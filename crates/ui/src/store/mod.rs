@@ -1735,6 +1735,7 @@ mod tests {
             let event_session_id = session_id.clone();
             update_host!(&host, move |state, cx| {
                 state
+                    .residents
                     .active
                     .as_mut()
                     .expect("active session")
@@ -1752,7 +1753,12 @@ mod tests {
             });
         }
         let live = update_host!(&host, |state, _| {
-            let timeline = &state.active.as_ref().expect("active session").timeline;
+            let timeline = &state
+                .residents
+                .active
+                .as_ref()
+                .expect("active session")
+                .timeline;
             (
                 timeline
                     .entries
@@ -2203,6 +2209,7 @@ mod tests {
             state.acp_registry_loading = false;
             state.acp_registry_error = None;
             state
+                .providers
                 .provider_versions
                 .entry(ProviderKind::Codex)
                 .or_default()

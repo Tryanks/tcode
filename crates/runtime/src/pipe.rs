@@ -712,7 +712,7 @@ fn dispatch_query(
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
         Query::ListActiveWorkspace => {
-            let cwd = app.active.as_ref().map(|active| active.meta.cwd.clone());
+            let cwd = app.active_session().map(|active| active.meta.cwd.clone());
             let task = app.list_workspace_at(cwd, cx);
             cx.spawn_background(async move { Ok(QueryResponse::ActiveWorkspace(task.await)) })
         }

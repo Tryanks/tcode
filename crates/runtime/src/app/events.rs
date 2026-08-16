@@ -8,202 +8,168 @@ impl AppState {
             serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
         );
 
-        if let AgentEvent::RewindFailed { error, .. } = &event {
-            self.pending_native_rewinds.remove(session_id);
-            self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
-            return;
-        }
-
-        if let AgentEvent::TurnAccepted { delivery_id } = &event {
-            self.on_turn_accepted(session_id, *delivery_id, cx);
-            return;
-        }
-
-        if let AgentEvent::BackgroundTasksChanged { count } = &event {
-            if let Some(active) = self
-                .active
-                .as_mut()
-                .filter(|active| active.meta.id == session_id)
-            {
-                active.background_task_count = *count;
-            } else if let Some(parked) = self.background.get_mut(session_id) {
-                parked.background_task_count = *count;
-                if *count > 0 {
-                    parked.idle_since = None;
-                }
-                if *count == 0
-                    && !parked.turn_in_flight
-                    && parked.delivery_in_flight.is_none()
-                    && parked.queue.is_empty()
-                {
-                    self.mark_resident_idle(session_id, cx);
-                }
-            }
-            return;
-        }
-
-        if let AgentEvent::SessionClosed { reason } = &event {
-            self.pending_native_rewinds.remove(session_id);
-            self.clear_approvals(session_id);
-            self.close_orchestrator_children(session_id, cx);
-            let is_active = self.active_session_id() == Some(session_id);
-            if !is_active {
-                // A parked session's process died on its own. Record the close,
-                // but retain any unaccepted/queued text on an Idle session so
-                // reopening it can resume delivery.
-                if self.background.contains_key(session_id) {
-                    self.record_event(session_id, &event, cx);
-                    let has_queued = if let Some(parked) = self.background.get_mut(session_id) {
-                        parked.runtime = Runtime::Idle;
-                        parked.delivery_in_flight = None;
-                        parked.turn_in_flight = false;
-                        parked.background_task_count = 0;
-                        parked._pump = None;
-                        !parked.queue.is_empty()
-                    } else {
-                        false
-                    };
-                    let is_child = self
-                        .sessions
-                        .iter()
-                        .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
-                    if is_child && !has_queued {
-                        self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
-                    }
-                    if !has_queued {
-                        self.background.remove(session_id);
-                    }
-                }
-                // Otherwise: user-requested shutdowns remove the runtime before
-                // the provider acknowledges them, so their close stays silent.
+        match &event {
+            AgentEvent::RewindFailed { error, .. } => {
+                self.pending_native_rewinds.remove(session_id);
+                self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
                 return;
             }
-
-            self.record_event(session_id, &event, cx);
-            if self
-                .sessions
-                .iter()
-                .any(|meta| meta.id == session_id && meta.parent_session_id.is_some())
-            {
-                self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+            AgentEvent::TurnAccepted { delivery_id } => {
+                self.on_turn_accepted(session_id, *delivery_id, cx);
+                return;
             }
-            if let Some(active) = self.active.as_mut() {
-                active.runtime = Runtime::Idle;
-                active.delivery_in_flight = None;
-                active.turn_in_flight = false;
-                active.background_task_count = 0;
-                active._pump = None;
+            AgentEvent::BackgroundTasksChanged { count } => {
+                let is_active = self.active_session_id() == Some(session_id);
+                let should_mark_idle = self.resident_mut(session_id).is_some_and(|resident| {
+                    resident.background_task_count = *count;
+                    if !is_active && *count > 0 {
+                        resident.idle_since = None;
+                    }
+                    !is_active
+                        && *count == 0
+                        && !resident.turn_in_flight
+                        && resident.delivery_in_flight.is_none()
+                        && resident.queue.is_empty()
+                });
+                if should_mark_idle {
+                    self.mark_resident_idle(session_id, cx);
+                }
+                return;
             }
-            self.report_error(
-                RuntimeError::ProviderClosed {
-                    reason: reason.clone(),
-                },
-                cx,
-            );
-            return;
-        }
+            AgentEvent::SessionClosed { reason } => {
+                self.pending_native_rewinds.remove(session_id);
+                self.clear_approvals(session_id);
+                self.close_orchestrator_children(session_id, cx);
+                let is_active = self.active_session_id() == Some(session_id);
+                if !is_active {
+                    // A parked session's process died on its own. Record the close,
+                    // but retain any unaccepted/queued text on an Idle session so
+                    // reopening it can resume delivery.
+                    if self.resident(session_id).is_some() {
+                        self.record_event(session_id, &event, cx);
+                        let has_queued = self.resident_mut(session_id).is_some_and(|parked| {
+                            parked.mark_dead();
+                            !parked.queue.is_empty()
+                        });
+                        let is_child = self
+                            .sessions
+                            .iter()
+                            .any(|meta| meta.id == session_id && meta.parent_session_id.is_some());
+                        if is_child && !has_queued {
+                            self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+                        }
+                        if !has_queued {
+                            self.residents.evict(session_id);
+                        }
+                    }
+                    // Otherwise: user-requested shutdowns remove the runtime before
+                    // the provider acknowledges them, so their close stays silent.
+                    return;
+                }
 
-        // Provider commands/skills are session metadata for the composer menus —
-        // stored on the live session and in a per-provider cache, never folded
-        // into the timeline or the persisted JSONL log. Parked sessions still
-        // receive provider updates, so update/cache those too.
-        if let AgentEvent::ProviderCommands { commands } = &event {
-            let cache_key = if let Some(active) = self
-                .active
-                .as_mut()
-                .filter(|active| active.meta.id == session_id)
-            {
-                active.provider_commands.clone_from(commands);
-                Some((active.meta.provider, active.meta.acp_agent_id.clone()))
-            } else if let Some(parked) = self.background.get_mut(session_id) {
-                parked.provider_commands.clone_from(commands);
-                Some((parked.meta.provider, parked.meta.acp_agent_id.clone()))
-            } else {
-                None
-            };
-            if let Some((provider, acp_agent_id)) = cache_key {
-                self.enqueue_store_write(
-                    StoreWrite::SaveCommands {
-                        provider,
-                        acp_agent_id,
-                        commands: commands.clone(),
+                self.record_event(session_id, &event, cx);
+                if self
+                    .sessions
+                    .iter()
+                    .any(|meta| meta.id == session_id && meta.parent_session_id.is_some())
+                {
+                    self.deliver_child_callback(session_id, TurnStatus::Failed, cx);
+                }
+                if let Some(active) = self.resident_mut(session_id) {
+                    active.mark_dead();
+                }
+                self.report_error(
+                    RuntimeError::ProviderClosed {
+                        reason: reason.clone(),
                     },
                     cx,
                 );
+                return;
             }
-            return;
-        }
 
-        // The agent's own options (ACP modes / models / config options). Same
-        // deal: session metadata for the traits picker, not timeline content.
-        // The pushed selections become the session's selections, so the picker
-        // shows what the agent is actually running with.
-        if let AgentEvent::ProviderOptions {
-            descriptors,
-            selections,
-        } = &event
-        {
-            let apply = |active: &mut ActiveSession| {
-                active.provider_options = descriptors.clone();
-                for selection in selections {
-                    active
-                        .meta
-                        .option_selections
-                        .retain(|s| s.id != selection.id);
-                    active.meta.option_selections.push(selection.clone());
+            // Provider commands/skills are session metadata for the composer menus —
+            // stored on the live session and in a per-provider cache, never folded
+            // into the timeline or the persisted JSONL log. Parked sessions still
+            // receive provider updates, so update/cache those too.
+            AgentEvent::ProviderCommands { commands } => {
+                let cache_key = self.resident_mut(session_id).map(|resident| {
+                    resident.provider_commands.clone_from(commands);
+                    (resident.meta.provider, resident.meta.acp_agent_id.clone())
+                });
+                if let Some((provider, acp_agent_id)) = cache_key {
+                    self.enqueue_store_write(
+                        StoreWrite::SaveCommands {
+                            provider,
+                            acp_agent_id,
+                            commands: commands.clone(),
+                        },
+                        cx,
+                    );
                 }
-                if active.meta.provider == ProviderKind::Acp {
-                    let plan_mode = descriptors.iter().find_map(|descriptor| match descriptor {
-                        OptionDescriptor::Select { id, options, .. } if id == "acp:mode" => options
+                return;
+            }
+
+            // The agent's own options (ACP modes / models / config options). Same
+            // deal: session metadata for the traits picker, not timeline content.
+            // The pushed selections become the session's selections, so the picker
+            // shows what the agent is actually running with.
+            AgentEvent::ProviderOptions {
+                descriptors,
+                selections,
+            } => {
+                let apply = |active: &mut ActiveSession| {
+                    active.provider_options = descriptors.clone();
+                    for selection in selections {
+                        active
+                            .meta
+                            .option_selections
+                            .retain(|s| s.id != selection.id);
+                        active.meta.option_selections.push(selection.clone());
+                    }
+                    if active.meta.provider == ProviderKind::Acp {
+                        let plan_mode =
+                            descriptors.iter().find_map(|descriptor| match descriptor {
+                                OptionDescriptor::Select { id, options, .. }
+                                    if id == "acp:mode" =>
+                                {
+                                    options
+                                        .iter()
+                                        .find(|option| option.value.eq_ignore_ascii_case("plan"))
+                                        .map(|option| option.value.as_str())
+                                }
+                                _ => None,
+                            });
+                        let current_mode = selections
                             .iter()
-                            .find(|option| option.value.eq_ignore_ascii_case("plan"))
-                            .map(|option| option.value.as_str()),
-                        _ => None,
-                    });
-                    let current_mode = selections
-                        .iter()
-                        .find(|selection| selection.id == "acp:mode")
-                        .and_then(|selection| selection.value.as_str());
-                    active.meta.interaction_mode = match (plan_mode, current_mode) {
-                        (Some(plan), Some(current)) if current.eq_ignore_ascii_case(plan) => {
-                            InteractionMode::Plan
-                        }
-                        _ => InteractionMode::Build,
-                    };
+                            .find(|selection| selection.id == "acp:mode")
+                            .and_then(|selection| selection.value.as_str());
+                        active.meta.interaction_mode = match (plan_mode, current_mode) {
+                            (Some(plan), Some(current)) if current.eq_ignore_ascii_case(plan) => {
+                                InteractionMode::Plan
+                            }
+                            _ => InteractionMode::Build,
+                        };
+                    }
+                    active.live_option_selections = active.meta.option_selections.clone();
+                };
+                let meta = self.resident_mut(session_id).map(|resident| {
+                    apply(resident);
+                    resident.meta.clone()
+                });
+                if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
+                    self.persist_meta(&meta, cx);
                 }
-                active.live_option_selections = active.meta.option_selections.clone();
-            };
-            let meta = if let Some(active) = self
-                .active
-                .as_mut()
-                .filter(|active| active.meta.id == session_id)
-            {
-                apply(active);
-                Some(active.meta.clone())
-            } else if let Some(parked) = self.background.get_mut(session_id) {
-                apply(parked);
-                Some(parked.meta.clone())
-            } else {
-                None
-            };
-            if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
-                self.persist_meta(&meta, cx);
+                return;
             }
-            return;
-        }
 
-        // Session bookkeeping side effects.
-        match &event {
+            // Session bookkeeping side effects.
             AgentEvent::TurnStarted { .. } => {
-                if let Some(active) = self
-                    .active
-                    .as_mut()
-                    .filter(|active| active.meta.id == session_id)
-                {
-                    active.turn_in_flight = true;
-                } else if let Some(parked) = self.background.get_mut(session_id) {
-                    parked.turn_in_flight = true;
-                    parked.idle_since = None;
+                let is_active = self.active_session_id() == Some(session_id);
+                if let Some(resident) = self.resident_mut(session_id) {
+                    resident.turn_in_flight = true;
+                    if !is_active {
+                        resident.idle_since = None;
+                    }
                 }
             }
             AgentEvent::SessionStarted { resume, model, .. } => {
@@ -219,16 +185,8 @@ impl AppState {
                     let meta = meta.clone();
                     self.persist_meta(&meta, cx);
                 }
-                if filled_default_model {
-                    if let Some(active) = self
-                        .active
-                        .as_mut()
-                        .filter(|active| active.meta.id == session_id)
-                    {
-                        active.live_model = model.clone();
-                    } else if let Some(parked) = self.background.get_mut(session_id) {
-                        parked.live_model = model.clone();
-                    }
+                if filled_default_model && let Some(resident) = self.resident_mut(session_id) {
+                    resident.live_model = model.clone();
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
@@ -241,6 +199,7 @@ impl AppState {
                 // first commit; refresh the display-only branch label and the
                 // git quick-action status.
                 if let Some((session_id, cwd)) = self
+                    .residents
                     .active
                     .as_ref()
                     .filter(|active| active.meta.id == session_id)
@@ -296,20 +255,37 @@ impl AppState {
                     RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
                 );
             }
-            _ => {}
+            AgentEvent::ProviderRelay { .. }
+            | AgentEvent::PlanResolved { .. }
+            | AgentEvent::ServedModel { .. }
+            | AgentEvent::TurnChangesUpdated { .. }
+            | AgentEvent::TurnCheckpoint { .. }
+            | AgentEvent::ItemStarted(_)
+            | AgentEvent::ItemUpdated(_)
+            | AgentEvent::ItemCompleted(_)
+            | AgentEvent::SteerRequested { .. }
+            | AgentEvent::SteerAccepted { .. }
+            | AgentEvent::Delta { .. }
+            | AgentEvent::ApprovalRequested(_)
+            | AgentEvent::ApprovalResolved { .. }
+            | AgentEvent::UserInputRequested { .. }
+            | AgentEvent::UserInputResolved { .. }
+            | AgentEvent::TokenUsage(_)
+            | AgentEvent::ContextCompacted
+            | AgentEvent::PlanUpdated { .. }
+            | AgentEvent::ProposedPlanDelta { .. }
+            | AgentEvent::ProposedPlan { .. }
+            | AgentEvent::ProviderStartFailed { .. } => {}
         }
 
         self.record_approval_event(session_id, &event);
         self.record_event(session_id, &event, cx);
 
-        match &event {
-            AgentEvent::TurnCompleted { status, .. } => {
-                self.deliver_child_callback(session_id, *status, cx);
-            }
-            AgentEvent::ApprovalRequested(request) => {
-                self.deliver_child_approval_callback(session_id, &request.id, cx);
-            }
-            _ => {}
+        if let AgentEvent::TurnCompleted { status, .. } = &event {
+            self.deliver_child_callback(session_id, *status, cx);
+        }
+        if let AgentEvent::ApprovalRequested(request) = &event {
+            self.deliver_child_approval_callback(session_id, &request.id, cx);
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
@@ -318,6 +294,7 @@ impl AppState {
             let mut restart = false;
             let mut restart_deferred = false;
             let is_active = if let Some(active) = self
+                .residents
                 .active
                 .as_mut()
                 .filter(|active| active.meta.id == session_id)
@@ -401,7 +378,7 @@ impl AppState {
             return;
         }
 
-        let Some(fallback_meta) = self.active.as_mut().and_then(|active| {
+        let Some(fallback_meta) = self.residents.active.as_mut().and_then(|active| {
             active.meta.title.starts_with("New ").then(|| {
                 active.meta.title = fallback.clone();
                 active.meta.updated_at = now_secs();

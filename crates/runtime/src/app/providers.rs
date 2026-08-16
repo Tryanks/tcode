@@ -1,5 +1,77 @@
 use super::*;
 
+pub struct ProviderCatalog {
+    pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+    pub models_loading: HashMap<ProviderKind, bool>,
+    pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
+    pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
+}
+
+impl ProviderCatalog {
+    pub(super) fn new(
+        model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
+        provider_secret_names: HashMap<String, HashSet<String>>,
+    ) -> Self {
+        Self {
+            model_catalogs,
+            models_loading: HashMap::new(),
+            provider_versions: HashMap::new(),
+            provider_snapshots: HashMap::new(),
+            provider_secret_names,
+        }
+    }
+
+    pub(super) fn status_snapshot(
+        &self,
+        acp_marketplace_items: Vec<AcpMarketplaceItem>,
+        acp_registry_loading: bool,
+        acp_registry_error: Option<String>,
+        acp_installing: HashSet<String>,
+    ) -> ProvidersStatus {
+        ProvidersStatus {
+            model_catalogs: self.model_catalogs.clone(),
+            models_loading: self.models_loading.clone(),
+            provider_versions: self
+                .provider_versions
+                .iter()
+                .map(|(&provider, status)| {
+                    (
+                        provider,
+                        ProtocolProviderVersionStatus {
+                            installed: status.installed.clone(),
+                            latest: status.latest.clone(),
+                            update_available: status.update_available,
+                            checking: status.checking,
+                            updating: status.updating,
+                            update_command: update_command_string(provider, status.install_source),
+                        },
+                    )
+                })
+                .collect(),
+            provider_snapshots: self.provider_snapshots.clone(),
+            acp_marketplace_items,
+            acp_registry_loading,
+            acp_registry_error,
+            acp_installing,
+            providers_checked_at: self
+                .provider_snapshots
+                .values()
+                .filter_map(|snapshot| snapshot.checked_at)
+                .max(),
+            providers_checking: self
+                .provider_snapshots
+                .values()
+                .any(|snapshot| snapshot.checking)
+                || self
+                    .provider_versions
+                    .values()
+                    .any(|status| status.checking),
+            secret_names: self.provider_secret_names.clone(),
+        }
+    }
+}
+
 impl AppState {
     /// Kick off a background refresh of every provider's model catalog (called
     /// at app start and after a binary-path change). Results update
@@ -9,7 +81,7 @@ impl AppState {
             let binary = self.settings.provider(provider).binary_path;
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
-            self.models_loading.insert(provider, true);
+            self.providers.models_loading.insert(provider, true);
             let store = self.store.clone();
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -22,13 +94,13 @@ impl AppState {
                     .await;
                 let result = list_models(provider, binary, launch_env).await;
                 host_cx.enqueue(move |state, _cx| {
-                    state.models_loading.insert(provider, false);
+                    state.providers.models_loading.insert(provider, false);
                     match result {
                         Ok(models) if !models.is_empty() => {
                             if let Err(err) = store.save_models(provider, &models) {
                                 log::warn!("failed to persist {provider:?} model catalog: {err}");
                             }
-                            state.model_catalogs.insert(provider, models);
+                            state.providers.model_catalogs.insert(provider, models);
                         }
                         Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
@@ -136,6 +208,7 @@ impl AppState {
             cx,
         );
         let names = self
+            .providers
             .provider_secret_names
             .entry(id.to_string())
             .or_default();
@@ -231,6 +304,7 @@ impl AppState {
                     cx,
                 );
                 state
+                    .providers
                     .provider_secret_names
                     .entry(id.clone())
                     .or_default()
@@ -252,7 +326,7 @@ impl AppState {
             return;
         }
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
-        self.provider_secret_names.remove(id);
+        self.providers.provider_secret_names.remove(id);
         self.update_settings(settings, cx);
     }
 
@@ -260,7 +334,7 @@ impl AppState {
 
     #[allow(dead_code)]
     pub(crate) fn profile_snapshot(&self, id: &str) -> Option<&ProviderSnapshot> {
-        self.provider_snapshots.get(id)
+        self.providers.provider_snapshots.get(id)
     }
 
     #[allow(dead_code)]
@@ -269,19 +343,6 @@ impl AppState {
     }
 
     /// The most recent probe time across providers (the section's "Checked …").
-    pub(crate) fn providers_checked_at(&self) -> Option<u64> {
-        self.provider_snapshots
-            .values()
-            .filter_map(|s| s.checked_at)
-            .max()
-    }
-
-    /// Whether any provider probe is currently in flight (spins the refresh icon).
-    pub(crate) fn providers_checking(&self) -> bool {
-        self.provider_snapshots.values().any(|s| s.checking)
-            || self.provider_versions.values().any(|s| s.checking)
-    }
-
     /// Probe every provider profile: is the CLI there, what version, and who is signed
     /// in? Runs the same `--version` call the version check uses, plus the
     /// provider's own auth surface where one is unambiguous (`claude auth
@@ -292,6 +353,7 @@ impl AppState {
             let profile_id = profile.id;
             let provider = profile.kind;
             let snapshot = self
+                .providers
                 .provider_snapshots
                 .entry(profile_id.clone())
                 .or_default();
@@ -314,7 +376,10 @@ impl AppState {
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
                 host_cx.enqueue(move |state, _cx| {
-                    state.provider_snapshots.insert(profile_id, snapshot);
+                    state
+                        .providers
+                        .provider_snapshots
+                        .insert(profile_id, snapshot);
                 });
             });
         }
@@ -326,7 +391,11 @@ impl AppState {
     pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.resolve_provider_binary(provider);
-            let status = self.provider_versions.entry(provider).or_default();
+            let status = self
+                .providers
+                .provider_versions
+                .entry(provider)
+                .or_default();
             if status.checking {
                 continue;
             }
@@ -363,6 +432,7 @@ impl AppState {
                         _ => false,
                     };
                     let already = state
+                        .providers
                         .provider_versions
                         .get(&provider)
                         .map(|s| s.update_available)
@@ -378,7 +448,11 @@ impl AppState {
                     };
                     let installed_pretty = pretty(&installed);
                     let latest_pretty = pretty(&latest);
-                    let status = state.provider_versions.entry(provider).or_default();
+                    let status = state
+                        .providers
+                        .provider_versions
+                        .entry(provider)
+                        .or_default();
                     status.checking = false;
                     status.install_source = source;
                     status.installed = installed_pretty;
@@ -406,6 +480,7 @@ impl AppState {
     /// showing an "updating" toast, then re-check its version.
     pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut HostCx) {
         let source = self
+            .providers
             .provider_versions
             .get(&provider)
             .map(|s| s.install_source)
@@ -414,7 +489,11 @@ impl AppState {
             self.report_error(RuntimeError::UpdateUnknown { provider }, cx);
             return;
         };
-        let status = self.provider_versions.entry(provider).or_default();
+        let status = self
+            .providers
+            .provider_versions
+            .entry(provider)
+            .or_default();
         if status.updating {
             return;
         }
@@ -428,7 +507,7 @@ impl AppState {
             let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
             let ok = run_status(&command[0], &args).await;
             host_cx.enqueue(move |state, cx| {
-                if let Some(status) = state.provider_versions.get_mut(&provider) {
+                if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
                     status.updating = false;
                 }
                 if ok {
@@ -449,7 +528,11 @@ impl AppState {
     /// already been detected. The install-source detail stays inside runtime.
     #[cfg(test)]
     pub(super) fn provider_update_command(&self, provider: ProviderKind) -> Option<String> {
-        let source = self.provider_versions.get(&provider)?.install_source;
+        let source = self
+            .providers
+            .provider_versions
+            .get(&provider)?
+            .install_source;
         update_command_string(provider, source)
     }
 
@@ -463,7 +546,8 @@ impl AppState {
 
     /// The cached model catalog for `provider` (empty when never fetched).
     pub(crate) fn models_for(&self, provider: ProviderKind) -> &[ModelSpec] {
-        self.model_catalogs
+        self.providers
+            .model_catalogs
             .get(&provider)
             .map(Vec::as_slice)
             .unwrap_or(&[])

@@ -255,10 +255,13 @@ use active_session::{
     PendingRelay, Runtime, SendRouting, attachment_paths, conversation_destination,
     wire_text_with_placeholder,
 };
+use orchestrate::McpWiring;
+pub use providers::ProviderCatalog;
 use providers::{
     effort_selection, normalized_selections, provider_secret_names, session_launch_env,
     session_options,
 };
+pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
 use store_write::{StoreWrite, run_store_write};
 
@@ -288,19 +291,7 @@ pub struct AppState {
     store_write_failure_receiver: Option<smol::channel::Receiver<Result<RuntimeError, String>>>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
-    pub active: Option<ActiveSession>,
-    /// Sessions whose provider outlives their place on screen. Switching threads
-    /// used to kill the live process outright — mid-turn — which is the same
-    /// failure T3 Code's 30-minute idle reaper inflicts on autonomous overnight
-    /// sessions, except triggered by a glance at another thread. A session with
-    /// work left (turn in flight, or queued messages) is parked here instead:
-    /// its process, event pump and queue stay alive, events keep landing in its
-    /// JSONL (`record_event` routes by id), queued messages keep dispatching as
-    /// turns complete, and selecting the thread re-adopts it seamlessly. Once a
-    /// parked session runs out of work it is shut down for real — no reaper, no
-    /// timer, just "finish what you were given, then rest". (The parked
-    /// `timeline` goes stale by design; re-adoption replays the JSONL.)
-    background: HashMap<String, ActiveSession>,
+    pub residents: ResidentSessions,
     /// Terminal resources parked by conversation destination. Drawer chrome is
     /// client-owned; this map retains only PTYs, tabs, splits, and contexts.
     terminal_workspaces: HashMap<ConversationDestination, TerminalWorkspace>,
@@ -312,13 +303,7 @@ pub struct AppState {
     /// provider response is the only authority that can complete it.
     pending_native_rewinds: HashMap<String, (String, RewindMode)>,
     pub settings: Settings,
-    /// Per-provider model catalog (from `agent::list_models`): loaded instantly
-    /// from the persisted cache, then refreshed in the background at start and
-    /// whenever a binary path changes. Absent entry = never fetched.
-    pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
-    /// Providers whose catalog is currently being fetched (drives the picker's
-    /// "Loading models…" row when the cache is also empty).
-    pub models_loading: HashMap<ProviderKind, bool>,
+    pub providers: ProviderCatalog,
     terminal_preferences_path: PathBuf,
     terminal_preferences: HashMap<String, TerminalPreferences>,
     next_terminal_spawn_id: u64,
@@ -340,19 +325,7 @@ pub struct AppState {
     pub acp_registry_error: Option<String>,
     /// Registry ids currently downloading (their marketplace row shows a spinner).
     pub acp_installing: std::collections::HashSet<String>,
-    /// App-wide preview endpoint and its per-session bearer-token issuer.
-    preview_url: Option<String>,
-    preview_tokens: Option<preview_mcp::TokenRegistry>,
-    preview_registrations: HashMap<String, agent::McpRegistration>,
-    /// App-wide orchestrator endpoint and its per-parent bearer-token issuer.
-    orchestrate_url: Option<String>,
-    orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
-    orchestrate_registrations: HashMap<String, agent::McpRegistration>,
-    /// Requests from the orchestrate MCP runtime, pumped by the host executor.
-    pub orchestrate_requests: Option<smol::channel::Receiver<orchestrate_mcp::BrokerRequest>>,
-    /// Process-wide computer-use MCP registration, supplied only to sessions
-    /// while the global computer-use setting is enabled.
-    computer_use_registration: Option<agent::McpRegistration>,
+    mcp: McpWiring,
     callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
     /// Live provider approvals for every resident session. This is the sole
@@ -377,14 +350,6 @@ pub struct AppState {
     timeline_load_generations: HashMap<String, u64>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
-    /// Per-provider version-check results (Group C). Populated on launch (when
-    /// the toggle is on) and by Settings → "Check now".
-    pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
-    /// Per-profile install/auth probe results, driving the Settings → Providers
-    /// card status dot + summary line. Absent until the first probe lands.
-    pub provider_snapshots: HashMap<String, ProviderSnapshot>,
-    /// Profile environment names visible to the UI. Values remain backend-only.
-    provider_secret_names: HashMap<String, HashSet<String>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
     /// Present only after an app-relaunch triggered by a permission grant; applied
     /// once by [`AppState::apply_pending_relaunch`] and then cleared.
@@ -454,14 +419,12 @@ impl AppState {
             store_write_failure_receiver: Some(store_write_failure_receiver),
             sessions,
             projects,
-            active: None,
-            background: HashMap::new(),
+            residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
             terminal_registry,
             pending_native_rewinds: HashMap::new(),
             settings,
-            model_catalogs,
-            models_loading: HashMap::new(),
+            providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
             terminal_preferences_path,
             terminal_preferences,
             next_terminal_spawn_id: 0,
@@ -475,14 +438,7 @@ impl AppState {
             acp_registry_loading: false,
             acp_registry_error: None,
             acp_installing: std::collections::HashSet::new(),
-            preview_url: None,
-            preview_tokens: None,
-            preview_registrations: HashMap::new(),
-            orchestrate_url: None,
-            orchestrate_tokens: None,
-            orchestrate_registrations: HashMap::new(),
-            orchestrate_requests: None,
-            computer_use_registration: None,
+            mcp: McpWiring::default(),
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
             approvals: HashMap::new(),
@@ -493,9 +449,6 @@ impl AppState {
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
             review_comment_drafts: HashMap::new(),
-            provider_versions: HashMap::new(),
-            provider_snapshots: HashMap::new(),
-            provider_secret_names,
             pending_relaunch,
         }
     }
