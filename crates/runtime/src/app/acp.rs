@@ -206,18 +206,18 @@ impl AppState {
         let Some(active) = self.residents.active.as_mut() else {
             return;
         };
-        if active.meta.provider == ProviderKind::Acp
+        if matches!(active.meta.provider, ProviderKind::Acp)
             && active.meta.acp_agent_id.as_deref() == Some(id)
         {
             return;
         }
-        if !active.draft && active.meta.provider != ProviderKind::Acp {
+        if !active.draft && !matches!(active.meta.provider, ProviderKind::Acp) {
             let source = active.pending_relay.clone().unwrap_or(PendingRelay {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
             });
-            if active.pending_relay.is_some() && source.from_provider == ProviderKind::Acp {
+            if active.pending_relay.is_some() && matches!(source.from_provider, ProviderKind::Acp) {
                 active.pending_relay = None;
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);

@@ -180,8 +180,8 @@ impl ProviderDialog {
             binary,
             home,
             launch_args,
-            pi_trust_project_extensions: settings.pi_trust_project_extensions,
-            pi_native_approvals: settings.pi_native_approvals,
+            pi_trust_project_extensions: settings.pi.trust_project_extensions,
+            pi_native_approvals: settings.pi.native_approvals,
             custom_model,
             slug_error: None,
             accent: settings.accent_color.clone(),
@@ -266,16 +266,17 @@ impl ProviderDialog {
                         env,
                         binary_path: binary.map(Into::into),
                         // OpenCode has no single-home override.
-                        home_path: (provider != ProviderKind::OpenCode)
+                        home_path: provider
+                            .caps()
+                            .home_path
                             .then(|| home.map(Into::into))
                             .flatten(),
                         // Codex ignores launch arguments (no field is rendered).
-                        launch_args: match provider {
-                            ProviderKind::Codex => None,
-                            _ => launch,
+                        launch_args: provider.caps().launch_args.then_some(launch).flatten(),
+                        pi: tcode_core::settings::PiProviderSettings {
+                            trust_project_extensions: pi_trust_project_extensions,
+                            native_approvals: pi_native_approvals,
                         },
-                        pi_trust_project_extensions,
-                        pi_native_approvals,
                         custom_models: custom,
                         hidden_models: hidden,
                     },
@@ -545,7 +546,7 @@ impl ProviderDialog {
                 cx,
             ),
         ];
-        if provider != ProviderKind::OpenCode {
+        if provider.caps().home_path {
             let &[_, _, home_label, home_help, _, _] = provider_copy(provider);
             blocks.push(
                 self.field_block(
@@ -577,7 +578,7 @@ impl ProviderDialog {
             );
         }
         blocks.push(self.render_env(cx));
-        if provider != ProviderKind::Codex {
+        if provider.caps().launch_args {
             blocks.push(
                 self.field_block(
                     crate::tr!("providers.launch_args").into_owned().into(),
@@ -589,7 +590,7 @@ impl ProviderDialog {
                 ),
             );
         }
-        if provider == ProviderKind::Pi {
+        if provider.caps().trust_project_extensions {
             blocks.push(
                 self.field_block(
                     crate::tr!("providers.pi_trust_project_extensions")

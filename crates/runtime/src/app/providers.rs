@@ -182,8 +182,7 @@ impl AppState {
                 target.binary_path = configuration.binary_path;
                 target.home_path = configuration.home_path;
                 target.launch_args = configuration.launch_args;
-                target.pi_trust_project_extensions = configuration.pi_trust_project_extensions;
-                target.pi_native_approvals = configuration.pi_native_approvals;
+                target.pi = configuration.pi;
                 target.custom_models = configuration.custom_models;
                 target.hidden_models = configuration.hidden_models;
             }
@@ -643,13 +642,19 @@ pub(super) fn session_launch_env(
     settings_store: &SettingsStore,
     meta: &SessionMeta,
 ) -> LaunchEnv {
-    if meta.provider != ProviderKind::Acp {
-        let profile_id = meta
-            .profile_id
-            .clone()
-            .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
-        let secrets = settings_store.profile_secrets(&profile_id);
-        return launch_env_for_profile(settings, &profile_id, secrets);
+    match meta.provider {
+        ProviderKind::Acp => {}
+        ProviderKind::Codex
+        | ProviderKind::ClaudeCode
+        | ProviderKind::Pi
+        | ProviderKind::OpenCode => {
+            let profile_id = meta
+                .profile_id
+                .clone()
+                .unwrap_or_else(|| Settings::builtin_profile_id(meta.provider).to_string());
+            let secrets = settings_store.profile_secrets(&profile_id);
+            return launch_env_for_profile(settings, &profile_id, secrets);
+        }
     }
     let env = meta
         .acp_agent_id
@@ -684,8 +689,11 @@ pub(super) fn session_options(
         .as_deref()
         .and_then(|id| settings.acp_agent(id))
         .cloned();
-    let approval_mode = if meta.provider == ProviderKind::Pi
-        && !provider_settings.pi_native_approvals
+    let approval_mode = if meta
+        .provider
+        .caps()
+        .downgrade_approval_without_native_approvals
+        && !provider_settings.pi.native_approvals
     {
         match meta.approval_mode {
             ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits => ApprovalMode::FullAccess,
@@ -705,7 +713,9 @@ pub(super) fn session_options(
         option_selections: meta.option_selections.clone(),
         interaction_mode: meta.interaction_mode,
         mcp_servers: [
-            (meta.provider != ProviderKind::Pi)
+            meta.provider
+                .caps()
+                .preview_mcp
                 .then_some(mcp_server)
                 .flatten(),
             meta.orchestrate_enabled
@@ -723,20 +733,24 @@ pub(super) fn session_options(
         launch_env,
         // Native providers that expose "Launch arguments" use their profile;
         // an ACP agent carries its own from the installed-agent card.
-        extra_args: match meta.provider {
-            ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
-            ProviderKind::Pi => {
-                let mut extra_args = provider_settings.extra_args();
-                if provider_settings.pi_trust_project_extensions {
-                    extra_args.push("--approve".into());
+        extra_args: if meta.provider.caps().launch_args {
+            match meta.provider {
+                ProviderKind::ClaudeCode | ProviderKind::OpenCode => provider_settings.extra_args(),
+                ProviderKind::Pi => {
+                    let mut extra_args = provider_settings.extra_args();
+                    if provider_settings.pi.trust_project_extensions {
+                        extra_args.push("--approve".into());
+                    }
+                    extra_args
                 }
-                extra_args
+                ProviderKind::Acp => acp_agent
+                    .as_ref()
+                    .map(|agent| agent.extra_args())
+                    .unwrap_or_default(),
+                ProviderKind::Codex => Vec::new(),
             }
-            ProviderKind::Codex => Vec::new(),
-            ProviderKind::Acp => acp_agent
-                .as_ref()
-                .map(|agent| agent.extra_args())
-                .unwrap_or_default(),
+        } else {
+            Vec::new()
         },
         acp: acp_agent.map(|agent| agent::AcpAgent {
             id: agent.id.clone(),

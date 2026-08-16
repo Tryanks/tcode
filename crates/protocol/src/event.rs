@@ -157,7 +157,8 @@ pub struct SessionStatus {
     pub working: bool,
     pub pending_approval: bool,
     pub pending_user_input: bool,
-    pub supports_steering: bool,
+    #[serde(rename = "supports_steering")]
+    pub steering_supported: bool,
     pub provider_option_descriptors: Vec<OptionDescriptor>,
     pub provider_option_selections: Vec<OptionSelection>,
     pub provider_commands: Vec<ProviderCommand>,

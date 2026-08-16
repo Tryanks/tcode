@@ -184,7 +184,10 @@ impl AppState {
     pub fn session_status_snapshot(&self, session_id: &str) -> Option<SessionStatus> {
         let session = self.resident(session_id)?;
         let meta = &session.meta;
-        let provider_option_descriptors = if meta.provider == ProviderKind::Acp {
+        let provider_option_descriptors = if matches!(
+            meta.provider.caps().option_descriptors,
+            OptionDescriptors::Wire
+        ) {
             session.provider_options.clone()
         } else {
             meta.model
@@ -275,7 +278,7 @@ impl AppState {
             working: session.has_work(),
             pending_approval,
             pending_user_input: session.timeline.pending_user_input.is_some(),
-            supports_steering: session.supports_steering(),
+            steering_supported: session.can_steer(),
             provider_option_descriptors,
             provider_option_selections: meta.option_selections.clone(),
             provider_commands: session.provider_commands.clone(),

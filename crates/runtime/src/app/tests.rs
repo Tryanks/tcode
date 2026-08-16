@@ -1330,7 +1330,8 @@ fn provider_env_home_and_launch_args_reach_session_options() {
 
     settings
         .provider_mut(ProviderKind::Pi)
-        .pi_trust_project_extensions = true;
+        .pi
+        .trust_project_extensions = true;
     let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
     assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
 }
@@ -1619,7 +1620,7 @@ fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
 #[test]
 fn pi_session_options_preserve_supervised_with_native_approvals() {
     let mut settings = Settings::default();
-    settings.provider_mut(ProviderKind::Pi).pi_native_approvals = true;
+    settings.provider_mut(ProviderKind::Pi).pi.native_approvals = true;
     let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
     meta.approval_mode = ApprovalMode::Supervised;
 

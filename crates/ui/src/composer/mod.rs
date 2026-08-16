@@ -525,7 +525,7 @@ impl Composer {
                 .workspace_store
                 .read(cx)
                 .composer_state()
-                .supports_steering;
+                .steering_supported;
             let has_text = !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
                 .gap_2()
