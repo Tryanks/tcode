@@ -21,6 +21,10 @@ use crate::terminal::LocalTerminalRegistry;
 /// client traffic.
 #[derive(Default)]
 pub struct HostServices {
+    /// Run provider catalog, version, and status probes during host startup.
+    pub background_startup_probes: bool,
+    /// Generate AI-authored titles after the first completed turn.
+    pub ai_title_generation: bool,
     /// Split at host construction: URL/tokens stay host-side and the
     /// non-serializable WebView broker receiver moves once to `HostHandle`.
     /// A remote transport replaces that receiver with reverse RPC.
@@ -374,7 +378,11 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
-            let mut state = AppState::new_with_terminal_registry(store, terminals);
+            let mut state = AppState::new_with_terminal_registry(
+                store,
+                terminals,
+                services.ai_title_generation,
+            );
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
@@ -386,7 +394,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             let mut cx = HostCx::new(mailbox_tx, event_tx, pending, changed_tx);
             state.pump_orchestrate_requests(&mut cx);
-            if !cfg!(any(test, feature = "test-support")) {
+            if services.background_startup_probes {
                 state.refresh_model_catalogs(&mut cx);
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(&mut cx);
