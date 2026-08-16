@@ -10,7 +10,6 @@ impl AppState {
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
             self.models_loading.insert(provider, true);
-            self.emit_providers_status(cx);
             let store = self.store.clone();
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
@@ -22,7 +21,7 @@ impl AppState {
                     })
                     .await;
                 let result = list_models(provider, binary, launch_env).await;
-                host_cx.enqueue(move |state, cx| {
+                host_cx.enqueue(move |state, _cx| {
                     state.models_loading.insert(provider, false);
                     match result {
                         Ok(models) if !models.is_empty() => {
@@ -34,13 +33,9 @@ impl AppState {
                         Ok(_) => log::info!("{provider:?} returned an empty model catalog"),
                         Err(err) => log::warn!("failed to list {provider:?} models: {err}"),
                     }
-                    state.emit_active_session_status(cx);
-                    state.emit_providers_status(cx);
-                    cx.notify();
                 });
             });
         }
-        cx.notify();
     }
 
     // -- provider version checks (Group C / s3 §6) --------------------------
@@ -149,8 +144,6 @@ impl AppState {
         } else {
             names.remove(name);
         }
-        self.emit_providers_status(cx);
-        cx.notify();
     }
 
     /// Create a first-class *third-party* Claude Code profile from the Add-agent
@@ -242,8 +235,6 @@ impl AppState {
                     .entry(id.clone())
                     .or_default()
                     .insert("ANTHROPIC_API_KEY".to_string());
-                state.emit_providers_status(cx);
-                cx.notify();
             });
         });
         result_id
@@ -263,7 +254,6 @@ impl AppState {
         self.enqueue_store_write(StoreWrite::ClearProfileSecrets(id.to_string()), cx);
         self.provider_secret_names.remove(id);
         self.update_settings(settings, cx);
-        cx.notify();
     }
 
     // -- provider status snapshots (Settings → Providers card) --------------
@@ -309,7 +299,6 @@ impl AppState {
                 continue;
             }
             snapshot.checking = true;
-            self.emit_providers_status(cx);
             let binary = self.resolve_profile_binary(&profile_id);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
@@ -324,14 +313,11 @@ impl AppState {
                     .await;
                 let snapshot = probe_provider(provider, binary, launch_env).await;
                 log::info!("probe {provider:?} profile {profile_id} -> {snapshot:?}");
-                host_cx.enqueue(move |state, cx| {
+                host_cx.enqueue(move |state, _cx| {
                     state.provider_snapshots.insert(profile_id, snapshot);
-                    state.emit_providers_status(cx);
-                    cx.notify();
                 });
             });
         }
-        cx.notify();
     }
 
     /// Check every provider's installed vs. latest version in the background,
@@ -345,7 +331,6 @@ impl AppState {
                 continue;
             }
             status.checking = true;
-            self.emit_providers_status(cx);
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -412,12 +397,9 @@ impl AppState {
                             }),
                         );
                     }
-                    state.emit_providers_status(cx);
-                    cx.notify();
                 });
             });
         }
-        cx.notify();
     }
 
     /// Run the provider's self-update command (per its detected install source),
@@ -437,12 +419,10 @@ impl AppState {
             return;
         }
         status.updating = true;
-        self.emit_providers_status(cx);
         emit_runtime(
             cx,
             RuntimeEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
         );
-        cx.notify();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
@@ -461,8 +441,6 @@ impl AppState {
                 } else {
                     state.report_error(RuntimeError::UpdateFailed { provider }, cx);
                 }
-                state.emit_providers_status(cx);
-                cx.notify();
             });
         });
     }
@@ -495,7 +473,6 @@ impl AppState {
         // Persist so the choice survives a restart (save errors are cosmetic).
         self.settings.sidebar_collapsed = collapsed;
         self.persist_settings(cx);
-        cx.notify();
     }
 }
 

@@ -43,6 +43,96 @@ fn dispatched_settings_command_crosses_outgoing_ndjson() {
 }
 
 #[test]
+fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-provider-diff-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let command = Command::SetProfileSecret {
+        profile_id: "codex".into(),
+        name: "OPENAI_API_KEY".into(),
+        value: Some("test-secret".into()),
+    };
+
+    state.dispatch_command(cx, 43, command.clone());
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    let provider_events: Vec<_> = outgoing
+        .iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::Providers,
+                event: ServerEvent::ProvidersReplaced(status),
+            }) => Some(status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(provider_events.len(), 1);
+    assert!(
+        provider_events[0]
+            .secret_names
+            .get("codex")
+            .is_some_and(|names| names.contains("OPENAI_API_KEY"))
+    );
+
+    state.dispatch_command(cx, 44, command);
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(!outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::Providers,
+            event: ServerEvent::ProvidersReplaced(_),
+        })
+    )));
+}
+
+#[test]
+fn parked_session_projection_diff_emits_session_status() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-parked-session-diff-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let parked = live_session(ProviderKind::Codex, smol::channel::unbounded().0);
+    let parked_id = parked.meta.id.clone();
+
+    state.host_update(cx, |state, _cx| {
+        state.sessions.push(parked.meta.clone());
+        state.background.insert(parked.meta.id.clone(), parked);
+    });
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
+    state.dispatch_command(
+        cx,
+        45,
+        Command::RenameSession {
+            session_id: parked_id.clone(),
+            title: "Renamed while parked".into(),
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    let statuses: Vec<_> = outgoing
+        .iter()
+        .filter_map(|message| match message {
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::SessionStatus { session_id },
+                event: ServerEvent::SessionStatusReplaced(status),
+            }) if session_id == &parked_id => Some(status),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].title, "Renamed while parked");
+    state.read_with(cx, |state, _| {
+        assert!(state.active.is_none());
+        assert!(state.background.contains_key(&parked_id));
+    });
+}
+
+#[test]
 fn dispatched_start_draft_emits_session_status_over_ndjson() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-session-status-seam-test");

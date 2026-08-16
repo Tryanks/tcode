@@ -115,7 +115,6 @@ impl WorkspaceStore {
             Topic::Providers,
             Topic::GitStatus,
             Topic::ActiveSession,
-            Topic::RuntimeEvents,
         ];
         for topic in &seed_topics {
             if let Err(error) = host.subscribe(Subscription {
@@ -138,8 +137,7 @@ impl WorkspaceStore {
                     | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
                     | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
                     | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
-                    | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_))
-                    | (Topic::RuntimeEvents, ServerEvent::RuntimeSnapshot(_)) => {
+                    | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
                         seeded.insert(envelope.topic.clone());
                     }
                     _ => {}
@@ -178,15 +176,6 @@ impl WorkspaceStore {
                         })
                         .is_err()
                     {
-                        break;
-                    }
-                }
-            })
-            .detach();
-            let changed = host.changed_receiver();
-            cx.spawn(async move |this, cx| {
-                while changed.recv().await.is_ok() {
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
                 }
@@ -502,8 +491,6 @@ impl WorkspaceStore {
             }
             cx.notify();
         }
-        let changed = self.host.changed_receiver();
-        while changed.try_recv().is_ok() {}
     }
 
     pub fn working_sessions_count(&self) -> usize {
@@ -1757,7 +1744,6 @@ mod tests {
                     topic: Topic::SessionEvents {
                         session_id: event_session_id,
                     },
-                    seq: 10 + offset as u64,
                     event: ServerEvent::SessionEvent(SessionEventRecord {
                         ts: Some(200 + offset as u64),
                         event,
@@ -2025,7 +2011,6 @@ mod tests {
                 topic: Topic::SessionStatus {
                     session_id: background_session_id.clone(),
                 },
-                seq: 1,
                 event: ServerEvent::SessionStatusReplaced(status),
             });
         });
@@ -2082,7 +2067,6 @@ mod tests {
                 topic: Topic::SessionStatus {
                     session_id: first.id.clone(),
                 },
-                seq: 1,
                 event: ServerEvent::SessionStatusReplaced(parked.clone()),
             });
 
@@ -2095,12 +2079,10 @@ mod tests {
                 topic: Topic::SessionStatus {
                     session_id: second.id.clone(),
                 },
-                seq: 1,
                 event: ServerEvent::SessionStatusReplaced(next.clone()),
             });
             store.apply_domain_event(&EventEnvelope {
                 topic: Topic::ActiveSession,
-                seq: 2,
                 event: ServerEvent::ActiveSessionReplaced(Some(next)),
             });
         });
@@ -2149,16 +2131,15 @@ mod tests {
             })
         });
 
-        for (seq, session_id, text) in [
-            (1, first.id.clone(), "first parked prefill".to_string()),
-            (2, second.id.clone(), "second parked prefill".to_string()),
+        for (session_id, text) in [
+            (first.id.clone(), "first parked prefill".to_string()),
+            (second.id.clone(), "second parked prefill".to_string()),
         ] {
             update_host!(&host, move |_state, cx| {
                 cx.emit(HostEvent::Domain(EventEnvelope {
                     topic: Topic::SessionStatus {
                         session_id: session_id.clone(),
                     },
-                    seq,
                     event: ServerEvent::NativeRewindPrefill { session_id, text },
                 }));
             });
@@ -2206,7 +2187,7 @@ mod tests {
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
 
-        update_host!(&host, |state, cx| {
+        update_host!(&host, |state, _cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
                     "agents": [{
@@ -2238,7 +2219,6 @@ mod tests {
                 ..Default::default()
             });
             state.git_busy = true;
-            state.emit_provider_and_git_replicas_for_test(cx);
         });
         wait_until(cx, &workspace, "provider and git replicas", |cx| {
             workspace.read_with(cx, |store, _| {

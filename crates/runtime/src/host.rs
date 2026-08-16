@@ -28,14 +28,12 @@ pub type HostTask<T> = smol::Task<T>;
 ///
 /// Clones are `Send` and may be held by background work. All state mutation
 /// returns through `mailbox`; emitted events enter the serialized host-output
-/// stream; notification-only changes use a bounded channel as a coalescing bit.
+/// stream.
 #[derive(Clone)]
 pub struct HostCx {
     mailbox: smol::channel::Sender<HostMsg>,
     events: smol::channel::Sender<String>,
     pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
-    runtime_seq: Arc<Mutex<u64>>,
-    changed: smol::channel::Sender<()>,
 }
 
 impl HostCx {
@@ -43,14 +41,11 @@ impl HostCx {
         mailbox: smol::channel::Sender<HostMsg>,
         events: smol::channel::Sender<String>,
         pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
-        changed: smol::channel::Sender<()>,
     ) -> Self {
         Self {
             mailbox,
             events,
             pending,
-            runtime_seq: Arc::new(Mutex::new(0)),
-            changed,
         }
     }
 
@@ -58,11 +53,8 @@ impl HostCx {
         let envelope = match event {
             HostEvent::Domain(envelope) => envelope,
             HostEvent::Runtime(notification) => {
-                let mut seq = self.runtime_seq.lock().unwrap();
-                *seq = seq.wrapping_add(1);
                 let envelope = EventEnvelope {
                     topic: Topic::RuntimeEvents,
-                    seq: *seq,
                     event: ServerEvent::Runtime(notification),
                 };
                 self.send_message(HostMessage::Event(envelope));
@@ -91,12 +83,6 @@ impl HostCx {
         } else {
             let _ = self.events.try_send(line);
         }
-    }
-
-    pub fn notify(&mut self) {
-        // Capacity one makes this a coalesced dirty bit. The client-side pump
-        // drains it and maps each observation to its UI notification primitive.
-        let _ = self.changed.try_send(());
     }
 
     pub fn spawn_background<T: Send + 'static>(

@@ -15,24 +15,19 @@ impl AppState {
     pub(crate) fn refresh_git_status(&mut self, cx: &mut HostCx) {
         let Some(cwd) = self.active.as_ref().map(|a| a.meta.cwd.clone()) else {
             self.git_status = None;
-            self.emit_git_status(cx);
-            cx.notify();
             return;
         };
         let session_id = self.active_session_id().map(str::to_string);
         self.git_status_generation += 1;
         let generation = self.git_status_generation;
-        self.emit_git_status(cx);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let status = host_cx.unblock(move || read_status(&cwd)).await;
-            host_cx.enqueue(move |state, cx| {
+            host_cx.enqueue(move |state, _cx| {
                 if state.git_status_generation == generation
                     && state.active_session_id().map(str::to_string) == session_id
                 {
                     state.git_status = Some(status);
-                    state.emit_git_status(cx);
-                    cx.notify();
                 }
             });
         });
@@ -47,11 +42,9 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let branch = host_cx.unblock(move || read_git_branch(&cwd)).await;
-            host_cx.enqueue(move |state, cx| {
+            host_cx.enqueue(move |state, _cx| {
                 if let Some(session) = state.resident_mut(&session_id) {
                     session.git_branch = branch;
-                    state.emit_session_status(&session_id, cx);
-                    cx.notify();
                 }
             });
         });
@@ -110,7 +103,6 @@ impl AppState {
         };
         let current_branch = self.git_branch_name();
         self.git_busy = true;
-        self.emit_git_status(cx);
         let operation = self.next_operation_id();
         let retry = GitActionRequest {
             action,
@@ -158,10 +150,7 @@ impl AppState {
                 if let Some(active) = state.active.as_mut() {
                     active.git_branch = git_branch;
                 }
-                state.emit_active_session_status(cx);
-                state.emit_git_status(cx);
                 state.refresh_git_status(cx);
-                cx.notify();
             });
         });
     }

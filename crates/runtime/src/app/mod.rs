@@ -47,7 +47,7 @@ use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
 use tcode_protocol::{
-    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, PathEntry,
+    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot, PathEntry,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
     RecentDir, ServerEvent, SessionEventRecord, SessionStatus, TerminalContextStatus,
     TerminalSplitStatus, TerminalStatus, Topic,
@@ -259,7 +259,8 @@ use providers::{
     effort_selection, normalized_selections, provider_secret_names, session_launch_env,
     session_options,
 };
-use store_write::{StoreWrite, StoreWriteFailure, run_store_write};
+pub(crate) use snapshots::DomainDiff;
+use store_write::{StoreWrite, run_store_write};
 
 /// The result of a provider version check (Group C / s3 §6).
 #[derive(Debug, Clone, Default)]
@@ -283,8 +284,8 @@ pub struct AppState {
     settings_store: SettingsStore,
     store_writes: smol::channel::Sender<StoreWrite>,
     store_write_receiver: Option<smol::channel::Receiver<StoreWrite>>,
-    store_write_failures: smol::channel::Sender<StoreWriteFailure>,
-    store_write_failure_receiver: Option<smol::channel::Receiver<StoreWriteFailure>>,
+    store_write_failures: smol::channel::Sender<Result<RuntimeError, String>>,
+    store_write_failure_receiver: Option<smol::channel::Receiver<Result<RuntimeError, String>>>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
     pub active: Option<ActiveSession>,
@@ -366,13 +367,6 @@ pub struct AppState {
     pub git_busy: bool,
     /// Source of ids used to correlate semantic operation lifecycle events.
     next_operation_id: u64,
-    /// Per-topic sequence numbers for replicated protocol domains.
-    index_event_seq: u64,
-    settings_event_seq: u64,
-    session_event_seqs: HashMap<String, u64>,
-    session_status_event_seqs: HashMap<String, u64>,
-    providers_event_seq: u64,
-    git_status_event_seq: u64,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: u64,
@@ -495,12 +489,6 @@ impl AppState {
             git_status: None,
             git_busy: false,
             next_operation_id: 1,
-            index_event_seq: 0,
-            settings_event_seq: 0,
-            session_event_seqs: HashMap::new(),
-            session_status_event_seqs: HashMap::new(),
-            providers_event_seq: 0,
-            git_status_event_seq: 0,
             git_status_generation: 0,
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
@@ -538,28 +526,8 @@ impl AppState {
             HostCx::spawn_detached(cx, async move {
                 while let Ok(failure) = failures.recv().await {
                     host_cx.enqueue(move |state, cx| match failure {
-                        StoreWriteFailure::PersistEvent(error) => {
-                            state.report_error(RuntimeError::PersistEvent { error }, cx);
-                        }
-                        StoreWriteFailure::PersistSession(error) => {
-                            state.report_error(RuntimeError::PersistSession { error }, cx);
-                        }
-                        StoreWriteFailure::PersistSessionIndex(error) => {
-                            state.report_error(RuntimeError::PersistSessionIndex { error }, cx);
-                        }
-                        StoreWriteFailure::PersistProject(error) => {
-                            state.report_error(RuntimeError::PersistProject { error }, cx);
-                        }
-                        StoreWriteFailure::DeleteSession(error) => {
-                            state.report_error(RuntimeError::DeleteSession { error }, cx);
-                        }
-                        StoreWriteFailure::DeleteProject(error) => {
-                            state.report_error(RuntimeError::DeleteProject { error }, cx);
-                        }
-                        StoreWriteFailure::PersistSettings(error) => {
-                            state.report_error(RuntimeError::PersistSettings { error }, cx);
-                        }
-                        StoreWriteFailure::Log(message) => log::warn!("{message}"),
+                        Ok(error) => state.report_error(error, cx),
+                        Err(message) => log::warn!("{message}"),
                     });
                 }
             });
@@ -567,24 +535,6 @@ impl AppState {
     }
 
     fn enqueue_store_write(&mut self, write: StoreWrite, cx: &mut HostCx) {
-        let index_event = match &write {
-            StoreWrite::UpsertMeta { meta, .. } => {
-                Some(ServerEvent::IndexUpsertSession((**meta).clone()))
-            }
-            StoreWrite::UpsertProject(project) => {
-                Some(ServerEvent::IndexUpsertProject(project.clone()))
-            }
-            StoreWrite::RemoveSession(session_id) => Some(ServerEvent::IndexRemoveSession {
-                session_id: session_id.clone(),
-            }),
-            StoreWrite::RemoveProject(project_id) => Some(ServerEvent::IndexRemoveProject {
-                project_id: project_id.clone(),
-            }),
-            _ => None,
-        };
-        if let Some(event) = index_event {
-            self.emit_domain(Topic::Index, event, cx);
-        }
         self.start_store_writer(cx);
         if self.store_writes.try_send(write).is_err() {
             log::error!("session store writer stopped before accepting a write");
@@ -592,11 +542,6 @@ impl AppState {
     }
 
     fn enqueue_settings(&mut self, settings: &Settings, cx: &mut HostCx) {
-        self.emit_domain(
-            Topic::Settings,
-            ServerEvent::SettingsReplaced(settings.clone()),
-            cx,
-        );
         match serde_json::to_vec_pretty(settings) {
             Ok(bytes) => self.enqueue_store_write(StoreWrite::WriteSettings(bytes), cx),
             Err(err) => self.report_error(
@@ -613,30 +558,7 @@ impl AppState {
         self.enqueue_settings(&settings, cx);
     }
 
-    fn emit_domain(&mut self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
-        let seq = match &topic {
-            Topic::Index => &mut self.index_event_seq,
-            Topic::Settings => &mut self.settings_event_seq,
-            Topic::SessionEvents { session_id } => self
-                .session_event_seqs
-                .entry(session_id.clone())
-                .or_default(),
-            Topic::SessionStatus { session_id } => self
-                .session_status_event_seqs
-                .entry(session_id.clone())
-                .or_default(),
-            Topic::Providers => &mut self.providers_event_seq,
-            Topic::GitStatus => &mut self.git_status_event_seq,
-            Topic::ActiveSession | Topic::RuntimeEvents | Topic::Terminal { .. } => {
-                log::error!("attempted sequenced domain emission for unsequenced topic {topic:?}");
-                return;
-            }
-        };
-        *seq += 1;
-        cx.emit(HostEvent::Domain(EventEnvelope {
-            topic,
-            seq: *seq,
-            event,
-        }));
+    fn emit_domain(&self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
+        cx.emit(HostEvent::Domain(EventEnvelope { topic, event }));
     }
 }

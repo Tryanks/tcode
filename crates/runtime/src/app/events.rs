@@ -10,9 +10,7 @@ impl AppState {
 
         if let AgentEvent::RewindFailed { error, .. } = &event {
             self.pending_native_rewinds.remove(session_id);
-            self.emit_session_status(session_id, cx);
             self.report_error(RuntimeError::ProviderMessage(error.clone()), cx);
-            cx.notify();
             return;
         }
 
@@ -41,8 +39,6 @@ impl AppState {
                     self.mark_resident_idle(session_id, cx);
                 }
             }
-            self.emit_session_status(session_id, cx);
-            cx.notify();
             return;
         }
 
@@ -67,7 +63,6 @@ impl AppState {
                     } else {
                         false
                     };
-                    self.emit_session_status(session_id, cx);
                     let is_child = self
                         .sessions
                         .iter()
@@ -78,7 +73,6 @@ impl AppState {
                     if !has_queued {
                         self.background.remove(session_id);
                     }
-                    cx.notify();
                 }
                 // Otherwise: user-requested shutdowns remove the runtime before
                 // the provider acknowledges them, so their close stays silent.
@@ -106,8 +100,6 @@ impl AppState {
                 },
                 cx,
             );
-            self.emit_session_status(session_id, cx);
-            cx.notify();
             return;
         }
 
@@ -122,7 +114,6 @@ impl AppState {
                 .filter(|active| active.meta.id == session_id)
             {
                 active.provider_commands.clone_from(commands);
-                cx.notify();
                 Some((active.meta.provider, active.meta.acp_agent_id.clone()))
             } else if let Some(parked) = self.background.get_mut(session_id) {
                 parked.provider_commands.clone_from(commands);
@@ -140,7 +131,6 @@ impl AppState {
                     cx,
                 );
             }
-            self.emit_session_status(session_id, cx);
             return;
         }
 
@@ -189,7 +179,6 @@ impl AppState {
                 .filter(|active| active.meta.id == session_id)
             {
                 apply(active);
-                cx.notify();
                 Some(active.meta.clone())
             } else if let Some(parked) = self.background.get_mut(session_id) {
                 apply(parked);
@@ -200,7 +189,6 @@ impl AppState {
             if let Some(meta) = meta.filter(|meta| meta.acp_agent_id.is_some()) {
                 self.persist_meta(&meta, cx);
             }
-            self.emit_session_status(session_id, cx);
             return;
         }
 
@@ -366,22 +354,6 @@ impl AppState {
         {
             self.on_background_turn_completed(session_id, cx);
         }
-
-        if matches!(
-            event,
-            AgentEvent::TurnStarted { .. }
-                | AgentEvent::SessionStarted { .. }
-                | AgentEvent::TurnCompleted { .. }
-                | AgentEvent::RewindCompleted { .. }
-                | AgentEvent::ApprovalRequested(_)
-                | AgentEvent::ApprovalResolved { .. }
-                | AgentEvent::UserInputRequested { .. }
-                | AgentEvent::UserInputResolved { .. }
-        ) {
-            self.emit_session_status(session_id, cx);
-        }
-
-        cx.notify();
     }
 
     /// Append to JSONL + fold into the matching active or background timeline.

@@ -219,7 +219,6 @@ impl AppState {
                 };
                 if applied {
                     state.persist_terminal_resource_count(cx);
-                    cx.notify();
                 }
                 if let Some((first, direction)) = followup_split {
                     let cwd = state.active.as_ref().unwrap().meta.cwd.clone();
@@ -272,9 +271,7 @@ impl AppState {
                     cx,
                 );
             }
-            return;
         }
-        cx.notify();
     }
 
     pub fn close_terminal_panel(&mut self, cx: &mut HostCx) {
@@ -287,7 +284,6 @@ impl AppState {
             let count = active.terminal_workspace.terminals.len();
             self.terminal_prefs_mut(key, count).open = false;
             self.write_terminal_preferences(cx);
-            cx.notify();
         }
     }
 
@@ -328,13 +324,12 @@ impl AppState {
         );
     }
 
-    pub fn activate_terminal(&mut self, terminal_id: u64, cx: &mut HostCx) {
+    pub fn activate_terminal(&mut self, terminal_id: u64, _cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
         if active.terminal_workspace.terminal(terminal_id).is_some() {
             active.terminal_workspace.active_id = Some(terminal_id);
-            cx.notify();
         }
     }
 
@@ -359,7 +354,6 @@ impl AppState {
         if empty {
             self.close_terminal_panel(cx);
         }
-        cx.notify();
     }
 
     pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut HostCx) {
@@ -401,7 +395,7 @@ impl AppState {
         );
     }
 
-    pub fn capture_terminal_selection(&mut self, terminal_id: u64, cx: &mut HostCx) {
+    pub fn capture_terminal_selection(&mut self, terminal_id: u64, _cx: &mut HostCx) {
         let Some(active) = self.active.as_mut() else {
             return;
         };
@@ -412,17 +406,15 @@ impl AppState {
         let selection = entry.terminal.selected_text();
         if let Some(selection) = selection {
             active.terminal_workspace.add_context(label, selection);
-            cx.notify();
         }
     }
 
-    pub fn remove_terminal_context(&mut self, context_id: u64, cx: &mut HostCx) {
+    pub fn remove_terminal_context(&mut self, context_id: u64, _cx: &mut HostCx) {
         if let Some(active) = self.active.as_mut() {
             active
                 .terminal_workspace
                 .contexts
                 .retain(|context| context.id != context_id);
-            cx.notify();
         }
     }
 
@@ -436,18 +428,16 @@ impl AppState {
             .unwrap_or(&[])
     }
 
-    pub fn add_review_comment(&mut self, comment: ReviewComment, cx: &mut HostCx) {
+    pub fn add_review_comment(&mut self, comment: ReviewComment, _cx: &mut HostCx) {
         if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
             self.review_comment_drafts
                 .entry(id.clone())
                 .or_default()
                 .push(comment);
-            self.emit_session_status(&id, cx);
-            cx.notify();
         }
     }
 
-    pub fn remove_review_comment(&mut self, index: usize, cx: &mut HostCx) {
+    pub fn remove_review_comment(&mut self, index: usize, _cx: &mut HostCx) {
         let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) else {
             return;
         };
@@ -455,16 +445,12 @@ impl AppState {
             && index < comments.len()
         {
             comments.remove(index);
-            self.emit_session_status(&id, cx);
-            cx.notify();
         }
     }
 
-    pub(super) fn clear_review_comments(&mut self, cx: &mut HostCx) {
-        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone())
-            && self.review_comment_drafts.remove(&id).is_some()
-        {
-            self.emit_session_status(&id, cx);
+    pub(super) fn clear_review_comments(&mut self, _cx: &mut HostCx) {
+        if let Some(id) = self.active.as_ref().map(|active| active.meta.id.clone()) {
+            self.review_comment_drafts.remove(&id);
         }
     }
 

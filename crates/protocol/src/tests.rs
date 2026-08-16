@@ -66,7 +66,6 @@ fn round_trips_top_level_wire_types() {
 
     let event = EventEnvelope {
         topic: Topic::RuntimeEvents,
-        seq: 9,
         event: ServerEvent::Runtime(RuntimeNotification::Notice(
             RuntimeNotice::UpdateAvailable {
                 provider: ProviderKind::Codex,
@@ -80,7 +79,6 @@ fn round_trips_top_level_wire_types() {
         topic: Topic::SessionStatus {
             session_id: "session-1".into(),
         },
-        seq: 10,
         event: ServerEvent::SessionStatusReplaced(SessionStatus {
             session_id: "session-1".into(),
             title: "Replicated status".into(),
@@ -159,7 +157,6 @@ fn round_trips_top_level_wire_types() {
     });
     round_trip(&EventEnvelope {
         topic: Topic::Providers,
-        seq: 11,
         event: ServerEvent::ProvidersReplaced(ProvidersStatus {
             models_loading: HashMap::from([(ProviderKind::Codex, true)]),
             provider_versions: HashMap::from([(
@@ -203,7 +200,6 @@ fn round_trips_top_level_wire_types() {
     });
     round_trip(&EventEnvelope {
         topic: Topic::GitStatus,
-        seq: 12,
         event: ServerEvent::GitStatusReplaced(GitStatusStatus {
             status: Some(tcode_core::git::GitStatus {
                 is_repo: true,
@@ -216,7 +212,6 @@ fn round_trips_top_level_wire_types() {
                 ..Default::default()
             }),
             busy: true,
-            generation: 7,
         }),
     });
     round_trip(&ProtocolError {
@@ -678,7 +673,6 @@ fn round_trips_event_and_snapshot_families() {
         feature_branch: None,
     });
     round_trip(&RuntimeOperationId(17));
-    round_trip(&RuntimeSnapshot);
 }
 
 #[test]

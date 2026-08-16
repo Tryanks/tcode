@@ -58,8 +58,6 @@ impl AppState {
         } else {
             self.ensure_started(cx);
         }
-        self.emit_session_status(&session_id, cx);
-        cx.notify();
     }
 
     #[cfg(test)]
@@ -107,7 +105,6 @@ impl AppState {
         active.live_option_selections = active.meta.option_selections.clone();
 
         let meta = active.meta.clone();
-        self.emit_session_status(session_id, cx);
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
         let preview_registration = if meta.provider == ProviderKind::Pi {
@@ -222,8 +219,6 @@ impl AppState {
                                 state.on_background_turn_completed(&session_id, cx);
                             }
                         }
-                        state.emit_session_status(&session_id, cx);
-                        cx.notify();
                     }
                     Err(err) => {
                         if matches_active || matches_parked {
@@ -264,8 +259,6 @@ impl AppState {
                                 },
                                 cx,
                             );
-                            state.emit_session_status(&session_id, cx);
-                            cx.notify();
                         }
                     }
                 }
@@ -342,8 +335,6 @@ impl AppState {
         // where re-reading and re-parsing a large sessions.json stalls the UI.
         // `sessions` stays newest-first, matching `load_index`'s order.
         self.upsert_session_in_memory(meta.clone());
-        self.emit_session_status(&meta.id, cx);
-        cx.notify();
     }
 
     pub(crate) fn shutdown_active(&mut self, _cx: &mut HostCx) {
@@ -404,7 +395,6 @@ impl AppState {
             if !has_work {
                 self.mark_resident_idle(&session_id, cx);
             }
-            self.emit_session_status(&session_id, cx);
         }
     }
 
@@ -423,7 +413,6 @@ impl AppState {
 
         let idle_since = Instant::now();
         self.background.get_mut(session_id).unwrap().idle_since = Some(idle_since);
-        self.emit_session_status(session_id, cx);
 
         let oldest = {
             let mut residents: Vec<_> = self
@@ -465,7 +454,6 @@ impl AppState {
                 }) && !state.pending_native_rewinds.contains_key(&session_id);
                 if still_idle {
                     state.drop_background(&session_id, cx);
-                    cx.notify();
                 }
             });
         });
