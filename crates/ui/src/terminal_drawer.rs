@@ -1806,29 +1806,31 @@ impl Render for TerminalDrawer {
                         let width = f32::from(bounds.size.width);
                         let height = f32::from(bounds.size.height);
                         let scale_factor = window.scale_factor();
-                        let resize = |cx: &App, terminal_id: u64, pane_width: f32, pane_height: f32| {
-                            let cols = ((pane_width - 2. * PANE_PADDING) / cell_width)
-                                .floor()
-                                .max(2.) as usize;
-                            let rows = ((pane_height - 2. * PANE_PADDING) / cell_height)
-                                .floor()
-                                .max(2.) as usize;
-                            let cell_width_px = (cell_width * scale_factor).round().max(1.) as u32;
-                            let cell_height_px =
-                                (cell_height * scale_factor).round().max(1.) as u32;
-                            workspace_store
-                                .read(cx)
-                                .with_terminal_workspace(|workspace| {
-                                    if let Some(entry) = workspace.terminal(terminal_id) {
-                                        entry.terminal.resize_with_cell_size(
-                                            cols,
-                                            rows,
-                                            cell_width_px,
-                                            cell_height_px,
-                                        );
-                                    }
-                                });
-                        };
+                        let resize =
+                            |cx: &App, terminal_id: u64, pane_width: f32, pane_height: f32| {
+                                let cols = ((pane_width - 2. * PANE_PADDING) / cell_width)
+                                    .floor()
+                                    .max(2.) as usize;
+                                let rows = ((pane_height - 2. * PANE_PADDING) / cell_height)
+                                    .floor()
+                                    .max(2.) as usize;
+                                let cell_width_px =
+                                    (cell_width * scale_factor).round().max(1.) as u32;
+                                let cell_height_px =
+                                    (cell_height * scale_factor).round().max(1.) as u32;
+                                workspace_store
+                                    .read(cx)
+                                    .with_terminal_workspace(|workspace| {
+                                        if let Some(entry) = workspace.terminal(terminal_id) {
+                                            entry.terminal.resize_with_cell_size(
+                                                cols,
+                                                rows,
+                                                cell_width_px,
+                                                cell_height_px,
+                                            );
+                                        }
+                                    });
+                            };
                         match active_split {
                             None => {
                                 if let Some(id) = active_id {

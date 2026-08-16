@@ -1,8 +1,8 @@
 use std::path::Path;
 
+use crate::icon::{Icon, IconName};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
-use crate::icon::{Icon, IconName};
 use agent::{ChangeCompleteness, FileChange};
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement as _,
@@ -100,8 +100,7 @@ pub(crate) fn changed_files(
         changes.len().min(3)
     };
     let mut body = h_flex().w_full().px_1().gap_1p5().flex_wrap();
-    for (file_index, (change, on_click)) in
-        changes.iter().zip(open_files).take(visible).enumerate()
+    for (file_index, (change, on_click)) in changes.iter().zip(open_files).take(visible).enumerate()
     {
         let display = tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
         let name = Path::new(&display)

@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use crate::theme::ActiveTheme as _;
 use crate::icon::{Icon, IconName};
+use crate::theme::ActiveTheme as _;
 use agent::TurnStatus;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
