@@ -173,8 +173,14 @@ struct BuiltListItems {
     split: Vec<DiffListItem>,
 }
 
-fn file_header_index(files: &[RenderedFile], items: &[DiffListItem], path: &str) -> Option<usize> {
-    let file_index = files.iter().position(|file| file.path == path)?;
+fn file_header_index(
+    files: &[RenderedFile],
+    items: &[DiffListItem],
+    path: &str,
+    cwd: &Path,
+) -> Option<usize> {
+    let display_path = relativize_to_workspace(path, cwd);
+    let file_index = files.iter().position(|file| file.path == display_path)?;
     items
         .iter()
         .position(|item| matches!(item, DiffListItem::Header(index) if *index == file_index))
@@ -305,12 +311,18 @@ impl DiffPanel {
         let DiffScope::Turn(turn) = scope else {
             return;
         };
-        let request = self
-            .workspace_store
-            .read(cx)
-            .pending_diff_focus()
-            .filter(|request| request.session == session && request.turn == turn);
-        let Some(request) = request else {
+        let (request, cwd) = {
+            let store = self.workspace_store.read(cx);
+            let request = store
+                .pending_diff_focus()
+                .filter(|request| request.session == session && request.turn == turn);
+            let cwd = store
+                .diff_active_state()
+                .filter(|active| active.session == session)
+                .map(|active| active.cwd);
+            (request, cwd)
+        };
+        let (Some(request), Some(cwd)) = (request, cwd) else {
             return;
         };
         let Some(cache) = self
@@ -320,13 +332,17 @@ impl DiffPanel {
         else {
             return;
         };
-        if let Some(index) = file_header_index(&cache.files, &cache.unified_items, &request.path) {
+        if let Some(index) =
+            file_header_index(&cache.files, &cache.unified_items, &request.path, &cwd)
+        {
             cache.unified_list.scroll_to(ListOffset {
                 item_ix: index,
                 offset_in_item: px(0.),
             });
         }
-        if let Some(index) = file_header_index(&cache.files, &cache.split_items, &request.path) {
+        if let Some(index) =
+            file_header_index(&cache.files, &cache.split_items, &request.path, &cwd)
+        {
             cache.split_list.scroll_to(ListOffset {
                 item_ix: index,
                 offset_in_item: px(0.),
@@ -1961,6 +1977,44 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
+    fn out_of_workspace_turn_change_renders_from_stored_diff_without_file_text() {
+        let path = "/tmp/tcode-outside-workspace.rs";
+        let change = FileChange {
+            path: path.into(),
+            kind: FileChangeKind::Modify,
+            diff: Some("@@ -1 +1 @@\n-fn old_value() {}\n+fn new_value() {}\n".into()),
+        };
+        let colors = DiffColors {
+            added_word_bg: gpui::hsla(0.3, 0.8, 0.5, 0.3),
+            removed_word_bg: gpui::hsla(0., 0.8, 0.5, 0.28),
+        };
+
+        let file = render_file(
+            &change,
+            None,
+            None,
+            RenderFileContext {
+                cwd: Path::new("/workspace/repository"),
+                options: DiffOptions {
+                    ignore_ws: false,
+                    show_invisibles: false,
+                },
+                theme: &HighlightTheme::default_dark(),
+                colors: &colors,
+                whitespace_style: &HighlightStyle::default(),
+            },
+        );
+
+        assert_eq!(file.path, path);
+        assert_eq!(file.added, 1);
+        assert_eq!(file.removed, 1);
+        assert_eq!(file.all_rows.len(), 2);
+        let items = build_list_items(std::slice::from_ref(&file));
+        assert_eq!(items.unified.len(), 3, "header plus two visible rows");
+        assert_eq!(items.split.len(), 2, "header plus one paired row");
+    }
+
+    #[test]
     fn resolves_file_headers_independently_for_unified_and_split_lists() {
         let code_row = |text: &str| RenderedRow {
             kind: RowKind::Added,
@@ -1971,6 +2025,7 @@ mod tests {
         };
         let first_rows = vec![code_row("one"), code_row("two"), code_row("three")];
         let second_rows = vec![code_row("replacement")];
+        let outside_rows = vec![code_row("outside")];
         let files = vec![
             RenderedFile {
                 path: "src/first.rs".into(),
@@ -1998,19 +2053,46 @@ mod tests {
                 collapsed: Vec::new(),
                 expandable: false,
             },
+            RenderedFile {
+                path: "/tmp/outside.rs".into(),
+                kind: FileChangeKind::Modify,
+                added: 1,
+                removed: 0,
+                all_split: vec![PairedRow {
+                    left: None,
+                    right: Some(0),
+                }],
+                all_rows: outside_rows,
+                collapsed: Vec::new(),
+                expandable: false,
+            },
         ];
         let items = build_list_items(&files);
         let (unified, split) = (items.unified, items.split);
+        let cwd = Path::new("/workspace/repository");
 
         assert_eq!(
-            file_header_index(&files, &unified, "tests/second.rs"),
+            file_header_index(&files, &unified, "tests/second.rs", cwd),
             Some(4)
         );
         assert_eq!(
-            file_header_index(&files, &split, "tests/second.rs"),
+            file_header_index(&files, &split, "tests/second.rs", cwd),
             Some(2)
         );
-        assert_eq!(file_header_index(&files, &unified, "missing.rs"), None);
+        assert_eq!(
+            file_header_index(
+                &files,
+                &unified,
+                "/workspace/repository/tests/second.rs",
+                cwd,
+            ),
+            Some(4)
+        );
+        assert_eq!(
+            file_header_index(&files, &unified, "/tmp/outside.rs", cwd),
+            Some(6)
+        );
+        assert_eq!(file_header_index(&files, &unified, "missing.rs", cwd), None);
     }
 
     #[test]
