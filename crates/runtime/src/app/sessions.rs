@@ -1,5 +1,51 @@
 use super::*;
 
+/// Live sessions owned by the runtime, whether currently selected or parked.
+#[derive(Default)]
+pub struct ResidentSessions {
+    pub active: Option<ActiveSession>,
+    pub(super) parked: HashMap<String, ActiveSession>,
+}
+
+impl ResidentSessions {
+    pub(super) fn resident(&self, id: &str) -> Option<&ActiveSession> {
+        self.active
+            .as_ref()
+            .filter(|session| session.meta.id == id)
+            .or_else(|| self.parked.get(id))
+    }
+
+    pub(super) fn resident_mut(&mut self, id: &str) -> Option<&mut ActiveSession> {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|session| session.meta.id == id)
+        {
+            return self.active.as_mut();
+        }
+        self.parked.get_mut(id)
+    }
+
+    pub(super) fn park(&mut self, session: ActiveSession) {
+        self.parked.insert(session.meta.id.clone(), session);
+    }
+
+    pub(super) fn adopt(&mut self, id: &str) -> Option<ActiveSession> {
+        self.parked.remove(id)
+    }
+
+    pub(super) fn evict(&mut self, id: &str) -> Option<ActiveSession> {
+        self.parked.remove(id)
+    }
+
+    pub(super) fn ids(&self) -> impl Iterator<Item = &str> {
+        self.active
+            .iter()
+            .map(|session| session.meta.id.as_str())
+            .chain(self.parked.keys().map(String::as_str))
+    }
+}
+
 impl AppState {
     /// Assemble the provider-bound message at the runtime boundary. Unreadable
     /// attachment files are skipped, matching the composer's previous behavior.
@@ -9,6 +55,7 @@ impl AppState {
         attachment_paths: Vec<PathBuf>,
     ) -> (String, Vec<Attachment>) {
         let terminal_contexts = self
+            .residents
             .active
             .as_ref()
             .map(|active| active.terminal_workspace.contexts.as_slice())
@@ -51,7 +98,6 @@ impl AppState {
         let id = project.id.clone();
         self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
         self.projects.push(project);
-        cx.notify();
         Some(id)
     }
 
@@ -140,8 +186,6 @@ impl AppState {
             let mut settings = self.settings.clone();
             settings.collapsed_projects.retain(|id| id != project_id);
             self.update_settings(settings, cx);
-        } else {
-            cx.notify();
         }
     }
 
@@ -161,25 +205,19 @@ impl AppState {
     }
 
     pub fn active_session_id(&self) -> Option<&str> {
-        self.active.as_ref().map(|a| a.meta.id.as_str())
+        self.residents.active.as_ref().map(|a| a.meta.id.as_str())
+    }
+
+    pub(crate) fn active_session(&self) -> Option<&ActiveSession> {
+        self.residents.active.as_ref()
     }
 
     pub(super) fn resident(&self, id: &str) -> Option<&ActiveSession> {
-        self.active
-            .as_ref()
-            .filter(|session| session.meta.id == id)
-            .or_else(|| self.background.get(id))
+        self.residents.resident(id)
     }
 
     pub(super) fn resident_mut(&mut self, id: &str) -> Option<&mut ActiveSession> {
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|session| session.meta.id == id)
-        {
-            return self.active.as_mut();
-        }
-        self.background.get_mut(id)
+        self.residents.resident_mut(id)
     }
 
     pub(super) fn find_meta(&self, id: &str) -> Option<SessionMeta> {
@@ -208,7 +246,8 @@ impl AppState {
         self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
         self.settings = settings;
-        self.provider_secret_names = provider_secret_names(&self.settings, &self.settings_store);
+        self.providers.provider_secret_names =
+            provider_secret_names(&self.settings, &self.settings_store);
         // Keep the live computer-use MCP config in step with the persisted
         // settings on every change (the server outlives any one snapshot).
         computer_use_mcp::config::set(self.settings.computer_use.clone());
@@ -216,8 +255,44 @@ impl AppState {
             cx,
             RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { language }),
         );
-        self.emit_providers_status(cx);
-        cx.notify();
+    }
+
+    pub fn patch_settings(&mut self, patch: tcode_protocol::SettingsPatch, cx: &mut HostCx) {
+        let mut settings = self.settings.clone();
+        match patch {
+            tcode_protocol::SettingsPatch::Language(value) => settings.language = value,
+            tcode_protocol::SettingsPatch::ThemeMode(value) => settings.theme_mode = value,
+            tcode_protocol::SettingsPatch::WordWrapDiffs(value) => settings.word_wrap_diffs = value,
+            tcode_protocol::SettingsPatch::SkipDeleteConfirmation(value) => {
+                settings.skip_delete_confirmation = value;
+            }
+            tcode_protocol::SettingsPatch::AutoOpenTaskPanel(value) => {
+                settings.auto_open_task_panel = value;
+            }
+            tcode_protocol::SettingsPatch::ProviderUpdateChecksDisabled(value) => {
+                settings.provider_update_checks_disabled = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveDisabled(value) => {
+                settings.auto_archive_disabled = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveMaxIdleDays(value) => {
+                settings.auto_archive_max_idle_days = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveKeepCount(value) => {
+                settings.auto_archive_keep_count = value;
+            }
+            tcode_protocol::SettingsPatch::AutoArchiveNoticeShown(value) => {
+                settings.auto_archive_notice_shown = value;
+            }
+            tcode_protocol::SettingsPatch::Orchestrate(value) => settings.orchestrate = value,
+            tcode_protocol::SettingsPatch::ComputerUse(value) => settings.computer_use = value,
+            tcode_protocol::SettingsPatch::Browser(value) => settings.browser = value,
+            tcode_protocol::SettingsPatch::TitleGeneration(value) => {
+                settings.title_generation = value;
+            }
+            tcode_protocol::SettingsPatch::SidebarLayout(value) => settings.sidebar_layout = value,
+        }
+        self.update_settings(settings, cx);
     }
 
     /// Persist a restart-continuity marker naming the Settings page to reopen and
@@ -244,7 +319,6 @@ impl AppState {
         {
             self.select_session(id, cx);
         }
-        cx.notify();
         Some(marker.reopen_settings)
     }
 
@@ -393,12 +467,14 @@ impl AppState {
     /// user turn, exactly like a cold-opened stored thread.
     pub fn fork_thread(&mut self, id: &str, cx: &mut HostCx) {
         let source = self
+            .residents
             .active
             .as_ref()
             .filter(|session| session.meta.id == id)
             .map(|session| (session.meta.clone(), session.turn_in_flight))
             .or_else(|| {
-                self.background
+                self.residents
+                    .parked
                     .get(id)
                     .map(|session| (session.meta.clone(), session.turn_in_flight))
             })
@@ -412,7 +488,7 @@ impl AppState {
         let Some((source, turn_in_flight)) = source else {
             return;
         };
-        if !source.provider.supports_fork() {
+        if !source.provider.caps().supports_fork {
             self.report_error(
                 RuntimeError::External("This provider does not support conversation forks.".into()),
                 cx,
@@ -524,7 +600,7 @@ impl AppState {
                     if let Err(err) = result
                         && !state.sessions.iter().any(|meta| meta.id == deleted_id)
                         && state.active_session_id() != Some(&deleted_id)
-                        && !state.background.contains_key(&deleted_id)
+                        && !state.residents.parked.contains_key(&deleted_id)
                     {
                         state.report_error(
                             RuntimeError::WorktreeRemove {
@@ -536,7 +612,6 @@ impl AppState {
                 });
             });
         }
-        cx.notify();
     }
 
     /// Permanently remove a project and all of its threads from tcode. Project
@@ -549,6 +624,7 @@ impl AppState {
             .map(|meta| meta.id.clone())
             .collect();
         if self
+            .residents
             .active
             .as_ref()
             .is_some_and(|active| active.meta.project_id.as_deref() == Some(project_id))
@@ -573,7 +649,6 @@ impl AppState {
             .retain(|id| id != project_id);
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
-        cx.notify();
     }
 
     /// Whether `session_id` owns live or queued work.
@@ -588,12 +663,17 @@ impl AppState {
     /// on this rather than on turns alone.
     #[cfg(test)]
     pub(super) fn working_sessions_count(&self) -> usize {
-        usize::from(self.active.as_ref().is_some_and(ActiveSession::has_work))
-            + self
-                .background
-                .values()
-                .filter(|session| session.has_work())
-                .count()
+        usize::from(
+            self.residents
+                .active
+                .as_ref()
+                .is_some_and(ActiveSession::has_work),
+        ) + self
+            .residents
+            .parked
+            .values()
+            .filter(|session| session.has_work())
+            .count()
     }
 
     /// Record that a thread has been visited now (clears its unread dot).
@@ -617,7 +697,6 @@ impl AppState {
             .last_visited
             .insert(session_id.to_string(), updated.saturating_sub(1));
         self.persist_settings(cx);
-        cx.notify();
     }
 
     /// Whether a thread shows an unread dot: it has been visited before, its
@@ -639,11 +718,9 @@ impl AppState {
 
     /// Choose the draft's workspace mode (checkout-row picker). No-op unless the
     /// active thread is an unstarted draft.
-    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, cx: &mut HostCx) {
-        if let Some(active) = self.active.as_mut().filter(|a| a.draft) {
+    pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, _cx: &mut HostCx) {
+        if let Some(active) = self.residents.active.as_mut().filter(|a| a.draft) {
             active.draft_workspace = mode;
-            self.emit_active_session_status(cx);
-            cx.notify();
         }
     }
 
@@ -656,14 +733,12 @@ impl AppState {
         base: String,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         active.preparing_worktree = true;
         let session_id = active.meta.id.clone();
         let root = active.meta.cwd.clone();
-        self.emit_session_status(&session_id, cx);
-        cx.notify();
 
         let path = worktree_path_for(&session_id);
         let branch = format!("tcode/{session_id}");
@@ -689,6 +764,7 @@ impl AppState {
                 .await;
             host_cx.enqueue(move |state, cx| {
                 let Some(active) = state
+                    .residents
                     .active
                     .as_mut()
                     .filter(|a| a.meta.id == session_id && a.draft)
@@ -719,7 +795,6 @@ impl AppState {
                         );
                     }
                 }
-                state.emit_session_status(&session_id, cx);
             });
         });
     }
@@ -820,27 +895,25 @@ impl AppState {
         draft.meta.option_selections = reasoning_effort.into_iter().collect();
         let terminal_preferences = self.terminal_preferences_for(&draft);
         let restored_terminal = self.restore_terminal_workspace(&mut draft);
-        self.active = Some(draft);
-        self.emit_active_session_status(cx);
-        if let Some(active) = self.active.as_ref() {
+        self.residents.active = Some(draft);
+        if let Some(active) = self.residents.active.as_ref() {
             self.refresh_session_git_branch(active.meta.id.clone(), active.meta.cwd.clone(), cx);
         }
         if !restored_terminal {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
-        cx.notify();
     }
 
     /// Whether the active thread is an unsent draft.
     pub(crate) fn active_is_draft(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| a.draft)
+        self.residents.active.as_ref().is_some_and(|a| a.draft)
     }
 
     /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
     pub(super) fn commit_draft(&mut self, cx: &mut HostCx) -> std::io::Result<()> {
-        let preference_migration = self.active.as_ref().and_then(|active| {
+        let preference_migration = self.residents.active.as_ref().and_then(|active| {
             active.draft.then(|| {
                 (
                     conversation_destination(active).preference_key(),
@@ -848,7 +921,7 @@ impl AppState {
                 )
             })
         });
-        if let Some(active) = self.active.as_mut()
+        if let Some(active) = self.residents.active.as_mut()
             && active.draft
         {
             active.draft = false;
@@ -868,7 +941,6 @@ impl AppState {
                 cx,
             );
             self.upsert_session_in_memory(meta);
-            self.emit_active_session_status(cx);
         }
         if let Some((draft_key, session_key)) = preference_migration
             && let Some(preferences) = self.terminal_preferences.remove(&draft_key)
@@ -914,10 +986,11 @@ impl AppState {
     ) {
         let intended = match target {
             TimelineLoadTarget::Active { .. } => self
+                .residents
                 .active
                 .as_ref()
                 .filter(|session| session.meta.id == session_id),
-            TimelineLoadTarget::Background { .. } => self.background.get(&session_id),
+            TimelineLoadTarget::Background { .. } => self.residents.parked.get(&session_id),
         };
         let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
             return;
@@ -960,7 +1033,7 @@ impl AppState {
                         state.active_session_id() == Some(session_id.as_str())
                     }
                     TimelineLoadTarget::Background { .. } => {
-                        state.background.contains_key(&session_id)
+                        state.residents.parked.contains_key(&session_id)
                     }
                 };
                 if !generation_matches || !target_matches {
@@ -984,7 +1057,7 @@ impl AppState {
                 }
                 match target {
                     TimelineLoadTarget::Active { .. } => {
-                        if let Some(active) = state.active.as_mut() {
+                        if let Some(active) = state.residents.active.as_mut() {
                             active.timeline = timeline;
                             if let Some(git_branch) = git_branch {
                                 active.git_branch = git_branch;
@@ -997,15 +1070,13 @@ impl AppState {
                             ServerEvent::SessionSnapshot(records),
                             cx,
                         );
-                        state.emit_session_status(&session_id, cx);
                     }
                     TimelineLoadTarget::Background { .. } => {
-                        if let Some(background) = state.background.get_mut(&session_id) {
+                        if let Some(background) = state.residents.parked.get_mut(&session_id) {
                             background.timeline = timeline;
                         }
                     }
                 }
-                cx.notify();
             });
         });
     }
@@ -1026,7 +1097,7 @@ impl AppState {
         // and queue come back as they were, and the timeline is rebuilt from the
         // JSONL — which stayed current while parked, because `record_event`
         // routes by session id.
-        if let Some(mut parked) = self.background.remove(session_id) {
+        if let Some(mut parked) = self.residents.adopt(session_id) {
             log::info!(
                 "re-adopting parked session {} (turn in flight: {}, queued: {})",
                 session_id,
@@ -1037,7 +1108,7 @@ impl AppState {
             let terminal_preferences = self.terminal_preferences_for(&parked);
             let restored_terminal = self.restore_terminal_workspace(&mut parked);
             let needs_restart = matches!(parked.runtime, Runtime::Idle) && !parked.queue.is_empty();
-            self.active = Some(parked);
+            self.residents.active = Some(parked);
             self.schedule_timeline_load(
                 session_id.to_string(),
                 TimelineLoadTarget::Active {
@@ -1075,7 +1146,7 @@ impl AppState {
         let mut active = ActiveSession::new(meta, false, provider_commands);
         let terminal_preferences = self.terminal_preferences_for(&active);
         let restored_terminal = self.restore_terminal_workspace(&mut active);
-        self.active = Some(active);
+        self.residents.active = Some(active);
         self.schedule_timeline_load(
             session_id,
             TimelineLoadTarget::Active {
@@ -1088,8 +1159,6 @@ impl AppState {
             self.reopen_persisted_terminals(terminal_preferences, cx);
         }
         self.refresh_git_status(cx);
-        self.emit_active_session_status(cx);
-        cx.notify();
     }
 
     /// Open the most recently updated stored session (replay only). Used by the

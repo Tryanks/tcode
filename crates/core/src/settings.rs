@@ -115,12 +115,8 @@ pub struct ProviderSettings {
     /// Native-provider CLI arguments appended on session start (ignored for Codex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_args: Option<String>,
-    /// Whether pi should trust and load the project's local `.pi` configuration.
-    #[serde(default)]
-    pub pi_trust_project_extensions: bool,
-    /// Whether tcode should inject its native approval extension into pi.
-    #[serde(default)]
-    pub pi_native_approvals: bool,
+    #[serde(flatten)]
+    pub pi: PiProviderSettings,
     /// Model slugs added by hand in the Models section.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_models: Vec<String>,
@@ -147,12 +143,20 @@ pub struct ProfileConfigurationPatch {
     pub binary_path: Option<PathBuf>,
     pub home_path: Option<PathBuf>,
     pub launch_args: Option<String>,
-    #[serde(default)]
-    pub pi_trust_project_extensions: bool,
-    #[serde(default)]
-    pub pi_native_approvals: bool,
+    #[serde(flatten)]
+    pub pi: PiProviderSettings,
     pub custom_models: Vec<String>,
     pub hidden_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PiProviderSettings {
+    /// Whether pi should trust and load the project's local `.pi` configuration.
+    #[serde(default, rename = "pi_trust_project_extensions")]
+    pub trust_project_extensions: bool,
+    /// Whether tcode should inject its native approval extension into pi.
+    #[serde(default, rename = "pi_native_approvals")]
+    pub native_approvals: bool,
 }
 
 fn default_true() -> bool {
@@ -169,8 +173,7 @@ impl Default for ProviderSettings {
             binary_path: None,
             home_path: None,
             launch_args: None,
-            pi_trust_project_extensions: false,
-            pi_native_approvals: false,
+            pi: PiProviderSettings::default(),
             custom_models: Vec::new(),
             hidden_models: Vec::new(),
         }
@@ -958,20 +961,22 @@ mod tests {
     }
 
     #[test]
-    fn pi_project_trust_defaults_off_and_round_trips() {
+    fn old_pi_provider_settings_field_names_remain_serde_compatible() {
         let legacy: ProviderSettings = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.pi_trust_project_extensions);
-        assert!(!legacy.pi_native_approvals);
+        assert!(!legacy.pi.trust_project_extensions);
+        assert!(!legacy.pi.native_approvals);
 
-        let settings = ProviderSettings {
-            pi_trust_project_extensions: true,
-            pi_native_approvals: true,
-            ..ProviderSettings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: ProviderSettings = serde_json::from_str(&json).unwrap();
-        assert!(back.pi_trust_project_extensions);
-        assert!(back.pi_native_approvals);
+        let old_json = r#"{
+            "pi_trust_project_extensions": true,
+            "pi_native_approvals": true
+        }"#;
+        let settings: ProviderSettings = serde_json::from_str(old_json).unwrap();
+        assert!(settings.pi.trust_project_extensions);
+        assert!(settings.pi.native_approvals);
+        let serialized = serde_json::to_value(&settings).unwrap();
+        assert_eq!(serialized["pi_trust_project_extensions"], true);
+        assert_eq!(serialized["pi_native_approvals"], true);
+        assert!(serialized.get("pi").is_none());
 
         let legacy_patch: ProfileConfigurationPatch = serde_json::from_str(
             r#"{
@@ -986,8 +991,8 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(!legacy_patch.pi_trust_project_extensions);
-        assert!(!legacy_patch.pi_native_approvals);
+        assert!(!legacy_patch.pi.trust_project_extensions);
+        assert!(!legacy_patch.pi.native_approvals);
     }
 
     #[test]

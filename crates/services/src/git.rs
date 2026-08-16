@@ -206,7 +206,6 @@ fn load_file_texts(
                         .and_then(|path| read_git_text(cwd, "HEAD", path)),
                 },
                 GitDiffScope::Unknown => GitFileText::default(),
-                _ => GitFileText::default(),
             }
         })
         .collect()
@@ -289,14 +288,6 @@ pub fn load_git_diff(
         GitDiffScope::Unknown => {
             return GitDiffResult {
                 error: Some("unknown git diff scope".into()),
-                branches,
-                default_base,
-                ..GitDiffResult::default()
-            };
-        }
-        _ => {
-            return GitDiffResult {
-                error: Some("unsupported git diff scope".into()),
                 branches,
                 default_base,
                 ..GitDiffResult::default()

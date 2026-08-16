@@ -48,7 +48,7 @@ pub(super) fn approval_mode_meta(mode: ApprovalMode) -> (String, &'static str) {
 }
 
 /// The minimal `/`-command set this slice handles (S1 §7).
-pub(super) enum SlashCommand {
+pub(super) enum SlashIntent {
     Plan,
     Default,
     Model,
@@ -168,11 +168,11 @@ pub(super) fn format_countdown(secs: u64) -> String {
 
 /// Recognize a standalone `/plan`, `/default`, or `/model` message (T3 strips
 /// the command and switches mode / opens the picker instead of sending it).
-pub(super) fn slash_command(text: &str) -> Option<SlashCommand> {
+pub(super) fn slash_command(text: &str) -> Option<SlashIntent> {
     match text.trim() {
-        "/plan" => Some(SlashCommand::Plan),
-        "/default" => Some(SlashCommand::Default),
-        "/model" => Some(SlashCommand::Model),
+        "/plan" => Some(SlashIntent::Plan),
+        "/default" => Some(SlashIntent::Default),
+        "/model" => Some(SlashIntent::Model),
         _ => None,
     }
 }

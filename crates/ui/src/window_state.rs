@@ -1,5 +1,4 @@
 use gpui::{Context, Entity};
-use tcode_protocol::Command;
 
 use crate::store::WorkspaceStore;
 
@@ -32,9 +31,7 @@ impl WindowState {
     ) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         store.update(cx, |store, _cx| {
-            store.dispatch(Command::SetSidebarCollapsed {
-                collapsed: self.sidebar_collapsed,
-            })
+            store.set_sidebar_collapsed(self.sidebar_collapsed)
         });
         cx.notify();
     }

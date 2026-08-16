@@ -38,10 +38,11 @@ use term::{
     },
 };
 
+use crate::{
+    material,
+    store::{StoreChange, TopicKind, WorkspaceStore, observe_store_topics},
+};
 use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
-use tcode_protocol::Command;
-
-use crate::{material, store::WorkspaceStore};
 
 const FONT_SIZE: f32 = 13.;
 #[cfg(target_os = "macos")]
@@ -52,6 +53,140 @@ const TERMINAL_FONT_FAMILY: &str = "Consolas";
 const TERMINAL_FONT_FAMILY: &str = "Lilex";
 const PANE_PADDING: f32 = 8.;
 const SELECTION_DRAG_THRESHOLD: f32 = 2.;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScreenPoint {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionDragAction {
+    None,
+    ClearAndWait,
+    Start {
+        kind: SelectionKind,
+        point: (usize, usize),
+        side: SelectionSide,
+    },
+    Update {
+        point: (usize, usize),
+        side: SelectionSide,
+    },
+    StartSimpleAndUpdate {
+        anchor: (usize, usize),
+        anchor_side: SelectionSide,
+        point: (usize, usize),
+        side: SelectionSide,
+    },
+}
+
+#[derive(Default)]
+struct SelectionDrag {
+    selecting: Option<u64>,
+    pending_simple: Option<(u64, (usize, usize), SelectionSide)>,
+    mouse_down: Option<(u64, ScreenPoint)>,
+    last_reported_point: HashMap<u64, (usize, usize)>,
+}
+
+impl SelectionDrag {
+    fn on_down(
+        &mut self,
+        terminal_id: u64,
+        position: ScreenPoint,
+        point: (usize, usize),
+        side: SelectionSide,
+        click_count: usize,
+        shift: bool,
+    ) -> SelectionDragAction {
+        self.mouse_down = Some((terminal_id, position));
+        self.selecting = None;
+        self.pending_simple = None;
+        let kind = match click_count {
+            1 => SelectionKind::Simple,
+            2 => SelectionKind::Semantic,
+            3 => SelectionKind::Lines,
+            _ => return SelectionDragAction::None,
+        };
+        if kind == SelectionKind::Simple && shift {
+            return SelectionDragAction::Update { point, side };
+        }
+        if kind == SelectionKind::Simple {
+            self.pending_simple = Some((terminal_id, point, side));
+            return SelectionDragAction::ClearAndWait;
+        }
+        SelectionDragAction::Start { kind, point, side }
+    }
+
+    fn on_move(
+        &mut self,
+        terminal_id: u64,
+        position: ScreenPoint,
+        point: (usize, usize),
+        side: SelectionSide,
+        left_pressed: bool,
+    ) -> SelectionDragAction {
+        if !left_pressed
+            || !self
+                .mouse_down
+                .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
+        {
+            return SelectionDragAction::None;
+        }
+        if self.selecting != Some(terminal_id)
+            && let Some((_, mouse_down)) = self.mouse_down
+        {
+            if !selection_drag_started(position.x - mouse_down.x, position.y - mouse_down.y) {
+                return SelectionDragAction::None;
+            }
+            self.selecting = Some(terminal_id);
+            if self
+                .pending_simple
+                .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
+                && let Some((_, anchor, anchor_side)) = self.pending_simple.take()
+            {
+                return SelectionDragAction::StartSimpleAndUpdate {
+                    anchor,
+                    anchor_side,
+                    point,
+                    side,
+                };
+            }
+        }
+        self.selecting = Some(terminal_id);
+        SelectionDragAction::Update { point, side }
+    }
+
+    fn on_up(&mut self, terminal_id: u64) -> bool {
+        let was_selecting = self.selecting == Some(terminal_id);
+        if was_selecting {
+            self.selecting = None;
+        }
+        if self
+            .mouse_down
+            .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
+        {
+            self.mouse_down = None;
+        }
+        if self
+            .pending_simple
+            .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
+        {
+            self.pending_simple = None;
+        }
+        self.last_reported_point.remove(&terminal_id);
+        was_selecting
+    }
+
+    fn should_report_mouse_move(&mut self, terminal_id: u64, point: (usize, usize)) -> bool {
+        if self.last_reported_point.get(&terminal_id) == Some(&point) {
+            false
+        } else {
+            self.last_reported_point.insert(terminal_id, point);
+            true
+        }
+    }
+}
 
 #[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tcode_terminal, no_json)]
@@ -227,11 +362,8 @@ pub struct TerminalDrawer {
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
-    selecting: Option<u64>,
-    pending_simple_selection: Option<(u64, (usize, usize), SelectionSide)>,
-    mouse_down_position: Option<(u64, Point<Pixels>)>,
-    last_mouse_point: HashMap<u64, (usize, usize)>,
-    focus_subscriptions: Vec<gpui::Subscription>,
+    selection_drag: SelectionDrag,
+    _focus_subscriptions: Vec<gpui::Subscription>,
     event_subscriptions: HashMap<u64, TerminalEventSubscription>,
     marked_text: Option<MarkedText>,
     bell_tabs: HashSet<u64>,
@@ -241,16 +373,77 @@ pub struct TerminalDrawer {
     cursor_phase: bool,
     last_input: Instant,
     terminal_focused: bool,
-    blink_task: Option<Task<()>>,
-    _store_subscription: gpui::Subscription,
+    current_size: Option<(f32, f32)>,
+    _blink_task: Option<Task<()>>,
+    _store_subscriptions: Vec<gpui::Subscription>,
 }
 
 impl TerminalDrawer {
-    pub fn new(workspace_store: Entity<WorkspaceStore>, cx: &mut Context<Self>) -> Self {
-        let store_subscription = cx.observe(&workspace_store, |_, _, cx| cx.notify());
-        Self {
+    pub fn new(
+        workspace_store: Entity<WorkspaceStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let store_observer = observe_store_topics(
+            &workspace_store,
+            &[TopicKind::ActiveSession, TopicKind::SessionStatus],
+            cx,
+        );
+        let topology_observer = cx.subscribe_in(
+            &workspace_store,
+            window,
+            |this, _, change: &StoreChange, window, cx| {
+                if matches!(
+                    change.topic,
+                    TopicKind::ActiveSession | TopicKind::SessionStatus
+                ) {
+                    this.sync_event_subscriptions(window, cx);
+                }
+            },
+        );
+        let focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
+        let focus_store = workspace_store.clone();
+        let focus_in = window.on_focus_in(&focus_handle, cx, move |_, cx| {
+            focus_store.read(cx).with_terminal_workspace(|workspace| {
+                if let Some(entry) = workspace.active()
+                    && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
+                {
+                    entry.terminal.write_raw(b"\x1b[I".to_vec());
+                }
+            });
+        });
+        let focus_store = workspace_store.clone();
+        let focus_out = window.on_focus_out(&focus_handle, cx, move |_, _, cx| {
+            focus_store.read(cx).with_terminal_workspace(|workspace| {
+                if let Some(entry) = workspace.active()
+                    && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
+                {
+                    entry.terminal.write_raw(b"\x1b[O".to_vec());
+                }
+            });
+        });
+        #[cfg(not(test))]
+        let blink_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                smol::Timer::after(Duration::from_millis(500)).await;
+                if this
+                    .update(cx, |this, cx| {
+                        this.cursor_phase = !this.cursor_phase;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+        // GPUI's deterministic test scheduler rejects the async-io timer's
+        // background-thread wakeup during window teardown.
+        #[cfg(test)]
+        let blink_task = None;
+        let mut drawer = Self {
             workspace_store,
-            focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
+            focus_handle,
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
             split_sizes: Rc::new(RefCell::new(Vec::new())),
             row_layout_cache: RefCell::new(HashMap::new()),
@@ -258,11 +451,8 @@ impl TerminalDrawer {
             cell_width: 7.83,
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
-            selecting: None,
-            pending_simple_selection: None,
-            mouse_down_position: None,
-            last_mouse_point: HashMap::new(),
-            focus_subscriptions: Vec::new(),
+            selection_drag: SelectionDrag::default(),
+            _focus_subscriptions: vec![focus_in, focus_out],
             event_subscriptions: HashMap::new(),
             marked_text: None,
             bell_tabs: HashSet::new(),
@@ -272,19 +462,25 @@ impl TerminalDrawer {
             cursor_phase: true,
             last_input: Instant::now(),
             terminal_focused: false,
-            blink_task: None,
-            _store_subscription: store_subscription,
-        }
+            current_size: None,
+            _blink_task: blink_task,
+            _store_subscriptions: vec![store_observer, topology_observer],
+        };
+        drawer.sync_event_subscriptions(window, cx);
+        drawer
     }
 
-    pub fn resize(&self, _width: f32, height: f32, cx: &mut Context<Self>) {
+    pub fn is_size(&self, width: f32, height: f32) -> bool {
+        self.current_size == Some((width, height))
+    }
+
+    pub fn resize(&mut self, width: f32, height: f32, cx: &mut Context<Self>) {
+        if self.is_size(width, height) {
+            return;
+        }
+        self.current_size = Some((width, height));
         self.workspace_store
             .update(cx, |store, cx| store.set_terminal_height(height, cx));
-    }
-
-    fn dispatch(&self, command: Command, cx: &mut Context<Self>) {
-        self.workspace_store
-            .update(cx, |store, _cx| store.dispatch(command));
     }
 
     fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&term::Terminal)) {
@@ -376,12 +572,8 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.dispatch(
-            Command::CaptureTerminalSelection {
-                terminal_id: action.0,
-            },
-            cx,
-        );
+        self.workspace_store
+            .update(cx, |store, _cx| store.capture_terminal_selection(action.0));
     }
 
     /// Keep one gpui-side drain task per live PTY. Terminal restarts retain the
@@ -979,7 +1171,8 @@ impl TerminalDrawer {
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
-        self.dispatch(Command::ActivateTerminal { terminal_id }, cx);
+        self.workspace_store
+            .update(cx, |store, _cx| store.activate_terminal(terminal_id));
         let workspace_store = self.workspace_store.clone();
         let mut stop_propagation = false;
         #[cfg(target_os = "linux")]
@@ -1038,25 +1231,30 @@ impl TerminalDrawer {
                         self.pressed_link = Some((terminal_id, link.url));
                         return;
                     }
-                    self.mouse_down_position = Some((terminal_id, event.position));
-                    self.selecting = None;
-                    self.pending_simple_selection = None;
-                    let kind = match event.click_count {
-                        1 => SelectionKind::Simple,
-                        2 => SelectionKind::Semantic,
-                        3 => SelectionKind::Lines,
-                        _ => return,
-                    };
-                    if kind == SelectionKind::Simple && event.modifiers.shift {
-                        entry.terminal.update_selection(point, side);
-                        return;
+                    let action = self.selection_drag.on_down(
+                        terminal_id,
+                        ScreenPoint {
+                            x: f32::from(event.position.x),
+                            y: f32::from(event.position.y),
+                        },
+                        point,
+                        side,
+                        event.click_count,
+                        event.modifiers.shift,
+                    );
+                    match action {
+                        SelectionDragAction::None => {}
+                        SelectionDragAction::ClearAndWait => entry.terminal.clear_selection(),
+                        SelectionDragAction::Start { kind, point, side } => {
+                            entry.terminal.start_selection(kind, point, side);
+                        }
+                        SelectionDragAction::Update { point, side } => {
+                            entry.terminal.update_selection(point, side);
+                        }
+                        SelectionDragAction::StartSimpleAndUpdate { .. } => {
+                            unreachable!("mouse down cannot start a drag")
+                        }
                     }
-                    if kind == SelectionKind::Simple {
-                        entry.terminal.clear_selection();
-                        self.pending_simple_selection = Some((terminal_id, point, side));
-                        return;
-                    }
-                    entry.terminal.start_selection(kind, point, side);
                 }
             });
         if stop_propagation {
@@ -1085,9 +1283,10 @@ impl TerminalDrawer {
                 };
                 let mode = entry.terminal.mode();
                 if mappings::routes_mouse(mode, event.modifiers.shift) {
-                    if self.last_mouse_point.get(&terminal_id) != Some(&point) {
-                        self.last_mouse_point.insert(terminal_id, point);
-                        if let Some(bytes) = mappings::mouse_move_report(
+                    if self
+                        .selection_drag
+                        .should_report_mouse_move(terminal_id, point)
+                        && let Some(bytes) = mappings::mouse_move_report(
                             GridPoint {
                                 row: point.0,
                                 column: point.1,
@@ -1095,9 +1294,9 @@ impl TerminalDrawer {
                             event.pressed_button.and_then(term_mouse_button),
                             term_modifiers(event.modifiers),
                             mode,
-                        ) {
-                            entry.terminal.write_raw(bytes);
-                        }
+                        )
+                    {
+                        entry.terminal.write_raw(bytes);
                     }
                     return;
                 }
@@ -1114,34 +1313,40 @@ impl TerminalDrawer {
                     }
                 } else {
                     self.hovered_link = None;
-                    if event.pressed_button == Some(MouseButton::Left)
-                        && self
-                            .mouse_down_position
-                            .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
-                    {
-                        if self.selecting != Some(terminal_id)
-                            && let Some((_, mouse_down_position)) = self.mouse_down_position
-                        {
-                            let dx = f32::from(event.position.x - mouse_down_position.x);
-                            let dy = f32::from(event.position.y - mouse_down_position.y);
-                            if !selection_drag_started(dx, dy) {
-                                return;
-                            }
-                            if self
-                                .pending_simple_selection
-                                .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
-                                && let Some((_, anchor, anchor_side)) =
-                                    self.pending_simple_selection.take()
-                            {
+                    let action = self.selection_drag.on_move(
+                        terminal_id,
+                        ScreenPoint {
+                            x: f32::from(event.position.x),
+                            y: f32::from(event.position.y),
+                        },
+                        point,
+                        side,
+                        event.pressed_button == Some(MouseButton::Left),
+                    );
+                    if !matches!(action, SelectionDragAction::None) {
+                        match action {
+                            SelectionDragAction::StartSimpleAndUpdate {
+                                anchor,
+                                anchor_side,
+                                point,
+                                side,
+                            } => {
                                 entry.terminal.start_selection(
                                     SelectionKind::Simple,
                                     anchor,
                                     anchor_side,
                                 );
+                                entry.terminal.update_selection(point, side);
+                            }
+                            SelectionDragAction::Update { point, side } => {
+                                entry.terminal.update_selection(point, side);
+                            }
+                            SelectionDragAction::None
+                            | SelectionDragAction::ClearAndWait
+                            | SelectionDragAction::Start { .. } => {
+                                unreachable!("unexpected mouse move action")
                             }
                         }
-                        self.selecting = Some(terminal_id);
-                        entry.terminal.update_selection(point, side);
                         if !mode.contains(Mode::ALT_SCREEN)
                             && entry.terminal.history_size() > 0
                             && let Some(lines) = drag_scroll_lines(
@@ -1210,8 +1415,7 @@ impl TerminalDrawer {
         if let Some(released_url) = released_url {
             cx.open_url(&released_url);
         }
-        if self.selecting == Some(terminal_id) {
-            self.selecting = None;
+        if self.selection_drag.on_up(terminal_id) {
             #[cfg(target_os = "linux")]
             if let Some(text) = self
                 .workspace_store
@@ -1227,20 +1431,7 @@ impl TerminalDrawer {
                 cx.write_to_primary(ClipboardItem::new_string(text));
             }
         }
-        if self
-            .mouse_down_position
-            .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
-        {
-            self.mouse_down_position = None;
-        }
-        if self
-            .pending_simple_selection
-            .is_some_and(|(pending_id, _, _)| pending_id == terminal_id)
-        {
-            self.pending_simple_selection = None;
-        }
         self.pressed_link = None;
-        self.last_mouse_point.remove(&terminal_id);
         cx.notify();
     }
 
@@ -1369,7 +1560,9 @@ impl TerminalDrawer {
                         .tooltip(format!("{} · {}", label, crate::tr!("terminal.selection")))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.dispatch(Command::CaptureTerminalSelection { terminal_id }, cx);
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.capture_terminal_selection(terminal_id)
+                            });
                         })),
                 )
             })
@@ -1423,50 +1616,6 @@ impl Focusable for TerminalDrawer {
 impl Render for TerminalDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.terminal_focused = self.focus_handle.is_focused(window);
-        if self.blink_task.is_none() {
-            self.blink_task = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    smol::Timer::after(Duration::from_millis(500)).await;
-                    if this
-                        .update(cx, |this, cx| {
-                            this.cursor_phase = !this.cursor_phase;
-                            cx.notify();
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }));
-        }
-        self.sync_event_subscriptions(window, cx);
-        if self.focus_subscriptions.is_empty() {
-            let workspace_store = self.workspace_store.clone();
-            let focus_in = window.on_focus_in(&self.focus_handle, cx, move |_, cx| {
-                workspace_store
-                    .read(cx)
-                    .with_terminal_workspace(|workspace| {
-                        if let Some(entry) = workspace.active()
-                            && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
-                        {
-                            entry.terminal.write_raw(b"\x1b[I".to_vec());
-                        }
-                    });
-            });
-            let workspace_store = self.workspace_store.clone();
-            let focus_out = window.on_focus_out(&self.focus_handle, cx, move |_, _, cx| {
-                workspace_store
-                    .read(cx)
-                    .with_terminal_workspace(|workspace| {
-                        if let Some(entry) = workspace.active()
-                            && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
-                        {
-                            entry.terminal.write_raw(b"\x1b[O".to_vec());
-                        }
-                    });
-            });
-            self.focus_subscriptions.extend([focus_in, focus_out]);
-        }
 
         // PTY dimensions and mouse hit-testing use the exact advance and
         // vertical metrics of the same resolved face used by StyledText.
@@ -1550,7 +1699,8 @@ impl Render for TerminalDrawer {
                     cx.theme().background.opacity(0.)
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.dispatch(Command::ActivateTerminal { terminal_id: id }, cx);
+                    this.workspace_store
+                        .update(cx, |store, _cx| store.activate_terminal(id));
                 }))
                 .child(
                     div()
@@ -1608,7 +1758,8 @@ impl Render for TerminalDrawer {
                         .small()
                         .label(crate::tr!("terminal.restart"))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.dispatch(Command::RestartTerminal, cx);
+                            this.workspace_store
+                                .update(cx, |store, _cx| store.restart_terminal());
                         })),
                 )
             })
@@ -1632,12 +1783,9 @@ impl Render for TerminalDrawer {
                             .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.dispatch(
-                                    Command::SplitTerminal {
-                                        direction: TerminalSplitDirection::Horizontal,
-                                    },
-                                    cx,
-                                );
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.split_terminal(TerminalSplitDirection::Horizontal)
+                                });
                             });
                         }
                     })),
@@ -1662,12 +1810,9 @@ impl Render for TerminalDrawer {
                             .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.dispatch(
-                                    Command::SplitTerminal {
-                                        direction: TerminalSplitDirection::Vertical,
-                                    },
-                                    cx,
-                                );
+                                this.workspace_store.update(cx, |store, _cx| {
+                                    store.split_terminal(TerminalSplitDirection::Vertical)
+                                });
                             });
                         }
                     })),
@@ -1696,7 +1841,8 @@ impl Render for TerminalDrawer {
                             .flatten();
                         if let Some(cwd) = cwd {
                             term::Terminal::with_spawn_cwd(cwd, || {
-                                this.dispatch(Command::NewTerminal, cx);
+                                this.workspace_store
+                                    .update(cx, |store, _cx| store.new_terminal());
                             });
                         }
                     })),
@@ -2854,6 +3000,110 @@ mod tests {
         assert!(!selection_drag_started(SELECTION_DRAG_THRESHOLD, 0.));
         assert!(selection_drag_started(SELECTION_DRAG_THRESHOLD + 0.01, 0.));
         assert!(selection_drag_started(2., 2.));
+    }
+
+    #[test]
+    fn selection_drag_distinguishes_click_from_drag_threshold() {
+        let mut drag = SelectionDrag::default();
+        assert!(matches!(
+            drag.on_down(
+                7,
+                ScreenPoint { x: 10., y: 10. },
+                (0, 1),
+                SelectionSide::Left,
+                1,
+                false,
+            ),
+            SelectionDragAction::ClearAndWait
+        ));
+        assert!(matches!(
+            drag.on_move(
+                7,
+                ScreenPoint { x: 12., y: 10. },
+                (0, 1),
+                SelectionSide::Right,
+                true,
+            ),
+            SelectionDragAction::None
+        ));
+        assert!(matches!(
+            drag.on_move(
+                7,
+                ScreenPoint { x: 12.1, y: 10. },
+                (0, 2),
+                SelectionSide::Left,
+                true,
+            ),
+            SelectionDragAction::StartSimpleAndUpdate {
+                anchor: (0, 1),
+                point: (0, 2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn selection_drag_preserves_word_and_line_click_kinds() {
+        let mut drag = SelectionDrag::default();
+        assert!(matches!(
+            drag.on_down(
+                1,
+                ScreenPoint { x: 0., y: 0. },
+                (2, 3),
+                SelectionSide::Left,
+                2,
+                false,
+            ),
+            SelectionDragAction::Start {
+                kind: SelectionKind::Semantic,
+                point: (2, 3),
+                ..
+            }
+        ));
+        assert!(matches!(
+            drag.on_down(
+                1,
+                ScreenPoint { x: 0., y: 0. },
+                (4, 0),
+                SelectionSide::Left,
+                3,
+                false,
+            ),
+            SelectionDragAction::Start {
+                kind: SelectionKind::Lines,
+                point: (4, 0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn selection_drag_updates_across_rows_after_starting() {
+        let mut drag = SelectionDrag::default();
+        drag.on_down(
+            3,
+            ScreenPoint { x: 4., y: 4. },
+            (1, 4),
+            SelectionSide::Left,
+            1,
+            false,
+        );
+        let action = drag.on_move(
+            3,
+            ScreenPoint { x: 20., y: 40. },
+            (3, 2),
+            SelectionSide::Right,
+            true,
+        );
+        assert!(matches!(
+            action,
+            SelectionDragAction::StartSimpleAndUpdate {
+                anchor: (1, 4),
+                point: (3, 2),
+                ..
+            }
+        ));
+        assert!(drag.on_up(3));
     }
 
     #[test]

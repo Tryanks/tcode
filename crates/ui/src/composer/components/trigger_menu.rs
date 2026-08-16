@@ -235,9 +235,8 @@ impl Composer {
             MenuAccept::SetMode(mode) => {
                 let mode = *mode;
                 self.replace_trigger("", window, cx);
-                self.workspace_store.update(cx, |store, _cx| {
-                    store.dispatch(Command::SetInteractionMode { mode })
-                });
+                self.workspace_store
+                    .update(cx, |store, _cx| store.set_interaction_mode(mode));
             }
         }
         self.active_trigger = None;

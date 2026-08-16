@@ -335,9 +335,8 @@ impl Composer {
                     .child(label),
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.workspace_store.update(cx, |store, _cx| {
-                    store.dispatch(Command::ToggleInteractionMode)
-                });
+                this.workspace_store
+                    .update(cx, |store, _cx| store.toggle_interaction_mode());
             }))
             .into_any_element()
     }
@@ -645,16 +644,11 @@ fn render_model_pane(
             {
                 let row = key_rows[n - 1].clone();
                 store_key.update(cx, |store, _cx| {
-                    let command = if row.acp {
-                        Command::SetActiveAcpAgent { id: row.id }
+                    if row.acp {
+                        store.set_active_acp_agent(row.id);
                     } else {
-                        Command::SetActiveModel {
-                            provider: row.provider,
-                            model: Some(row.id),
-                            profile_id: row.profile_id,
-                        }
-                    };
-                    store.dispatch(command);
+                        store.set_active_model(row.provider, Some(row.id), row.profile_id);
+                    }
                 });
                 popover_key.update(cx, |st, cx| st.dismiss(window, cx));
             }
@@ -714,16 +708,11 @@ fn render_model_row(
             let id = id.clone();
             let profile_id = profile_id.clone();
             store_select.update(cx, |store, _cx| {
-                let command = if is_acp {
-                    Command::SetActiveAcpAgent { id }
+                if is_acp {
+                    store.set_active_acp_agent(id);
                 } else {
-                    Command::SetActiveModel {
-                        provider,
-                        model: Some(id),
-                        profile_id,
-                    }
-                };
-                store.dispatch(command);
+                    store.set_active_model(provider, Some(id), profile_id);
+                }
             });
             popover_select.update(cx, |st, cx| st.dismiss(window, cx));
         })
@@ -802,9 +791,7 @@ fn render_model_row(
             .on_click(move |_, _, cx| {
                 cx.stop_propagation();
                 let fav_id = fav_id.clone();
-                store_fav.update(cx, |store, _cx| {
-                    store.dispatch(Command::ToggleFavoriteModel { model: fav_id })
-                });
+                store_fav.update(cx, |store, _cx| store.toggle_favorite_model(fav_id));
                 // Refresh the open popover so the star + ordering update.
                 popover_fav.update(cx, |_, cx| cx.notify());
             }),
@@ -874,9 +861,7 @@ fn render_permission_pane(
                     row.cursor_pointer()
                         .hover(|s| s.bg(cx.theme().muted))
                         .on_click(move |_, window, cx| {
-                            store.update(cx, |store, _cx| {
-                                store.dispatch(Command::SetActiveApprovalMode { mode })
-                            });
+                            store.update(cx, |store, _cx| store.set_active_approval_mode(mode));
                             popover.update(cx, |st, cx| st.dismiss(window, cx));
                         })
                 })
@@ -1028,15 +1013,14 @@ fn render_traits_pane(
                                 let opt_id = opt_id.clone();
                                 let opt_value = opt_value.clone();
                                 store.update(cx, |store, _cx| {
-                                    let command = if is_ultra {
-                                        Command::SelectUltrathink
+                                    if is_ultra {
+                                        store.select_ultrathink();
                                     } else {
-                                        Command::SetActiveOption {
-                                            id: opt_id,
-                                            value: Some(serde_json::Value::String(opt_value)),
-                                        }
-                                    };
-                                    store.dispatch(command);
+                                        store.set_active_option(
+                                            opt_id,
+                                            Some(serde_json::Value::String(opt_value)),
+                                        );
+                                    }
                                 });
                                 pop.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
@@ -1081,10 +1065,10 @@ fn render_traits_pane(
                             .on_click(move |_, window, cx| {
                                 let opt_id = opt_id.clone();
                                 store.update(cx, |store, _cx| {
-                                    store.dispatch(Command::SetActiveOption {
-                                        id: opt_id,
-                                        value: Some(serde_json::Value::Bool(value)),
-                                    });
+                                    store.set_active_option(
+                                        opt_id,
+                                        Some(serde_json::Value::Bool(value)),
+                                    );
                                 });
                                 pop.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
@@ -1185,9 +1169,7 @@ fn render_overflow_pane(
                 .child(interaction_label)
                 .on_click(move |_, window, cx| {
                     interaction_store.update(cx, |store, _cx| {
-                        store.dispatch(Command::SetInteractionMode {
-                            mode: next_interaction,
-                        })
+                        store.set_interaction_mode(next_interaction)
                     });
                     interaction_popover.update(cx, |state, cx| state.dismiss(window, cx));
                 }),

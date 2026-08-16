@@ -10,21 +10,18 @@ impl AppState {
             return;
         }
         self.acp_registry_loading = true;
-        self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let cache_dir = data_dir.clone();
             let cached_registry = host_cx.unblock(move || cached(&cache_dir)).await;
-            host_cx.enqueue(move |state, cx| {
+            host_cx.enqueue(move |state, _cx| {
                 if state.acp_registry_loading && state.acp_registry.is_none() {
                     state.acp_registry = cached_registry;
-                    state.emit_providers_status(cx);
-                    cx.notify();
                 }
             });
             let result = host_cx.unblock(move || load(&data_dir)).await;
-            host_cx.enqueue(move |state, cx| {
+            host_cx.enqueue(move |state, _cx| {
                 state.acp_registry_loading = false;
                 match result {
                     Ok(registry) => {
@@ -36,11 +33,8 @@ impl AppState {
                         state.acp_registry_error = Some(err.to_string());
                     }
                 }
-                state.emit_providers_status(cx);
-                cx.notify();
             });
         });
-        cx.notify();
     }
 
     /// The marketplace list: every registry agent except the hidden adapters
@@ -86,7 +80,6 @@ impl AppState {
         if !self.acp_installing.insert(id.clone()) {
             return;
         }
-        self.emit_providers_status(cx);
         let operation = self.next_operation_id();
         let data_dir = self.store.root().clone();
         let name = agent.name.clone();
@@ -125,18 +118,14 @@ impl AppState {
                         }),
                     ),
                 }
-                state.emit_providers_status(cx);
-                cx.notify();
             });
         });
-        cx.notify();
     }
 
     /// Remove an installed ACP agent (its files and its settings entry).
     pub fn remove_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
         self.settings.acp_agents.remove(id);
         self.persist_settings(cx);
-        self.emit_providers_status(cx);
         let data_dir = self.store.root().clone();
         let id = id.to_string();
         let host_cx = cx.clone();
@@ -149,7 +138,6 @@ impl AppState {
                 })
                 .await;
         });
-        cx.notify();
     }
 
     /// Register a user-defined ACP agent (the escape hatch for anything not in
@@ -182,7 +170,6 @@ impl AppState {
             },
         );
         self.persist_settings(cx);
-        cx.notify();
     }
 
     /// Update one installed ACP agent in place (enable switch, env rows, args).
@@ -196,17 +183,14 @@ impl AppState {
                 }
             }
             self.persist_settings(cx);
-            cx.notify();
         }
     }
 
     pub(super) fn preview_draft_or_persist_active(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
         if active.draft {
-            self.emit_active_session_status(cx);
-            cx.notify();
             return;
         }
         active.meta.updated_at = now_secs();
@@ -219,21 +203,21 @@ impl AppState {
     /// models over the wire once the session starts.
     pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
         let provider_commands = self.cached_provider_commands(ProviderKind::Acp, Some(id));
-        let Some(active) = self.active.as_mut() else {
+        let Some(active) = self.residents.active.as_mut() else {
             return;
         };
-        if active.meta.provider == ProviderKind::Acp
+        if matches!(active.meta.provider, ProviderKind::Acp)
             && active.meta.acp_agent_id.as_deref() == Some(id)
         {
             return;
         }
-        if !active.draft && active.meta.provider != ProviderKind::Acp {
+        if !active.draft && !matches!(active.meta.provider, ProviderKind::Acp) {
             let source = active.pending_relay.clone().unwrap_or(PendingRelay {
                 from_provider: active.meta.provider,
                 from_model: active.meta.model.clone(),
                 from_profile: active.meta.profile_id.clone(),
             });
-            if active.pending_relay.is_some() && source.from_provider == ProviderKind::Acp {
+            if active.pending_relay.is_some() && matches!(source.from_provider, ProviderKind::Acp) {
                 active.pending_relay = None;
             } else if has_meaningful_history(&active.timeline) {
                 active.pending_relay = Some(source);
@@ -249,8 +233,6 @@ impl AppState {
         active.provider_commands = provider_commands;
         active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
-            self.emit_active_session_status(cx);
-            cx.notify();
             return;
         }
         self.preview_draft_or_persist_active(cx);

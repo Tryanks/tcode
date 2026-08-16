@@ -6,11 +6,35 @@ use tcode_core::{
     acp::AcpAgentPatch,
     git::GitAction,
     session::ReviewComment,
-    settings::{ProfileSettingsPatch, Settings},
+    settings::{
+        BrowserSettings, ComputerUseSettings, OrchestrateSettings, ProfileSettingsPatch,
+        SidebarLayout, ThemeMode, TitleGenerationSettings,
+    },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
 use crate::ExternalThread;
+
+/// A field-scoped settings mutation applied to the host's current settings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum SettingsPatch {
+    Language(Option<String>),
+    ThemeMode(ThemeMode),
+    WordWrapDiffs(bool),
+    SkipDeleteConfirmation(bool),
+    AutoOpenTaskPanel(bool),
+    ProviderUpdateChecksDisabled(bool),
+    AutoArchiveDisabled(bool),
+    AutoArchiveMaxIdleDays(u32),
+    AutoArchiveKeepCount(usize),
+    AutoArchiveNoticeShown(bool),
+    Orchestrate(OrchestrateSettings),
+    ComputerUse(ComputerUseSettings),
+    Browser(BrowserSettings),
+    TitleGeneration(TitleGenerationSettings),
+    SidebarLayout(SidebarLayout),
+}
 
 /// A backend mutation requested by a client.
 ///
@@ -134,8 +158,8 @@ pub enum Command {
     ToggleProjectCollapsed {
         project_id: String,
     },
-    UpdateSettings {
-        settings: Settings,
+    PatchSettings {
+        patch: SettingsPatch,
     },
     ArchiveSession {
         session_id: String,
@@ -258,7 +282,6 @@ pub enum Command {
 /// Most mutations return [`CommandResponse::Unit`]. Keeping the few
 /// result-bearing operations on the command plane avoids disguising mutations
 /// as queries.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum CommandResponse {
