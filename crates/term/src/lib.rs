@@ -496,6 +496,8 @@ mod tests {
         }
     }
 
+    // Only the live-PTY tests use this, and those are unix-gated.
+    #[cfg(unix)]
     fn find_char(state: &TermSnapshot, needle: char) -> Option<(usize, usize)> {
         state
             .visible_rows
