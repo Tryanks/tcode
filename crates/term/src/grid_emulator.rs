@@ -1,6 +1,7 @@
 //! Client-side terminal emulation, rendering snapshots, scrollback, and selection.
 
 use std::{
+    collections::HashMap,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicUsize, Ordering},
@@ -9,25 +10,29 @@ use std::{
     time::Instant,
 };
 
-use alacritty_terminal::{
-    Term,
-    event::{Event, EventListener, WindowSize},
-    grid::{Dimensions, Scroll},
-    index::{Column, Line, Point, Side as AlacrittySide},
+use rio_graphics::{atlas_image_key, kitty_image_key};
+use rio_vt::{
+    ansi::{CursorShape as RioCursorShape, KeyboardModes, graphics::UpdateQueues},
+    clipboard::ClipboardType,
+    config::colors::{ColorRgb, NamedColor},
+    crosswords::{
+        Crosswords, CrosswordsSize,
+        grid::{Dimensions, Scroll},
+        pos::{Column, Line, Pos, Side as RioSide},
+    },
+    event::{EventListener, RioEvent, TerminalDamage, WindowId, WindowSize, sync::FairMutex},
+    performer::handler::Processor,
     selection::{Selection, SelectionType},
-    sync::FairMutex,
-    term::{Config, TermMode, cell::Flags},
-    vte::ansi::{ClearMode, Color as AlacrittyColor, Handler as _, NamedColor, Processor, Rgb},
 };
 
 use crate::{
-    Cell, Color, CursorShape, ModeSnapshot, SelectedText, SelectionKind, SelectionSide, TermState,
-    hyperlinks,
+    DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, SelectedText, SelectionKind, SelectionSide,
+    TermSnapshot, hyperlinks,
 };
 #[cfg(test)]
 use crate::{DEFAULT_COLS, DEFAULT_ROWS};
 
-impl From<SelectionSide> for AlacrittySide {
+impl From<SelectionSide> for RioSide {
     fn from(side: SelectionSide) -> Self {
         match side {
             SelectionSide::Left => Self::Left,
@@ -47,11 +52,12 @@ pub(crate) enum GridEvent {
     CursorBlinkingChanged,
     Bell,
     Input(Vec<u8>),
+    ClipboardStore { kind: ClipboardType, text: String },
 }
 
 /// Client-side terminal state machine.
 ///
-/// This type accepts raw output bytes and owns all Alacritty grid state. It has
+/// This type accepts raw output bytes and owns all terminal grid state. It has
 /// no PTY, child-process, or platform process types in its public API.
 #[derive(Clone)]
 pub(crate) struct GridEmulator {
@@ -66,10 +72,11 @@ struct GridCore {
     fallback_title: Mutex<String>,
     lifecycle: Mutex<GridLifecycle>,
     size: Arc<AtomicGridSize>,
+    graphics_updates: Arc<Mutex<Option<UpdateQueues>>>,
 }
 
 struct GridState {
-    term: Term<GridListener>,
+    term: Crosswords<GridListener>,
     parser: Processor,
 }
 
@@ -82,27 +89,46 @@ struct GridLifecycle {
 struct AtomicGridSize {
     cols: AtomicUsize,
     rows: AtomicUsize,
+    cell_width_px: AtomicUsize,
+    cell_height_px: AtomicUsize,
 }
 
 impl AtomicGridSize {
-    fn new(cols: usize, rows: usize) -> Self {
+    fn new(size: GridSize) -> Self {
         Self {
-            cols: AtomicUsize::new(cols),
-            rows: AtomicUsize::new(rows),
+            cols: AtomicUsize::new(size.cols),
+            rows: AtomicUsize::new(size.rows),
+            cell_width_px: AtomicUsize::new(size.cell_width_px as usize),
+            cell_height_px: AtomicUsize::new(size.cell_height_px as usize),
         }
     }
 
-    fn store(&self, cols: usize, rows: usize) {
-        self.cols.store(cols, Ordering::Relaxed);
-        self.rows.store(rows, Ordering::Relaxed);
-    }
-
-    fn window_size(&self) -> WindowSize {
+    fn load(&self) -> GridSize {
         GridSize {
             cols: self.cols.load(Ordering::Relaxed),
             rows: self.rows.load(Ordering::Relaxed),
+            cell_width_px: self
+                .cell_width_px
+                .load(Ordering::Relaxed)
+                .min(u32::MAX as usize) as u32,
+            cell_height_px: self
+                .cell_height_px
+                .load(Ordering::Relaxed)
+                .min(u32::MAX as usize) as u32,
         }
-        .window_size()
+    }
+
+    fn store(&self, size: GridSize) {
+        self.cols.store(size.cols, Ordering::Relaxed);
+        self.rows.store(size.rows, Ordering::Relaxed);
+        self.cell_width_px
+            .store(size.cell_width_px as usize, Ordering::Relaxed);
+        self.cell_height_px
+            .store(size.cell_height_px as usize, Ordering::Relaxed);
+    }
+
+    fn window_size(&self) -> WindowSize {
+        self.load().window_size()
     }
 }
 
@@ -111,58 +137,80 @@ struct GridListener {
     notifications: async_channel::Sender<GridEvent>,
     osc_title: Arc<Mutex<Option<String>>>,
     size: Arc<AtomicGridSize>,
+    graphics_updates: Arc<Mutex<Option<UpdateQueues>>>,
 }
 
 impl EventListener for GridListener {
-    fn send_event(&self, event: Event) {
+    fn send_event(&self, event: RioEvent, _window_id: WindowId) {
         match event {
-            Event::Title(title) => {
+            RioEvent::Title(title) => {
                 *self.osc_title.lock().unwrap() = Some(title.clone());
                 let _ = self
                     .notifications
                     .try_send(GridEvent::TitleChanged(Some(title)));
             }
-            Event::ResetTitle => {
+            RioEvent::ResetTitle => {
                 *self.osc_title.lock().unwrap() = None;
                 let _ = self.notifications.try_send(GridEvent::TitleChanged(None));
             }
-            Event::CursorBlinkingChange => {
+            RioEvent::CursorBlinkingChange | RioEvent::CursorBlinkingChangeOnRoute(_) => {
                 let _ = self
                     .notifications
                     .try_send(GridEvent::CursorBlinkingChanged);
             }
-            Event::Bell => {
+            RioEvent::Bell => {
                 let _ = self.notifications.try_send(GridEvent::Bell);
             }
-            Event::Wakeup => {
+            RioEvent::Render
+            | RioEvent::RenderRoute(_)
+            | RioEvent::TerminalDamaged(_)
+            | RioEvent::PrepareRender(_)
+            | RioEvent::PrepareRenderOnRoute(_, _) => {
                 let _ = self.notifications.try_send(GridEvent::Wakeup);
             }
-            Event::PtyWrite(text) => {
+            RioEvent::PtyWrite(_, text) => {
                 let _ = self
                     .notifications
                     .try_send(GridEvent::Input(text.into_bytes()));
             }
-            Event::ColorRequest(index, format) => {
+            RioEvent::ColorRequest(_, index, format) => {
                 let bytes = format(query_color(index)).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
             }
-            Event::TextAreaSizeRequest(format) => {
+            RioEvent::TextAreaSizeRequest(_, format) => {
                 let bytes = format(self.size.window_size()).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
             }
-            Event::MouseCursorDirty
-            | Event::ClipboardStore(..)
-            | Event::ClipboardLoad(..)
-            | Event::Exit
-            | Event::ChildExit(_) => {}
+            RioEvent::UpdateGraphics { queues, .. } => {
+                merge_graphics_updates(&mut self.graphics_updates.lock().unwrap(), queues);
+                let _ = self.notifications.try_send(GridEvent::Wakeup);
+            }
+            RioEvent::GlyphProtocolInstalled { .. } | RioEvent::GlyphProtocolQuery { .. } => {
+                // tcode does not install rio's feature-gated font machinery;
+                // image protocols are rendered independently by the drawer.
+            }
+            RioEvent::ClipboardStore(kind, text) => {
+                let _ = self
+                    .notifications
+                    .try_send(GridEvent::ClipboardStore { kind, text });
+            }
+            RioEvent::ClipboardLoad(_, _, formatter) => {
+                // OSC 52 reads are denied by returning an empty clipboard.
+                let _ = self
+                    .notifications
+                    .try_send(GridEvent::Input(formatter("").into_bytes()));
+            }
+            _ => {}
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct GridSize {
     cols: usize,
     rows: usize,
+    cell_width_px: u32,
+    cell_height_px: u32,
 }
 
 impl Dimensions for GridSize {
@@ -180,12 +228,37 @@ impl Dimensions for GridSize {
 }
 
 impl GridSize {
+    fn crosswords_size(self) -> CrosswordsSize {
+        let width = (self.cols as u64)
+            .saturating_mul(u64::from(self.cell_width_px))
+            .min(u64::from(u32::MAX)) as u32;
+        let height = (self.rows as u64)
+            .saturating_mul(u64::from(self.cell_height_px))
+            .min(u64::from(u32::MAX)) as u32;
+        CrosswordsSize::new_with_dimensions(
+            self.cols,
+            self.rows,
+            width,
+            height,
+            self.cell_width_px,
+            self.cell_height_px,
+        )
+    }
+
     fn window_size(self) -> WindowSize {
+        let width = self
+            .cols
+            .saturating_mul(self.cell_width_px as usize)
+            .min(u16::MAX as usize) as u16;
+        let height = self
+            .rows
+            .saturating_mul(self.cell_height_px as usize)
+            .min(u16::MAX as usize) as u16;
         WindowSize {
-            num_lines: self.rows as u16,
-            num_cols: self.cols as u16,
-            cell_width: 8,
-            cell_height: 17,
+            rows: self.rows.min(u16::MAX as usize) as u16,
+            cols: self.cols.min(u16::MAX as usize) as u16,
+            width,
+            height,
         }
     }
 }
@@ -207,30 +280,38 @@ impl GridEmulator {
         let size = GridSize {
             cols: cols.max(2),
             rows: rows.max(2),
+            cell_width_px: DEFAULT_CELL_WIDTH_PX,
+            cell_height_px: DEFAULT_CELL_HEIGHT_PX,
         };
         let (notifications, events) = async_channel::unbounded();
         let osc_title = Arc::new(Mutex::new(None));
-        let atomic_size = Arc::new(AtomicGridSize::new(size.cols, size.rows));
+        let atomic_size = Arc::new(AtomicGridSize::new(size));
+        let graphics_updates = Arc::new(Mutex::new(None));
         let listener = GridListener {
             notifications: notifications.clone(),
             osc_title: osc_title.clone(),
             size: atomic_size.clone(),
+            graphics_updates: graphics_updates.clone(),
         };
-        let config = Config {
-            scrolling_history: 1000,
-            ..Config::default()
-        };
-        let term = Term::new(config, &size, listener);
+        let term = Crosswords::new(
+            size.crosswords_size(),
+            RioCursorShape::Block,
+            listener,
+            WindowId::from(0),
+            0,
+            1000,
+        );
         let core = Arc::new(GridCore {
             state: FairMutex::new(GridState {
                 term,
-                parser: Processor::new(),
+                parser: Processor::default(),
             }),
             notifications,
             osc_title,
             fallback_title: Mutex::new(fallback_title),
             lifecycle: Mutex::new(GridLifecycle::default()),
             size: atomic_size,
+            graphics_updates,
         });
         Self { core, events }
     }
@@ -247,8 +328,20 @@ impl GridEmulator {
         let (expired_sync, wakeup, sync_deadline) = {
             let mut state = self.core.state.lock();
             let expired_sync = stop_expired_sync(&mut state);
+            let old_selection = state
+                .term
+                .selection
+                .as_ref()
+                .and_then(|selection| selection.to_range(&state.term));
             let GridState { term, parser } = &mut *state;
             parser.advance(term, bytes);
+            let new_selection = term
+                .selection
+                .as_ref()
+                .and_then(|selection| selection.to_range(term));
+            if new_selection != old_selection {
+                term.update_selection_damage(new_selection, term.display_offset());
+            }
             let wakeup = parser.sync_bytes_count() < bytes.len();
             let sync_deadline = parser.sync_timeout().sync_timeout();
             (expired_sync, wakeup, sync_deadline)
@@ -283,10 +376,16 @@ impl GridEmulator {
 
     pub(crate) fn prepare_input_if_changed(&self) -> bool {
         let mut state = self.core.state.lock();
-        let display_offset = state.term.grid().display_offset();
+        let display_offset = state.term.display_offset();
         let had_selection = state.term.selection.take().is_some();
         state.term.scroll_display(Scroll::Bottom);
-        let changed = had_selection || state.term.grid().display_offset() != display_offset;
+        if had_selection {
+            state.term.update_selection_damage(None, display_offset);
+        }
+        if state.term.display_offset() != display_offset {
+            state.term.mark_fully_damaged();
+        }
+        let changed = had_selection || state.term.display_offset() != display_offset;
         drop(state);
         if changed {
             let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -295,24 +394,58 @@ impl GridEmulator {
     }
 
     pub(crate) fn resize_if_changed(&self, cols: usize, rows: usize) -> bool {
-        let cols = cols.max(2);
-        let rows = rows.max(2);
+        let current = self.core.size.load();
+        self.resize_with_cell_size_if_changed(
+            cols,
+            rows,
+            current.cell_width_px,
+            current.cell_height_px,
+        )
+    }
+
+    pub(crate) fn set_cell_size(&self, width_px: u32, height_px: u32) -> bool {
+        let current = self.core.size.load();
+        self.resize_with_cell_size_if_changed(current.cols, current.rows, width_px, height_px)
+    }
+
+    pub(crate) fn resize_with_cell_size_if_changed(
+        &self,
+        cols: usize,
+        rows: usize,
+        width_px: u32,
+        height_px: u32,
+    ) -> bool {
+        let size = GridSize {
+            cols: cols.max(2),
+            rows: rows.max(2),
+            cell_width_px: width_px.max(1),
+            cell_height_px: height_px.max(1),
+        };
         let mut state = self.core.state.lock();
-        if state.term.columns() == cols && state.term.screen_lines() == rows {
+        let current = self.core.size.load();
+        if current == size {
             return false;
         }
-        state.term.resize(GridSize { cols, rows });
-        self.core.size.store(cols, rows);
+        state.term.resize(size.crosswords_size());
+        state.term.mark_fully_damaged();
+        self.core.size.store(size);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
         true
     }
 
+    pub(crate) fn window_size(&self) -> WindowSize {
+        self.core.size.window_size()
+    }
+
     pub fn scroll(&self, lines: i32) {
         let mut state = self.core.state.lock();
-        let display_offset = state.term.grid().display_offset();
+        let display_offset = state.term.display_offset();
         state.term.scroll_display(Scroll::Delta(lines));
-        let changed = state.term.grid().display_offset() != display_offset;
+        let changed = state.term.display_offset() != display_offset;
+        if changed {
+            state.term.mark_fully_damaged();
+        }
         drop(state);
         if changed {
             let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -327,17 +460,18 @@ impl GridEmulator {
     /// Start or update a selection of the requested kind.
     fn select_kind(&self, start: (usize, usize), end: (usize, usize), kind: SelectionKind) {
         let mut state = self.core.state.lock();
-        let offset = state.term.grid().display_offset() as i32;
+        let offset = state.term.display_offset() as i32;
         let point = |(row, col): (usize, usize)| {
-            Point::new(
+            Pos::new(
                 Line(row as i32 - offset),
                 Column(col.min(state.term.columns() - 1)),
             )
         };
         let selection_type = selection_type(kind);
-        let mut selection = Selection::new(selection_type, point(start), AlacrittySide::Left);
-        selection.update(point(end), AlacrittySide::Right);
+        let mut selection = Selection::new(selection_type, point(start), RioSide::Left);
+        selection.update(point(end), RioSide::Right);
         state.term.selection = Some(selection);
+        update_selection_damage(&mut state.term);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
     }
@@ -345,12 +479,13 @@ impl GridEmulator {
     /// Start an interactive selection at an empty anchor in visible grid coordinates.
     pub fn start_selection(&self, kind: SelectionKind, point: (usize, usize), side: SelectionSide) {
         let mut state = self.core.state.lock();
-        let offset = state.term.grid().display_offset() as i32;
-        let point = Point::new(
+        let offset = state.term.display_offset() as i32;
+        let point = Pos::new(
             Line(point.0 as i32 - offset),
             Column(point.1.min(state.term.columns() - 1)),
         );
         state.term.selection = Some(Selection::new(selection_type(kind), point, side.into()));
+        update_selection_damage(&mut state.term);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
     }
@@ -358,21 +493,26 @@ impl GridEmulator {
     /// Update the existing interactive selection using visible grid coordinates.
     pub fn update_selection(&self, point: (usize, usize), side: SelectionSide) {
         let mut state = self.core.state.lock();
-        let offset = state.term.grid().display_offset() as i32;
-        let point = Point::new(
+        let offset = state.term.display_offset() as i32;
+        let point = Pos::new(
             Line(point.0 as i32 - offset),
             Column(point.1.min(state.term.columns() - 1)),
         );
         if let Some(selection) = state.term.selection.as_mut() {
             selection.update(point, side.into());
         }
+        update_selection_damage(&mut state.term);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
     }
 
     pub fn clear_selection(&self) {
         let mut state = self.core.state.lock();
+        let display_offset = state.term.display_offset();
         let changed = state.term.selection.take().is_some();
+        if changed {
+            state.term.update_selection_damage(None, display_offset);
+        }
         drop(state);
         if changed {
             let _ = self.core.notifications.try_send(GridEvent::Wakeup);
@@ -383,38 +523,41 @@ impl GridEmulator {
         let mut state = self.core.state.lock();
         let mut selection = Selection::new(
             SelectionType::Simple,
-            Point::new(Line(-(state.term.history_size() as i32)), Column(0)),
-            AlacrittySide::Left,
+            Pos::new(Line(-(state.term.history_size() as i32)), Column(0)),
+            RioSide::Left,
         );
         selection.update(
-            Point::new(state.term.bottommost_line(), state.term.last_column()),
-            AlacrittySide::Right,
+            Pos::new(state.term.bottommost_line(), state.term.last_column()),
+            RioSide::Right,
         );
         state.term.selection = Some(selection);
+        update_selection_damage(&mut state.term);
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
     }
 
     pub fn clear(&self) {
         let mut state = self.core.state.lock();
-        state.term.clear_screen(ClearMode::Saved);
+        state.term.clear_saved_history();
 
-        let cursor = state.term.grid().cursor.point;
-        state.term.grid_mut().reset_region(..cursor.line);
+        let cursor = state.term.grid.cursor.pos;
+        state.term.grid.reset_region(..cursor.row);
 
-        let line = state.term.grid()[cursor.line][..Column(state.term.columns())]
+        let line = state.term.grid[cursor.row][..Column(state.term.columns())]
             .iter()
-            .cloned()
+            .copied()
             .enumerate()
             .collect::<Vec<_>>();
         for (index, cell) in line {
-            state.term.grid_mut()[Line(0)][Column(index)] = cell;
+            state.term.grid[Line(0)][Column(index)] = cell;
         }
 
-        state.term.grid_mut().cursor.point = Point::new(Line(0), cursor.column);
+        state.term.grid.cursor.pos = Pos::new(Line(0), cursor.col);
         if state.term.screen_lines() > 1 {
-            state.term.grid_mut().reset_region(Line(1)..);
+            state.term.grid.reset_region(Line(1)..);
         }
+        state.term.selection = None;
+        state.term.mark_fully_damaged();
         drop(state);
         let _ = self.core.notifications.try_send(GridEvent::Wakeup);
     }
@@ -433,79 +576,156 @@ impl GridEmulator {
             return None;
         }
         Some(SelectedText {
-            line_start: line_number(range.start.line),
-            line_end: line_number(range.end.line),
+            line_start: line_number(range.start.row),
+            line_end: line_number(range.end.row),
             text,
         })
     }
 
-    pub fn snapshot(&self) -> TermState {
-        let state = self.core.state.lock();
-        let content = state.term.renderable_content();
-        let cursor_style = state.term.cursor_style();
+    pub fn mode(&self) -> rio_vt::crosswords::Mode {
+        self.core.state.lock().term.mode()
+    }
+
+    pub fn keyboard_mode(&self) -> KeyboardModes {
+        self.core.state.lock().term.keyboard_mode()
+    }
+
+    pub fn modify_other_keys(&self) -> Option<u8> {
+        self.core.state.lock().term.modify_other_keys()
+    }
+
+    pub fn history_size(&self) -> usize {
+        self.core.state.lock().term.history_size()
+    }
+
+    pub fn snapshot(&self) -> TermSnapshot {
+        let mut state = self.core.state.lock();
         let cols = state.term.columns();
-        let rows = state.term.screen_lines();
-        let display_cursor_line = content.cursor.point.line.0 + content.display_offset as i32;
-        let cursor = if display_cursor_line >= 0 && display_cursor_line < rows as i32 {
-            Some((display_cursor_line as usize, content.cursor.point.column.0))
+        let screen_lines = state.term.screen_lines();
+        let display_offset = state.term.display_offset();
+        let cursor_state = state.term.cursor();
+        let display_cursor_line = cursor_state.pos.row.0 + display_offset as i32;
+        let cursor = if display_cursor_line >= 0 && display_cursor_line < screen_lines as i32 {
+            Some((display_cursor_line as usize, cursor_state.pos.col.0))
         } else {
             None
         };
-        let selection = content.selection;
-        let cells = content
-            .display_iter
-            .map(|indexed| {
-                let selected = selection.is_some_and(|range| {
-                    range.contains_cell(&indexed, content.cursor.point, content.cursor.shape)
-                });
-                let cell = indexed.cell;
-                let mut text = String::from(cell.c);
-                text.extend(cell.zerowidth().into_iter().flatten());
-                Cell {
-                    ch: cell.c,
-                    text,
-                    fg: convert_color(cell.fg),
-                    bg: convert_color(cell.bg),
-                    bold: cell.flags.contains(Flags::BOLD),
-                    italic: cell.flags.contains(Flags::ITALIC),
-                    underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                    inverse: cell.flags.contains(Flags::INVERSE),
-                    selected,
-                    wide: cell.flags.contains(Flags::WIDE_CHAR),
-                    wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-                }
+        let selection = state
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&state.term));
+        let mut damage = state
+            .term
+            .peek_damage_event()
+            .unwrap_or(TerminalDamage::Noop);
+        let mut graphics_updates = self.core.graphics_updates.lock().unwrap().take();
+        if let Some(queues) = state.term.graphics_take_queues() {
+            merge_graphics_updates(&mut graphics_updates, queues);
+        }
+        let atlas_placements = state.term.graphics.atlas_placements.clone();
+        let mut kitty_placements = state
+            .term
+            .graphics
+            .kitty_placements
+            .values()
+            .filter(|placement| {
+                state
+                    .term
+                    .graphics
+                    .kitty_images
+                    .contains_key(&placement.image_id)
             })
+            .cloned()
+            .collect::<Vec<_>>();
+        kitty_placements.sort_by_key(|placement| {
+            (
+                placement.z_index,
+                placement.image_id,
+                placement.placement_id,
+            )
+        });
+        let kitty_virtual_placements = state
+            .term
+            .graphics
+            .kitty_virtual_placements
+            .iter()
+            .map(|(key, placement)| (*key, placement.clone()))
             .collect();
-        let mode = *state.term.mode();
+        let graphics_changed =
+            state.term.graphics.kitty_graphics_dirty || graphics_updates.is_some();
+        state.term.graphics.kitty_graphics_dirty = false;
+        if graphics_changed && damage == TerminalDamage::Noop {
+            damage = TerminalDamage::Full;
+        }
+        let mut row_damage = vec![false; screen_lines];
+        match state.term.damage() {
+            rio_vt::crosswords::TermDamage::Full => row_damage.fill(true),
+            rio_vt::crosswords::TermDamage::Partial(lines) => {
+                for line in lines {
+                    if let Some(damaged) = row_damage.get_mut(line.line) {
+                        *damaged = true;
+                    }
+                }
+            }
+        }
+        state.term.reset_damage();
+        let visible_rows = state.term.visible_rows();
+        if damage == TerminalDamage::Full {
+            row_damage.fill(true);
+        } else {
+            for (damaged, row) in row_damage.iter_mut().zip(&visible_rows) {
+                *damaged |= row.dirty;
+            }
+        }
+        for row in 0..screen_lines {
+            state.term.grid[Line(row as i32 - display_offset as i32)].dirty = false;
+        }
+        let styles = state.term.grid.style_set.styles().to_vec();
+        let mut zero_width = HashMap::new();
+        for square in visible_rows
+            .iter()
+            .flat_map(|row| row.inner.iter())
+            .copied()
+        {
+            if let Some(id) = square.extras_id().filter(|_| !square.is_bg_only())
+                && let Some(extras) = state.term.grid.extras_table.get(id)
+                && !extras.zerowidth.is_empty()
+            {
+                zero_width.insert(id, extras.zerowidth.clone());
+            }
+        }
+        let mode = state.term.mode();
+        let keyboard_mode = state.term.keyboard_mode();
         let history_size = state.term.history_size();
-        let cursor_shape = content.cursor.shape;
-        let display_offset = content.display_offset;
+        let lines_evicted = state.term.lines_evicted();
+        let cursor_blinking = state.term.blinking_cursor;
         drop(state);
         let lifecycle = self.core.lifecycle.lock().unwrap();
-        TermState {
+        TermSnapshot {
             cols,
-            rows,
-            cells,
+            screen_lines,
+            visible_rows,
+            row_damage,
+            damage,
+            cursor_state,
             cursor,
-            cursor_shape: map_cursor_shape(cursor_shape),
-            cursor_blinking: cursor_style.blinking,
+            cursor_blinking,
             title: self.title(),
             exited: lifecycle.exited,
             exit_code: lifecycle.exit_code,
             display_offset,
             history_size,
-            mode: ModeSnapshot {
-                mouse_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
-                mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
-                mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
-                sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
-                utf8_mouse: mode.contains(TermMode::UTF8_MOUSE),
-                alt_screen: mode.contains(TermMode::ALT_SCREEN),
-                alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
-                bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
-                app_cursor: mode.contains(TermMode::APP_CURSOR),
-                focus_in_out: mode.contains(TermMode::FOCUS_IN_OUT),
-            },
+            lines_evicted,
+            graphics_updates,
+            atlas_placements,
+            kitty_placements,
+            kitty_virtual_placements,
+            mode,
+            keyboard_mode,
+            selection,
+            styles,
+            zero_width,
         }
     }
 
@@ -540,6 +760,46 @@ impl GridEmulator {
         let mut lifecycle = self.core.lifecycle.lock().unwrap();
         lifecycle.exited = true;
         lifecycle.exit_code = exit_code;
+    }
+}
+
+fn merge_graphics_updates(target: &mut Option<UpdateQueues>, mut updates: UpdateQueues) {
+    let target = target.get_or_insert_with(|| UpdateQueues {
+        pending: Vec::new(),
+        pending_images: Vec::new(),
+        remove_queue: Vec::new(),
+    });
+
+    // A snapshot is the renderer's transaction boundary. Coalesce repeated
+    // events by final image key while retaining rio's per-event ordering
+    // (adds first, then removals), so remove→retransmit leaves the new image
+    // present and transmit→remove leaves it absent.
+    for graphic in updates.pending.drain(..) {
+        let key = atlas_image_key(graphic.id.get());
+        target
+            .pending
+            .retain(|previous| atlas_image_key(previous.id.get()) != key);
+        target.remove_queue.retain(|removed| *removed != key);
+        target.pending.push(graphic);
+    }
+    for (image_id, graphic) in updates.pending_images.drain(..) {
+        let key = kitty_image_key(image_id);
+        target
+            .pending_images
+            .retain(|(previous_id, _)| kitty_image_key(*previous_id) != key);
+        target.remove_queue.retain(|removed| *removed != key);
+        target.pending_images.push((image_id, graphic));
+    }
+    for key in updates.remove_queue.drain(..) {
+        target
+            .pending
+            .retain(|graphic| atlas_image_key(graphic.id.get()) != key);
+        target
+            .pending_images
+            .retain(|(image_id, _)| kitty_image_key(*image_id) != key);
+        if !target.remove_queue.contains(&key) {
+            target.remove_queue.push(key);
+        }
     }
 }
 
@@ -582,18 +842,15 @@ fn selection_type(kind: SelectionKind) -> SelectionType {
     }
 }
 
-fn map_cursor_shape(shape: alacritty_terminal::vte::ansi::CursorShape) -> CursorShape {
-    use alacritty_terminal::vte::ansi::CursorShape as AlacrittyCursorShape;
-    match shape {
-        AlacrittyCursorShape::Block => CursorShape::Block,
-        AlacrittyCursorShape::Underline => CursorShape::Underline,
-        AlacrittyCursorShape::Beam => CursorShape::Bar,
-        AlacrittyCursorShape::HollowBlock => CursorShape::HollowBlock,
-        AlacrittyCursorShape::Hidden => CursorShape::Hidden,
-    }
+fn update_selection_damage<T: EventListener>(term: &mut Crosswords<T>) {
+    let selection = term
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(term));
+    term.update_selection_damage(selection, term.display_offset());
 }
 
-fn query_color(index: usize) -> Rgb {
+fn query_color(index: usize) -> ColorRgb {
     const ANSI: [u32; 16] = [
         0x1f2329, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xabb2bf, 0x5c6370,
         0xff616e, 0x7bc275, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
@@ -613,33 +870,10 @@ fn query_color(index: usize) -> Rgb {
         index if index == NamedColor::Cursor as usize => 0x1f2329,
         _ => 0x1f2329,
     };
-    Rgb {
+    ColorRgb {
         r: (value >> 16) as u8,
         g: (value >> 8) as u8,
         b: value as u8,
-    }
-}
-
-fn convert_color(color: AlacrittyColor) -> Color {
-    match color {
-        AlacrittyColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
-        AlacrittyColor::Indexed(index) => Color::Indexed(index),
-        AlacrittyColor::Named(named) => match named {
-            NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
-                Color::DefaultForeground
-            }
-            NamedColor::Background => Color::DefaultBackground,
-            NamedColor::Cursor => Color::DefaultForeground,
-            NamedColor::DimBlack => Color::Indexed(0),
-            NamedColor::DimRed => Color::Indexed(1),
-            NamedColor::DimGreen => Color::Indexed(2),
-            NamedColor::DimYellow => Color::Indexed(3),
-            NamedColor::DimBlue => Color::Indexed(4),
-            NamedColor::DimMagenta => Color::Indexed(5),
-            NamedColor::DimCyan => Color::Indexed(6),
-            NamedColor::DimWhite => Color::Indexed(7),
-            named => Color::Indexed(named as u8),
-        },
     }
 }
 
@@ -667,17 +901,80 @@ mod tests {
             chunked.feed(chunk);
         }
 
-        assert_eq!(chunked.snapshot(), combined.snapshot());
+        let chunked_snapshot = chunked.snapshot();
+        let combined_snapshot = combined.snapshot();
+        assert_eq!(
+            chunked_snapshot.visible_rows,
+            combined_snapshot.visible_rows
+        );
+        assert_eq!(chunked_snapshot.styles, combined_snapshot.styles);
+        assert_eq!(chunked_snapshot.zero_width, combined_snapshot.zero_width);
+        assert_eq!(
+            chunked_snapshot.cursor_state,
+            combined_snapshot.cursor_state
+        );
+        assert_eq!(chunked_snapshot.mode.bits(), combined_snapshot.mode.bits());
+        assert_eq!(chunked_snapshot.text(), combined_snapshot.text());
         let state = chunked.snapshot();
-        let link =
-            state.cells.iter().enumerate().find_map(|(index, _)| {
-                chunked.hyperlink_at(index / state.cols, index % state.cols)
-            });
+        let link = (0..state.screen_lines)
+            .find_map(|row| (0..state.cols).find_map(|col| chunked.hyperlink_at(row, col)));
         assert_eq!(link.unwrap().url, "https://example.com/target");
     }
 
     #[test]
-    fn title_bell_and_protocol_reply_are_data_events() {
+    fn feed_marks_only_the_written_visible_row_after_reset() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+        emulator.feed(b"written");
+
+        let snapshot = emulator.snapshot();
+        assert!(snapshot.row_damage[0]);
+        assert!(snapshot.row_damage[1..].iter().all(|damaged| !damaged));
+        assert_eq!(snapshot.damage, TerminalDamage::Partial);
+    }
+
+    #[test]
+    fn clear_marks_full_damage() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+        emulator.feed(b"written");
+        emulator.snapshot();
+
+        emulator.clear();
+        let snapshot = emulator.snapshot();
+        assert_eq!(snapshot.damage, TerminalDamage::Full);
+        assert!(snapshot.row_damage.iter().all(|damaged| *damaged));
+    }
+
+    #[test]
+    fn setting_and_clearing_selection_damages_affected_rows() {
+        let emulator = GridEmulator::new();
+        emulator.feed(b"one\r\ntwo");
+        emulator.snapshot();
+
+        emulator.select((0, 0), (1, 2));
+        let selected = emulator.snapshot();
+        assert!(selected.row_damage[0]);
+        assert!(selected.row_damage[1]);
+
+        emulator.clear_selection();
+        let cleared = emulator.snapshot();
+        assert!(cleared.row_damage[0]);
+        assert!(cleared.row_damage[1]);
+    }
+
+    #[test]
+    fn consecutive_idle_snapshots_are_clean() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+
+        let snapshot = emulator.snapshot();
+        assert_eq!(snapshot.damage, TerminalDamage::Noop);
+        assert!(snapshot.row_damage.iter().all(|damaged| !damaged));
+    }
+
+    #[test]
+    fn title_bell_and_native_primary_da_reply_are_data_events() {
         let emulator = GridEmulator::new();
         let events = emulator.events();
         emulator.feed(b"\x07\x1b]2;client title\x07\x1b[c");
@@ -685,19 +982,138 @@ mod tests {
         let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
         assert!(emitted.contains(&GridEvent::Bell));
         assert!(emitted.contains(&GridEvent::TitleChanged(Some("client title".to_string()))));
-        assert!(emitted.contains(&GridEvent::Input(b"\x1b[?6c".to_vec())));
+        assert!(emitted.contains(&GridEvent::Input(b"\x1b[?62;4;6;22;52c".to_vec())));
     }
 
     #[test]
-    fn maps_all_alacritty_cursor_shapes() {
-        use alacritty_terminal::vte::ansi::CursorShape as Shape;
-        assert_eq!(map_cursor_shape(Shape::Block), CursorShape::Block);
-        assert_eq!(map_cursor_shape(Shape::Underline), CursorShape::Underline);
-        assert_eq!(map_cursor_shape(Shape::Beam), CursorShape::Bar);
-        assert_eq!(
-            map_cursor_shape(Shape::HollowBlock),
-            CursorShape::HollowBlock
+    fn cell_metrics_drive_text_area_pixel_size_replies() {
+        let emulator = GridEmulator::new();
+        let events = emulator.events();
+        emulator.set_cell_size(10, 20);
+        emulator.resize_if_changed(42, 9);
+
+        emulator.feed(b"\x1b[14t");
+
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| { event == GridEvent::Input(b"\x1b[4;180;420t".to_vec()) })
         );
-        assert_eq!(map_cursor_shape(Shape::Hidden), CursorShape::Hidden);
+    }
+
+    #[test]
+    fn sixel_image_crosses_snapshot_once_with_placement_and_damage() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+
+        emulator.feed(b"\x1bPq~\x1b\\");
+
+        let snapshot = emulator.snapshot();
+        let updates = snapshot.graphics_updates.expect("sixel add queue");
+        assert_eq!(updates.pending.len(), 1);
+        assert!(updates.pending_images.is_empty());
+        assert!(updates.remove_queue.is_empty());
+        assert_eq!(
+            (updates.pending[0].width, updates.pending[0].height),
+            (1, 6)
+        );
+        assert_eq!(snapshot.atlas_placements.len(), 1);
+        assert_ne!(snapshot.damage, TerminalDamage::Noop);
+        assert!(snapshot.row_damage.iter().any(|damaged| *damaged));
+
+        let idle = emulator.snapshot();
+        assert!(idle.graphics_updates.is_none());
+        assert_eq!(idle.damage, TerminalDamage::Noop);
+    }
+
+    #[test]
+    fn kitty_transmit_display_and_delete_all_cross_the_snapshot() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+        emulator.feed(b"\x1b_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\");
+
+        let displayed = emulator.snapshot();
+        let updates = displayed.graphics_updates.expect("kitty add queue");
+        assert!(updates.pending.is_empty());
+        assert_eq!(updates.pending_images.len(), 1);
+        assert_eq!(updates.pending_images[0].0, 7);
+        assert_eq!(
+            (
+                updates.pending_images[0].1.width,
+                updates.pending_images[0].1.height,
+            ),
+            (2, 2)
+        );
+        assert_eq!(displayed.kitty_placements.len(), 1);
+        assert_eq!(displayed.kitty_placements[0].image_id, 7);
+
+        emulator.feed(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        let deleted = emulator.snapshot();
+        assert!(deleted.kitty_placements.is_empty());
+        assert!(deleted.kitty_virtual_placements.is_empty());
+    }
+
+    #[test]
+    fn graphics_updates_preserve_the_latest_operation_before_a_snapshot() {
+        let emulator = GridEmulator::new();
+        emulator.snapshot();
+        let transmit = b"\x1b_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\";
+
+        emulator.feed(transmit);
+        emulator.feed(b"\x1b_Ga=d,d=A,q=2\x1b\\");
+        emulator.feed(transmit);
+
+        let snapshot = emulator.snapshot();
+        let updates = snapshot.graphics_updates.expect("coalesced kitty queue");
+        assert_eq!(updates.pending_images.len(), 1);
+        assert_eq!(updates.pending_images[0].0, 7);
+        assert!(
+            !updates
+                .remove_queue
+                .contains(&rio_graphics::kitty_image_key(7))
+        );
+        assert_eq!(snapshot.kitty_placements.len(), 1);
+    }
+
+    #[test]
+    fn kitty_keyboard_mode_is_available_without_consuming_damage() {
+        let emulator = GridEmulator::new();
+        emulator.feed(b"\x1b[>1u");
+        assert_eq!(
+            emulator.keyboard_mode(),
+            KeyboardModes::DISAMBIGUATE_ESC_CODES
+        );
+    }
+
+    #[test]
+    fn osc52_store_is_decoded_and_load_is_denied_with_an_empty_reply() {
+        let emulator = GridEmulator::new();
+        let events = emulator.events();
+        emulator.feed(b"\x1b]52;c;dGNvZGU=\x07");
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event
+                == GridEvent::ClipboardStore {
+                    kind: ClipboardType::Clipboard,
+                    text: "tcode".to_string(),
+                }
+        }));
+
+        emulator.feed(b"\x1b]52;c;?\x07");
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| { event == GridEvent::Input(b"\x1b]52;c;\x07".to_vec()) })
+        );
+    }
+
+    #[test]
+    fn snapshot_preserves_all_rio_cursor_shapes() {
+        use rio_vt::ansi::CursorShape as Shape;
+        let emulator = GridEmulator::new();
+        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Block);
+        emulator.feed(b"\x1b[4 q");
+        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Underline);
+        emulator.feed(b"\x1b[6 q");
+        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Beam);
+        emulator.feed(b"\x1b[?25l");
+        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Hidden);
     }
 }

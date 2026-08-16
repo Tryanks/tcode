@@ -1290,7 +1290,7 @@ pub fn parse_orchestrate_callback(text: &str) -> Option<OrchestrateCallback> {
 }
 
 /// Merge an authoritative item snapshot over an existing entry, keeping
-/// delta-accumulated text when the snapshot's text field is empty.
+/// incremental text or file diffs when the snapshot omits them.
 fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent {
     match (existing, incoming) {
         (
@@ -1334,6 +1334,28 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
             exit_code,
             status,
         }),
+        (
+            EntryContent::Item(ItemContent::FileChange {
+                changes: existing_changes,
+                ..
+            }),
+            EntryContent::Item(ItemContent::FileChange {
+                mut changes,
+                status,
+            }),
+        ) => {
+            for change in &mut changes {
+                if change.diff.is_none()
+                    && let Some(existing_diff) = existing_changes
+                        .iter()
+                        .find(|existing| existing.path == change.path)
+                        .and_then(|existing| existing.diff.as_ref())
+                {
+                    change.diff = Some(existing_diff.clone());
+                }
+            }
+            EntryContent::Item(ItemContent::FileChange { changes, status })
+        }
         (
             EntryContent::Item(ItemContent::Subagent {
                 summary: old_summary,
@@ -1535,6 +1557,46 @@ mod tests {
         assert_eq!(change_set.changes.len(), 2);
         assert_eq!(change_set.changes[0].path, "src/lib.rs");
         assert_eq!(change_set.changes[1].path, "src/child.rs");
+    }
+
+    #[test]
+    fn completed_file_snapshot_keeps_diff_from_started_snapshot() {
+        let path = "/tmp/tcode-outside-workspace.txt";
+        let timeline = Timeline::fold_events([
+            user_msg("user-1", "write it"),
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "write-external".into(),
+                parent_item_id: None,
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: path.into(),
+                        kind: FileChangeKind::Create,
+                        diff: Some("+visible diff".into()),
+                    }],
+                    status: ItemStatus::InProgress,
+                },
+            }),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "write-external".into(),
+                parent_item_id: None,
+                content: ItemContent::FileChange {
+                    changes: vec![FileChange {
+                        path: path.into(),
+                        kind: FileChangeKind::Create,
+                        diff: None,
+                    }],
+                    status: ItemStatus::Completed,
+                },
+            }),
+        ]);
+
+        let change_set = timeline.turns[0]
+            .changes
+            .as_ref()
+            .expect("completed change set");
+        assert_eq!(change_set.changes.len(), 1);
+        assert_eq!(change_set.changes[0].path, path);
+        assert_eq!(change_set.changes[0].diff.as_deref(), Some("+visible diff"));
     }
 
     #[test]

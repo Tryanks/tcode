@@ -7,7 +7,7 @@ use gpui::{
     App, Bounds, Context, EntityId, FocusHandle, IntoElement, ListAlignment, ListState,
     ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Window, px,
 };
-use gpui_component::{ElementExt as _, v_flex};
+use gpui_base::{ElementExt as _, v_flex};
 
 use super::{link_target::LinkTarget, nodes::BlockNode, render, window_selection};
 
@@ -24,6 +24,7 @@ pub struct MarkdownState {
     pub(super) entity_id: EntityId,
     pub(super) bounds: Bounds<Pixels>,
     pub(super) selectable: bool,
+    pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) pending_context_link: Option<PendingLinkMenu>,
     pub(super) is_selecting: bool,
@@ -46,6 +47,7 @@ impl MarkdownState {
             entity_id: cx.entity_id(),
             bounds: Bounds::default(),
             selectable: false,
+            compact_headings: false,
             base_dir: None,
             pending_context_link: None,
             is_selecting: false,
@@ -121,6 +123,16 @@ impl MarkdownState {
             self.reset_selection();
             window_selection::clear_selection_for_view(self.entity_id, cx);
         }
+        cx.notify();
+    }
+
+    /// Scale headings for a chat message instead of a document. Document scale
+    /// (h1 at 2× body) dwarfs a timeline; chat scale keeps them in the flow.
+    pub fn set_compact_headings(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact_headings == compact {
+            return;
+        }
+        self.compact_headings = compact;
         cx.notify();
     }
 
@@ -351,7 +363,6 @@ impl Render for MarkdownState {
         let measured_content_height = self.measured_content_height;
         v_flex()
             .w_full()
-            .text_size(px(15.))
             .child(render::render_root(
                 &parsed,
                 self.list_state.clone(),
@@ -384,7 +395,7 @@ mod tests {
 
     #[gpui::test]
     fn source_and_parsed_text_stay_coherent(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("old", cx)));
 
@@ -409,7 +420,7 @@ mod tests {
     /// (streaming chat pushes deltas while the user may be selecting).
     #[gpui::test]
     fn reparse_preserves_selection_during_active_drag(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("start", cx)));
         state.update(cx, |state, cx| {
@@ -429,7 +440,7 @@ mod tests {
 
     #[gpui::test]
     fn select_all_reads_blocks_that_were_never_painted(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let source = (0..2_000)
             .map(|ix| format!("block {ix}"))
@@ -453,7 +464,7 @@ mod tests {
 
     #[gpui::test]
     fn select_all_includes_code_and_table_text(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(super::super::init);
         let state = cx.update(|cx| {
             cx.new(|cx| {

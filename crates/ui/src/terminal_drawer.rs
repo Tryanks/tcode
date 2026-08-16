@@ -3,34 +3,43 @@ use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::menu::ContextMenuExt as _;
+use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, RenderImage, Role,
     ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
     prelude::FluentBuilder as _, px, rgb, size,
 };
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, ElementExt as _, IconName, Sizable as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    menu::ContextMenuExt as _,
-    resizable::{h_resizable, resizable_panel, v_resizable},
-    v_flex,
-};
+use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use term::{
-    Cell, Color, CursorShape, HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermState,
+    HyperlinkMatch, SelectionKind, SelectionSide, TermEvent, TermSnapshot,
+    graphics::{
+        AtlasPlacement, ColorType, GraphicData, GraphicOverlay, IncompletePlacement,
+        KittyPlacement, OverlayViewport, PLACEHOLDER, PlaceholderRun, UpdateQueues,
+        VirtualPlacement, atlas_image_key, atlas_overlay_geometry, clip_overlay_to_rect,
+        compute_run_geometry, kitty_image_key, kitty_overlay_geometry,
+    },
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
+    rio_vt::{
+        ansi::CursorShape,
+        clipboard::ClipboardType,
+        config::colors::{AnsiColor, NamedColor},
+        crosswords::{Mode, square::Wide, style::StyleFlags},
+    },
 };
 
-use tcode_core::ui::TerminalSplitDirection;
+use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 use tcode_protocol::Command;
-use tcode_runtime::app::MAX_TERMINALS_PER_SESSION;
 
 use crate::{material, store::WorkspaceStore};
 
@@ -88,11 +97,12 @@ struct MarkedText {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GridTextStyle {
-    fg: Color,
-    bg: Color,
+    fg: AnsiColor,
+    bg: AnsiColor,
     bold: bool,
     italic: bool,
     underline: bool,
+    underline_wavy: bool,
     selected: bool,
     cursor: bool,
 }
@@ -107,7 +117,7 @@ struct BatchedTextRun {
     style: GridTextStyle,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct TerminalPalette {
     foreground: Hsla,
     background: Hsla,
@@ -141,10 +151,79 @@ struct GridPaintData {
     cursor: Option<CursorPaint>,
 }
 
+#[derive(Clone, Default)]
+struct RowPaintData {
+    text_runs: Vec<BatchedTextRun>,
+    backgrounds: Vec<BackgroundRect>,
+    selections: Vec<BackgroundRect>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CursorRowKey {
+    position: (usize, usize),
+    shape: CursorShape,
+    blinking: bool,
+    marked_text: Option<String>,
+    focused: bool,
+    blink_phase: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RowLayoutKey {
+    selection: Option<term::rio_vt::selection::SelectionRange>,
+    hovered_link: Option<((usize, usize), (usize, usize))>,
+    cursor: Option<CursorRowKey>,
+}
+
+#[derive(Clone)]
+struct CachedRowLayout {
+    key: RowLayoutKey,
+    paint: RowPaintData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GridCacheKey {
+    cols: usize,
+    screen_lines: usize,
+    display_offset: usize,
+    palette: TerminalPalette,
+}
+
+struct TerminalGridCache {
+    key: GridCacheKey,
+    rows: Vec<Option<CachedRowLayout>>,
+}
+
+#[derive(Clone)]
+struct TerminalImage {
+    image: Arc<RenderImage>,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy)]
+struct VirtualPlaceholderPaint {
+    run: PlaceholderRun,
+    screen_line: usize,
+    start_screen_col: usize,
+}
+
+struct OrderedGraphicOverlay {
+    overlay: GraphicOverlay,
+    protocol_order: u8,
+    placement_order: u32,
+}
+
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
+    /// Last-known panel sizes of the active split (from its resize handle),
+    /// used to apportion the drawer body between the two panes when resizing
+    /// their PTYs. Empty means "no drag yet": assume an even split.
+    split_sizes: Rc<RefCell<Vec<f32>>>,
+    row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
+    image_registry: RefCell<HashMap<u64, HashMap<u64, TerminalImage>>>,
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
@@ -173,6 +252,9 @@ impl TerminalDrawer {
             workspace_store,
             focus_handle: cx.focus_handle().tab_index(0).tab_stop(true),
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
+            split_sizes: Rc::new(RefCell::new(Vec::new())),
+            row_layout_cache: RefCell::new(HashMap::new()),
+            image_registry: RefCell::new(HashMap::new()),
             cell_width: 7.83,
             cell_height: 17.,
             scroll_remainder: HashMap::new(),
@@ -232,8 +314,8 @@ impl TerminalDrawer {
 
     fn paste_to_terminal(&self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
         self.with_terminal_id(terminal_id, cx, |terminal| {
-            let mode = terminal.snapshot().mode;
-            let text = prepare_terminal_paste(text, mode.bracketed_paste);
+            let mode = terminal.mode();
+            let text = prepare_terminal_paste(text, mode.contains(Mode::BRACKETED_PASTE));
             terminal.write_input(text.into_bytes());
         });
     }
@@ -320,6 +402,9 @@ impl TerminalDrawer {
 
         self.event_subscriptions
             .retain(|id, _| streams.iter().any(|(stream_id, _)| stream_id == id));
+        self.image_registry
+            .borrow_mut()
+            .retain(|id, _| streams.iter().any(|(stream_id, _)| stream_id == id));
 
         for (terminal_id, receiver) in streams {
             let already_subscribed = self
@@ -329,6 +414,11 @@ impl TerminalDrawer {
             if already_subscribed {
                 continue;
             }
+            if self.event_subscriptions.contains_key(&terminal_id) {
+                // A restart keeps the tab id but creates a new terminal. Its
+                // image namespace starts empty just like a newly opened tab.
+                self.image_registry.borrow_mut().remove(&terminal_id);
+            }
 
             let task_receiver = receiver.clone();
             let task = cx.spawn_in(window, async move |this, cx| {
@@ -337,9 +427,26 @@ impl TerminalDrawer {
                     // window then collapses Wakeup floods from large PTY writes.
                     if this
                         .update_in(cx, |this, window, cx| {
-                            if matches!(first_event, TermEvent::Bell) {
-                                this.bell_tabs.insert(terminal_id);
-                                window.play_system_bell();
+                            match &first_event {
+                                TermEvent::Bell => {
+                                    this.bell_tabs.insert(terminal_id);
+                                    window.play_system_bell();
+                                }
+                                TermEvent::ClipboardStore {
+                                    kind: ClipboardType::Clipboard,
+                                    text,
+                                } => {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                }
+                                TermEvent::ClipboardStore {
+                                    kind: ClipboardType::Selection,
+                                    ..
+                                } => {
+                                    // GPUI exposes the system clipboard but no primary-selection
+                                    // clipboard. macOS has no primary selection, and on other
+                                    // platforms substituting the system clipboard would be wrong.
+                                }
+                                _ => {}
                             }
                             window.invalidate_character_coordinates();
                             cx.notify();
@@ -368,13 +475,30 @@ impl TerminalDrawer {
                             return;
                         };
                         saw_batched_event = true;
-                        if matches!(event, TermEvent::Bell) {
-                            let _ = this.update_in(cx, |this, window, _| {
-                                this.bell_tabs.insert(terminal_id);
-                                window.play_system_bell();
-                            });
+                        match &event {
+                            TermEvent::Bell => {
+                                let _ = this.update_in(cx, |this, window, _| {
+                                    this.bell_tabs.insert(terminal_id);
+                                    window.play_system_bell();
+                                });
+                            }
+                            TermEvent::ClipboardStore {
+                                kind: ClipboardType::Clipboard,
+                                text,
+                            } => {
+                                let text = text.clone();
+                                let _ = this.update_in(cx, |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                });
+                            }
+                            TermEvent::ClipboardStore {
+                                kind: ClipboardType::Selection,
+                                ..
+                            }
+                            | TermEvent::Wakeup
+                            | TermEvent::Exited => {}
                         }
-                        if !matches!(event, TermEvent::Wakeup) {
+                        if !matches!(&event, TermEvent::Wakeup) {
                             non_wakeup_events += 1;
                             if non_wakeup_events >= 100 {
                                 break;
@@ -400,6 +524,30 @@ impl TerminalDrawer {
                     _task: task,
                 },
             );
+        }
+    }
+
+    fn apply_graphics_updates(&self, terminal_id: u64, updates: Option<UpdateQueues>) {
+        let Some(updates) = updates else {
+            return;
+        };
+        let mut registries = self.image_registry.borrow_mut();
+        let images = registries.entry(terminal_id).or_default();
+
+        for graphic in updates.pending {
+            let key = atlas_image_key(graphic.id.get());
+            if let Some(image) = terminal_image(graphic) {
+                images.insert(key, image);
+            }
+        }
+        for (image_id, graphic) in updates.pending_images {
+            let key = kitty_image_key(image_id);
+            if let Some(image) = terminal_image(graphic) {
+                images.insert(key, image);
+            }
+        }
+        for key in updates.remove_queue {
+            images.remove(&key);
         }
     }
 
@@ -442,16 +590,14 @@ impl TerminalDrawer {
             cx.stop_propagation();
             return;
         }
-        if event.prefer_character_input {
-            return;
-        }
-
         let mut handled = false;
         self.with_terminal(cx, |terminal| {
             if let Some(bytes) = mappings::key_bytes(
                 &keystroke.key,
                 term_modifiers(keystroke.modifiers),
-                terminal.snapshot().mode,
+                terminal.mode(),
+                terminal.keyboard_mode(),
+                terminal.modify_other_keys(),
                 true,
             ) {
                 terminal.write_input(bytes);
@@ -494,22 +640,22 @@ impl TerminalDrawer {
                 .read(cx)
                 .with_terminal_workspace(|workspace| {
                     if let Some(entry) = workspace.terminal(terminal_id) {
-                        let snapshot = entry.terminal.snapshot();
+                        let mode = entry.terminal.mode();
                         let point = self
                             .grid_point_and_side(terminal_id, event.position)
                             .map(|((row, column), _)| GridPoint { row, column })
                             .unwrap_or(GridPoint { row: 0, column: 0 });
-                        if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                        if mappings::routes_mouse(mode, event.modifiers.shift) {
                             if let Some(bytes) = mappings::scroll_report(
                                 point,
                                 lines,
                                 term_modifiers(event.modifiers),
-                                snapshot.mode,
+                                mode,
                             ) {
                                 entry.terminal.write_raw(bytes);
                             }
-                        } else if snapshot.mode.alt_screen
-                            && snapshot.mode.alternate_scroll
+                        } else if mode.contains(Mode::ALT_SCREEN)
+                            && mode.contains(Mode::ALTERNATE_SCROLL)
                             && !event.modifiers.shift
                         {
                             entry.terminal.write_raw(mappings::alt_scroll(lines));
@@ -526,7 +672,7 @@ impl TerminalDrawer {
     fn render_grid(
         &self,
         terminal_id: u64,
-        state: &TermState,
+        state: &TermSnapshot,
         register_input: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -545,18 +691,35 @@ impl TerminalDrawer {
             .as_ref()
             .filter(|(id, _)| *id == terminal_id)
             .map(|(_, link)| link);
-        let paint_data = layout_grid(
+        let blink_phase =
+            self.cursor_phase || self.last_input.elapsed() < Duration::from_millis(500);
+        let paint_data = layout_grid_cached(
+            &mut self.row_layout_cache.borrow_mut(),
+            terminal_id,
             state,
             palette,
-            marked_text.is_some(),
+            marked_text.as_deref(),
             hovered_link,
             self.terminal_focused,
-            self.cursor_phase || self.last_input.elapsed() < Duration::from_millis(500),
+            blink_phase,
         );
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
         let cols = state.cols;
-        let rows = state.rows;
+        let rows = state.screen_lines;
+        let atlas_placements = state.atlas_placements.clone();
+        let kitty_placements = state.kitty_placements.clone();
+        let kitty_virtual_placements = state.kitty_virtual_placements.clone();
+        let virtual_placeholder_paints = virtual_placeholder_paints(state);
+        let history_size = (state.lines_evicted.min(i64::MAX as u64) as i64)
+            .saturating_add(state.history_size.min(i64::MAX as usize) as i64);
+        let display_offset = state.display_offset.min(i64::MAX as usize) as i64;
+        let graphic_images = self
+            .image_registry
+            .borrow()
+            .get(&terminal_id)
+            .cloned()
+            .unwrap_or_default();
         let focus_handle = self.focus_handle.clone();
         let drawer = cx.entity();
         let grid_bounds = self.grid_bounds.clone();
@@ -608,6 +771,42 @@ impl TerminalDrawer {
                         window.paint_quad(fill(background_bounds, background.color));
                     }
 
+                    let physical_cell_width = cell_width * scale_factor;
+                    let physical_cell_height = cell_height * scale_factor;
+                    let physical_origin_x = f32::from(origin.x) * scale_factor;
+                    let physical_origin_y = f32::from(origin.y) * scale_factor;
+                    let viewport = OverlayViewport {
+                        cell_width: physical_cell_width,
+                        cell_height: physical_cell_height,
+                        origin_x: physical_origin_x,
+                        origin_y: physical_origin_y,
+                        history_size,
+                        display_offset,
+                        screen_lines: rows.min(i64::MAX as usize) as i64,
+                    };
+                    let clip = (
+                        physical_origin_x,
+                        physical_origin_y,
+                        physical_origin_x + cols as f32 * physical_cell_width,
+                        physical_origin_y + rows as f32 * physical_cell_height,
+                    );
+                    let graphic_overlays = layout_graphic_overlays(
+                        &atlas_placements,
+                        &kitty_placements,
+                        &kitty_virtual_placements,
+                        &virtual_placeholder_paints,
+                        &graphic_images,
+                        &viewport,
+                        clip,
+                    );
+                    paint_graphic_overlays(
+                        window,
+                        &graphic_overlays,
+                        &graphic_images,
+                        scale_factor,
+                        false,
+                    );
+
                     let cursor_bounds = paint_data.cursor.map(|cursor| {
                         Bounds::new(
                             point(
@@ -622,14 +821,14 @@ impl TerminalDrawer {
                         && let Some(cursor_bounds) = cursor_bounds
                     {
                         match (cursor.focused, cursor.shape) {
-                            (false, _) | (_, CursorShape::HollowBlock) => {
+                            (false, _) => {
                                 let t = px(1.);
                                 window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(cursor_bounds.size.width, t)), cursor.color));
                                 window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - t), size(cursor_bounds.size.width, t)), cursor.color));
                                 window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(t, cursor_bounds.size.height)), cursor.color));
                                 window.paint_quad(fill(Bounds::new(point(cursor_bounds.right() - t, cursor_bounds.top()), size(t, cursor_bounds.size.height)), cursor.color));
                             }
-                            (_, CursorShape::Bar) => window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(px(2.), cursor_bounds.size.height)), cursor.color)),
+                            (_, CursorShape::Beam) => window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(px(2.), cursor_bounds.size.height)), cursor.color)),
                             (_, CursorShape::Underline) => window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - px(2.)), size(cursor_bounds.size.width, px(2.))), cursor.color)),
                             (_, CursorShape::Block) => window.paint_quad(fill(cursor_bounds, cursor.color)),
                             (_, CursorShape::Hidden) => {}
@@ -662,7 +861,7 @@ impl TerminalDrawer {
                             underline: run.style.underline.then_some(UnderlineStyle {
                                 thickness: px(1.),
                                 color: Some(foreground),
-                                wavy: false,
+                                wavy: run.style.underline_wavy,
                             }),
                         };
                         let shaped = window.text_system().shape_line(
@@ -721,6 +920,14 @@ impl TerminalDrawer {
                             cx,
                         );
                     }
+
+                    paint_graphic_overlays(
+                        window,
+                        &graphic_overlays,
+                        &graphic_images,
+                        scale_factor,
+                        true,
+                    );
 
                     if register_input {
                         window.handle_input(
@@ -783,8 +990,8 @@ impl TerminalDrawer {
             .read(cx)
             .with_terminal_workspace(|workspace| {
                 if let Some(entry) = workspace.terminal(terminal_id) {
-                    let snapshot = entry.terminal.snapshot();
-                    if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                    let mode = entry.terminal.mode();
+                    if mappings::routes_mouse(mode, event.modifiers.shift) {
                         if let Some(button) = term_mouse_button(event.button)
                             && let Some(bytes) = mappings::mouse_button_report(
                                 GridPoint {
@@ -794,7 +1001,7 @@ impl TerminalDrawer {
                                 button,
                                 term_modifiers(event.modifiers),
                                 true,
-                                snapshot.mode,
+                                mode,
                             )
                         {
                             entry.terminal.write_raw(bytes);
@@ -815,7 +1022,8 @@ impl TerminalDrawer {
                     #[cfg(target_os = "linux")]
                     if event.button == MouseButton::Middle {
                         if let Some(text) = primary_text {
-                            let text = prepare_terminal_paste(&text, snapshot.mode.bracketed_paste);
+                            let text =
+                                prepare_terminal_paste(&text, mode.contains(Mode::BRACKETED_PASTE));
                             entry.terminal.write_input(text.into_bytes());
                         }
                         stop_propagation = true;
@@ -875,8 +1083,8 @@ impl TerminalDrawer {
                 let Some(entry) = workspace.terminal(terminal_id) else {
                     return;
                 };
-                let snapshot = entry.terminal.snapshot();
-                if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                let mode = entry.terminal.mode();
+                if mappings::routes_mouse(mode, event.modifiers.shift) {
                     if self.last_mouse_point.get(&terminal_id) != Some(&point) {
                         self.last_mouse_point.insert(terminal_id, point);
                         if let Some(bytes) = mappings::mouse_move_report(
@@ -886,7 +1094,7 @@ impl TerminalDrawer {
                             },
                             event.pressed_button.and_then(term_mouse_button),
                             term_modifiers(event.modifiers),
-                            snapshot.mode,
+                            mode,
                         ) {
                             entry.terminal.write_raw(bytes);
                         }
@@ -934,8 +1142,8 @@ impl TerminalDrawer {
                         }
                         self.selecting = Some(terminal_id);
                         entry.terminal.update_selection(point, side);
-                        if !snapshot.mode.alt_screen
-                            && snapshot.history_size > 0
+                        if !mode.contains(Mode::ALT_SCREEN)
+                            && entry.terminal.history_size() > 0
                             && let Some(lines) = drag_scroll_lines(
                                 event.position.y,
                                 self.grid_bounds.borrow().get(&terminal_id).copied(),
@@ -964,8 +1172,8 @@ impl TerminalDrawer {
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         let entry = workspace.terminal(terminal_id)?;
-                        let snapshot = entry.terminal.snapshot();
-                        if snapshot.mode.routes_mouse(event.modifiers.shift) {
+                        let mode = entry.terminal.mode();
+                        if mappings::routes_mouse(mode, event.modifiers.shift) {
                             if let Some(button) = term_mouse_button(event.button)
                                 && let Some(bytes) = mappings::mouse_button_report(
                                     GridPoint {
@@ -975,7 +1183,7 @@ impl TerminalDrawer {
                                     button,
                                     term_modifiers(event.modifiers),
                                     false,
-                                    snapshot.mode,
+                                    mode,
                                 )
                             {
                                 entry.terminal.write_raw(bytes);
@@ -1037,7 +1245,7 @@ impl TerminalDrawer {
     }
 
     fn render_terminal(&self, terminal_id: u64, cx: &mut Context<Self>) -> AnyElement {
-        let Some((snapshot, label, register_input)) = self
+        let Some((mut snapshot, label, register_input)) = self
             .workspace_store
             .read(cx)
             .with_terminal_workspace(|workspace| {
@@ -1053,6 +1261,8 @@ impl TerminalDrawer {
         else {
             return div().into_any_element();
         };
+
+        self.apply_graphics_updates(terminal_id, snapshot.graphics_updates.take());
 
         let mut grid = v_flex().child(self.render_grid(terminal_id, &snapshot, register_input, cx));
         if snapshot.exited {
@@ -1071,14 +1281,17 @@ impl TerminalDrawer {
         // The add-to-context button is a pure overlay: it must never affect the
         // grid's geometry. Reserving space for it while a selection exists
         // resized the PTY mid-drag — rows jumped and blank lines appeared.
-        let has_selection = snapshot.cells.iter().any(|cell| cell.selected);
-        let workspace_store = self.workspace_store.clone();
-        let cell_width = self.cell_width;
-        let cell_height = self.cell_height;
+        let has_selection = snapshot.selection.is_some();
         let link_hovered = self
             .hovered_link
             .as_ref()
             .is_some_and(|(id, _)| *id == terminal_id);
+        // PTY dimensions are deliberately NOT measured from this pane: its
+        // percentage height does not resolve against the flex-sized drawer
+        // body, so the pane hugs the grid's content height and any row count
+        // derived from it is self-referential (frozen at its current value).
+        // `render` measures the drawer body — which does track the real
+        // height — and resizes every pane's PTY from there.
         div()
             .id(("terminal-grid", terminal_id))
             .relative()
@@ -1089,19 +1302,6 @@ impl TerminalDrawer {
             .items_center()
             .justify_center()
             .when(link_hovered, |this| this.cursor_pointer())
-            .on_prepaint(move |bounds, _window, cx| {
-                let content_width = f32::from(bounds.size.width) - 2. * PANE_PADDING;
-                let content_height = f32::from(bounds.size.height) - 2. * PANE_PADDING;
-                let cols = (content_width / cell_width).floor().max(2.) as usize;
-                let rows = (content_height / cell_height).floor().max(2.) as usize;
-                workspace_store
-                    .read(cx)
-                    .with_terminal_workspace(|workspace| {
-                        if let Some(entry) = workspace.terminal(terminal_id) {
-                            entry.terminal.resize(cols, rows);
-                        }
-                    });
-            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event, window, cx| {
@@ -1247,7 +1447,7 @@ impl Render for TerminalDrawer {
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.active()
-                            && entry.terminal.snapshot().mode.focus_in_out
+                            && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
                         {
                             entry.terminal.write_raw(b"\x1b[I".to_vec());
                         }
@@ -1259,7 +1459,7 @@ impl Render for TerminalDrawer {
                     .read(cx)
                     .with_terminal_workspace(|workspace| {
                         if let Some(entry) = workspace.active()
-                            && entry.terminal.snapshot().mode.focus_in_out
+                            && entry.terminal.mode().contains(Mode::FOCUS_IN_OUT)
                         {
                             entry.terminal.write_raw(b"\x1b[O".to_vec());
                         }
@@ -1299,7 +1499,7 @@ impl Render for TerminalDrawer {
                             (
                                 entry.id,
                                 entry.terminal.label(),
-                                entry.terminal.snapshot().exited,
+                                entry.terminal.exited(),
                                 self.bell_tabs.contains(&entry.id),
                             )
                         })
@@ -1514,33 +1714,51 @@ impl Render for TerminalDrawer {
                     })),
             );
 
+        if active_split.is_none() {
+            self.split_sizes.borrow_mut().clear();
+        }
         let body: AnyElement = match (active_id, active_split) {
-            (_, Some(split)) => match split.direction {
-                TerminalSplitDirection::Horizontal => {
-                    let first = resizable_panel()
-                        .pr(px(2.))
-                        .child(self.render_terminal(split.first, cx));
-                    let second = resizable_panel()
-                        .pl(px(2.))
-                        .child(self.render_terminal(split.second, cx));
-                    h_resizable(("terminal-split-h", split.first))
-                        .child(first)
-                        .child(second)
-                        .into_any_element()
+            (_, Some(split)) => {
+                let split_sizes = self.split_sizes.clone();
+                let on_resize = move |state: &gpui::Entity<gpui_base::ResizableState>,
+                                      _: &mut Window,
+                                      cx: &mut App| {
+                    *split_sizes.borrow_mut() = state
+                        .read(cx)
+                        .sizes()
+                        .iter()
+                        .map(|size| f32::from(*size))
+                        .collect();
+                };
+                match split.direction {
+                    TerminalSplitDirection::Horizontal => {
+                        let first = resizable_panel()
+                            .pr(px(2.))
+                            .child(self.render_terminal(split.first, cx));
+                        let second = resizable_panel()
+                            .pl(px(2.))
+                            .child(self.render_terminal(split.second, cx));
+                        h_resizable(("terminal-split-h", split.first))
+                            .on_resize(on_resize)
+                            .child(first)
+                            .child(second)
+                            .into_any_element()
+                    }
+                    TerminalSplitDirection::Vertical => {
+                        let first = resizable_panel()
+                            .pb(px(2.))
+                            .child(self.render_terminal(split.first, cx));
+                        let second = resizable_panel()
+                            .pt(px(2.))
+                            .child(self.render_terminal(split.second, cx));
+                        v_resizable(("terminal-split-v", split.first))
+                            .on_resize(on_resize)
+                            .child(first)
+                            .child(second)
+                            .into_any_element()
+                    }
                 }
-                TerminalSplitDirection::Vertical => {
-                    let first = resizable_panel()
-                        .pb(px(2.))
-                        .child(self.render_terminal(split.first, cx));
-                    let second = resizable_panel()
-                        .pt(px(2.))
-                        .child(self.render_terminal(split.second, cx));
-                    v_resizable(("terminal-split-v", split.first))
-                        .child(first)
-                        .child(second)
-                        .into_any_element()
-                }
-            },
+            }
             (Some(id), None) => self.render_terminal(id, cx),
             _ => div()
                 .p_3()
@@ -1575,113 +1793,321 @@ impl Render for TerminalDrawer {
                 .bg(cx.theme().popover)
                 .flex_1()
                 .min_h_0()
+                // Resize every pane's PTY from this element's bounds. This is
+                // the innermost element whose laid-out height reliably tracks
+                // the drawer; the panes themselves hug their grid content
+                // (percentage heights fail to resolve below this point), which
+                // previously froze the row count at its initial value.
+                .on_prepaint({
+                    let workspace_store = self.workspace_store.clone();
+                    let (cell_width, cell_height) = (self.cell_width, self.cell_height);
+                    let split_sizes = self.split_sizes.clone();
+                    move |bounds, window, cx| {
+                        let width = f32::from(bounds.size.width);
+                        let height = f32::from(bounds.size.height);
+                        let scale_factor = window.scale_factor();
+                        let resize =
+                            |cx: &App, terminal_id: u64, pane_width: f32, pane_height: f32| {
+                                let cols = ((pane_width - 2. * PANE_PADDING) / cell_width)
+                                    .floor()
+                                    .max(2.) as usize;
+                                let rows = ((pane_height - 2. * PANE_PADDING) / cell_height)
+                                    .floor()
+                                    .max(2.) as usize;
+                                let cell_width_px =
+                                    (cell_width * scale_factor).round().max(1.) as u32;
+                                let cell_height_px =
+                                    (cell_height * scale_factor).round().max(1.) as u32;
+                                workspace_store
+                                    .read(cx)
+                                    .with_terminal_workspace(|workspace| {
+                                        if let Some(entry) = workspace.terminal(terminal_id) {
+                                            entry.terminal.resize_with_cell_size(
+                                                cols,
+                                                rows,
+                                                cell_width_px,
+                                                cell_height_px,
+                                            );
+                                        }
+                                    });
+                            };
+                        match active_split {
+                            None => {
+                                if let Some(id) = active_id {
+                                    resize(cx, id, width, height);
+                                }
+                            }
+                            Some(split) => {
+                                // Panel sizes from the resize handle; before any
+                                // drag the group splits the axis evenly (1px
+                                // handle). Each pane also carries a 2px gutter
+                                // (`pr`/`pl`/`pb`/`pt`) toward the handle.
+                                let sizes = split_sizes.borrow();
+                                let axis = match split.direction {
+                                    TerminalSplitDirection::Horizontal => width,
+                                    TerminalSplitDirection::Vertical => height,
+                                };
+                                let (first, second) = match sizes.as_slice() {
+                                    [first, second] => (*first, *second),
+                                    _ => ((axis - 1.) / 2., (axis - 1.) / 2.),
+                                };
+                                match split.direction {
+                                    TerminalSplitDirection::Horizontal => {
+                                        resize(cx, split.first, first - 2., height);
+                                        resize(cx, split.second, second - 2., height);
+                                    }
+                                    TerminalSplitDirection::Vertical => {
+                                        resize(cx, split.first, width, first - 2.);
+                                        resize(cx, split.second, width, second - 2.);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
                 .child(body),
             )
     }
 }
 
+#[cfg(test)]
 fn layout_grid(
-    state: &TermState,
+    state: &TermSnapshot,
     palette: TerminalPalette,
     composing: bool,
     hovered_link: Option<&HyperlinkMatch>,
     focused: bool,
     blink_phase: bool,
 ) -> GridPaintData {
+    layout_grid_cached(
+        &mut HashMap::new(),
+        0,
+        state,
+        palette,
+        composing.then_some(""),
+        hovered_link,
+        focused,
+        blink_phase,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_grid_cached(
+    caches: &mut HashMap<u64, TerminalGridCache>,
+    terminal_id: u64,
+    state: &TermSnapshot,
+    palette: TerminalPalette,
+    marked_text: Option<&str>,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+) -> GridPaintData {
+    let composing = marked_text.is_some();
     let cursor = layout_cursor(state, palette);
     let cursor_cell = cursor.map(|cursor| (cursor.row, cursor.start_col));
-    let mut text_runs: Vec<BatchedTextRun> = Vec::new();
-    let mut backgrounds: Vec<BackgroundRect> = Vec::new();
-    let mut selections: Vec<BackgroundRect> = Vec::new();
+    let grid_key = GridCacheKey {
+        cols: state.cols,
+        screen_lines: state.screen_lines,
+        display_offset: state.display_offset,
+        palette,
+    };
+    let cache = caches
+        .entry(terminal_id)
+        .or_insert_with(|| TerminalGridCache {
+            key: grid_key,
+            rows: vec![None; state.screen_lines],
+        });
+    if cache.key != grid_key || matches!(state.damage, term::rio_vt::event::TerminalDamage::Full) {
+        cache.key = grid_key;
+        cache.rows = vec![None; state.screen_lines];
+    }
 
-    for row in 0..state.rows {
-        let mut previous_cell_had_extras = false;
-        for col in 0..state.cols {
-            let Some(cell) = state.cell(row, col) else {
-                break;
-            };
-            let (fg, bg) = cell_colors(cell);
+    let mut paint = RowPaintData::default();
 
-            let background = if matches!(bg, Color::DefaultBackground) {
-                None
-            } else {
-                Some(terminal_color(bg, palette))
-            };
-            if let Some(color) = background {
-                push_background(&mut backgrounds, row, col, color);
-            }
-            if cell.selected {
-                push_background(&mut selections, row, col, palette.selection);
-            }
-
-            // A wide spacer still participates in backgrounds and hit-testing,
-            // but never contributes a glyph to the shaped text.
-            if cell.wide_spacer {
-                continue;
-            }
-
-            // Alacritty stores emoji variation/modifier codepoints as extras;
-            // its following placeholder space is not an independently painted
-            // character. This mirrors Zed's terminal layout workaround.
-            if cell.ch == ' ' && previous_cell_had_extras {
-                previous_cell_had_extras = false;
-                continue;
-            }
-            previous_cell_had_extras = cell.text.chars().nth(1).is_some();
-
-            let text = display_cell_text(cell);
-            if matches!(cell.ch, '\0' | ' ') && !cell.underline {
-                continue;
-            }
-
-            let cursor_visible = !composing
-                && !cell.selected
-                && state.display_offset == 0
-                && cursor_cell == Some((row, col))
-                && focused
-                && state.cursor_shape == CursorShape::Block
-                && (!state.cursor_blinking || blink_phase);
-            let hyperlink_hovered =
-                hovered_link.is_some_and(|link| (row, col) >= link.start && (row, col) <= link.end);
-            let style = GridTextStyle {
-                fg,
-                bg,
-                bold: cell.bold,
-                italic: cell.italic,
-                underline: cell.underline || hyperlink_hovered,
-                selected: cell.selected,
-                cursor: cursor_visible,
-            };
-
-            if let Some(current) = text_runs.last_mut()
-                && current.row == row
-                && current.start_col + current.cell_count == col
-                && current.style == style
-            {
-                current.text.push_str(&text);
-                current.cell_count += 1;
-            } else {
-                text_runs.push(BatchedTextRun {
-                    row,
-                    start_col: col,
-                    text,
-                    cell_count: 1,
-                    style,
-                });
-            }
-        }
+    for row in 0..state.screen_lines {
+        let row_key = row_layout_key(
+            state,
+            row,
+            cursor_cell,
+            marked_text,
+            hovered_link,
+            focused,
+            blink_phase,
+        );
+        let clean = !state.row_damage.get(row).copied().unwrap_or(true);
+        let cached = cache.rows[row]
+            .as_ref()
+            .filter(|cached| clean && cached.key == row_key)
+            .map(|cached| cached.paint.clone());
+        let row_paint = cached.unwrap_or_else(|| {
+            let paint = layout_row(
+                state,
+                row,
+                palette,
+                composing,
+                hovered_link,
+                focused,
+                blink_phase,
+                cursor_cell,
+            );
+            cache.rows[row] = Some(CachedRowLayout {
+                key: row_key,
+                paint: paint.clone(),
+            });
+            paint
+        });
+        paint.text_runs.extend(row_paint.text_runs);
+        paint.backgrounds.extend(row_paint.backgrounds);
+        paint.selections.extend(row_paint.selections);
     }
 
     GridPaintData {
-        text_runs,
-        backgrounds,
-        selections,
+        text_runs: paint.text_runs,
+        backgrounds: paint.backgrounds,
+        selections: paint.selections,
         cursor: cursor.map(|mut cursor| {
             cursor.focused = focused;
             cursor.visible &= !composing && (!state.cursor_blinking || blink_phase);
             cursor
         }),
     }
+}
+
+fn row_layout_key(
+    state: &TermSnapshot,
+    row: usize,
+    cursor_cell: Option<(usize, usize)>,
+    marked_text: Option<&str>,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+) -> RowLayoutKey {
+    let grid_line = row as i32 - state.display_offset as i32;
+    let selection = state
+        .selection
+        .filter(|range| grid_line >= range.start.row.0 && grid_line <= range.end.row.0);
+    let hovered_link = hovered_link
+        .filter(|link| row >= link.start.0 && row <= link.end.0)
+        .map(|link| (link.start, link.end));
+    let cursor = cursor_cell
+        .filter(|(cursor_row, _)| *cursor_row == row && state.display_offset == 0)
+        .map(|position| CursorRowKey {
+            position,
+            shape: state.cursor_state.content,
+            blinking: state.cursor_blinking,
+            marked_text: marked_text.map(str::to_owned),
+            focused,
+            blink_phase,
+        });
+    RowLayoutKey {
+        selection,
+        hovered_link,
+        cursor,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_row(
+    state: &TermSnapshot,
+    row: usize,
+    palette: TerminalPalette,
+    composing: bool,
+    hovered_link: Option<&HyperlinkMatch>,
+    focused: bool,
+    blink_phase: bool,
+    cursor_cell: Option<(usize, usize)>,
+) -> RowPaintData {
+    let mut paint = RowPaintData::default();
+    let mut previous_cell_had_extras = false;
+    for col in 0..state.cols {
+        let Some(square) = state.cell(row, col).copied() else {
+            break;
+        };
+        let Some(style) = state.style(row, col) else {
+            break;
+        };
+        let selected = state.is_selected(row, col);
+        let (fg, bg) = cell_colors(style.fg, style.bg, style.flags);
+
+        let background = if matches!(bg, AnsiColor::Named(NamedColor::Background)) {
+            None
+        } else {
+            Some(terminal_color(bg, palette))
+        };
+        if let Some(color) = background {
+            push_background(&mut paint.backgrounds, row, col, color);
+        }
+        if selected {
+            push_background(&mut paint.selections, row, col, palette.selection);
+        }
+
+        // A wide spacer still participates in backgrounds and hit-testing,
+        // but never contributes a glyph to the shaped text.
+        if square.wide() == Wide::Spacer {
+            continue;
+        }
+
+        // Kitty Unicode placeholders are image-placement metadata, not text.
+        // Their cell styling still participates in backgrounds and selection.
+        if square.c() == PLACEHOLDER {
+            previous_cell_had_extras = false;
+            continue;
+        }
+
+        // Alacritty stores emoji variation/modifier codepoints as extras;
+        // its following placeholder space is not an independently painted
+        // character. This mirrors Zed's terminal layout workaround.
+        let cell_text = state.cell_text(row, col).unwrap_or_else(|| " ".to_string());
+        if square.c() == ' ' && previous_cell_had_extras {
+            previous_cell_had_extras = false;
+            continue;
+        }
+        previous_cell_had_extras = cell_text.chars().nth(1).is_some();
+
+        let text = display_cell_text(&cell_text);
+        let underline = style.flags.intersects(StyleFlags::ALL_UNDERLINES);
+        if matches!(square.c(), '\0' | ' ') && !underline {
+            continue;
+        }
+
+        let cursor_visible = !composing
+            && !selected
+            && state.display_offset == 0
+            && cursor_cell == Some((row, col))
+            && focused
+            && state.cursor_state.content == CursorShape::Block
+            && (!state.cursor_blinking || blink_phase);
+        let hyperlink_hovered =
+            hovered_link.is_some_and(|link| (row, col) >= link.start && (row, col) <= link.end);
+        let style = GridTextStyle {
+            fg,
+            bg,
+            bold: style.flags.contains(StyleFlags::BOLD),
+            italic: style.flags.contains(StyleFlags::ITALIC),
+            underline: underline || hyperlink_hovered,
+            underline_wavy: style.flags.contains(StyleFlags::UNDERCURL),
+            selected,
+            cursor: cursor_visible,
+        };
+
+        if let Some(current) = paint.text_runs.last_mut()
+            && current.row == row
+            && current.start_col + current.cell_count == col
+            && current.style == style
+        {
+            current.text.push_str(&text);
+            current.cell_count += 1;
+        } else {
+            paint.text_runs.push(BatchedTextRun {
+                row,
+                start_col: col,
+                text,
+                cell_count: 1,
+                style,
+            });
+        }
+    }
+    paint
 }
 
 fn push_background(backgrounds: &mut Vec<BackgroundRect>, row: usize, col: usize, color: Hsla) {
@@ -1701,8 +2127,8 @@ fn push_background(backgrounds: &mut Vec<BackgroundRect>, row: usize, col: usize
     }
 }
 
-fn display_cell_text(cell: &Cell) -> String {
-    let mut characters = cell.text.chars();
+fn display_cell_text(cell_text: &str) -> String {
+    let mut characters = cell_text.chars();
     let Some(first) = characters.next() else {
         return " ".to_string();
     };
@@ -1712,36 +2138,40 @@ fn display_cell_text(cell: &Cell) -> String {
     text
 }
 
-fn cell_colors(cell: &Cell) -> (Color, Color) {
-    let (mut fg, mut bg) = (cell.fg, cell.bg);
-    if cell.inverse {
+fn cell_colors(
+    foreground: AnsiColor,
+    background: AnsiColor,
+    flags: StyleFlags,
+) -> (AnsiColor, AnsiColor) {
+    let (mut fg, mut bg) = (foreground, background);
+    if flags.contains(StyleFlags::INVERSE) {
         std::mem::swap(&mut fg, &mut bg);
     }
     (fg, bg)
 }
 
-fn layout_cursor(state: &TermState, palette: TerminalPalette) -> Option<CursorPaint> {
+fn layout_cursor(state: &TermSnapshot, palette: TerminalPalette) -> Option<CursorPaint> {
     if state.display_offset != 0 {
         return None;
     }
     let (row, col) = state.cursor?;
-    let cell = state.cell(row, col)?;
-    let (start_col, cell_count, color_cell) = if cell.wide_spacer && col > 0 {
-        let base = state.cell(row, col - 1)?;
-        (col - 1, 2, base)
-    } else if cell.wide {
-        (col, 2, cell)
+    let square = *state.cell(row, col)?;
+    let (start_col, cell_count, color_col) = if square.wide() == Wide::Spacer && col > 0 {
+        (col - 1, 2, col - 1)
+    } else if square.wide() == Wide::Wide {
+        (col, 2, col)
     } else {
-        (col, 1, cell)
+        (col, 1, col)
     };
-    let (fg, _) = cell_colors(color_cell);
+    let style = state.style(row, color_col)?;
+    let (fg, _) = cell_colors(style.fg, style.bg, style.flags);
     Some(CursorPaint {
         row,
         start_col,
         cell_count,
         color: terminal_color(fg, palette).opacity(0.72),
-        visible: !color_cell.selected,
-        shape: state.cursor_shape,
+        visible: !state.is_selected(row, color_col),
+        shape: state.cursor_state.content,
         focused: true,
     })
 }
@@ -1989,20 +2419,343 @@ fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32
     Some(lines.clamp(1, 3) * pixels.signum() as i32)
 }
 
+fn terminal_image(graphic: GraphicData) -> Option<TerminalImage> {
+    if graphic.width == 0 || graphic.height == 0 {
+        return None;
+    }
+    let pixel_count = graphic.width.checked_mul(graphic.height)?;
+    let bgra = match graphic.color_type {
+        ColorType::Rgba => {
+            if graphic.pixels.len() != pixel_count.checked_mul(4)? {
+                return None;
+            }
+            let mut pixels = graphic.pixels;
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            pixels
+        }
+        ColorType::Rgb => {
+            if graphic.pixels.len() != pixel_count.checked_mul(3)? {
+                return None;
+            }
+            let mut pixels = Vec::with_capacity(pixel_count.checked_mul(4)?);
+            for pixel in graphic.pixels.chunks_exact(3) {
+                pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], u8::MAX]);
+            }
+            pixels
+        }
+    };
+    let width = u32::try_from(graphic.width).ok()?;
+    let height = u32::try_from(graphic.height).ok()?;
+    // RenderImage's byte contract is BGRA even though image::RgbaImage is the
+    // storage carrier, so protocol RGB(A) is swizzled exactly once on arrival.
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    Some(TerminalImage {
+        image: Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
+        width: graphic.width,
+        height: graphic.height,
+    })
+}
+
+fn virtual_placeholder_paints(state: &TermSnapshot) -> Vec<VirtualPlaceholderPaint> {
+    let mut paints = Vec::new();
+    for (screen_line, row) in state.visible_rows.iter().enumerate() {
+        if !row.kitty_virtual_placeholder {
+            continue;
+        }
+
+        let mut current: Option<(IncompletePlacement, usize)> = None;
+        for (col, square) in row.inner.iter().take(state.cols).enumerate() {
+            if square.c() != PLACEHOLDER {
+                flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+                continue;
+            }
+
+            let Some(style) = state.style(screen_line, col) else {
+                flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+                continue;
+            };
+            let combining = square
+                .extras_id()
+                .and_then(|id| state.zero_width.get(&id))
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut cell =
+                IncompletePlacement::from_cell(style.fg, style.underline_color, combining);
+
+            if let Some((placement, _)) = current.as_mut()
+                && placement.can_append(&cell)
+            {
+                placement.append();
+                continue;
+            }
+
+            flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+            // Missing coordinates on the first cell default to zero before
+            // continuation matching, as required by kitty's placeholder rules.
+            cell.row.get_or_insert(0);
+            cell.col.get_or_insert(0);
+            current = Some((cell, col));
+        }
+        flush_virtual_placeholder_paint(&mut paints, &mut current, screen_line);
+    }
+    paints
+}
+
+fn flush_virtual_placeholder_paint(
+    paints: &mut Vec<VirtualPlaceholderPaint>,
+    current: &mut Option<(IncompletePlacement, usize)>,
+    screen_line: usize,
+) {
+    if let Some((placement, start_screen_col)) = current.take() {
+        paints.push(VirtualPlaceholderPaint {
+            run: placement.complete(),
+            screen_line,
+            start_screen_col,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_graphic_overlays(
+    atlas_placements: &[AtlasPlacement],
+    kitty_placements: &[KittyPlacement],
+    virtual_placements: &HashMap<(u32, u32), VirtualPlacement>,
+    placeholder_paints: &[VirtualPlaceholderPaint],
+    images: &HashMap<u64, TerminalImage>,
+    viewport: &OverlayViewport,
+    clip: (f32, f32, f32, f32),
+) -> Vec<OrderedGraphicOverlay> {
+    let mut overlays = Vec::new();
+
+    for placement in atlas_placements {
+        if !images.contains_key(&placement.image_key) {
+            continue;
+        }
+        let Some(geometry) = atlas_overlay_geometry(placement, viewport) else {
+            continue;
+        };
+        push_graphic_overlay(
+            &mut overlays,
+            GraphicOverlay {
+                image_id: placement.image_key,
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                z_index: -1,
+                source_rect: geometry.source_rect,
+            },
+            0,
+            0,
+            clip,
+        );
+    }
+
+    for placement in kitty_placements {
+        let image_key = kitty_image_key(placement.image_id);
+        let Some(image) = images.get(&image_key) else {
+            continue;
+        };
+        let Some(geometry) = kitty_overlay_geometry(placement, image.width, image.height, viewport)
+        else {
+            continue;
+        };
+        push_graphic_overlay(
+            &mut overlays,
+            GraphicOverlay {
+                image_id: image_key,
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                z_index: placement.z_index,
+                source_rect: geometry.source_rect,
+            },
+            1,
+            placement.placement_id,
+            clip,
+        );
+    }
+
+    // Virtual placements have no z-index field in rio's metadata; rio's own
+    // renderer assigns -1, which puts them below glyphs like atlas graphics.
+    for placeholder in placeholder_paints {
+        let placement = virtual_placements
+            .get(&(placeholder.run.image_id, placeholder.run.placement_id))
+            .or_else(|| virtual_placements.get(&(placeholder.run.image_id, 0)));
+        let Some(placement) = placement else {
+            continue;
+        };
+        let image_key = kitty_image_key(placeholder.run.image_id);
+        let Some(image) = images.get(&image_key) else {
+            continue;
+        };
+        let (Ok(image_width), Ok(image_height)) =
+            (u32::try_from(image.width), u32::try_from(image.height))
+        else {
+            continue;
+        };
+        let Some(geometry) = compute_run_geometry(
+            &placeholder.run,
+            placement.columns,
+            placement.rows,
+            image_width,
+            image_height,
+            (placement.x, placement.y, placement.width, placement.height),
+            viewport.cell_width,
+            viewport.cell_height,
+            viewport.origin_x,
+            viewport.origin_y,
+            placeholder.screen_line,
+            placeholder.start_screen_col,
+        ) else {
+            continue;
+        };
+        push_graphic_overlay(
+            &mut overlays,
+            GraphicOverlay {
+                image_id: image_key,
+                x: geometry.x,
+                y: geometry.y,
+                width: geometry.width,
+                height: geometry.height,
+                z_index: -1,
+                source_rect: geometry.source_rect,
+            },
+            2,
+            placement.placement_id,
+            clip,
+        );
+    }
+
+    overlays.sort_by_key(|ordered| {
+        (
+            ordered.overlay.z_index,
+            ordered.protocol_order,
+            ordered.overlay.image_id,
+            ordered.placement_order,
+        )
+    });
+    overlays
+}
+
+fn push_graphic_overlay(
+    overlays: &mut Vec<OrderedGraphicOverlay>,
+    mut overlay: GraphicOverlay,
+    protocol_order: u8,
+    placement_order: u32,
+    clip: (f32, f32, f32, f32),
+) {
+    if clip_overlay_to_rect(&mut overlay, clip.0, clip.1, clip.2, clip.3) {
+        overlays.push(OrderedGraphicOverlay {
+            overlay,
+            protocol_order,
+            placement_order,
+        });
+    }
+}
+
+fn paint_graphic_overlays(
+    window: &mut Window,
+    overlays: &[OrderedGraphicOverlay],
+    images: &HashMap<u64, TerminalImage>,
+    scale_factor: f32,
+    above_text: bool,
+) {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return;
+    }
+    for ordered in overlays {
+        let overlay = &ordered.overlay;
+        if (overlay.z_index >= 0) != above_text {
+            continue;
+        }
+        let Some(image) = images.get(&overlay.image_id) else {
+            continue;
+        };
+        paint_graphic_overlay(window, overlay, image, scale_factor);
+    }
+}
+
+fn paint_graphic_overlay(
+    window: &mut Window,
+    overlay: &GraphicOverlay,
+    image: &TerminalImage,
+    scale_factor: f32,
+) {
+    let [u0, v0, u1, v1] = overlay.source_rect;
+    let source_width = u1 - u0;
+    let source_height = v1 - v0;
+    if !overlay.x.is_finite()
+        || !overlay.y.is_finite()
+        || !overlay.width.is_finite()
+        || !overlay.height.is_finite()
+        || !u0.is_finite()
+        || !v0.is_finite()
+        || !source_width.is_finite()
+        || !source_height.is_finite()
+        || overlay.width <= 0.0
+        || overlay.height <= 0.0
+        || source_width <= 0.0
+        || source_height <= 0.0
+    {
+        return;
+    }
+
+    let target_x = overlay.x / scale_factor;
+    let target_y = overlay.y / scale_factor;
+    let target_width = overlay.width / scale_factor;
+    let target_height = overlay.height / scale_factor;
+    let full_width = target_width / source_width;
+    let full_height = target_height / source_height;
+    let image_x = target_x - u0 * full_width;
+    let image_y = target_y - v0 * full_height;
+    let target_bounds = Bounds::new(
+        point(px(target_x), px(target_y)),
+        size(px(target_width), px(target_height)),
+    );
+    let image_bounds = Bounds::new(
+        point(px(image_x), px(image_y)),
+        size(px(full_width), px(full_height)),
+    );
+    let _ = window.paint_image(
+        target_bounds,
+        image_bounds,
+        Default::default(),
+        image.image.clone(),
+        0,
+        false,
+    );
+}
+
 fn terminal_font() -> gpui::Font {
     let mut terminal_font = font(TERMINAL_FONT_FAMILY);
     terminal_font.features = FontFeatures::disable_ligatures();
     terminal_font
 }
 
-fn terminal_color(color: Color, palette: TerminalPalette) -> Hsla {
+fn terminal_color(color: AnsiColor, palette: TerminalPalette) -> Hsla {
     match color {
-        Color::DefaultForeground => palette.foreground,
-        Color::DefaultBackground => palette.background,
-        Color::Rgb(r, g, b) => {
-            rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into()
+        AnsiColor::Named(
+            NamedColor::Foreground | NamedColor::LightForeground | NamedColor::DimForeground,
+        ) => palette.foreground,
+        AnsiColor::Named(NamedColor::Background) => palette.background,
+        AnsiColor::Named(NamedColor::Cursor) => palette.foreground,
+        AnsiColor::Named(NamedColor::DimBlack) => terminal_color(AnsiColor::Indexed(0), palette),
+        AnsiColor::Named(NamedColor::DimRed) => terminal_color(AnsiColor::Indexed(1), palette),
+        AnsiColor::Named(NamedColor::DimGreen) => terminal_color(AnsiColor::Indexed(2), palette),
+        AnsiColor::Named(NamedColor::DimYellow) => terminal_color(AnsiColor::Indexed(3), palette),
+        AnsiColor::Named(NamedColor::DimBlue) => terminal_color(AnsiColor::Indexed(4), palette),
+        AnsiColor::Named(NamedColor::DimMagenta) => terminal_color(AnsiColor::Indexed(5), palette),
+        AnsiColor::Named(NamedColor::DimCyan) => terminal_color(AnsiColor::Indexed(6), palette),
+        AnsiColor::Named(NamedColor::DimWhite) => terminal_color(AnsiColor::Indexed(7), palette),
+        AnsiColor::Named(named) => terminal_color(AnsiColor::Indexed(named as u8), palette),
+        AnsiColor::Spec(color) => {
+            rgb((u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)).into()
         }
-        Color::Indexed(index) => {
+        AnsiColor::Indexed(index) => {
             const ANSI: [u32; 16] = [
                 0x1f2329, 0xe45649, 0x50a14f, 0xc18401, 0x4078f2, 0xa626a4, 0x0184bc, 0xabb2bf,
                 0x5c6370, 0xff616e, 0x7bc275, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xffffff,
@@ -2027,20 +2780,47 @@ fn terminal_color(color: Color, palette: TerminalPalette) -> Hsla {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use term::rio_vt::{
+        ansi::KeyboardModes,
+        crosswords::{grid::row::Row, pos::CursorState, square::Square, style::Style},
+        event::TerminalDamage,
+    };
 
-    fn cell(ch: char, text: &str, wide: bool, wide_spacer: bool) -> Cell {
-        Cell {
-            ch,
-            text: text.to_string(),
-            fg: Color::DefaultForeground,
-            bg: Color::DefaultBackground,
-            bold: false,
-            italic: false,
-            underline: false,
-            inverse: false,
-            selected: false,
-            wide,
-            wide_spacer,
+    fn cell(ch: char, wide: Wide) -> Square {
+        let mut square = Square::from_char(ch);
+        square.set_wide(wide);
+        square
+    }
+
+    fn snapshot(cells: Vec<Square>) -> TermSnapshot {
+        let cols = cells.len();
+        let mut row = Row::new(cols);
+        row.inner = cells;
+        TermSnapshot {
+            cols,
+            screen_lines: 1,
+            visible_rows: vec![row],
+            row_damage: vec![true],
+            damage: TerminalDamage::Full,
+            cursor_state: CursorState::default(),
+            cursor: None,
+            cursor_blinking: false,
+            title: String::new(),
+            exited: false,
+            exit_code: None,
+            display_offset: 0,
+            history_size: 0,
+            lines_evicted: 0,
+            graphics_updates: None,
+            atlas_placements: Vec::new(),
+            kitty_placements: Vec::new(),
+            kitty_virtual_placements: HashMap::new(),
+            mode: Mode::empty(),
+            keyboard_mode: KeyboardModes::NO_MODE,
+            selection: None,
+            styles: vec![Style::default()],
+            zero_width: HashMap::new(),
         }
     }
 
@@ -2078,20 +2858,7 @@ mod tests {
 
     #[test]
     fn unselected_default_grid_has_no_selection_or_ansi_background_paint() {
-        let state = TermState {
-            cols: 1,
-            rows: 1,
-            cells: vec![cell('x', "x", false, false)],
-            cursor: None,
-            cursor_shape: CursorShape::Block,
-            cursor_blinking: false,
-            title: String::new(),
-            exited: false,
-            exit_code: None,
-            display_offset: 0,
-            history_size: 0,
-            mode: term::ModeSnapshot::default(),
-        };
+        let state = snapshot(vec![cell('x', Wide::Narrow)]);
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
             background: rgb(0x000000).into(),
@@ -2200,28 +2967,15 @@ mod tests {
     #[test]
     fn batches_mixed_cjk_at_physical_column_boundaries() {
         let cells = vec![
-            cell('a', "a", false, false),
-            cell('中', "中", true, false),
-            cell(' ', " ", false, true),
-            cell('b', "b", false, false),
-            cell('文', "文", true, false),
-            cell(' ', " ", false, true),
-            cell('c', "c", false, false),
+            cell('a', Wide::Narrow),
+            cell('中', Wide::Wide),
+            cell(' ', Wide::Spacer),
+            cell('b', Wide::Narrow),
+            cell('文', Wide::Wide),
+            cell(' ', Wide::Spacer),
+            cell('c', Wide::Narrow),
         ];
-        let state = TermState {
-            cols: cells.len(),
-            rows: 1,
-            cells,
-            cursor: None,
-            cursor_shape: CursorShape::Block,
-            cursor_blinking: false,
-            title: String::new(),
-            exited: false,
-            exit_code: None,
-            display_offset: 0,
-            history_size: 0,
-            mode: term::ModeSnapshot::default(),
-        };
+        let state = snapshot(cells);
         let palette = TerminalPalette {
             foreground: rgb(0xffffff).into(),
             background: rgb(0x000000).into(),
@@ -2243,11 +2997,64 @@ mod tests {
     }
 
     #[test]
+    fn row_cache_reuses_clean_rows_and_rebuilds_damaged_rows() {
+        let palette = TerminalPalette {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            selection: rgb(0x336699).into(),
+        };
+        let mut state = snapshot(vec![cell('a', Wide::Narrow)]);
+        let mut caches = HashMap::new();
+        let first = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(first.text_runs[0].text, "a");
+
+        state.visible_rows[0].inner[0] = cell('b', Wide::Narrow);
+        state.damage = TerminalDamage::CursorOnly;
+        state.row_damage[0] = false;
+        let cached = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(cached.text_runs[0].text, "a");
+
+        state.damage = TerminalDamage::Partial;
+        state.row_damage[0] = true;
+        let rebuilt = layout_grid_cached(&mut caches, 7, &state, palette, None, None, true, true);
+        assert_eq!(rebuilt.text_runs[0].text, "b");
+    }
+
+    #[test]
+    fn undercurl_maps_to_wavy_underline() {
+        let mut square = cell('x', Wide::Narrow);
+        square.set_style_id(1);
+        let mut state = snapshot(vec![square]);
+        state.styles.push(Style {
+            flags: StyleFlags::UNDERCURL,
+            ..Style::default()
+        });
+        let palette = TerminalPalette {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            selection: rgb(0x336699).into(),
+        };
+
+        let run = layout_grid(&state, palette, false, None, true, true)
+            .text_runs
+            .remove(0);
+        assert!(run.style.underline);
+        assert!(run.style.underline_wavy);
+    }
+
+    #[test]
     fn printable_keys_defer_to_input_handler_but_control_keys_stay_raw() {
-        let mode = term::ModeSnapshot::default();
+        let mode = Mode::empty();
         let encode = |key: &str| {
             let key = gpui::Keystroke::parse(key).unwrap();
-            mappings::key_bytes(&key.key, term_modifiers(key.modifiers), mode, true)
+            mappings::key_bytes(
+                &key.key,
+                term_modifiers(key.modifiers),
+                mode,
+                term::rio_vt::ansi::KeyboardModes::NO_MODE,
+                None,
+                true,
+            )
         };
         assert_eq!(encode("a"), None);
         assert_eq!(encode("ctrl-space"), Some(vec![0]));

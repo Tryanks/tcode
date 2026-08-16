@@ -3,18 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::overlay::{Notification, OverlayExt as _};
+use crate::widgets::input::{Copy, SelectAll};
+use crate::widgets::menu::ContextMenuExt as _;
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, Element, ElementId, Entity, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, ParentElement as _, Pixels, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    StyledExt as _, WindowExt as _,
-    input::{Copy, SelectAll},
-    menu::ContextMenuExt as _,
-    notification::Notification,
-};
+use gpui_base::StyledExt as _;
 use serde::Deserialize;
 
 use super::{link_target::LinkTarget, state::MarkdownState, window_selection};
@@ -51,6 +49,7 @@ pub struct MarkdownView {
     state: Entity<MarkdownState>,
     style: StyleRefinement,
     selectable: Option<bool>,
+    compact_headings: Option<bool>,
     base_dir: Option<PathBuf>,
 }
 
@@ -62,8 +61,16 @@ impl MarkdownView {
             state: state.clone(),
             style: StyleRefinement::default(),
             selectable: None,
+            compact_headings: None,
             base_dir: None,
         }
+    }
+
+    /// Render headings at chat scale (h1 17px / h2 15px / h3+ 13.5px) instead
+    /// of document scale.
+    pub fn compact_headings(mut self, compact: bool) -> Self {
+        self.compact_headings = Some(compact);
+        self
     }
 
     /// Set whether text participates in window-level selection.
@@ -116,6 +123,9 @@ impl Element for MarkdownView {
         state.update(cx, |state, cx| {
             if let Some(selectable) = self.selectable {
                 state.set_selectable(selectable, cx);
+            }
+            if let Some(compact) = self.compact_headings {
+                state.set_compact_headings(compact, cx);
             }
             if let Some(base_dir) = &self.base_dir {
                 state.set_base_dir(Some(base_dir.clone()), cx);
@@ -392,7 +402,7 @@ mod tests {
 
     #[gpui::test]
     fn renders_gfm_document_without_panicking(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             TestRoot::new(
@@ -408,7 +418,7 @@ mod tests {
 
     #[gpui::test]
     fn markdown_reports_intrinsic_height_inside_outer_list(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) = cx.add_window_view(|_, cx| OuterListRoot::new(cx));
         let cx: &mut VisualTestContext = cx;
@@ -426,7 +436,7 @@ mod tests {
 
     #[gpui::test]
     fn streamed_append_preserves_earlier_block_measurements(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("stable block\n\nstreaming block", cx));
@@ -450,7 +460,7 @@ mod tests {
 
     #[gpui::test]
     fn wide_table_shrinks_to_viewport_and_wraps(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             TestRoot::new(
@@ -481,7 +491,7 @@ mod tests {
 
     #[gpui::test]
     fn small_table_stretches_to_viewport_width(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("| a | b |\n| --- | --- |\n| 1 | 2 |", cx));
@@ -503,7 +513,7 @@ mod tests {
 
     #[gpui::test]
     fn right_aligned_column_justifies_cell_content(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| {
             TestRoot::new("| num | label |\n| ---: | --- |\n| 1 | value |", cx)
@@ -534,7 +544,7 @@ mod tests {
 
     #[gpui::test]
     fn wide_table_track_contains_the_last_cell(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let header = (0..20).map(|ix| format!("column-{ix}")).collect::<Vec<_>>();
         let separator = vec!["---"; header.len()];
@@ -571,7 +581,7 @@ mod tests {
 
     #[gpui::test]
     fn streaming_table_growth_updates_track_height(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("| column |\n| --- |\n| streaming", cx));
@@ -612,7 +622,7 @@ mod tests {
 
     #[gpui::test]
     fn clipped_markdown_cannot_start_selection(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("visible\n\nhidden selection text", cx));
@@ -642,7 +652,7 @@ mod tests {
 
     #[gpui::test]
     fn cross_view_drag_copies_in_document_order(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| CrossViewRoot::new(cx));
         let cx: &mut VisualTestContext = cx;

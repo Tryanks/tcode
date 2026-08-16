@@ -3,17 +3,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::overlay::{Notification, OverlayExt as _};
+use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
     Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Root, WindowExt as _,
-    notification::Notification,
-    resizable::{ResizableState, h_resizable, resizable_panel},
-};
+use gpui_base::{ResizableState, h_resizable, resizable_panel};
 use tcode_core::ui::RightTab;
 use tcode_protocol::Command;
 use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
@@ -152,6 +150,7 @@ fn next_sidebar_overlay_visibility(
     transition: SidebarHoverTransition,
     collapsed: bool,
     route: Route,
+    popover_open: bool,
 ) -> bool {
     if !collapsed || route != Route::Chat {
         return false;
@@ -160,7 +159,11 @@ fn next_sidebar_overlay_visibility(
     match transition {
         SidebarHoverTransition::Trigger(true) | SidebarHoverTransition::Overlay(true) => true,
         SidebarHoverTransition::Trigger(false) => currently_visible,
-        SidebarHoverTransition::Overlay(false) => false,
+        // A menu spawned from the sidebar (new-thread dropdown, row context
+        // menu) is an occluding deferred layer: hovering it reads as leaving
+        // the overlay. Treat an open popover's lifetime as continued hover;
+        // the render pass reaps the overlay once the popover dismisses.
+        SidebarHoverTransition::Overlay(false) => currently_visible && popover_open,
     }
 }
 
@@ -365,9 +368,6 @@ impl AppShell {
 
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sheet_layer = Root::render_sheet_layer(window, cx);
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-        let notification_layer = Root::render_notification_layer(window, cx);
         let route = self.window_state.read(cx).route;
         let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
@@ -382,7 +382,10 @@ impl Render for AppShell {
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let (diff_open, right_tab, diff_expanded) = self.store.read(cx).shell_panel_state();
+        let panel = self.store.read(cx).shell_panel_state();
+        let diff_open = panel.right_panel_open;
+        let right_tab = panel.right_tab;
+        let diff_expanded = panel.right_panel_expanded;
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
         let diff_expanded = diff_expanded && right_tab != RightTab::Preview;
@@ -422,10 +425,7 @@ impl Render for AppShell {
                         .min_h_0()
                         .overflow_hidden()
                         .child(self.settings_page.clone()),
-                )
-                .children(sheet_layer)
-                .children(dialog_layer)
-                .children(notification_layer);
+                );
         }
 
         // Which entity fills the right panel: the Preview tab shows the embedded
@@ -544,6 +544,17 @@ impl Render for AppShell {
             // and runs to the window's left edge. The trigger and overlay are
             // independent absolute siblings, so neither reflows the columns.
             let overlay_width = self.sidebar_width.get();
+            // A popover keeps the overlay alive through its occluded-hover
+            // false transition (see next_sidebar_overlay_visibility). When the
+            // popover dismisses with the pointer already outside the overlay,
+            // no hover event follows — reap the stale overlay here instead
+            // (dismissal refreshes the window, so this pass always runs).
+            if self.sidebar_overlay_visible
+                && !gpui_base::GlobalState::is_in_deferred_context(cx)
+                && window.mouse_position().x > overlay_width
+            {
+                self.sidebar_overlay_visible = false;
+            }
             div()
                 .relative()
                 .size_full()
@@ -570,6 +581,7 @@ impl Render for AppShell {
                                 SidebarHoverTransition::Trigger(*hovered),
                                 collapsed,
                                 route,
+                                gpui_base::GlobalState::is_in_deferred_context(cx),
                             );
                             if this.sidebar_overlay_visible != visible {
                                 this.sidebar_overlay_visible = visible;
@@ -606,6 +618,7 @@ impl Render for AppShell {
                                     SidebarHoverTransition::Overlay(*hovered),
                                     collapsed,
                                     route,
+                                    gpui_base::GlobalState::is_in_deferred_context(cx),
                                 );
                                 if this.sidebar_overlay_visible != visible {
                                     this.sidebar_overlay_visible = visible;
@@ -656,9 +669,6 @@ impl Render for AppShell {
                     .child(workspace),
             )
             .when(palette_open, |this| this.child(self.palette.clone()))
-            .children(sheet_layer)
-            .children(dialog_layer)
-            .children(notification_layer)
     }
 }
 
@@ -667,7 +677,7 @@ mod tests {
     use super::*;
 
     fn transition(current: bool, transition: SidebarHoverTransition) -> bool {
-        next_sidebar_overlay_visibility(current, transition, true, Route::Chat)
+        next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false)
     }
 
     #[test]
@@ -693,12 +703,32 @@ mod tests {
     }
 
     #[test]
+    fn open_popover_keeps_overlay_through_occluded_hover_loss() {
+        assert!(next_sidebar_overlay_visibility(
+            true,
+            SidebarHoverTransition::Overlay(false),
+            true,
+            Route::Chat,
+            true,
+        ));
+        // But a popover cannot conjure an overlay that is already closed.
+        assert!(!next_sidebar_overlay_visibility(
+            false,
+            SidebarHoverTransition::Overlay(false),
+            true,
+            Route::Chat,
+            true,
+        ));
+    }
+
+    #[test]
     fn expanded_sidebar_forces_overlay_closed() {
         assert!(!next_sidebar_overlay_visibility(
             true,
             SidebarHoverTransition::Overlay(true),
             false,
             Route::Chat,
+            false,
         ));
     }
 
@@ -709,6 +739,7 @@ mod tests {
             SidebarHoverTransition::Overlay(true),
             true,
             Route::Settings,
+            false,
         ));
     }
 }

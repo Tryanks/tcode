@@ -9,6 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::highlight::HighlightTheme;
+use crate::theme::ActiveTheme as _;
+use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
@@ -17,9 +20,7 @@ use gpui::{
     StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px, relative,
     rems, size,
 };
-use gpui_component::{
-    ActiveTheme as _, h_flex, highlighter::HighlightTheme, tooltip::Tooltip, v_flex,
-};
+use gpui_base::{h_flex, v_flex};
 
 use crate::{diff::model::sub_runs, highlight};
 
@@ -58,19 +59,6 @@ struct CodeCacheKey {
 struct CodeHighlightCache {
     entries: HashMap<CodeCacheKey, SharedHighlightRuns>,
     order: VecDeque<CodeCacheKey>,
-}
-
-#[derive(Clone, Hash, PartialEq, Eq)]
-struct CodeWidthCacheKey {
-    code: String,
-    font_size_bits: u32,
-    font_family: SharedString,
-}
-
-#[derive(Default)]
-struct CodeWidthCache {
-    entries: HashMap<CodeWidthCacheKey, Pixels>,
-    order: VecDeque<CodeWidthCacheKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,7 +110,6 @@ fn dominant_scroll_axis(delta_x: f32, delta_y: f32) -> ScrollGestureAxis {
 
 thread_local! {
     static CODE_HIGHLIGHTS: RefCell<CodeHighlightCache> = RefCell::new(CodeHighlightCache::default());
-    static CODE_WIDTHS: RefCell<CodeWidthCache> = RefCell::new(CodeWidthCache::default());
 }
 
 #[derive(Clone)]
@@ -398,7 +385,16 @@ fn render_block(
                 6 => (1., FontWeight::MEDIUM),
                 _ => (1., FontWeight::NORMAL),
             };
-            let size = HEADING_BASE_FONT_SIZE * scale;
+            // In a chat message a heading is a section label, not a title page.
+            let size = if state.read(cx).compact_headings {
+                match level {
+                    1 => px(17.),
+                    2 => px(15.),
+                    _ => px(13.5),
+                }
+            } else {
+                HEADING_BASE_FONT_SIZE * scale
+            };
             div()
                 .id(options.path.clone())
                 .pb(rems(0.3))
@@ -453,7 +449,7 @@ fn render_block(
                 .into_any_element()
         }
         BlockNode::ListItem { .. } => render_list_item(node, 0, options, state, window, cx),
-        BlockNode::CodeBlock(code) => render_code_block(code, &options, state, window, cx),
+        BlockNode::CodeBlock(code) => render_code_block(code, &options, state, cx),
         BlockNode::Table(table) => render_table(table, &options, state, window, cx),
         BlockNode::HorizontalRule => div()
             .id(options.path)
@@ -572,7 +568,7 @@ fn marks_for_node(marks: &[(Range<usize>, TextMark)], offset: usize, cx: &mut Ap
             });
         }
         if mark.code {
-            highlight.background_color = Some(*cx.theme().tokens.muted);
+            highlight.background_color = Some(cx.theme().tokens.colors.muted);
             fonts.push((range.clone(), cx.theme().mono_font_family.clone()));
         }
         if let Some(link) = mark.link.clone() {
@@ -661,7 +657,7 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
                 code_style: Some(InlineCodeStyle {
                     font_family: cx.theme().mono_font_family.clone(),
                     font_size: INLINE_CODE_FONT_SIZE,
-                    background: *cx.theme().tokens.muted,
+                    background: cx.theme().tokens.colors.muted,
                     radius: INLINE_CODE_RADIUS,
                 }),
             });
@@ -739,7 +735,7 @@ fn render_list_item(
                                     .border_1()
                                     .border_color(cx.theme().primary)
                                     .when(checked, |this| {
-                                        this.bg(cx.theme().tokens.primary)
+                                        this.bg(cx.theme().tokens.colors.primary)
                                             .text_color(cx.theme().primary_foreground)
                                             .text_xs()
                                             .child("✓")
@@ -798,50 +794,6 @@ fn cached_highlights(code: &str, lang: &str, theme: &HighlightTheme) -> SharedHi
     })
 }
 
-fn cached_code_width(
-    code: &str,
-    lines: &[&str],
-    font_size: Pixels,
-    font_family: &SharedString,
-    window: &mut Window,
-) -> Pixels {
-    let key = CodeWidthCacheKey {
-        code: code.to_string(),
-        font_size_bits: f32::from(font_size).to_bits(),
-        font_family: font_family.clone(),
-    };
-    CODE_WIDTHS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(width) = cache.entries.get(&key) {
-            return *width;
-        }
-
-        let mut text_style = window.text_style();
-        text_style.font_family = font_family.clone();
-        text_style.font_size = gpui::AbsoluteLength::Pixels(font_size);
-        let max_width = lines.iter().fold(px(0.), |max_width, line| {
-            if line.is_empty() {
-                max_width
-            } else {
-                let width = window
-                    .text_system()
-                    .layout_line(line, font_size, &[text_style.to_run(line.len())], None)
-                    .width;
-                max_width.max(width)
-            }
-        });
-        while cache.entries.len() >= CODE_CACHE_CAPACITY {
-            let Some(oldest) = cache.order.pop_front() else {
-                break;
-            };
-            cache.entries.remove(&oldest);
-        }
-        cache.order.push_back(key.clone());
-        cache.entries.insert(key, max_width);
-        max_width
-    })
-}
-
 /// Split code content into display lines. The fence's single terminating
 /// newline is a delimiter, not content; genuine trailing blank lines survive
 /// (`"a\n\n"` → `["a", ""]`).
@@ -857,7 +809,6 @@ fn render_code_block(
     code: &CodeBlock,
     options: &RenderOptions,
     view: &Entity<MarkdownState>,
-    window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
     let lang = code.lang.as_deref().unwrap_or("text");
@@ -878,13 +829,7 @@ fn render_code_block(
     let mut offset = 0;
     let mut rendered_lines = Vec::with_capacity(lines.len());
     let mono_font_family = cx.theme().mono_font_family.clone();
-    let max_width = cached_code_width(
-        code_text,
-        &lines,
-        INLINE_CODE_FONT_SIZE,
-        &mono_font_family,
-        window,
-    );
+    // Long lines soft-wrap in place; nothing scrolls out of reach.
     for (ix, (line, line_state)) in lines.iter().zip(states).enumerate() {
         let end = offset + line.len();
         let runs = sub_runs(&all_runs, offset, end);
@@ -892,7 +837,7 @@ fn render_code_block(
             div()
                 .id(("code-line", ix))
                 .min_h(px(18.))
-                .whitespace_nowrap()
+                .whitespace_normal()
                 .font_family(mono_font_family.clone())
                 .text_size(INLINE_CODE_FONT_SIZE)
                 .child(Inline::new(
@@ -906,26 +851,16 @@ fn render_code_block(
         );
         offset = end.saturating_add(1);
     }
-    let scroll_key: SharedString =
-        format!("markdown-code-scroll-{}-{}", view.entity_id(), options.path).into();
-    let scroll = window.use_keyed_state(scroll_key, cx, |_, _| HorizontalScrollState::default());
-    let track = v_flex()
-        .min_w_full()
-        .w(max_width + px(24.))
-        .children(rendered_lines);
     div()
         .id(options.path.clone())
         .pb(if options.is_last { rems(0.) } else { rems(1.) })
-        .child(horizontal_scroll_area(
-            format!("{}-viewport", options.path),
-            &scroll,
-            cx,
+        .child(
             div()
                 .p_3()
                 .rounded(cx.theme().radius)
-                .bg(cx.theme().tokens.muted)
-                .child(track),
-        ))
+                .bg(cx.theme().tokens.colors.muted)
+                .child(v_flex().w_full().children(rendered_lines)),
+        )
         .into_any_element()
 }
 
@@ -1027,7 +962,7 @@ fn render_scroll_table(
                 .flex()
                 .flex_row()
                 .when(row_ix == 0, |this| {
-                    this.bg(cx.theme().tokens.muted)
+                    this.bg(cx.theme().tokens.colors.muted)
                         .font_weight(FontWeight::SEMIBOLD)
                 })
                 .when(row_ix + 1 < row_count, |this| {

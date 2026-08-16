@@ -1,19 +1,20 @@
 //! Settings → Orchestrate: lead-model identities and the child-model routing
 //! allow list. Every main model is eligible; only child dispatch is gated.
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use crate::widgets::switch::Switch;
+use crate::{
+    icon::{Icon, IconName},
+    sizing::Sizable as _,
+};
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
-use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    input::{Input, InputEvent, InputState},
-    switch::Switch,
-    v_flex,
-};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 use tcode_protocol::Command;
@@ -29,7 +30,7 @@ use crate::store::WorkspaceStore;
 struct IdentityRowState {
     provider: ProviderKind,
     model: String,
-    identity: Entity<InputState>,
+    identity: Entity<TextareaState>,
 }
 
 struct ChildRowState {
@@ -37,12 +38,12 @@ struct ChildRowState {
     model: String,
     profile_id: Option<String>,
     effort: Entity<InputState>,
-    description: Entity<InputState>,
+    description: Entity<TextareaState>,
 }
 
 pub struct OrchestrateSettingsPanel {
     store: Entity<WorkspaceStore>,
-    generic_identity: Entity<InputState>,
+    generic_identity: Entity<TextareaState>,
     identity_rows: Vec<IdentityRowState>,
     child_rows: Vec<ChildRowState>,
     identity_model_picker: Entity<ProviderModelPicker>,
@@ -60,8 +61,7 @@ impl OrchestrateSettingsPanel {
             .generic_identity
             .clone();
         let generic_identity = cx.new(|cx| {
-            InputState::new(window, cx)
-                .multi_line(true)
+            TextareaState::new(window, cx)
                 .auto_grow(4, 14)
                 .placeholder(crate::tr!("orchestrate.generic_identity.placeholder"))
                 .default_value(generic_value)
@@ -144,8 +144,7 @@ impl OrchestrateSettingsPanel {
 
         for entry in orchestrate.model_identities {
             let identity = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .auto_grow(3, 10)
                     .placeholder(crate::tr!("orchestrate.model_identity.placeholder"))
                     .default_value(entry.identity)
@@ -172,8 +171,7 @@ impl OrchestrateSettingsPanel {
                     .default_value(entry.effort.clone().unwrap_or_default())
             });
             let description = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .multi_line(true)
+                TextareaState::new(window, cx)
                     .auto_grow(3, 9)
                     .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                     .default_value(entry.description)
@@ -476,8 +474,8 @@ impl OrchestrateSettingsPanel {
             .display_name(provider, model, profile_id, cx)
     }
 
-    /// A status message in the shared rail language: a soft neutral fill with a
-    /// floating 2px rail in the semantic color — no colored slab.
+    /// A status message in the shared rail language: inline copy beside a
+    /// semantic 2px rail, with no enclosing surface.
     fn status_note(
         &self,
         accent: gpui::Hsla,
@@ -487,24 +485,20 @@ impl OrchestrateSettingsPanel {
         h_flex()
             .w_full()
             .items_stretch()
-            .rounded(crate::material::radius_card())
-            .overflow_hidden()
-            .bg(cx.theme().muted.opacity(0.6))
+            .gap_2()
             .child(
                 div()
                     .flex_none()
                     .w(px(2.))
-                    .ml(px(8.))
-                    .my(px(8.))
+                    .my_0p5()
                     .rounded_full()
                     .bg(accent),
             )
             .child(
                 div()
                     .flex_1()
-                    .px_3()
-                    .py_2p5()
                     .text_size(px(13.))
+                    .line_height(px(18.))
                     .text_color(cx.theme().foreground)
                     .child(text.into()),
             )
@@ -577,7 +571,7 @@ impl OrchestrateSettingsPanel {
                 let option = |mode: ChildApprovalMode,
                               id: &'static str,
                               label: gpui::SharedString,
-                              cx: &mut Context<gpui_component::popover::PopoverState>|
+                              cx: &mut Context<gpui_base::PopoverState>|
                  -> AnyElement {
                     let panel = panel.clone();
                     let popover = cx.entity();
@@ -795,7 +789,7 @@ impl OrchestrateSettingsPanel {
                                     .child(crate::tr!("orchestrate.generic_identity.description")),
                             )
                             .child(
-                                Input::new(&self.generic_identity)
+                                Textarea::new(&self.generic_identity)
                                     .rounded(crate::material::radius_input()),
                             ),
                     ),
@@ -885,7 +879,7 @@ impl OrchestrateSettingsPanel {
                                     })),
                             ),
                     )
-                    .child(Input::new(&row.identity).rounded(crate::material::radius_input()))
+                    .child(Textarea::new(&row.identity).rounded(crate::material::radius_input()))
                     .into_any_element(),
             );
         }
@@ -1041,8 +1035,8 @@ impl OrchestrateSettingsPanel {
                             ),
                     )
                     .child(
-                        Input::new(&row.description)
-                            .small()
+                        Textarea::new(&row.description)
+                            .text_sm()
                             .rounded(crate::material::radius_input()),
                     )
                     .into_any_element(),

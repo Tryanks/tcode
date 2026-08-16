@@ -40,7 +40,7 @@ pub fn summarize(
 ) -> StatusSummary {
     let t = |key: &str| crate::tr!(key).into_owned();
     let checking = || StatusSummary {
-        dot: StatusDot::Warning,
+        dot: StatusDot::Loading,
         headline: t("providers.status.checking"),
         detail: t("providers.status.checking_detail"),
         email: None,
@@ -227,9 +227,9 @@ mod tests {
     #[test]
     fn status_summary_derivation_table() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        // No snapshot yet → warning dot + "checking" copy.
+        // No snapshot yet → neutral loading dot + "checking" copy.
         let s = summarize(None, true);
-        assert_eq!(s.dot, StatusDot::Warning);
+        assert_eq!(s.dot, StatusDot::Loading);
         assert_eq!(s.headline, "Checking provider status");
         assert_eq!(
             s.detail,
@@ -366,7 +366,7 @@ mod tests {
             ..ProviderSnapshot::default()
         };
         let s = summarize(Some(&in_flight), false);
-        assert_eq!(s.dot, StatusDot::Warning);
+        assert_eq!(s.dot, StatusDot::Loading);
         assert_eq!(s.headline, "Checking provider status");
         assert_eq!(
             s.detail,

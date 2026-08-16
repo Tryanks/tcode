@@ -44,6 +44,7 @@ pub struct ProviderSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusDot {
+    Loading,
     Success,
     Warning,
     Error,

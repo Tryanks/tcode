@@ -1,4 +1,4 @@
-//! Typed in-process client/host pipe.
+//! NDJSON in-process client/host pipe with typed endpoint APIs.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, EventEnvelope, HostMessage,
-    ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic,
+    ProtocolError, Query, QueryResponse, ServerEvent, Subscription, Topic, decode_client_line,
+    decode_host_line, encode_line,
 };
 use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
@@ -34,14 +35,14 @@ pub struct HostServices {
 }
 
 struct HostHandleInner {
-    client_tx: smol::channel::Sender<ClientMessage>,
-    event_rx: smol::channel::Receiver<HostMessage>,
+    client_tx: smol::channel::Sender<String>,
+    event_rx: smol::channel::Receiver<String>,
     changed_rx: smol::channel::Receiver<()>,
     stopped_rx: smol::channel::Receiver<()>,
     #[cfg(feature = "test-support")]
     test_mailbox: smol::channel::Sender<HostMsg>,
     next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<HostMessage>>>>,
+    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
     import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
     preview_requests: Mutex<Option<smol::channel::Receiver<preview_mcp::BrokerRequest>>>,
     terminals: LocalTerminalRegistry,
@@ -53,15 +54,49 @@ pub struct HostHandle {
     inner: Arc<HostHandleInner>,
 }
 
+/// Client-side receiver that decodes each host NDJSON record on receipt.
+#[derive(Clone)]
+pub struct HostEventReceiver {
+    wire: smol::channel::Receiver<String>,
+}
+
+#[derive(Debug)]
+pub enum HostEventTryRecvError {
+    Empty,
+    Closed,
+    Protocol(ProtocolError),
+}
+
+impl HostEventReceiver {
+    pub async fn recv(&self) -> Result<HostMessage, ProtocolError> {
+        let line = self.wire.recv().await.map_err(transport_error)?;
+        decode_host_line(&line)
+    }
+
+    pub fn recv_blocking(&self) -> Result<HostMessage, ProtocolError> {
+        let line = self.wire.recv_blocking().map_err(transport_error)?;
+        decode_host_line(&line)
+    }
+
+    pub fn try_recv(&self) -> Result<HostMessage, HostEventTryRecvError> {
+        let line = self.wire.try_recv().map_err(|error| match error {
+            smol::channel::TryRecvError::Empty => HostEventTryRecvError::Empty,
+            smol::channel::TryRecvError::Closed => HostEventTryRecvError::Closed,
+        })?;
+        decode_host_line(&line).map_err(HostEventTryRecvError::Protocol)
+    }
+}
+
 impl HostHandle {
     fn next_id(&self) -> u64 {
         self.inner.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     fn send_payload(&self, id: u64, payload: ClientPayload) -> Result<(), ProtocolError> {
+        let line = encode_line(&ClientMessage { id, payload })?;
         self.inner
             .client_tx
-            .try_send(ClientMessage { id, payload })
+            .try_send(line)
             .map_err(|error| ProtocolError {
                 code: "transport_closed".into(),
                 message: error.to_string(),
@@ -76,13 +111,14 @@ impl HostHandle {
             self.inner.pending.lock().unwrap().remove(&id);
             return Err(error);
         }
-        receiver.recv().await.map_err(|error| ProtocolError {
+        let line = receiver.recv().await.map_err(|error| ProtocolError {
             code: "transport_closed".into(),
             message: error.to_string(),
-        })
+        })?;
+        decode_host_line(&line)
     }
 
-    /// Fire a mutation through the typed pipe. Its correlated ack is intentionally
+    /// Fire a mutation through the serialized pipe. Its correlated ack is intentionally
     /// ignored by this fire-and-forget UI convenience.
     pub fn dispatch(&self, command: Command) -> Result<(), ProtocolError> {
         let id = self.next_id();
@@ -107,7 +143,7 @@ impl HostHandle {
         }
     }
 
-    /// Drain the host's store-write barrier, close the typed client
+    /// Drain the host's store-write barrier, close the serialized client
     /// endpoint, and wait until the state-owning thread has exited.
     ///
     /// This is the terminal lifecycle operation for the one-client in-process
@@ -141,9 +177,11 @@ impl HostHandle {
         self.send_payload(id, ClientPayload::Subscribe(subscription))
     }
 
-    /// Typed events consumed by the client-side replica pump.
-    pub fn event_receiver(&self) -> smol::channel::Receiver<HostMessage> {
-        self.inner.event_rx.clone()
+    /// Decoded events consumed by the client-side replica pump.
+    pub fn event_receiver(&self) -> HostEventReceiver {
+        HostEventReceiver {
+            wire: self.inner.event_rx.clone(),
+        }
     }
 
     /// Coalesced notification-only changes consumed by the client-side pump.
@@ -171,7 +209,8 @@ impl HostHandle {
     }
 
     /// Start an import through a command and receive its progress stream.
-    /// client-local progress receiver, correlated by the command's wire id.
+    /// The command and ack cross NDJSON; the progress receiver is a deliberate
+    /// local affordance correlated by the command's wire id.
     pub async fn start_external_import(
         &self,
         project_id: String,
@@ -197,29 +236,37 @@ impl HostHandle {
             self.inner.import_routes.lock().unwrap().remove(&id);
             return Err(error);
         }
-        let started = match ack_receiver.recv().await {
-            Ok(HostMessage::Ack {
+        let started = match ack_receiver
+            .recv()
+            .await
+            .map(|line| decode_host_line(&line))
+        {
+            Ok(Ok(HostMessage::Ack {
                 result: Ok(CommandResponse::ExternalImportStarted(started)),
                 ..
-            }) => started,
-            Ok(HostMessage::Ack {
+            })) => started,
+            Ok(Ok(HostMessage::Ack {
                 result: Ok(other), ..
-            }) => {
+            })) => {
                 self.inner.import_routes.lock().unwrap().remove(&id);
                 return Err(ProtocolError {
                     code: "unexpected_response".into(),
                     message: format!("expected external-import started result, got {other:?}"),
                 });
             }
-            Ok(HostMessage::Ack {
+            Ok(Ok(HostMessage::Ack {
                 result: Err(error), ..
-            }) => {
+            })) => {
                 self.inner.import_routes.lock().unwrap().remove(&id);
                 return Err(error);
             }
-            Ok(other) => {
+            Ok(Ok(other)) => {
                 self.inner.import_routes.lock().unwrap().remove(&id);
                 return Err(unexpected_response("external-import ack", &other));
+            }
+            Ok(Err(error)) => {
+                self.inner.import_routes.lock().unwrap().remove(&id);
+                return Err(error);
             }
             Err(error) => {
                 self.inner.import_routes.lock().unwrap().remove(&id);
@@ -240,8 +287,8 @@ impl HostHandle {
     /// the authoritative host value after an internal mutation.
     ///
     /// This is intentionally absent from production builds. The mutation
-    /// enters the real host mailbox, and any emitted events still cross the
-    /// typed event path before reaching the client.
+    /// enters the real host mailbox over a deliberate typed local affordance;
+    /// any emitted events still cross the serialized path to the client.
     #[cfg(feature = "test-support")]
     pub async fn update_state_for_test<R>(
         &self,
@@ -276,13 +323,20 @@ fn unexpected_response(expected: &str, actual: &HostMessage) -> ProtocolError {
     }
 }
 
+fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError {
+        code: "transport_closed".into(),
+        message: error.to_string(),
+    }
+}
+
 /// Spawn the dedicated host thread and return its typed client endpoint.
 pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<HostHandle> {
     fn assert_send<T: Send>() {}
     assert_send::<AppState>();
 
-    let (client_tx, client_rx) = smol::channel::unbounded::<ClientMessage>();
-    let (event_tx, event_rx) = smol::channel::unbounded::<HostMessage>();
+    let (client_tx, client_rx) = smol::channel::unbounded::<String>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<String>();
     let (changed_tx, changed_rx) = smol::channel::bounded(1);
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
@@ -357,7 +411,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
 async fn host_loop(
     mut state: AppState,
     mut cx: HostCx,
-    client: smol::channel::Receiver<ClientMessage>,
+    client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostMsg>,
     import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
 ) {
@@ -365,17 +419,24 @@ async fn host_loop(
     let mut last_active: Option<Option<tcode_protocol::SessionStatus>> = None;
     loop {
         enum Input {
-            Client(Result<Box<ClientMessage>, smol::channel::RecvError>),
+            Client(Result<String, smol::channel::RecvError>),
             Internal(Result<HostMsg, smol::channel::RecvError>),
         }
-        match smol::future::race(
-            async { Input::Client(client.recv().await.map(Box::new)) },
-            async { Input::Internal(mailbox.recv().await) },
-        )
+        match smol::future::race(async { Input::Client(client.recv().await) }, async {
+            Input::Internal(mailbox.recv().await)
+        })
         .await
         {
             Input::Client(message) => match message {
-                Ok(message) => handle_client_message(&mut state, &mut cx, *message, &import_routes),
+                Ok(line) => match decode_client_line(&line) {
+                    Ok(message) => {
+                        handle_client_message(&mut state, &mut cx, message, &import_routes)
+                    }
+                    Err(error) => cx.send_message(HostMessage::Ack {
+                        id: malformed_message_id(&line).unwrap_or(0),
+                        result: Err(error),
+                    }),
+                },
                 Err(_) => break,
             },
             Input::Internal(message) => match message {
@@ -397,6 +458,13 @@ async fn host_loop(
             }));
         }
     }
+}
+
+fn malformed_message_id(line: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(line.trim_end())
+        .ok()?
+        .get("id")?
+        .as_u64()
 }
 
 fn handle_client_message(
@@ -745,7 +813,7 @@ mod tests {
     use super::*;
 
     fn next_event(
-        events: &smol::channel::Receiver<HostMessage>,
+        events: &HostEventReceiver,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -757,11 +825,14 @@ mod tests {
                     }
                 }
                 Ok(_) => {}
-                Err(smol::channel::TryRecvError::Empty) => {
+                Err(HostEventTryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Err(smol::channel::TryRecvError::Closed) => {
+                Err(HostEventTryRecvError::Closed) => {
                     panic!("host event stream closed before the expected event")
+                }
+                Err(HostEventTryRecvError::Protocol(error)) => {
+                    panic!("invalid host event line: {error:?}")
                 }
             }
         }
@@ -777,6 +848,23 @@ mod tests {
         let store = SessionStore::open_at(data_root.clone()).expect("open session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
         let events = host.event_receiver();
+
+        host.inner
+            .client_tx
+            .try_send("{not valid ndjson}\n".into())
+            .expect("send malformed client line");
+        let decode_error = loop {
+            if let HostMessage::Ack {
+                id: 0,
+                result: Err(error),
+            } = events
+                .recv_blocking()
+                .expect("receive protocol-error response")
+            {
+                break error;
+            }
+        };
+        assert_eq!(decode_error.code, "decode_error");
 
         host.subscribe(Subscription {
             topic: Topic::Index,

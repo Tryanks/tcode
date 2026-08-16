@@ -656,7 +656,7 @@ mod tests {
     }
 
     fn setup(cx: &mut TestAppContext) -> &mut VisualTestContext {
-        cx.update(gpui_component::init);
+        cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (_, cx) = cx.add_window_view(|_, cx| DragAreaRoot::new(cx));
         let cx: &mut VisualTestContext = cx;

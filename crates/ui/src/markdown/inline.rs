@@ -7,14 +7,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::theme::ActiveTheme as _;
+use crate::widgets::tooltip::Tooltip;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
     StyledText, TextLayout, Window, point, px, quad,
 };
-use gpui_component::ActiveTheme as _;
-use gpui_component::tooltip::Tooltip;
 
 use super::{
     link_target::{LinkTarget, resolve_link},

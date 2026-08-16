@@ -1,9 +1,8 @@
 //! Host-side pseudoterminal ownership and raw byte transport.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     io::{self, ErrorKind, Read as _, Write as _},
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -14,20 +13,28 @@ use std::{
     time::Duration,
 };
 
-use alacritty_terminal::{
-    event::{OnResize as _, WindowSize},
-    tty::{self, ChildEvent, EventedPty as _, EventedReadWrite as _},
+#[cfg(unix)]
+use rio_vt::corcovado::unix::UnixReady;
+use rio_vt::{
+    corcovado::{Events, Poll, PollOpt, Ready, Token, channel},
+    event::WindowSize,
+    teletypewriter::{
+        self as tty, ChildEvent, EventedPty as _, ProcessReadWrite as _, WinsizeBuilder,
+    },
 };
-use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
-use crate::{DEFAULT_COLS, DEFAULT_ROWS, pty_info};
+use crate::{DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, DEFAULT_COLS, DEFAULT_ROWS, pty_info};
 
 const READ_BUFFER_SIZE: usize = 0x10_0000;
-const PTY_CHILD_EVENT_TOKEN: usize = 1;
-#[cfg(unix)]
-const PTY_READ_WRITE_TOKEN: usize = 0;
-#[cfg(windows)]
-const PTY_READ_WRITE_TOKEN: usize = 2;
+
+fn initial_window_size() -> WindowSize {
+    WindowSize {
+        rows: DEFAULT_ROWS as u16,
+        cols: DEFAULT_COLS as u16,
+        width: (DEFAULT_COLS * DEFAULT_CELL_WIDTH_PX as usize) as u16,
+        height: (DEFAULT_ROWS * DEFAULT_CELL_HEIGHT_PX as usize) as u16,
+    }
+}
 
 thread_local! {
     static SPAWN_CWD_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
@@ -64,7 +71,7 @@ struct Shared {
 /// Host-side handle for a child process running in a pseudoterminal.
 ///
 /// This type owns process lifecycle and byte I/O only. It has no terminal-grid
-/// state and its public API contains no Alacritty grid or parser types.
+/// state and its public API contains no grid or parser types.
 pub(crate) struct PtyHandle {
     sender: PtyCommandSender,
     notifications: async_channel::Sender<PtyEvent>,
@@ -102,27 +109,41 @@ impl PtyHandle {
         shell_name: String,
     ) -> io::Result<Self> {
         let cwd = cwd.as_ref().to_path_buf();
-        let size = PtySize {
-            cols: DEFAULT_COLS,
-            rows: DEFAULT_ROWS,
-        };
-        let options = tty::Options {
-            shell: Some(tty::Shell::new(program, args)),
-            working_directory: Some(cwd.clone()),
-            drain_on_exit: true,
-            env: HashMap::from([
-                ("TERM".to_string(), "xterm-256color".to_string()),
-                ("COLORTERM".to_string(), "truecolor".to_string()),
-                ("TERM_PROGRAM".to_string(), "tcode".to_string()),
-            ]),
-            #[cfg(windows)]
-            escape_args: false,
-        };
-        let pty = with_pty_creation(|| tty::new(&options, size.window_size(), 0))?;
+        let size = initial_window_size();
+        let environment = Some(vec![
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("COLORTERM".to_string(), "truecolor".to_string()),
+            ("TERM_PROGRAM".to_string(), "tcode".to_string()),
+        ]);
+        let working_directory = Some(cwd.to_string_lossy().into_owned());
+        #[cfg(unix)]
+        let mut pty = with_pty_creation(|| {
+            tty::create_pty_with_spawn(
+                Some(&program),
+                args,
+                &working_directory,
+                environment,
+                size.cols,
+                size.rows,
+                size.width,
+                size.height,
+            )
+        })?;
+        #[cfg(windows)]
+        let pty = with_pty_creation(|| {
+            tty::create_pty(
+                Some(&program),
+                args,
+                &working_directory,
+                environment,
+                size.cols,
+                size.rows,
+            )
+        })?;
         #[cfg(unix)]
         let pty_info = Arc::new(pty_info::PtyInfo::new(
-            pty.file().try_clone()?,
-            pty.child().id(),
+            pty.reader().try_clone()?,
+            (*pty.child.pid) as u32,
         ));
         #[cfg(not(unix))]
         let pty_info = Arc::new(pty_info::PtyInfo::new());
@@ -136,21 +157,18 @@ impl PtyHandle {
         }));
         let refresh_running = Arc::new(AtomicBool::new(false));
         let (notifications, events) = async_channel::unbounded();
-        let (sender, receiver) = mpsc::channel();
-        let poller = Arc::new(Poller::new()?);
-        let command_sender = PtyCommandSender {
-            sender,
-            poller: poller.clone(),
-        };
+        let (sender, receiver) = channel::channel();
+        let poll = Poll::new()?;
+        let command_sender = PtyCommandSender { sender };
         let event_loop = RawPtyEventLoop {
             pty,
-            poller,
+            poll,
             receiver,
             notifications: notifications.clone(),
             shared: shared.clone(),
             pty_info: pty_info.clone(),
             refresh_running: refresh_running.clone(),
-            drain_on_exit: options.drain_on_exit,
+            drain_on_exit: true,
         };
         thread::Builder::new()
             .name("tcode-pty-io".into())
@@ -250,12 +268,9 @@ impl PtyHandle {
         self.sender.send(PtyCommand::Input(bytes.into()))
     }
 
-    /// Resize the host PTY. Dimensions are clamped to at least 2×2.
-    pub fn resize(&self, cols: usize, rows: usize) -> io::Result<()> {
-        self.sender.send(PtyCommand::Resize(PtySize {
-            cols: cols.max(2),
-            rows: rows.max(2),
-        }))
+    /// Resize the host PTY with row/column and total pixel dimensions.
+    pub fn resize(&self, size: WindowSize) -> io::Result<()> {
+        self.sender.send(PtyCommand::Resize(size))
     }
 
     /// Terminate the child process.
@@ -287,49 +302,30 @@ impl PtyWriter {
     }
 }
 
-#[derive(Clone, Copy)]
-struct PtySize {
-    cols: usize,
-    rows: usize,
-}
-
-impl PtySize {
-    fn window_size(self) -> WindowSize {
-        WindowSize {
-            num_lines: self.rows as u16,
-            num_cols: self.cols as u16,
-            cell_width: 8,
-            cell_height: 17,
-        }
-    }
-}
-
 enum PtyCommand {
     Input(Vec<u8>),
-    Resize(PtySize),
+    Resize(WindowSize),
     Kill,
     Shutdown,
 }
 
 #[derive(Clone)]
 struct PtyCommandSender {
-    sender: mpsc::Sender<PtyCommand>,
-    poller: Arc<Poller>,
+    sender: channel::Sender<PtyCommand>,
 }
 
 impl PtyCommandSender {
     fn send(&self, command: PtyCommand) -> io::Result<()> {
         self.sender
             .send(command)
-            .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "PTY event loop has stopped"))?;
-        self.poller.notify()
+            .map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "PTY event loop has stopped"))
     }
 }
 
 struct RawPtyEventLoop {
     pty: tty::Pty,
-    poller: Arc<Poller>,
-    receiver: mpsc::Receiver<PtyCommand>,
+    poll: Poll,
+    receiver: channel::Receiver<PtyCommand>,
     notifications: async_channel::Sender<PtyEvent>,
     shared: Arc<Mutex<Shared>>,
     pty_info: Arc<pty_info::PtyInfo>,
@@ -339,20 +335,39 @@ struct RawPtyEventLoop {
 
 impl RawPtyEventLoop {
     fn run(mut self) {
-        let poll_mode = PollMode::Level;
-        let mut interest = PollingEvent::readable(0);
-        if unsafe { self.pty.register(&self.poller, interest, poll_mode) }.is_err() {
+        let mut tokens = (0..).map(Token::from);
+        let channel_token = tokens.next().unwrap();
+        if self
+            .poll
+            .register(
+                &self.receiver,
+                channel_token,
+                Ready::readable(),
+                PollOpt::edge(),
+            )
+            .is_err()
+        {
+            return;
+        }
+        let poll_options = PollOpt::level();
+        if self
+            .pty
+            .register(&self.poll, &mut tokens, Ready::readable(), poll_options)
+            .is_err()
+        {
+            let _ = self.poll.deregister(&self.receiver);
             return;
         }
 
-        let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
+        let mut events = Events::with_capacity(1024);
         let mut writes = VecDeque::new();
         let mut current_write = None;
         let mut buffer = vec![0; READ_BUFFER_SIZE];
+        let mut last_interest = Ready::readable();
 
         'event_loop: loop {
             events.clear();
-            match self.poller.wait(&mut events, None) {
+            match self.poll.poll(&mut events, None) {
                 Ok(_) => {}
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -363,54 +378,60 @@ impl RawPtyEventLoop {
             }
 
             for event in events.iter() {
-                match event.key {
-                    PTY_CHILD_EVENT_TOKEN => {
-                        if let Some(ChildEvent::Exited(exit_code)) = self.pty.next_child_event() {
-                            if self.drain_on_exit {
-                                let _ = self.read_output(&mut buffer);
-                            }
-                            self.record_exit(exit_code);
-                            break 'event_loop;
+                let token = event.token();
+                if token == channel_token {
+                    continue;
+                }
+                if token == self.pty.child_event_token() {
+                    if let Some(ChildEvent::Exited(exit_code)) = self.pty.next_child_event() {
+                        if self.drain_on_exit {
+                            let _ = self.read_output(&mut buffer);
                         }
+                        self.record_exit(exit_code);
+                        break 'event_loop;
                     }
-                    PTY_READ_WRITE_TOKEN => {
-                        if event.is_interrupt() {
+                } else if token == self.pty.read_token() || token == self.pty.write_token() {
+                    #[cfg(unix)]
+                    if UnixReady::from(event.readiness()).is_hup() {
+                        continue;
+                    }
+                    if event.readiness().is_readable()
+                        && let Err(_error) = self.read_output(&mut buffer)
+                    {
+                        #[cfg(target_os = "linux")]
+                        if _error.raw_os_error() == Some(libc::EIO) {
                             continue;
                         }
-                        if event.readable
-                            && let Err(_error) = self.read_output(&mut buffer)
-                        {
-                            #[cfg(target_os = "linux")]
-                            if _error.raw_os_error() == Some(libc::EIO) {
-                                continue;
-                            }
-                            break 'event_loop;
-                        }
-                        if event.writable
-                            && Self::write_pending(&mut self.pty, &mut writes, &mut current_write)
-                                .is_err()
-                        {
-                            break 'event_loop;
-                        }
+                        break 'event_loop;
                     }
-                    _ => {}
+                    if event.readiness().is_writable()
+                        && Self::write_pending(&mut self.pty, &mut writes, &mut current_write)
+                            .is_err()
+                    {
+                        break 'event_loop;
+                    }
                 }
             }
 
             let needs_write = current_write.is_some() || !writes.is_empty();
-            if needs_write != interest.writable {
-                interest.writable = needs_write;
+            let mut interest = Ready::readable();
+            if needs_write {
+                interest.insert(Ready::writable());
+            }
+            if interest != last_interest {
                 if self
                     .pty
-                    .reregister(&self.poller, interest, poll_mode)
+                    .reregister(&self.poll, interest, poll_options)
                     .is_err()
                 {
                     break;
                 }
+                last_interest = interest;
             }
         }
 
-        let _ = self.pty.deregister(&self.poller);
+        let _ = self.poll.deregister(&self.receiver);
+        let _ = self.pty.deregister(&self.poll);
     }
 
     fn drain_commands(&mut self, writes: &mut VecDeque<Vec<u8>>) -> bool {
@@ -421,7 +442,9 @@ impl RawPtyEventLoop {
                         writes.push_back(bytes);
                     }
                 }
-                Ok(PtyCommand::Resize(size)) => self.pty.on_resize(size.window_size()),
+                Ok(PtyCommand::Resize(size)) => {
+                    let _ = self.pty.set_winsize(WinsizeBuilder::from(size));
+                }
                 Ok(PtyCommand::Kill) => {
                     let _ = terminate_pty(&self.pty);
                 }
@@ -522,12 +545,8 @@ impl PendingWrite {
 
 #[cfg(unix)]
 fn terminate_pty(pty: &tty::Pty) -> io::Result<()> {
-    let result = unsafe { libc::kill(pty.child().id() as i32, libc::SIGHUP) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    tty::kill_pid(*pty.child.pid);
+    Ok(())
 }
 
 #[cfg(windows)]
