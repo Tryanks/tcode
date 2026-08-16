@@ -4,7 +4,6 @@ use agent::FileChange;
 use serde::{Deserialize, Serialize};
 
 /// Read-only or result-bearing host operation.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Query {
@@ -37,7 +36,6 @@ pub enum Query {
 }
 
 /// Typed response paired with a [`Query`].
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum QueryResponse {
@@ -52,7 +50,6 @@ pub enum QueryResponse {
 }
 
 /// Scope used when loading a Git diff.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GitDiffScope {
@@ -105,7 +102,6 @@ impl PathEntry {
 }
 
 /// External tool that owns an importable thread.
-#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceTool {

@@ -3,7 +3,145 @@ use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::project::group_sessions;
-use tcode_protocol::HostMessage;
+use tcode_protocol::{Command, CommandResponse, HostMessage};
+
+#[test]
+fn dispatched_settings_command_crosses_outgoing_ndjson() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-dispatch-settings-seam-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let settings = Settings {
+        sidebar_collapsed: true,
+        ..Settings::default()
+    };
+
+    state.dispatch_command(
+        cx,
+        41,
+        Command::UpdateSettings {
+            settings: settings.clone(),
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 41,
+            result: Ok(CommandResponse::Unit)
+        }
+    )));
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::Settings,
+            event: ServerEvent::SettingsReplaced(replaced),
+            ..
+        }) if replaced.sidebar_collapsed && replaced == &settings
+    )));
+}
+
+#[test]
+fn dispatched_start_draft_emits_session_status_over_ndjson() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-dispatch-session-status-seam-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let cwd = test_store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    state.dispatch_command(
+        cx,
+        42,
+        Command::StartDraft {
+            project_id: "project-1".into(),
+            cwd: cwd.clone(),
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionStatus { session_id },
+            event: ServerEvent::SessionStatusReplaced(status),
+            ..
+        }) if session_id == &status.session_id
+            && status.project_id.as_deref() == Some("project-1")
+            && status.cwd == cwd
+            && status.draft
+    )));
+}
+
+#[test]
+fn scripted_provider_connects_command_launch_and_agent_event_paths() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-scripted-provider-seam-test");
+    let scripted = scripted_provider(ProviderKind::ClaudeCode);
+    let commands = scripted.commands.clone();
+    let events = scripted.events.clone();
+    let state = cx.new_entity(|_| {
+        let mut state = AppState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    let cwd = test_store.root().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    state.dispatch_command(
+        cx,
+        51,
+        Command::StartDraft {
+            project_id: "project-1".into(),
+            cwd,
+        },
+    );
+    state.dispatch_command(
+        cx,
+        52,
+        Command::SendTurn {
+            text: "exercise the adapter".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    cx.run_until_parked();
+
+    let delivery_id = match commands.try_recv() {
+        Ok(SessionCommand::SendTurn {
+            delivery_id, text, ..
+        }) => {
+            assert_eq!(text, "exercise the adapter");
+            delivery_id
+        }
+        other => panic!("expected scripted provider SendTurn, got {other:?}"),
+    };
+    events
+        .try_send(AgentEvent::TurnAccepted { delivery_id })
+        .unwrap();
+    events
+        .try_send(AgentEvent::TurnStarted {
+            turn_id: "scripted-turn".into(),
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionEvents { .. },
+            event: ServerEvent::SessionEvent(SessionEventRecord {
+                event: AgentEvent::TurnStarted { turn_id },
+                ..
+            }),
+            ..
+        }) if turn_id == "scripted-turn"
+    )));
+    state.read_with(cx, |state, _| {
+        assert!(state.active.as_ref().unwrap().turn_in_flight);
+    });
+}
 
 #[test]
 fn archive_and_unarchive_apply_exact_timestamp_cascades() {

@@ -524,16 +524,16 @@ fn handle_client_message(
                 result: Ok(CommandResponse::Unit),
             });
         }
-        _ => {
-            cx.send_message(HostMessage::Ack {
-                id,
-                result: Err(ProtocolError {
-                    code: "unsupported_message".into(),
-                    message: "client message is not supported by this host".into(),
-                }),
-            });
-        }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn handle_client_message_for_test(
+    state: &mut AppState,
+    cx: &mut HostCx,
+    message: ClientMessage,
+) {
+    handle_client_message(state, cx, message, &Arc::new(Mutex::new(HashMap::new())));
 }
 
 enum CommandOutcome {
@@ -800,12 +800,6 @@ fn dispatch_query(
             let task = cx.unblock(move || path.is_dir());
             cx.spawn_background(async move { Ok(QueryResponse::IsDirectory(task.await)) })
         }
-        _ => cx.spawn_background(async {
-            Err(ProtocolError {
-                code: "unsupported_query".into(),
-                message: "query is not supported by this host".into(),
-            })
-        }),
     }
 }
 

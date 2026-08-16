@@ -451,6 +451,7 @@ impl AppState {
         let source = first_message.to_string();
         let attachments = attachments.to_vec();
         let executor = cx.clone();
+        let provider_launcher = self.provider_launcher.clone();
 
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
@@ -460,9 +461,15 @@ impl AppState {
                 .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
                 .await;
             let options = session_options(&title_meta, &settings, launch_env, None, None, None);
-            let title =
-                generate_ai_title(title_meta.provider, options, source, attachments, executor)
-                    .await;
+            let title = generate_ai_title(
+                provider_launcher,
+                title_meta.provider,
+                options,
+                source,
+                attachments,
+                executor,
+            )
+            .await;
             host_cx.enqueue(move |state, cx| {
                 if let Some(title) = title {
                     state.apply_generated_title(&session_id, &fallback, &title, cx);
@@ -521,6 +528,7 @@ pub(super) fn title_turn_options() -> TurnOptions {
 }
 
 pub(super) async fn generate_ai_title(
+    provider_launcher: ProviderLauncher,
     provider: ProviderKind,
     mut options: SessionOptions,
     source: String,
@@ -542,7 +550,7 @@ pub(super) async fn generate_ai_title(
     options.cwd = scratch.clone();
 
     let generated = smol::future::or(
-        generate_ai_title_inner(provider, options, source, attachments),
+        generate_ai_title_inner(provider_launcher, provider, options, source, attachments),
         async {
             smol::Timer::after(AI_TITLE_TIMEOUT).await;
             None
@@ -556,12 +564,13 @@ pub(super) async fn generate_ai_title(
 }
 
 pub(super) async fn generate_ai_title_inner(
+    provider_launcher: ProviderLauncher,
     provider: ProviderKind,
     options: SessionOptions,
     source: String,
     attachments: Vec<Attachment>,
 ) -> Option<String> {
-    let handle = start_session(provider, options).await.ok()?;
+    let handle = provider_launcher.launch(provider, options).await.ok()?;
     let prompt = title_generation_prompt(&source, !attachments.is_empty());
     handle
         .commands

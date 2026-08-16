@@ -129,7 +129,6 @@ impl AppState {
             // transport. The construction-time handle registry carries the
             // split term channels instead.
             Topic::Terminal { .. } => return None,
-            _ => return None,
         };
         Some(EventEnvelope {
             topic: topic.clone(),
