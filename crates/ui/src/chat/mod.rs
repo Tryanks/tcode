@@ -682,7 +682,7 @@ impl ChatView {
 
         let mut rows = Vec::new();
         if expanded {
-            let visible = work_log_row_entries(activities, turn.running, !manually_expanded);
+            let visible = work_log_row_entries(activities, !manually_expanded);
 
             for entry in &visible {
                 if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content
