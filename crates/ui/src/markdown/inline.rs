@@ -19,9 +19,7 @@ use gpui::{
 use super::{
     link_target::{LinkTarget, resolve_link},
     nodes::LinkMark,
-    selection::word_range_at,
-    state::{MarkdownMultiClickKind, MarkdownState, PendingLinkMenu},
-    window_selection,
+    state::{MarkdownState, PendingLinkMenu},
 };
 
 /// Mutable paint-time data retained by the parsed IR.
@@ -104,70 +102,6 @@ impl Inline {
             .iter()
             .find(|(range, _)| range.contains(&offset))
             .map(|(range, link)| (range.clone(), link.clone()))
-    }
-
-    fn layout_selection(
-        &self,
-        text_layout: &TextLayout,
-        bounds: Bounds<Pixels>,
-        window: &Window,
-        cx: &App,
-    ) -> (bool, bool, Option<Range<usize>>) {
-        let state = self.view.read(cx);
-        if !state.is_selectable() {
-            return (false, false, None);
-        }
-        if state.is_all_selected() {
-            return (true, true, Some(0..self.text.len()));
-        }
-        if let Some(selection) = state.multi_click_selection() {
-            return (
-                true,
-                true,
-                selection_for_multi_click(
-                    &self.text,
-                    text_layout,
-                    bounds,
-                    selection.pos,
-                    selection.kind,
-                ),
-            );
-        }
-        let Some((selection_start, selection_end)) = state.selection_points(window, cx) else {
-            return (true, false, None);
-        };
-
-        let line_height = text_layout.line_height();
-        let mask_bounds = window.content_mask().bounds;
-        let mut selection: Option<Range<usize>> = None;
-        let mut offset = 0;
-        for c in self.text.chars() {
-            let next_offset = offset + c.len_utf8();
-            let Some(pos) = text_layout.position_for_index(offset) else {
-                offset = next_offset;
-                continue;
-            };
-            let mut char_width = line_height / 2.;
-            if let Some(next_pos) = text_layout.position_for_index(next_offset)
-                && next_pos.y == pos.y
-            {
-                char_width = next_pos.x - pos.x;
-            }
-            let center = point(pos.x + char_width / 2., pos.y + line_height / 2.);
-            if mask_bounds.contains(&center)
-                && point_in_text_selection(
-                    pos,
-                    char_width,
-                    selection_start,
-                    selection_end,
-                    line_height,
-                )
-            {
-                selection.get_or_insert(offset..offset).end = next_offset;
-            }
-            offset = next_offset;
-        }
-        (true, true, selection)
     }
 
     fn text_line_bounds(
@@ -368,12 +302,29 @@ impl Element for Inline {
         self.interactive_text
             .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
 
-        let (selectable, has_selection, selection) =
-            self.layout_selection(&text_layout, bounds, window, cx);
+        let selectable = self.view.read(cx).is_selectable();
+        let selection = selectable
+            .then(|| {
+                let text_bounds = self.text_line_bounds(&text_layout, window.content_mask().bounds);
+                let adapter = self.view.read(cx).selection_adapter.clone();
+                let projection = adapter.update_run(
+                    self.text.clone(),
+                    text_layout.clone(),
+                    bounds,
+                    text_bounds,
+                    cx,
+                );
+                if adapter.selection.has_local_selection(cx) {
+                    Some(0..self.text.len())
+                } else {
+                    projection
+                }
+            })
+            .flatten();
         if let Ok(mut state) = self.state.lock() {
             state.selection = selection.clone();
         }
-        if selectable || has_selection {
+        if selectable {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
         if Self::link_for_position(&text_layout, &self.links, window.mouse_position()).is_some() {
@@ -381,54 +332,6 @@ impl Element for Inline {
         }
         if let Some(selection) = &selection {
             Self::paint_selection(selection, &text_layout, bounds, window, cx);
-        }
-
-        if selectable {
-            window_selection::register_selectable_text_inline(
-                &self.view,
-                self.text_line_bounds(&text_layout, window.content_mask().bounds),
-                window,
-                cx,
-            );
-            window.on_mouse_event({
-                let hitbox = hitbox.clone();
-                let layout = text_layout.clone();
-                let inline_state = self.state.clone();
-                let text = self.text.clone();
-                let view = self.view.clone();
-                move |event: &MouseDownEvent, phase, window, cx| {
-                    if !phase.bubble()
-                        || !hitbox.is_hovered(window)
-                        || event.button != MouseButton::Left
-                    {
-                        return;
-                    }
-                    let kind = match event.click_count {
-                        2 => MarkdownMultiClickKind::Word,
-                        3 => MarkdownMultiClickKind::Paragraph,
-                        _ => return,
-                    };
-                    let Some(range) = selection_for_multi_click(
-                        &text,
-                        &layout,
-                        hitbox.bounds,
-                        event.position,
-                        kind,
-                    ) else {
-                        return;
-                    };
-                    let selected_text = text[range.clone()].to_string();
-                    if let Ok(mut state) = inline_state.lock() {
-                        state.selection = Some(range);
-                    }
-                    view.update(cx, |state, cx| {
-                        state.set_multi_click_selection(event.position, kind, selected_text);
-                        cx.notify();
-                    });
-                    window_selection::finish_drag(window, cx);
-                    cx.notify(current_view);
-                }
-            });
         }
 
         window.on_mouse_event({
@@ -477,80 +380,28 @@ impl Element for Inline {
             }
         });
 
-        if !has_selection {
-            window.on_mouse_event({
-                let links = self.links.clone();
-                let layout = text_layout;
-                let hitbox = hitbox.clone();
-                let view = self.view.clone();
-                move |event: &MouseUpEvent, phase, window, cx| {
-                    if !phase.bubble()
-                        || event.button != MouseButton::Left
-                        || !hitbox.is_hovered(window)
-                        || view.read(cx).has_selection(window, cx)
-                    {
-                        return;
-                    }
-                    if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
-                        window_selection::finish_drag(window, cx);
-                        cx.stop_propagation();
-                        match resolve_link(&link.url, view.read(cx).base_dir()) {
-                            LinkTarget::Web(url) => cx.open_url(&url),
-                            LinkTarget::Local(path) => cx.open_with_system(&path),
-                        }
+        window.on_mouse_event({
+            let links = self.links.clone();
+            let layout = text_layout;
+            let hitbox = hitbox.clone();
+            let view = self.view.clone();
+            move |event: &MouseUpEvent, phase, window, cx| {
+                if !phase.bubble()
+                    || event.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                    || gpui_base::TextSelection::has_selection(window, cx)
+                {
+                    return;
+                }
+                if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
+                    gpui_base::TextSelection::end(window, cx);
+                    cx.stop_propagation();
+                    match resolve_link(&link.url, view.read(cx).base_dir()) {
+                        LinkTarget::Web(url) => cx.open_url(&url),
+                        LinkTarget::Local(path) => cx.open_with_system(&path),
                     }
                 }
-            });
-        }
-    }
-}
-
-fn selection_for_multi_click(
-    text: &str,
-    layout: &TextLayout,
-    bounds: Bounds<Pixels>,
-    pos: Point<Pixels>,
-    kind: MarkdownMultiClickKind,
-) -> Option<Range<usize>> {
-    if !bounds.contains(&pos) {
-        return None;
-    }
-    let offset = layout.index_for_position(pos).ok()?;
-    match kind {
-        MarkdownMultiClickKind::Word => word_range_at(text, offset),
-        MarkdownMultiClickKind::Paragraph => (!text.is_empty()).then_some(0..text.len()),
-    }
-}
-
-fn point_in_text_selection(
-    pos: Point<Pixels>,
-    char_width: Pixels,
-    selection_start: Point<Pixels>,
-    selection_end: Point<Pixels>,
-    line_height: Pixels,
-) -> bool {
-    let point_in_line = |point: Point<Pixels>| point.y >= pos.y && point.y < pos.y + line_height;
-    let top = selection_start.y.min(selection_end.y);
-    let bottom = selection_start.y.max(selection_end.y);
-    let x = pos.x + char_width / 2.;
-    if pos.y + line_height <= top || pos.y > bottom {
-        return false;
-    }
-    if point_in_line(selection_start) && point_in_line(selection_end) {
-        let left = selection_start.x.min(selection_end.x);
-        let right = selection_start.x.max(selection_end.x);
-        return x >= left && x <= right;
-    }
-    let (top_point, bottom_point) = if selection_start.y < selection_end.y {
-        (selection_start, selection_end)
-    } else {
-        (selection_end, selection_start)
-    };
-    if point_in_line(top_point) {
-        x >= top_point.x
-    } else if point_in_line(bottom_point) {
-        x <= bottom_point.x
-    } else {
-        true
+            }
+        });
     }
 }

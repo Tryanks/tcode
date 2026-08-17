@@ -31,7 +31,6 @@ use super::{
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
     state::MarkdownState,
     utils::list_item_prefix,
-    window_selection,
 };
 
 const CODE_CACHE_CAPACITY: usize = 64;
@@ -505,7 +504,7 @@ fn render_paragraph(
                                 Tooltip::new(title.clone()).build(window, cx)
                             })
                             .on_click(move |_, window, cx| {
-                                window_selection::finish_drag(window, cx);
+                                gpui_base::TextSelection::end(window, cx);
                                 cx.stop_propagation();
                                 match resolve_link(&link.url, view.read(cx).base_dir()) {
                                     LinkTarget::Web(url) => cx.open_url(&url),

@@ -196,10 +196,7 @@ mod tests {
     }
 
     fn rendered(state: &Entity<MarkdownState>, cx: &mut TestAppContext) -> String {
-        state.update(cx, |state, cx| {
-            state.select_all(cx);
-            state.selected_text()
-        })
+        state.read_with(cx, |state, _| state.rendered_text())
     }
 
     #[gpui::test]
@@ -298,15 +295,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn markdown_state_selected_text_works_after_select_all(cx: &mut TestAppContext) {
+    fn markdown_state_rendered_text_includes_formatting_content(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Some **bold** text", cx)));
 
-        state.update(cx, |state, cx| state.select_all(cx));
-
         assert_eq!(
-            state.read_with(cx, |state, _| state.selected_text()),
+            state.read_with(cx, |state, _| state.rendered_text()),
             "Some bold text\n"
         );
     }
