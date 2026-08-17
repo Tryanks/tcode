@@ -919,7 +919,14 @@ impl Render for Composer {
             })
             .when(has_terminal_contexts, |this| this.child(context_chips))
             .when(has_review_comments, |this| this.child(review_chips))
-            .child(Textarea::new(&self.input).appearance(false))
+            // Prose typography per the Beautiful UI spec (13.5px / 21px), so
+            // text reads the same while typed as it does once sent.
+            .child(
+                Textarea::new(&self.input)
+                    .appearance(false)
+                    .text_size(px(13.5))
+                    .line_height(px(21.)),
+            )
             .children(self.render_image_strip(cx))
             .child(control_row);
 

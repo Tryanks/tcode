@@ -5,7 +5,7 @@ use crate::{
 use gpui::{
     App, DefiniteLength, Edges, Entity, Focusable as _, IntoElement, ParentElement as _,
     RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, Window,
-    prelude::FluentBuilder as _, px, relative,
+    prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
@@ -141,7 +141,17 @@ impl RenderOnce for Input {
             .flex()
             .size_full()
             .items_center()
-            .line_height(relative(1.25))
+            // The editor inherits the ambient text style, so typography must
+            // be pinned here (upstream gpui-component convention): explicit
+            // per-size font size and a fixed line height, not one relative to
+            // whatever font size happens to cascade in.
+            .line_height(rems(1.25))
+            .map(|this| match self.size {
+                Size::XSmall => this.text_xs(),
+                Size::Small | Size::Medium => this.text_sm(),
+                Size::Large => this.text_base(),
+                Size::Size(v) => this.text_size(v * 0.875),
+            })
             .when(!multi_line, |this| match self.size {
                 Size::XSmall => this.h_5().px_1(),
                 Size::Small => this.h_6().px_2(),
@@ -149,9 +159,10 @@ impl RenderOnce for Input {
                 Size::Size(v) => this.h(v).px(v * 0.2),
                 Size::Medium => this.h_8().px_2p5(),
             })
+            // Multi-line insets come from the editor paddings above; padding
+            // the container as well doubles them.
             .when(multi_line, |this| {
                 this.h_auto()
-                    .p_2()
                     .when_some(self.height, |this, height| this.h(height))
             })
             .when(self.appearance, |this| {
