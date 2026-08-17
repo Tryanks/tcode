@@ -317,6 +317,29 @@ impl Composer {
         self.recompute_trigger(cx);
     }
 
+    /// Remove a queued message and return its text to the composer for editing.
+    /// Selecting the replacement lets the user discard it with one keystroke,
+    /// while queued attachments are deliberately ignored.
+    fn drop_queued_and_refill(
+        &mut self,
+        id: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_store
+            .update(cx, |store, _cx| store.drop_queued(id));
+        let selection = 0..text.len();
+        self.input.update(cx, |state, cx| {
+            state.set_value(text, window, cx);
+            state
+                .base_state()
+                .update(cx, |state, cx| state.set_selected_range(selection, cx));
+            state.focus(window, cx);
+        });
+        self.recompute_trigger(cx);
+    }
+
     /// Whether `submit` has anything to send. Keep the primary-action choice on
     /// this same predicate so attachment/context-only drafts never masquerade
     /// as an empty plan that Enter would implement.
