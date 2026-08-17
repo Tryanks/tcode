@@ -73,6 +73,14 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         "icons/opencode.svg",
         include_bytes!("../../../assets/icons/opencode.svg"),
     ),
+    (
+        "icons/wrench.svg",
+        include_bytes!("../../../assets/icons/wrench.svg"),
+    ),
+    (
+        "icons/sparkles.svg",
+        include_bytes!("../../../assets/icons/sparkles.svg"),
+    ),
 ];
 
 /// App assets layered over gpui-component's built-in icon assets.
