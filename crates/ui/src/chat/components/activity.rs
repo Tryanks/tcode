@@ -109,7 +109,6 @@ pub(crate) fn activity_row(
             } else {
                 let summary = div()
                     .min_w_0()
-                    .flex_1()
                     .overflow_hidden()
                     .text_ellipsis()
                     .child(crate::tr!("chat.thinking_done"))
@@ -120,7 +119,6 @@ pub(crate) fn activity_row(
         EntryContent::ContextCompacted => {
             let summary = div()
                 .min_w_0()
-                .flex_1()
                 .overflow_hidden()
                 .text_ellipsis()
                 .text_color(muted)
@@ -188,7 +186,8 @@ pub(crate) fn activity_row(
 }
 
 /// A row summary in the tool-chips grammar: the bare verb, then its argument
-/// in the row's one and only surface — a 22px chip.
+/// as plain inline text. No surface of its own — the row packs left so the
+/// chevron sits right after the words, and only the argument shrinks.
 fn activity_summary(
     primary: impl IntoElement,
     argument: Option<AnyElement>,
@@ -197,7 +196,6 @@ fn activity_summary(
 ) -> AnyElement {
     h_flex()
         .min_w_0()
-        .flex_1()
         .gap_2()
         .overflow_hidden()
         .child(
@@ -209,27 +207,16 @@ fn activity_summary(
         )
         .when_some(argument, |row, argument| {
             row.child(
-                h_flex()
+                div()
                     .min_w_0()
-                    .flex_1()
-                    .h(px(22.))
-                    .px_1p5()
-                    .items_center()
                     .overflow_hidden()
-                    .rounded(crate::material::radius_chip())
-                    .bg(cx.theme().muted)
+                    .text_ellipsis()
                     .text_size(px(11.5))
                     .text_color(cx.theme().muted_foreground)
-                    .when(monospace, |chip| {
-                        chip.font_family(cx.theme().mono_font_family.clone())
+                    .when(monospace, |text| {
+                        text.font_family(cx.theme().mono_font_family.clone())
                     })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(argument),
-                    ),
+                    .child(argument),
             )
         })
         .into_any_element()
