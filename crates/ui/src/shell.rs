@@ -58,15 +58,12 @@ pub(crate) fn window_drag_area(
     }))
     .on_mouse_down(
         MouseButton::Left,
-        window.listener_for(&state, |state, event: &MouseDownEvent, window, _| {
-            // A titlebar press must never begin a window text selection. Left
-            // unprevented, the Markdown selection controller proxy-anchors a
-            // selection to the nearest message and its auto-scroll loop takes
-            // over once `start_window_move` swallows the mouse-up: the chat
-            // keeps scrolling up and selecting while the window is dragged.
-            // The controller skips presses outside Markdown hitboxes when the
-            // default is prevented, and drag strips contain no Markdown.
+        window.listener_for(&state, |state, event: &MouseDownEvent, window, cx| {
+            // A titlebar press must never begin text selection; once
+            // `start_window_move` swallows the mouse-up, a gesture would
+            // otherwise remain active while the window is dragged.
             window.prevent_default();
+            gpui_base::GlobalState::suppress_text_selection(cx);
             // Double-click zooms/maximizes the window like a native titlebar.
             if event.click_count >= 2 {
                 state.should_move = false;
@@ -414,7 +411,7 @@ impl Render for AppShell {
                 .on_action(cx.listener(Self::on_toggle_palette))
                 // Register first so its bubble-phase handlers run after child
                 // controls and own selection only when the press propagates.
-                .child(crate::markdown::TextSelectionController)
+                .child(gpui_base::TextSelectionLayer)
                 .child(
                     div()
                         .id("workspace")
@@ -655,8 +652,8 @@ impl Render for AppShell {
             })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
-            // Window-level Markdown selection controller (must be first child).
-            .child(crate::markdown::TextSelectionController)
+            // The window selection layer must be the first child.
+            .child(gpui_base::TextSelectionLayer)
             .child(
                 div()
                     .id("workspace")

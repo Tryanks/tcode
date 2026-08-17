@@ -21,7 +21,6 @@ use super::{
     link_target::{LinkTarget, resolve_link},
     nodes::LinkMark,
     state::MarkdownState,
-    window_selection,
 };
 
 const IMAGE_LEN: usize = 1;
@@ -158,7 +157,7 @@ impl InlineFlow {
                 this.cursor_pointer()
                     .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
                     .on_click(move |_, window, cx| {
-                        window_selection::finish_drag(window, cx);
+                        gpui_base::TextSelection::end(window, cx);
                         cx.stop_propagation();
                         match resolve_link(&link.url, view.read(cx).base_dir()) {
                             LinkTarget::Web(url) => cx.open_url(&url),

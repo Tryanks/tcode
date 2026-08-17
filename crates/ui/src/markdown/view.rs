@@ -15,7 +15,7 @@ use gpui::{
 use gpui_base::StyledExt as _;
 use serde::Deserialize;
 
-use super::{link_target::LinkTarget, state::MarkdownState, window_selection};
+use super::{link_target::LinkTarget, state::MarkdownState};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_markdown_link, no_json)]
@@ -132,18 +132,15 @@ impl Element for MarkdownView {
             }
         });
         let focus_handle = state.read(cx).focus_handle.clone();
-        let copy_state = state.clone();
         let mut element = div()
             .key_context(super::CONTEXT)
             .track_focus(&focus_handle)
             .w_full()
             .relative()
             .on_action(move |_: &Copy, window, cx| {
-                let mut text = window_selection::window_selected_text(window, cx);
-                if text.is_empty() {
-                    text = copy_state.read(cx).selected_text();
-                }
-                let text = text.trim().to_string();
+                let text = gpui_base::TextSelection::selected_text(window, cx)
+                    .trim()
+                    .to_string();
                 if text.is_empty() {
                     cx.propagate();
                 } else {
@@ -152,13 +149,15 @@ impl Element for MarkdownView {
             })
             .on_action({
                 let state = state.clone();
-                move |_: &SelectAll, _, cx| {
+                move |_: &SelectAll, window, cx| {
                     if !state.read(cx).is_selectable() {
                         cx.propagate();
                         return;
                     }
-                    window_selection::clear_window_selection_for_select_all(&state, cx);
-                    state.update(cx, |state, cx| state.select_all(cx));
+                    gpui_base::TextSelection::clear(window, cx);
+                    let selection = state.read(cx).selection_handle().clone();
+                    selection.set_local_selection(true, cx);
+                    state.update(cx, |_, cx| cx.notify());
                 }
             })
             .on_action(|action: &OpenLink, _, cx| cx.open_url(&action.0))
@@ -266,8 +265,9 @@ impl Element for MarkdownView {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if request_layout.0.read(cx).is_selectable() {
-            window_selection::register_selectable_text_view(&request_layout.0, hitbox, window, cx);
+        let selectable = request_layout.0.read(cx).is_selectable();
+        if selectable {
+            request_layout.0.read(cx).selection_adapter.begin_frame();
         }
         // Capture-phase so this runs before the Inline children's bubble-phase
         // handlers repopulate the pending link: a right-click on a non-link
@@ -285,6 +285,26 @@ impl Element for MarkdownView {
             }
         });
         request_layout.1.paint(window, cx);
+        if selectable {
+            let (adapter, content_bounds, scroll_offset) = {
+                let state = request_layout.0.read(cx);
+                (
+                    state.selection_adapter.clone(),
+                    state.bounds,
+                    state.list_state.scroll_px_offset_for_scrollbar(),
+                )
+            };
+            let y = hitbox.bounds.origin.y.as_f32().max(0.).to_bits() as u64;
+            let x = hitbox.bounds.origin.x.as_f32().max(0.).to_bits() as u64;
+            adapter.register(
+                hitbox.clone(),
+                content_bounds,
+                scroll_offset,
+                (y << 32) | x,
+                window,
+                cx,
+            );
+        }
     }
 }
 
@@ -299,14 +319,16 @@ fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use gpui::{
-        AppContext as _, Context, Entity, IntoElement, ListAlignment, ListState, Modifiers,
-        MouseButton, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
-        Window, div, point, px,
+        AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ListAlignment,
+        ListState, Modifiers, MouseButton, ParentElement as _, Render, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, point, px,
     };
 
     use super::*;
-    use crate::markdown::window_selection::TextSelectionController;
+    use gpui_base::TextSelectionLayer;
 
     struct TestRoot {
         markdown: Entity<MarkdownState>,
@@ -315,6 +337,10 @@ mod tests {
     struct CrossViewRoot {
         first: Entity<MarkdownState>,
         second: Entity<MarkdownState>,
+    }
+
+    struct DragAreaRoot {
+        markdown: Entity<MarkdownState>,
     }
 
     struct OuterListRoot {
@@ -335,7 +361,7 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(px(320.))
-                .child(TextSelectionController)
+                .child(TextSelectionLayer)
                 .child(
                     div()
                         .h(px(24.))
@@ -355,12 +381,92 @@ mod tests {
         }
     }
 
+    struct MultiBlockRoot {
+        markdown: Entity<MarkdownState>,
+    }
+
+    struct RightClickRoot {
+        markdown: Entity<MarkdownState>,
+        bubbled_right_clicks: Rc<RefCell<usize>>,
+    }
+
+    impl RightClickRoot {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self {
+                markdown: cx
+                    .new(|cx| MarkdownState::new("Alpha beta\n\n[click](https://example.com)", cx)),
+                bubbled_right_clicks: Rc::default(),
+            }
+        }
+    }
+
+    impl Render for RightClickRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let bubbled = self.bubbled_right_clicks.clone();
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(MarkdownView::new(&self.markdown).selectable(true))
+                .on_mouse_down(MouseButton::Right, move |_, _, _| {
+                    *bubbled.borrow_mut() += 1;
+                })
+        }
+    }
+
+    impl MultiBlockRoot {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self::with_text("Alpha beta\n\nGamma delta", cx)
+        }
+
+        fn with_text(text: &str, cx: &mut Context<Self>) -> Self {
+            Self {
+                markdown: cx.new(|cx| MarkdownState::new(text, cx)),
+            }
+        }
+    }
+
+    impl Render for MultiBlockRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(MarkdownView::new(&self.markdown).selectable(true))
+        }
+    }
+
+    impl DragAreaRoot {
+        fn new(cx: &mut Context<Self>) -> Self {
+            Self {
+                markdown: cx.new(|cx| MarkdownState::new("Hello world", cx)),
+            }
+        }
+    }
+
+    impl Render for DragAreaRoot {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(crate::window_drag_area(
+                    "test-titlebar",
+                    div().w_full().h(px(52.)),
+                    window,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .h(px(40.))
+                        .child(MarkdownView::new(&self.markdown).selectable(true)),
+                )
+        }
+    }
+
     impl Render for CrossViewRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
                 .size_full()
                 .pt(px(10.))
-                .child(TextSelectionController)
+                .child(TextSelectionLayer)
                 .child(
                     div()
                         .h(px(40.))
@@ -624,7 +730,7 @@ mod tests {
     fn clipped_markdown_cannot_start_selection(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let (view, cx) =
+        let (_view, cx) =
             cx.add_window_view(|_, cx| TestRoot::new("visible\n\nhidden selection text", cx));
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
@@ -646,8 +752,42 @@ mod tests {
             MouseButton::Left,
             Modifiers::default(),
         );
-        let selected = view.read_with(cx, |root, cx| root.markdown.read(cx).selected_text());
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
         assert!(selected.is_empty(), "unexpected selection: {selected:?}");
+    }
+
+    #[gpui::test]
+    fn press_on_titlebar_drag_area_does_not_start_selection(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (_, cx) = cx.add_window_view(|_, cx| DragAreaRoot::new(cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            point(px(10.), px(20.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(80.), px(70.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(80.), px(70.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert!(
+                gpui_base::TextSelection::selected_text(window, cx).is_empty(),
+                "a titlebar press started a text selection"
+            );
+        });
     }
 
     #[gpui::test]
@@ -676,9 +816,147 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        let selected = cx.update(|window, cx| {
-            crate::markdown::window_selection::window_selected_text(window, cx)
-        });
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
         assert_eq!(selected, "Hello world\nSecond message");
+    }
+
+    #[gpui::test]
+    fn drag_across_paragraphs_copies_both_blocks(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = cx.add_window_view(|_, cx| MultiBlockRoot::new(cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // Anchor mid-first-paragraph, cursor mid-second-paragraph, using the
+        // measured block bounds so the test tracks real layout.
+        let (start, end) = view.read_with(cx, |root, cx| {
+            let state = root.markdown.read(cx);
+            let first = state.list_state.bounds_for_item(0).unwrap();
+            let second = state.list_state.bounds_for_item(1).unwrap();
+            (
+                point(px(1.), first.center().y),
+                point(px(300.), second.center().y),
+            )
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        assert_eq!(selected, "Alpha beta\nGamma delta");
+    }
+
+    #[gpui::test]
+    fn drag_across_mixed_blocks_copies_every_block_kind(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            MultiBlockRoot::with_text(
+                "# Title\n\nIntro para\n\n- item one\n- item two\n\n```\ncode line\n```\n\nTail para",
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (start, end) = view.read_with(cx, |root, cx| {
+            let state = root.markdown.read(cx);
+            let first = state.list_state.bounds_for_item(0).unwrap();
+            let count = state.list_state.item_count();
+            let last = state.list_state.bounds_for_item(count - 1).unwrap();
+            (
+                point(px(1.), first.center().y),
+                point(px(300.), last.center().y),
+            )
+        });
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        for fragment in ["Title", "Intro para", "item one", "item two", "code line"] {
+            assert!(
+                selected.contains(fragment),
+                "missing {fragment:?} in {selected:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn right_click_off_link_is_swallowed_so_no_menu_opens(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = cx.add_window_view(|_, cx| RightClickRoot::new(cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (text_pos, link_pos) = view.read_with(cx, |root, cx| {
+            let state = root.markdown.read(cx);
+            let text = state.list_state.bounds_for_item(0).unwrap();
+            let link = state.list_state.bounds_for_item(1).unwrap();
+            (
+                point(px(5.), text.center().y),
+                point(px(5.), link.center().y),
+            )
+        });
+
+        // Plain (and selectable) text: the press must be swallowed before the
+        // context-menu popover — and thus before the root handler — sees it.
+        cx.simulate_mouse_down(text_pos, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(text_pos, MouseButton::Right, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bubbled = view.read_with(cx, |root, _| *root.bubbled_right_clicks.borrow());
+        assert_eq!(bubbled, 0, "right-click on plain text must not propagate");
+
+        let focused = cx.update(|window, cx| window.focused(cx));
+        let markdown_focus =
+            view.read_with(cx, |root, cx| root.markdown.read(cx).focus_handle.clone());
+        assert!(
+            focused.is_none() || focused == Some(markdown_focus.clone()),
+            "no menu may take focus on a plain-text right-click"
+        );
+
+        // A link still surfaces its context menu: the popover consumes the
+        // press (so the root handler stays at zero) and focuses the menu.
+        cx.simulate_mouse_down(link_pos, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(link_pos, MouseButton::Right, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let focused = cx.update(|window, cx| window.focused(cx));
+        assert!(
+            focused.is_some_and(|focused| focused != markdown_focus),
+            "a link right-click must open and focus the context menu"
+        );
     }
 }

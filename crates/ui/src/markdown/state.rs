@@ -1,15 +1,20 @@
 //! Synchronous Markdown state, structurally adapted from gpui-component's
 //! Apache-2.0 `text/state.rs` implementation.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ops::RangeInclusive,
+    path::{Path, PathBuf},
+};
 
 use gpui::{
-    App, Bounds, Context, EntityId, FocusHandle, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Pixels, Point, Render, SharedString, Styled as _, Window, px,
+    Bounds, Context, FocusHandle, IntoElement, ListAlignment, ListState, ParentElement as _,
+    Pixels, Render, SharedString, Styled as _, Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
-use super::{link_target::LinkTarget, nodes::BlockNode, render, window_selection};
+use super::{
+    link_target::LinkTarget, nodes::BlockNode, render, selection_adapter::MarkdownSelectionAdapter,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingLinkMenu {
@@ -21,20 +26,18 @@ pub(super) struct PendingLinkMenu {
 /// State backing a [`super::MarkdownView`].
 pub struct MarkdownState {
     pub(super) focus_handle: FocusHandle,
-    pub(super) entity_id: EntityId,
     pub(super) bounds: Bounds<Pixels>,
     pub(super) selectable: bool,
     pub(super) compact_headings: bool,
     pub(super) base_dir: Option<PathBuf>,
     pub(super) pending_context_link: Option<PendingLinkMenu>,
     pub(super) is_selecting: bool,
-    multi_click_selection: Option<MarkdownMultiClickSelection>,
-    selected_text_override: Option<String>,
-    select_all: bool,
     text: String,
     parsed: BlockNode,
     pub(super) list_state: ListState,
     measured_content_height: Option<Pixels>,
+    selection_revision: usize,
+    pub(super) selection_adapter: MarkdownSelectionAdapter,
 }
 
 impl MarkdownState {
@@ -42,24 +45,23 @@ impl MarkdownState {
     pub fn new(text: &str, cx: &mut Context<Self>) -> Self {
         let parsed = super::parse(text);
         let block_count = root_block_count(&parsed);
+        let selection_adapter = MarkdownSelectionAdapter::new(cx.entity().downgrade(), cx);
         Self {
             focus_handle: cx.focus_handle(),
-            entity_id: cx.entity_id(),
             bounds: Bounds::default(),
             selectable: false,
             compact_headings: false,
             base_dir: None,
             pending_context_link: None,
             is_selecting: false,
-            multi_click_selection: None,
-            selected_text_override: None,
-            select_all: false,
             text: text.to_string(),
             parsed,
             // Measure every block once so the list has a stable total height,
             // then construct/layout/paint only the visible blocks on warm frames.
             list_state: ListState::new(block_count, ListAlignment::Top, px(1000.)).measure_all(),
             measured_content_height: None,
+            selection_revision: 0,
+            selection_adapter,
         }
     }
 
@@ -82,35 +84,14 @@ impl MarkdownState {
         self.reparse_reset(cx);
     }
 
-    /// Return the currently selected rendered text.
-    ///
-    /// Block selections (select-all, drags) end with a single trailing
-    /// newline, matching gpui-component's block-text convention; the
-    /// multi-click override carries the exact word/line instead.
-    pub fn selected_text(&self) -> String {
-        if self.select_all {
-            return with_trailing_newline(self.parsed.text());
-        }
-        if let Some(text) = &self.selected_text_override {
-            return text.clone();
-        }
-        with_trailing_newline(self.parsed.selected_text())
+    /// Return all rendered text, including blocks that were never painted.
+    pub fn rendered_text(&self) -> String {
+        with_trailing_newline(self.parsed.text())
     }
 
-    /// Select all rendered text in this view.
-    pub fn select_all(&mut self, cx: &mut Context<Self>) {
-        self.parsed.clear_selection();
-        self.multi_click_selection = None;
-        self.selected_text_override = None;
-        self.select_all = true;
-        self.is_selecting = false;
-        cx.notify();
-    }
-
-    /// Clear all local and drag selection state for this view.
-    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        self.reset_selection();
-        cx.notify();
+    /// The native window-selection participant owned by this renderer.
+    pub fn selection_handle(&self) -> &gpui_base::TextSelectionHandle {
+        &self.selection_adapter.selection
     }
 
     /// Enable or disable selection for this state.
@@ -120,8 +101,10 @@ impl MarkdownState {
         }
         self.selectable = selectable;
         if !selectable {
-            self.reset_selection();
-            window_selection::clear_selection_for_view(self.entity_id, cx);
+            self.reset_selection_projection();
+            self.selection_adapter
+                .selection
+                .set_local_selection(false, cx);
         }
         cx.notify();
     }
@@ -165,8 +148,10 @@ impl MarkdownState {
         // Don't interrupt an active drag-selection; the window-level endpoints
         // stay valid for append-only growth and per-inline ranges repaint.
         if !self.is_selecting {
-            self.reset_selection();
-            window_selection::clear_selection_for_view(self.entity_id, cx);
+            self.reset_selection_projection();
+            self.selection_adapter
+                .selection
+                .set_local_selection(false, cx);
         }
     }
 
@@ -183,6 +168,7 @@ impl MarkdownState {
         let old_count = old_blocks.len();
         let new_count = new_blocks.len();
         self.parsed = parsed;
+        self.selection_revision = self.selection_revision.wrapping_add(1);
 
         if unchanged < old_count || unchanged < new_count {
             // An append can only affect the old trailing block and blocks added
@@ -199,6 +185,7 @@ impl MarkdownState {
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
         self.prepare_reparse(cx);
         self.parsed = super::parse(&self.text);
+        self.selection_revision = self.selection_revision.wrapping_add(1);
         let block_count = root_block_count(&self.parsed);
         // Even an edit that preserves the number of root blocks can change
         // their heights, so every reparse must invalidate the cached sizes.
@@ -207,10 +194,7 @@ impl MarkdownState {
         cx.notify();
     }
 
-    fn reset_selection(&mut self) {
-        self.multi_click_selection = None;
-        self.selected_text_override = None;
-        self.select_all = false;
+    pub(super) fn reset_selection_projection(&mut self) {
         self.is_selecting = false;
         self.parsed.clear_selection();
     }
@@ -219,52 +203,34 @@ impl MarkdownState {
         self.selectable
     }
 
-    pub(super) fn is_all_selected(&self) -> bool {
-        self.select_all
+    pub(super) fn block_count(&self) -> usize {
+        root_block_count(&self.parsed)
     }
 
-    pub(super) fn has_view_selection(&self) -> bool {
-        self.select_all
-            || self.multi_click_selection.is_some()
-            || self.selected_text_override.is_some()
-    }
-
-    pub(super) fn has_selection(&self, window: &Window, cx: &App) -> bool {
-        self.has_view_selection() || self.selection_points(window, cx).is_some()
-    }
-
-    pub(super) fn selection_points(
-        &self,
-        window: &Window,
-        cx: &App,
-    ) -> Option<(Point<Pixels>, Point<Pixels>)> {
-        if !self.selectable {
-            return None;
+    pub(super) fn selected_text_in(&self, blocks: Option<RangeInclusive<usize>>) -> String {
+        match (&self.parsed, blocks) {
+            (BlockNode::Root { children }, Some(blocks)) => {
+                let children = children
+                    .get(blocks)
+                    .map_or_else(Vec::new, |children| children.to_vec());
+                BlockNode::Root { children }.selected_text()
+            }
+            _ => self.parsed.selected_text(),
         }
-        window_selection::selection_points(window, self.entity_id, cx)
     }
 
-    pub(super) fn set_multi_click_selection(
-        &mut self,
-        position: Point<Pixels>,
-        kind: MarkdownMultiClickKind,
-        selected_text: String,
-    ) {
-        self.multi_click_selection = Some(MarkdownMultiClickSelection {
-            pos: position - self.bounds.origin,
-            kind,
-        });
-        self.selected_text_override = Some(selected_text);
-        self.select_all = false;
-        self.is_selecting = false;
-    }
-
-    pub(super) fn multi_click_selection(&self) -> Option<MarkdownMultiClickSelection> {
-        self.multi_click_selection
-            .map(|selection| MarkdownMultiClickSelection {
-                pos: selection.pos + self.bounds.origin,
-                ..selection
-            })
+    pub(super) fn block_ix_at(&self, content_y: Pixels) -> Option<usize> {
+        let origin = self.bounds.origin.y + self.list_state.scroll_px_offset_for_scrollbar().y;
+        let count = self.list_state.item_count();
+        let mut ix = self.list_state.logical_scroll_top().item_ix;
+        while ix < count {
+            let bounds = self.list_state.bounds_for_item(ix)?;
+            if content_y < bounds.bottom() - origin {
+                return Some(ix);
+            }
+            ix += 1;
+        }
+        count.checked_sub(1)
     }
 
     fn update_layout(
@@ -344,18 +310,6 @@ fn root_blocks(node: &BlockNode) -> &[BlockNode] {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct MarkdownMultiClickSelection {
-    pub(super) pos: Point<Pixels>,
-    pub(super) kind: MarkdownMultiClickKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum MarkdownMultiClickKind {
-    Word,
-    Paragraph,
-}
-
 impl Render for MarkdownState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = cx.entity();
@@ -374,14 +328,27 @@ impl Render for MarkdownState {
                 window,
                 cx,
             ))
-            .on_prepaint(move |bounds, _window, cx| {
-                let entity_id = state.entity_id();
+            .on_prepaint(move |bounds, window, cx| {
+                let (selection_involves_view, has_snapshot, is_selecting) = {
+                    let state = state.read(cx);
+                    (
+                        state.selection_adapter.participates_in_selection(cx),
+                        state.selection_adapter.has_selection_snapshot(cx),
+                        state.is_selecting,
+                    )
+                };
+                let mut revision_changed = false;
                 let resized = state.update(cx, |state, cx| {
+                    revision_changed = state
+                        .selection_adapter
+                        .update_layout_revision(state.selection_revision, state.is_selecting);
                     let measured_height = state.list_content_height();
                     state.update_layout(bounds, measured_height, cx)
                 });
-                if resized {
-                    window_selection::clear_selection_for_resized_view(entity_id, cx);
+                if !is_selecting
+                    && ((resized && selection_involves_view) || (revision_changed && has_snapshot))
+                {
+                    gpui_base::TextSelection::clear(window, cx);
                 }
             })
     }
@@ -389,9 +356,37 @@ impl Render for MarkdownState {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use gpui_base::TextSelectionLayer;
 
     use super::*;
+
+    struct SelectAllRoot {
+        markdown: Entity<MarkdownState>,
+    }
+
+    impl SelectAllRoot {
+        fn new(text: &str, cx: &mut Context<Self>) -> Self {
+            let text = text.to_string();
+            Self {
+                markdown: cx.new(|cx| MarkdownState::new(&text, cx)),
+            }
+        }
+    }
+
+    impl Render for SelectAllRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(TextSelectionLayer).child(
+                div()
+                    .h(px(24.))
+                    .overflow_hidden()
+                    .child(super::super::MarkdownView::new(&self.markdown).selectable(true)),
+            )
+        }
+    }
 
     #[gpui::test]
     fn source_and_parsed_text_stay_coherent(cx: &mut TestAppContext) {
@@ -399,42 +394,18 @@ mod tests {
         cx.update(super::super::init);
         let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("old", cx)));
 
-        state.update(cx, |state, cx| state.select_all(cx));
         assert_eq!(
-            state.read_with(cx, |state, _| state.selected_text()),
+            state.read_with(cx, |state, _| state.rendered_text()),
             "old\n"
         );
 
         state.update(cx, |state, cx| {
             state.set_text("new", cx);
             state.push_str(" **value**", cx);
-            state.select_all(cx);
         });
         state.read_with(cx, |state, _| {
             assert_eq!(state.source(), "new **value**");
-            assert_eq!(state.selected_text(), "new value\n");
-        });
-    }
-
-    /// A streamed update must not wipe a drag-selection in progress
-    /// (streaming chat pushes deltas while the user may be selecting).
-    #[gpui::test]
-    fn reparse_preserves_selection_during_active_drag(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("start", cx)));
-        state.update(cx, |state, cx| {
-            state.set_multi_click_selection(
-                Point::default(),
-                MarkdownMultiClickKind::Word,
-                "start".to_string(),
-            );
-            state.is_selecting = true;
-            state.push_str(" more", cx);
-            assert_eq!(state.selected_text(), "start", "selection survives drag");
-            state.is_selecting = false;
-            state.push_str(" again", cx);
-            assert_eq!(state.selected_text(), "", "settled selection clears");
+            assert_eq!(state.rendered_text(), "new value\n");
         });
     }
 
@@ -451,33 +422,36 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&source, cx)));
-
-        // No window or MarkdownView is created, so none of the list's blocks
-        // can have been painted before selected_text traverses the parsed tree.
-        state.update(cx, |state, cx| state.select_all(cx));
-        assert_eq!(
-            state.read_with(cx, |state, _| state.selected_text()),
-            expected
-        );
+        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(&source, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let selection = view.read_with(cx, |root, cx| {
+            root.markdown.read(cx).selection_handle().clone()
+        });
+        cx.update(|_, cx| selection.set_local_selection(true, cx));
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        assert_eq!(selected, expected);
     }
 
     #[gpui::test]
     fn select_all_includes_code_and_table_text(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(super::super::init);
-        let state = cx.update(|cx| {
-            cx.new(|cx| {
-                MarkdownState::new(
-                    "intro\n\n```text\nfirst line\nsecond line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |",
-                    cx,
-                )
-            })
+        let source = "intro\n\n```text\nfirst line\nsecond line\n```\n\n| name | value |\n| --- | --- |\n| alpha | beta |";
+        let (view, cx) = cx.add_window_view(|_, cx| SelectAllRoot::new(source, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
         });
-
-        state.update(cx, |state, cx| state.select_all(cx));
+        let selection = view.read_with(cx, |root, cx| {
+            root.markdown.read(cx).selection_handle().clone()
+        });
+        cx.update(|_, cx| selection.set_local_selection(true, cx));
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
         assert_eq!(
-            state.read_with(cx, |state, _| state.selected_text()),
+            selected,
             "intro\nfirst line\nsecond line\nname value\nalpha beta\n"
         );
     }
