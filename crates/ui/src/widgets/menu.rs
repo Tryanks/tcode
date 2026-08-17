@@ -189,6 +189,11 @@ impl Focusable for PopupMenu {
 
 impl Render for PopupMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_empty() {
+            // An empty menu is being dismissed by menu_popover; render nothing
+            // rather than a bare strip for its final frame.
+            return div().id("tcode-popup-menu");
+        }
         let mut root = div()
             .id("tcode-popup-menu")
             .key_context(CONTEXT)
@@ -280,11 +285,18 @@ where
         .mouse_button(button)
         .overlay_closable(true)
         .trigger_with(move |_, _, _| trigger.into_any_element())
-        .content(move |_, window, cx| {
+        .content(move |popover, window, cx| {
             if let Some(menu) = menu_state.read(cx).menu.clone() {
                 return menu;
             }
             let menu = PopupMenu::build(window, cx, |menu, window, cx| builder(menu, window, cx));
+            // A builder can decide there is nothing to offer (e.g. a
+            // right-click on non-link Markdown text): close the popover
+            // instead of presenting an empty strip.
+            if menu.read(cx).is_empty() {
+                popover.dismiss(window, cx);
+                return menu;
+            }
             menu_state.update(cx, |state, _| state.menu = Some(menu.clone()));
             menu.focus_handle(cx).focus(window, cx);
             let popover = cx.entity();

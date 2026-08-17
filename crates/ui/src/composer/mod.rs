@@ -293,9 +293,7 @@ impl Composer {
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(incoming_text, window, cx);
-            state
-                .base_state()
-                .update(cx, |state, cx| state.set_selected_range(cursor..cursor, cx));
+            state.set_selected_range(cursor..cursor, cx);
         });
         self.recompute_trigger(cx);
     }
@@ -313,9 +311,7 @@ impl Composer {
         let cursor = prefill.len();
         self.input.update(cx, |state, cx| {
             state.set_value(prefill, window, cx);
-            state
-                .base_state()
-                .update(cx, |state, cx| state.set_selected_range(cursor..cursor, cx));
+            state.set_selected_range(cursor..cursor, cx);
             state.focus(window, cx);
         });
         self.recompute_trigger(cx);
@@ -780,9 +776,7 @@ impl Render for Composer {
         if self.applied_placeholder != desired_placeholder {
             self.applied_placeholder = desired_placeholder.clone();
             self.input.update(cx, |state, cx| {
-                state.base_state().update(cx, |state, cx| {
-                    state.set_placeholder(desired_placeholder, window, cx)
-                })
+                state.set_placeholder(desired_placeholder, window, cx)
             });
         }
 

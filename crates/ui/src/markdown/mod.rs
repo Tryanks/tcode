@@ -10,11 +10,10 @@ mod link_target;
 pub(crate) mod nodes;
 pub(crate) mod parse;
 mod render;
-mod selection;
+mod selection_adapter;
 mod state;
 mod utils;
 mod view;
-mod window_selection;
 
 use gpui::{App, KeyBinding};
 use gpui_base::input::{Copy, SelectAll};
@@ -22,13 +21,11 @@ use gpui_base::input::{Copy, SelectAll};
 pub(crate) use parse::parse;
 pub use state::MarkdownState;
 pub use view::MarkdownView;
-pub(crate) use window_selection::TextSelectionController;
 
 pub(super) const CONTEXT: &str = "MarkdownView";
 
-/// Register Markdown copy/select-all bindings and selection globals.
+/// Register Markdown copy/select-all bindings.
 pub fn init(cx: &mut App) {
-    window_selection::init_global(cx);
     cx.bind_keys(vec![
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),

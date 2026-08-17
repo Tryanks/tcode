@@ -12,10 +12,7 @@ impl Composer {
     pub(in super::super) fn recompute_trigger(&mut self, cx: &mut Context<Self>) {
         let (text, cursor) = {
             let state = self.input.read(cx);
-            (
-                state.value().to_string(),
-                state.base_state().read(cx).cursor(),
-            )
+            (state.value().to_string(), state.cursor())
         };
         let trigger = detect_composer_trigger(&text, cursor);
         let key = trigger
@@ -199,9 +196,7 @@ impl Composer {
         };
         let replacement = replacement.to_string();
         self.input.update(cx, |state, cx| {
-            state.base_state().update(cx, |state, cx| {
-                state.set_selected_range(trigger.range.clone(), cx)
-            });
+            state.set_selected_range(trigger.range.clone(), cx);
             state.replace(replacement.clone(), window, cx);
         });
     }

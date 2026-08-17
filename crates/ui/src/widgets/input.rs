@@ -17,6 +17,15 @@ enum State {
     Textarea(Entity<TextareaState>),
 }
 
+macro_rules! dispatch_state {
+    ($state:expr, |$concrete:ident| $body:expr) => {
+        match $state {
+            State::Input($concrete) => $body,
+            State::Textarea($concrete) => $body,
+        }
+    };
+}
+
 #[derive(IntoElement)]
 pub struct Input {
     state: State,
@@ -96,18 +105,11 @@ impl Styled for Input {
 
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (base, multi_line) = match &self.state {
-            State::Input(state) => {
-                state.update(cx, |state, cx| state.prepare(window, cx));
-                (state.read(cx).base_state().clone(), false)
-            }
-            State::Textarea(state) => {
-                state.update(cx, |state, cx| state.prepare(window, cx));
-                (state.read(cx).base_state().clone(), true)
-            }
-        };
+        let multi_line = matches!(self.state, State::Textarea(_));
+        dispatch_state!(&self.state, |state| state
+            .update(cx, |state, cx| state.prepare(window, cx)));
         let theme = cx.theme().clone();
-        base.update(cx, |state, cx| {
+        dispatch_state!(&self.state, |base| base.update(cx, |state, cx| {
             state.set_editor_style(gpui_base::input::InputEditorStyle {
                 foreground: theme.foreground,
                 muted_foreground: theme.muted_foreground,
@@ -125,55 +127,67 @@ impl RenderOnce for Input {
             });
             state.set_disabled(self.disabled, cx);
             state.set_text_align(self.style.text.text_align.unwrap_or(TextAlign::Left), cx);
-        });
-        let focused = base.read(cx).focus_handle(cx).is_focused(window) && !self.disabled;
-        let placeholder = base.read(cx).presentation().placeholder.clone();
-        InputBase::new(("input", base.entity_id()))
-            .focused(focused)
-            .disabled(self.disabled)
-            .role(self.role)
-            .styles(|styles| styles.focused(|style| style.border_color(theme.ring)))
-            .when_some(
-                self.aria_label
-                    .or_else(|| (!placeholder.is_empty()).then_some(placeholder)),
-                |this, label| this.accessibility_label(label),
-            )
-            .flex()
-            .size_full()
-            .items_center()
-            // The editor inherits the ambient text style, so typography must
-            // be pinned here (upstream gpui-component convention): explicit
-            // per-size font size and a fixed line height, not one relative to
-            // whatever font size happens to cascade in.
-            .line_height(rems(1.25))
-            .map(|this| match self.size {
-                Size::XSmall => this.text_xs(),
-                Size::Small | Size::Medium => this.text_sm(),
-                Size::Large => this.text_base(),
-                Size::Size(v) => this.text_size(v * 0.875),
-            })
-            .when(!multi_line, |this| match self.size {
-                Size::XSmall => this.h_5().px_1(),
-                Size::Small => this.h_6().px_2(),
-                Size::Large => this.h_10().px_3(),
-                Size::Size(v) => this.h(v).px(v * 0.2),
-                Size::Medium => this.h_8().px_2p5(),
-            })
-            // Multi-line insets come from the editor paddings above; padding
-            // the container as well doubles them.
-            .when(multi_line, |this| {
-                this.h_auto()
-                    .when_some(self.height, |this, height| this.h(height))
-            })
-            .when(self.appearance, |this| {
-                this.bg(theme.background)
-                    .rounded(theme.radius)
-                    .when(self.bordered, |this| {
-                        this.border_1().border_color(theme.input)
-                    })
-            })
-            .refine_style(&self.style)
-            .child(base)
+        }));
+        let focused = dispatch_state!(&self.state, |base| base
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window))
+            && !self.disabled;
+        let placeholder = dispatch_state!(&self.state, |base| base
+            .read(cx)
+            .presentation()
+            .placeholder()
+            .clone());
+        let aria_label = self
+            .aria_label
+            .or_else(|| (!placeholder.is_empty()).then_some(placeholder));
+        dispatch_state!(&self.state, |base| {
+            InputBase::new(("input", base.entity_id()))
+                .focused(focused)
+                .disabled(self.disabled)
+                .role(self.role)
+                .styles(|styles| styles.focused(|style| style.border_color(theme.ring)))
+                .when_some(aria_label.clone(), |this, label| {
+                    this.accessibility_label(label)
+                })
+                .flex()
+                .size_full()
+                .items_center()
+                // The editor inherits the ambient text style, so typography must
+                // be pinned here (upstream gpui-component convention): explicit
+                // per-size font size and a fixed line height, not one relative to
+                // whatever font size happens to cascade in.
+                .line_height(rems(1.25))
+                .map(|this| match self.size {
+                    Size::XSmall => this.text_xs(),
+                    Size::Small | Size::Medium => this.text_sm(),
+                    Size::Large => this.text_base(),
+                    Size::Size(v) => this.text_size(v * 0.875),
+                })
+                .when(!multi_line, |this| match self.size {
+                    Size::XSmall => this.h_5().px_1(),
+                    Size::Small => this.h_6().px_2(),
+                    Size::Large => this.h_10().px_3(),
+                    Size::Size(v) => this.h(v).px(v * 0.2),
+                    Size::Medium => this.h_8().px_2p5(),
+                })
+                // Multi-line insets come from the editor paddings above; padding
+                // the container as well doubles them.
+                .when(multi_line, |this| {
+                    this.h_auto()
+                        .when_some(self.height, |this, height| this.h(height))
+                })
+                .when(self.appearance, |this| {
+                    this.bg(theme.background)
+                        .rounded(theme.radius)
+                        .when(self.bordered, |this| {
+                            this.border_1().border_color(theme.input)
+                        })
+                })
+                .refine_style(&self.style)
+                .child(base.clone())
+                .into_any_element()
+        })
     }
 }
 
