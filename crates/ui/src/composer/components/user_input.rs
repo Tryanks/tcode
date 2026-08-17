@@ -181,10 +181,12 @@ impl Composer {
             .border_color(cx.theme().input)
             .bg(cx.theme().popover)
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Textarea::new(&self.user_input_custom).appearance(false)),
+                div().flex_1().min_w_0().child(
+                    Textarea::new(&self.user_input_custom)
+                        .appearance(false)
+                        // Match the 13px option rows around it.
+                        .text_size(px(13.)),
+                ),
             )
             .child(
                 crate::material::accessible_clickable(
