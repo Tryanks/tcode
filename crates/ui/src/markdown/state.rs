@@ -208,7 +208,7 @@ impl MarkdownState {
     }
 
     pub(super) fn selected_text_in(&self, blocks: Option<RangeInclusive<usize>>) -> String {
-        let selected = match (&self.parsed, blocks) {
+        match (&self.parsed, blocks) {
             (BlockNode::Root { children }, Some(blocks)) => {
                 let children = children
                     .get(blocks)
@@ -216,8 +216,7 @@ impl MarkdownState {
                 BlockNode::Root { children }.selected_text()
             }
             _ => self.parsed.selected_text(),
-        };
-        selected
+        }
     }
 
     pub(super) fn block_ix_at(&self, content_y: Pixels) -> Option<usize> {
