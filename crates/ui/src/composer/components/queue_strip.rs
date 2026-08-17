@@ -63,6 +63,7 @@ impl Composer {
 
         for (index, message) in queued.into_iter().enumerate() {
             let id = message.id;
+            let text = message.text.clone();
             let scheduled = message.fire_at_unix_secs.is_some();
             let steer_tooltip = if scheduled {
                 crate::tr!("composer.send_now").into_owned()
@@ -127,9 +128,8 @@ impl Composer {
                             .xsmall()
                             .icon(IconName::Close)
                             .tooltip(crate::tr!("composer.drop_queued"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_store
-                                    .update(cx, |store, _cx| store.drop_queued(id));
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.drop_queued_and_refill(id, text.clone(), window, cx);
                             })),
                     ),
             );
