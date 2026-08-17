@@ -332,9 +332,7 @@ impl Composer {
         let selection = 0..text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
-            state
-                .base_state()
-                .update(cx, |state, cx| state.set_selected_range(selection, cx));
+            state.set_selected_range(selection, cx);
             state.focus(window, cx);
         });
         self.recompute_trigger(cx);
