@@ -16,12 +16,6 @@ members = [
 resolver = "3"
 default-members = ["crates/app"]
 
-# Debug FPS: gpui/taffy layout+paint are unusable at opt-level 0, and taffy's
-# generics are instantiated inside gpui, so deps must be optimized wholesale.
-# Workspace crates stay at opt-level 0 for debugging.
-[profile.dev.package."*"]
-opt-level = 2
-
 [profile.release]
 opt-level = 3
 lto = "fat"
