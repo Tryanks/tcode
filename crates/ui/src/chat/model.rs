@@ -576,32 +576,16 @@ pub(crate) fn work_log_auto_expands(
 
 /// The activity entries a Work Log segment renders as rows.
 ///
-/// File edits are shown only while the turn is still running, so a live turn
-/// names the files it is touching. Once the turn finishes, the turn-level
-/// CHANGED FILES card is the sole per-file presentation and these rows drop out
-/// rather than duplicating it. An automatically expanded live run is a two-row
-/// ticker; manual expansion returns every displayable row. Either way all
-/// activities still count toward the summary.
+/// An automatically expanded live run is a two-row ticker. Manual expansion
+/// returns every activity in the segment, including file changes.
 pub(crate) fn work_log_row_entries<'a>(
     activities: &[&'a TimelineEntry],
-    turn_running: bool,
     automatic_expansion: bool,
 ) -> Vec<&'a TimelineEntry> {
-    let rows: Vec<_> = activities
-        .iter()
-        .copied()
-        .filter(|entry| {
-            turn_running
-                || !matches!(
-                    entry.content,
-                    EntryContent::Item(ItemContent::FileChange { .. })
-                )
-        })
-        .collect();
     if automatic_expansion {
-        rows[rows.len().saturating_sub(2)..].to_vec()
+        activities[activities.len().saturating_sub(2)..].to_vec()
     } else {
-        rows
+        activities.to_vec()
     }
 }
 
@@ -1640,7 +1624,7 @@ mod tests {
     }
 
     #[test]
-    fn work_log_rows_use_a_ticker_only_for_automatic_live_expansion() {
+    fn work_log_rows_use_a_ticker_only_for_automatic_expansion() {
         let entries = [
             command("cargo check"),
             file_change("edit", &["src/foo.rs"]),
@@ -1655,18 +1639,14 @@ mod tests {
         };
 
         assert_eq!(
-            ids(work_log_row_entries(&activities, true, true)),
+            ids(work_log_row_entries(&activities, true)),
             ["cargo test", "cargo clippy"]
         );
         assert_eq!(
-            ids(work_log_row_entries(&activities, true, false)),
+            ids(work_log_row_entries(&activities, false)),
             ["cargo check", "edit", "cargo test", "cargo clippy"]
         );
-        assert_eq!(
-            ids(work_log_row_entries(&activities, false, false)),
-            ["cargo check", "cargo test", "cargo clippy"]
-        );
-        // Filtering rows never touches the summary counts.
+        // Row selection never touches the summary counts.
         assert_eq!(work_log_counts(&activities).files, 1);
     }
 
