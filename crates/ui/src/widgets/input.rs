@@ -4,7 +4,7 @@ use crate::{
 };
 use gpui::{
     App, DefiniteLength, Edges, Entity, Focusable as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, Window,
+    RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, Window, div,
     prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::StyledExt as _;
@@ -142,6 +142,20 @@ impl RenderOnce for Input {
             .aria_label
             .or_else(|| (!placeholder.is_empty()).then_some(placeholder));
         dispatch_state!(&self.state, |base| {
+            let editor = if multi_line {
+                // Give the editor a definite viewport before InputBase measures its
+                // soft-wrap width. Mounting it directly as a horizontal flex child
+                // lets mixed-script intrinsic widths leak into that measurement.
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .min_w_0()
+                    .child(div().relative().flex_1().min_w_0().child(base.clone()))
+                    .into_any_element()
+            } else {
+                base.clone().into_any_element()
+            };
             InputBase::new(("input", base.entity_id()))
                 .focused(focused)
                 .disabled(self.disabled)
@@ -185,7 +199,7 @@ impl RenderOnce for Input {
                         })
                 })
                 .refine_style(&self.style)
-                .child(base.clone())
+                .child(editor)
                 .into_any_element()
         })
     }
