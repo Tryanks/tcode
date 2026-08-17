@@ -35,11 +35,12 @@ pub(crate) fn activity_row(
             | EntryContent::Item(ItemContent::ToolCall { .. })
             | EntryContent::Item(ItemContent::Reasoning { .. })
     ) && !live_reasoning;
-    let (status, icon, summary): (ItemStatus, IconName, AnyElement) = match &entry.content {
+    // The icon says WHAT the row did — success or failure is carried by the
+    // badge in `activity_status_icon`, never by the glyph itself.
+    let (status, icon, summary): (ItemStatus, Icon, AnyElement) = match &entry.content {
         EntryContent::Item(ItemContent::CommandExecution {
             command, status, ..
         }) => {
-            let icon = activity_icon(*status);
             let (preview, breaks) = one_line_with_break_markers(command);
             let marker_style = HighlightStyle {
                 color: Some(muted.opacity(0.45)),
@@ -57,7 +58,7 @@ pub(crate) fn activity_row(
                 true,
                 cx,
             );
-            (*status, icon, summary)
+            (*status, Icon::new(IconName::SquareTerminal), summary)
         }
         EntryContent::Item(ItemContent::ToolCall {
             name,
@@ -72,15 +73,11 @@ pub(crate) fn activity_row(
                 brief = one_line(output);
             }
             let summary = activity_summary(name.clone(), argument(brief), true, cx);
-            (*status, activity_icon(*status), summary)
+            (*status, Icon::empty().path("icons/wrench.svg"), summary)
         }
         EntryContent::Item(ItemContent::WebSearch { query }) => {
             let summary = activity_summary("web_search", argument(one_line(query)), false, cx);
-            (
-                ItemStatus::Completed,
-                activity_icon(ItemStatus::Completed),
-                summary,
-            )
+            (ItemStatus::Completed, Icon::new(IconName::Globe), summary)
         }
         EntryContent::Item(ItemContent::Other {
             provider_kind,
@@ -92,11 +89,7 @@ pub(crate) fn activity_row(
                 false,
                 cx,
             );
-            (
-                ItemStatus::Completed,
-                activity_icon(ItemStatus::Completed),
-                summary,
-            )
+            (ItemStatus::Completed, Icon::new(IconName::Bot), summary)
         }
         EntryContent::Item(ItemContent::Reasoning { .. }) => {
             if live_reasoning {
@@ -105,7 +98,7 @@ pub(crate) fn activity_row(
                     crate::tr!("chat.thinking_live"),
                     cx,
                 );
-                (ItemStatus::InProgress, IconName::Loader, summary)
+                (ItemStatus::InProgress, Icon::new(IconName::Loader), summary)
             } else {
                 let summary = div()
                     .min_w_0()
@@ -113,7 +106,11 @@ pub(crate) fn activity_row(
                     .text_ellipsis()
                     .child(crate::tr!("chat.thinking_done"))
                     .into_any_element();
-                (ItemStatus::Completed, IconName::Check, summary)
+                (
+                    ItemStatus::Completed,
+                    Icon::empty().path("icons/sparkles.svg"),
+                    summary,
+                )
             }
         }
         EntryContent::ContextCompacted => {
@@ -124,11 +121,15 @@ pub(crate) fn activity_row(
                 .text_color(muted)
                 .child(crate::tr!("chat.context_compacted"))
                 .into_any_element();
-            (ItemStatus::Completed, IconName::Minimize, summary)
+            (
+                ItemStatus::Completed,
+                Icon::new(IconName::Minimize),
+                summary,
+            )
         }
         _ => (
             ItemStatus::Completed,
-            IconName::Check,
+            Icon::new(IconName::Info),
             div().into_any_element(),
         ),
     };
@@ -141,20 +142,7 @@ pub(crate) fn activity_row(
         .items_center()
         .when(!compact, |row| row.py_0p5())
         .text_size(px(12.5))
-        .child(match status {
-            ItemStatus::InProgress => Spinner::new()
-                .xsmall()
-                .color(cx.theme().primary)
-                .into_any_element(),
-            ItemStatus::Completed => Icon::new(icon)
-                .size(px(13.))
-                .text_color(muted)
-                .into_any_element(),
-            ItemStatus::Failed | ItemStatus::Declined => Icon::new(icon)
-                .size(px(13.))
-                .text_color(cx.theme().danger)
-                .into_any_element(),
-        })
+        .child(activity_status_icon(icon, status, cx))
         .child(summary)
         .when(expandable, |row| {
             row.child(Icon::new(chevron(expanded)).size(px(13.)).text_color(muted))
@@ -312,12 +300,41 @@ fn activity_detail(entry: &TimelineEntry, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn activity_icon(status: ItemStatus) -> IconName {
-    match status {
-        ItemStatus::InProgress => IconName::LoaderCircle,
-        ItemStatus::Completed => IconName::Check,
-        ItemStatus::Failed | ItemStatus::Declined => IconName::CircleX,
+/// The type icon at row scale. Failure never recolors the glyph — it hangs a
+/// small red X off the bottom-right corner, on a disc of the row background so
+/// the badge stays legible over whatever it overlaps.
+fn activity_status_icon(icon: Icon, status: ItemStatus, cx: &App) -> AnyElement {
+    if matches!(status, ItemStatus::InProgress) {
+        return Spinner::new()
+            .xsmall()
+            .color(cx.theme().primary)
+            .into_any_element();
     }
+    let icon = icon
+        .size(px(13.))
+        .text_color(cx.theme().muted_foreground)
+        .into_any_element();
+    if matches!(status, ItemStatus::Completed) {
+        return icon;
+    }
+    div()
+        .relative()
+        .flex_none()
+        .child(icon)
+        .child(
+            div()
+                .absolute()
+                .right(px(-3.))
+                .bottom(px(-3.))
+                .rounded_full()
+                .bg(cx.theme().background)
+                .child(
+                    Icon::new(IconName::CircleX)
+                        .size(px(7.))
+                        .text_color(cx.theme().danger),
+                ),
+        )
+        .into_any_element()
 }
 
 fn activity_detail_section(
