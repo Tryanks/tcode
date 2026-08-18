@@ -26,6 +26,7 @@ pub(crate) enum Segment<'a> {
     ActivityRun(Vec<&'a TimelineEntry>),
     Relay(&'a TimelineEntry),
     ModelChange(&'a TimelineEntry),
+    ContextCompacted(&'a TimelineEntry),
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Error(&'a TimelineEntry),
@@ -132,7 +133,6 @@ pub(crate) fn segment_entries<'a>(
             | EntryContent::Item(ItemContent::Subagent { .. })
             | EntryContent::Item(ItemContent::WebSearch { .. })
             | EntryContent::Item(ItemContent::Other { .. })
-            | EntryContent::ContextCompacted
             | EntryContent::Item(ItemContent::FileChange { .. }) => activities.push(entry),
             EntryContent::Item(ItemContent::Reasoning { .. }) => activities.push(entry),
             EntryContent::Item(ItemContent::UserMessage { .. }) | EntryContent::Steer { .. } => {
@@ -146,6 +146,10 @@ pub(crate) fn segment_entries<'a>(
             EntryContent::ModelChanged { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::ModelChange(entry));
+            }
+            EntryContent::ContextCompacted => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::ContextCompacted(entry));
             }
             EntryContent::Item(ItemContent::AssistantMessage { .. }) => {
                 flush_activities(&mut segments, &mut activities);
@@ -183,7 +187,6 @@ pub(crate) struct WorkLogCounts {
     pub(crate) files: usize,
     pub(crate) tools: usize,
     pub(crate) subagents: usize,
-    pub(crate) compactions: usize,
 }
 
 pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
@@ -200,8 +203,8 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             | EntryContent::Item(ItemContent::WebSearch { .. })
             | EntryContent::Item(ItemContent::Other { .. }) => counts.tools += 1,
             EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
-            EntryContent::ContextCompacted => counts.compactions += 1,
-            EntryContent::Steer { .. }
+            EntryContent::ContextCompacted
+            | EntryContent::Steer { .. }
             | EntryContent::Item(ItemContent::UserMessage { .. })
             | EntryContent::Item(ItemContent::AssistantMessage { .. })
             | EntryContent::Item(ItemContent::Reasoning { .. })
@@ -1579,7 +1582,6 @@ mod tests {
             files: 3,
             tools: 1,
             subagents: 2,
-            compactions: 1,
         };
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
