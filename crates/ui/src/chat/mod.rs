@@ -257,6 +257,14 @@ impl ChatView {
         cx.notify();
     }
 
+    fn promote_auto_expanded(&mut self, turn: usize, key: &str, cx: &mut Context<Self>) {
+        self.expanded.insert(manual_override_key(key));
+        self.expanded.insert(key.to_string());
+        self.sync_markdown_states(cx);
+        self.list_state.remeasure_items(turn..turn + 1);
+        cx.notify();
+    }
+
     // -- turn rendering -----------------------------------------------------
 
     /// Render one turn as chronological messages, errors, and Work Log runs.
@@ -275,8 +283,6 @@ impl ChatView {
 
         let segmented = segment_entries(entries, turn.running);
         let segments = &segmented.flow;
-        let turn_entries: Vec<&TimelineEntry> = entries.iter().map(AsRef::as_ref).collect();
-        let turn_counts = work_log_counts(&turn_entries);
         let last_activity_segment = live_activity_segment(segments, turn.running);
 
         for (segment_index, segment) in segments.iter().enumerate() {
@@ -318,7 +324,6 @@ impl ChatView {
                             turn,
                             cwd,
                             activities,
-                            &turn_counts,
                             last_activity_segment == Some(segment_index),
                         ),
                         cx,
@@ -659,7 +664,7 @@ impl ChatView {
         args: components::work_log::WorkLogArgs<'_>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (index, segment_id, turn, cwd, activities, turn_counts, is_last) = args;
+        let (index, segment_id, turn, cwd, activities, is_last) = args;
         let section_key = format!("worklog-{index}-{segment_id}");
         let running = is_last && turn.running;
         let automatic = work_log_auto_expands(activities, turn.running, is_last);
@@ -667,12 +672,7 @@ impl ChatView {
         let manually_expanded =
             expanded && (self.expanded.contains(&manual_override_key(&section_key)) || !automatic);
         let segment_counts = work_log_counts(activities);
-        let counts = if is_last {
-            turn_counts
-        } else {
-            &segment_counts
-        };
-        let mut capsule_label = work_log_capsule_label(counts, activities.len());
+        let mut capsule_label = work_log_capsule_label(&segment_counts, activities.len());
         if capsule_label.is_empty() {
             capsule_label = crate::tr!("chat.work_log").into_owned();
         }
@@ -709,6 +709,7 @@ impl ChatView {
         }
 
         let toggle_section_key = section_key;
+        let ticker_expanded = expanded && !manually_expanded;
         components::work_log::work_log(
             components::work_log::WorkLogData {
                 index,
@@ -721,7 +722,11 @@ impl ChatView {
                 rows,
             },
             cx.listener(move |this, _, _, cx| {
-                this.toggle_auto_expanded(index, &toggle_section_key, automatic, cx);
+                if ticker_expanded {
+                    this.promote_auto_expanded(index, &toggle_section_key, cx);
+                } else {
+                    this.toggle_auto_expanded(index, &toggle_section_key, automatic, cx);
+                }
             }),
             cx,
         )
