@@ -87,12 +87,28 @@ impl Composer {
         let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
 
         // Build the filtered row list for the current frame. Favorites open
-        // first when any exist (S1 §2).
+        // first when any exist (S1 §2). The favorites sweep covers every
+        // enabled profile — built-ins *and* third-party (e.g. a Kimi endpoint)
+        // — in rail order, so a starred custom-profile model is not lost.
         let query = self.model_search.read(cx).value().to_lowercase();
-        let has_favorites = PICKER_PROVIDER_KINDS
-            .into_iter()
-            .flat_map(|p| composer_state.picker_models(p))
-            .any(|m| m.favorite);
+        let fav_profiles: Vec<(String, ProviderKind)> = {
+            let profiles = store.enabled_profiles();
+            PICKER_PROVIDER_KINDS
+                .into_iter()
+                .flat_map(|kind| {
+                    profiles
+                        .iter()
+                        .filter(move |profile| profile.kind == kind)
+                        .map(|profile| (profile.id.clone(), profile.kind))
+                })
+                .collect()
+        };
+        let has_favorites = fav_profiles.iter().any(|(id, _)| {
+            store
+                .picker_models_for_profile(id)
+                .iter()
+                .any(|m| m.favorite)
+        });
         let rail = self.rail_for(
             provider,
             acp_agent_id.as_deref(),
@@ -100,20 +116,23 @@ impl Composer {
             has_favorites,
         );
         let all_rows: Vec<ModelRow> = match &rail {
-            PickerRail::Favorites => PICKER_PROVIDER_KINDS
-                .into_iter()
-                .flat_map(|p| {
-                    composer_state
-                        .picker_models(p)
+            PickerRail::Favorites => fav_profiles
+                .iter()
+                .flat_map(|(id, kind)| {
+                    let is_builtin = tcode_core::settings::Settings::is_builtin_profile_id(id);
+                    let profile_id = (!is_builtin).then(|| id.clone());
+                    let kind = *kind;
+                    store
+                        .picker_models_for_profile(id)
                         .into_iter()
                         .filter(|m| m.favorite)
                         .map(move |m| ModelRow {
                             id: m.id,
                             name: m.name,
-                            provider: p,
-                            profile_id: None,
+                            provider: kind,
+                            profile_id: profile_id.clone(),
                             acp: false,
-                            favorite: m.favorite,
+                            favorite: true,
                         })
                 })
                 .collect(),
@@ -734,15 +753,30 @@ fn render_model_row(
                             )
                         }),
                 )
-                .child(
+                .child({
+                    // A third-party profile's row is attributed to that profile
+                    // (its accent + display name), not the built-in provider.
+                    let (glyph, label) = match &row.profile_id {
+                        Some(id) => {
+                            let store = store_entity.read(cx);
+                            (
+                                tinted_profile_glyph(id, store),
+                                store.provider_profile_display_name(id).into(),
+                            )
+                        }
+                        None => (
+                            tinted_provider_glyph(row.provider, store_entity.read(cx)),
+                            gpui::SharedString::from(provider_label(row.provider)),
+                        ),
+                    };
                     h_flex()
                         .gap_1()
                         .items_center()
                         .text_size(px(11.))
                         .text_color(muted)
-                        .child(tinted_provider_glyph(row.provider, store_entity.read(cx)).xsmall())
-                        .child(provider_label(row.provider)),
-                ),
+                        .child(glyph.xsmall())
+                        .child(label)
+                }),
         )
         .when(index < 9, |this| {
             this.child(
