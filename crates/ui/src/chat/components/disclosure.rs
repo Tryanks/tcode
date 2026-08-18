@@ -52,9 +52,10 @@ pub(crate) fn callback_row(
     )
 }
 
-/// A naked disclosure row with a height-capped verbatim body: a hugging,
-/// left-aligned header led by a chevron, so it reads as an expandable row of
-/// the flow rather than an ambient divider.
+/// A centered disclosure notification with a height-capped verbatim body: the
+/// divider grammar's stub–label–stub row, with the label clickable to expand.
+/// Orchestrate context and child-thread results read as ambient notifications
+/// of the flow — the same standing as a relay or model-change divider.
 pub(crate) fn disclosure(
     key: &str,
     label: SharedString,
@@ -64,7 +65,7 @@ pub(crate) fn disclosure(
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let row = crate::material::accessible_clickable(
+    let toggle = crate::material::accessible_clickable(
         h_flex(),
         SharedString::from(format!("disclosure-{key}")),
         Role::Button,
@@ -72,19 +73,28 @@ pub(crate) fn disclosure(
         cx,
     )
     .aria_expanded(expanded)
-    .self_start()
-    .h(px(28.))
+    .flex_none()
+    .h(px(24.))
     .px_1p5()
     .gap_1p5()
     .items_center()
     .rounded(crate::material::radius_button())
-    .text_size(px(12.5))
+    .text_size(px(11.))
     .text_color(muted)
     .cursor_pointer()
     .hover(|row| row.bg(cx.theme().accent))
     .on_click(on_toggle)
     .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
     .child(label);
+
+    let row = h_flex()
+        .w_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .child(super::dividers::divider_stub(cx))
+        .child(toggle)
+        .child(super::dividers::divider_stub(cx));
 
     let mut block = v_flex().w_full().gap_1().child(row);
     if expanded {

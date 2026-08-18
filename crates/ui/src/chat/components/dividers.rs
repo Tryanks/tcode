@@ -1,7 +1,7 @@
 use crate::theme::ActiveTheme as _;
 use agent::ProviderKind;
 use gpui::{
-    AnyElement, App, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    AnyElement, App, Div, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, Styled as _, div, px,
 };
 use gpui_base::h_flex;
@@ -10,11 +10,17 @@ use gpui_base::h_flex;
 /// full-width rule would cut the flow in two, and these events only annotate it.
 const STUB_WIDTH: f32 = 24.;
 
+/// One hairline stub of the divider grammar, shared with the centered
+/// disclosure rows so every ambient notification flanks its label identically.
+pub(crate) fn divider_stub(cx: &App) -> Div {
+    div().h(px(1.)).w(px(STUB_WIDTH)).bg(cx.theme().border)
+}
+
 /// The one divider grammar: a centered 11px label between two hairline stubs.
 /// `tint` colors the label alone — the rules stay border-quiet no matter what
 /// the event is, so no divider can shout louder than another.
 fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement {
-    let stub = || div().h(px(1.)).w(px(STUB_WIDTH)).bg(cx.theme().border);
+    let stub = || divider_stub(cx);
     h_flex()
         .id(id)
         .w_full()
@@ -72,6 +78,17 @@ pub(crate) fn model_change_divider(
     divider(
         SharedString::from(format!("model-change-{id}")),
         label,
+        cx.theme().warning,
+        cx,
+    )
+}
+
+/// Context compaction rewrites what the model remembers, so it announces
+/// itself at model-swap prominence rather than hiding in the work log.
+pub(crate) fn context_compacted_divider(id: &str, cx: &App) -> AnyElement {
+    divider(
+        SharedString::from(format!("context-compacted-{id}")),
+        crate::tr!("chat.context_compacted").into_owned(),
         cx.theme().warning,
         cx,
     )

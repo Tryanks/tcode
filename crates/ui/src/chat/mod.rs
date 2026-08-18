@@ -309,6 +309,11 @@ impl ChatView {
                         cx,
                     ));
                 }
+                Segment::ContextCompacted(entry) => {
+                    column = column.child(components::dividers::context_compacted_divider(
+                        &entry.id, cx,
+                    ));
+                }
                 Segment::ActivityRun(activities) => {
                     let segment_id = activities[0].id.as_str();
                     column = column.child(self.compose_work_log(
