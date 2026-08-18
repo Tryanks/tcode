@@ -169,7 +169,7 @@ pub(crate) fn segment_entries<'a>(
 }
 
 /// Which segment, if any, is the turn's *live* work log — the one that opens on
-/// its own and reports the turn's totals.
+/// its own while the turn is running.
 ///
 /// A running turn whose last segment is prose has none: liveness is carried by
 /// the turn-level working indicator standing bare after every segment, so every
@@ -1501,7 +1501,7 @@ mod tests {
         // to host it, and the earlier run has already settled.
         assert_eq!(segments.len(), 2);
         assert_eq!(live_activity_segment(&segments, true), None);
-        // Once the turn ends, that same run carries the turn's snapshot.
+        // Once the turn ends, that same run is the final settled work log.
         assert_eq!(live_activity_segment(&segments, false), Some(0));
 
         let activity_tail = [entry("assistant", assistant("answer")), command("cmd")];
@@ -1765,14 +1765,14 @@ mod tests {
     }
 
     #[test]
-    fn finished_activity_runs_show_nonzero_segment_counts() {
+    fn finished_activity_runs_use_segment_scoped_counts() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let entries = [
             command("command-1"),
             file_change("files-1", &["src/shared.rs"]),
             entry("assistant", assistant("intermediate output")),
             command("command-2"),
-            file_change("files-2", &["src/shared.rs"]),
+            command("command-3"),
         ];
         let segments = segment_entries(&entries, false).flow;
         let activity_indexes: Vec<usize> = segments
@@ -1785,7 +1785,7 @@ mod tests {
         assert_eq!(activity_indexes.len(), 2);
 
         let counts = work_log_counts(&refs(&entries));
-        assert_eq!(counts.commands, 2);
+        assert_eq!(counts.commands, 3);
         assert_eq!(counts.files, 1);
 
         let labels = || {
@@ -1801,9 +1801,9 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(labels(), ["1 edit · 1 command", "1 edit · 1 command"]);
+        assert_eq!(labels(), ["1 edit · 1 command", "2 commands"]);
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(labels(), ["1 处编辑 · 1 条命令", "1 处编辑 · 1 条命令"]);
+        assert_eq!(labels(), ["1 处编辑 · 1 条命令", "2 条命令"]);
     }
 
     #[test]

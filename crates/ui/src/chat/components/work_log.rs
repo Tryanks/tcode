@@ -10,7 +10,6 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use super::super::model::WorkLogCounts;
 use tcode_core::session::{TimelineEntry, TurnMeta};
 
 pub(crate) type WorkLogArgs<'a> = (
@@ -19,7 +18,6 @@ pub(crate) type WorkLogArgs<'a> = (
     &'a TurnMeta,
     &'a Path,
     &'a [&'a TimelineEntry],
-    &'a WorkLogCounts,
     bool,
 );
 
