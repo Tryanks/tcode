@@ -322,6 +322,10 @@ fn main() {
                 // Persistent windows use the platform's system material:
                 // macOS blur, Windows Acrylic, or an opaque fallback.
                 window_background: main_window_background(),
+                // Throttle background redraws (spinners, streaming output) to
+                // ~2 FPS while the window is inactive; gpui lifts the cap the
+                // moment the window is active or receiving high-rate input.
+                inactive_frame_interval: Some(Duration::from_millis(500)),
                 ..Default::default()
             };
 
