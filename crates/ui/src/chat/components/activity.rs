@@ -113,20 +113,6 @@ pub(crate) fn activity_row(
                 )
             }
         }
-        EntryContent::ContextCompacted => {
-            let summary = div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_color(muted)
-                .child(crate::tr!("chat.context_compacted"))
-                .into_any_element();
-            (
-                ItemStatus::Completed,
-                Icon::new(IconName::Minimize),
-                summary,
-            )
-        }
         _ => (
             ItemStatus::Completed,
             Icon::new(IconName::Info),
