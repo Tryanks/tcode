@@ -284,6 +284,11 @@ impl ChatView {
         let segmented = segment_entries(entries, turn.running);
         let segments = &segmented.flow;
         let last_activity_segment = live_activity_segment(segments, turn.running);
+        // Only the turn's final assistant text is the deliverable; interim
+        // notes between tool runs carry no action row.
+        let last_assistant_segment = segments
+            .iter()
+            .rposition(|segment| matches!(segment, Segment::Assistant(_)));
 
         for (segment_index, segment) in segments.iter().enumerate() {
             match segment {
@@ -383,7 +388,8 @@ impl ChatView {
                             cwd,
                             markdown,
                             pinned: pinned.1 == Some(entry.id.as_str()),
-                            show_actions: !turn.running,
+                            show_actions: !turn.running
+                                && last_assistant_segment == Some(segment_index),
                             copied,
                         },
                         cx.listener(move |this, _, _, cx| {
