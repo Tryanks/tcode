@@ -10,7 +10,7 @@ use gpui::{
 use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
 
-pub use gpui_base::input::{Copy, InputEvent, InputState, SelectAll, TextareaState};
+pub use gpui_base::input::{Copy, InputEvent, InputState, Paste, SelectAll, TextareaState};
 
 enum State {
     Input(Entity<InputState>),

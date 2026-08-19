@@ -208,11 +208,12 @@ impl Composer {
     }
 
     /// Pull an image off the clipboard (⌘V with image content), if present.
+    /// Returns whether an image was accepted.
     pub(in super::super) fn paste_clipboard_image(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let mut accepted_image = false;
         if let Some(item) = cx.read_from_clipboard() {
             for entry in &item.entries {
@@ -240,8 +241,10 @@ impl Composer {
             }
         }
         if !accepted_image && let Some((mime, bytes)) = crate::pasteboard::read_pasteboard_image() {
-            self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
+            accepted_image =
+                self.add_image_bytes("pasted-image".to_string(), mime, bytes, window, cx);
         }
+        accepted_image
     }
 
     pub(in super::super) fn remove_image(&mut self, index: usize, cx: &mut Context<Self>) {
