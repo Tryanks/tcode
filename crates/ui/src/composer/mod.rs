@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use crate::widgets::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
 use crate::widgets::spinner::Spinner;
 use crate::{
     icon::{Icon, IconName},
@@ -883,14 +883,19 @@ impl Render for Composer {
             // token would render as a murky translucent wash here.
             .bg(cx.theme().popover)
             .shadow_md()
-            // Secondary+V with image clipboard content, and arrow/Escape trigger-menu
-            // navigation (fires after the input's own key actions).
+            // The editor binds Secondary+V to Paste, which consumes the keystroke
+            // before any key-down listener runs — so image paste must intercept
+            // the Paste *action* in the capture phase. Swallow it only when the
+            // clipboard held an image; text paste propagates to the editor.
+            .capture_action(cx.listener(|this, _: &Paste, window, cx| {
+                if this.paste_clipboard_image(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            // Arrow/Escape trigger-menu navigation (fires after the input's own
+            // key actions).
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 let key = ev.keystroke.key.as_str();
-                if key == "v" && ev.keystroke.modifiers.secondary() {
-                    this.paste_clipboard_image(window, cx);
-                    return;
-                }
                 if this.handle_user_input_digit(ev, window, cx) {
                     cx.stop_propagation();
                     return;
