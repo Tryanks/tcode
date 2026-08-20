@@ -428,6 +428,7 @@ impl AppState {
                 .remove(&ConversationDestination::Thread(id.to_string()));
             self.drop_background(id, cx);
             self.revoke_preview_registration(id);
+            self.revoke_orchestrate_child_registration(id);
         }
         let orchestrators: Vec<_> = ids.iter().map(|id| (*id).to_string()).collect();
         for id in orchestrators {

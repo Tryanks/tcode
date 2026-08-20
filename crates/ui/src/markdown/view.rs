@@ -322,9 +322,8 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::{
-        AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ListAlignment,
-        ListState, Modifiers, MouseButton, ParentElement as _, Render, Styled as _, TestAppContext,
-        VisualTestContext, Window, div, point, px,
+        AppContext as _, Context, Entity, IntoElement, ListAlignment, ListState, Modifiers,
+        MouseButton, Render, TestAppContext, VisualTestContext, Window, div, point, px,
     };
 
     use super::*;

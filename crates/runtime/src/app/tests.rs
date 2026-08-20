@@ -1261,9 +1261,24 @@ fn configured_binary_reaches_session_options() {
     settings.provider_mut(ProviderKind::ClaudeCode).binary_path =
         Some(PathBuf::from("/custom/claude"));
 
-    let codex_options = session_options(&codex, &settings, LaunchEnv::default(), None, None, None);
-    let claude_options =
-        session_options(&claude, &settings, LaunchEnv::default(), None, None, None);
+    let codex_options = session_options(
+        &codex,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
+    let claude_options = session_options(
+        &claude,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(
         codex_options.binary_path,
@@ -1297,7 +1312,7 @@ fn provider_env_home_and_launch_args_reach_session_options() {
             .clone(),
     };
     let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, None, None, None);
+    let opts = session_options(&meta, &settings, launch_env, None, None, None, None);
     assert_eq!(opts.extra_args, vec!["--chrome", "--verbose"]);
     assert_eq!(
         opts.launch_env.pairs(ProviderKind::ClaudeCode),
@@ -1316,7 +1331,7 @@ fn provider_env_home_and_launch_args_reach_session_options() {
         home: settings.provider(ProviderKind::Codex).home_path.clone(),
     };
     let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, launch_env, None, None, None);
+    let opts = session_options(&meta, &settings, launch_env, None, None, None, None);
     assert!(opts.extra_args.is_empty());
     assert_eq!(
         opts.launch_env.pairs(ProviderKind::Codex),
@@ -1325,14 +1340,30 @@ fn provider_env_home_and_launch_args_reach_session_options() {
 
     // pi project trust is opt-in and appends --approve after launch args.
     let meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
-    let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(opts.extra_args, vec!["--verbose"]);
 
     settings
         .provider_mut(ProviderKind::Pi)
         .pi
         .trust_project_extensions = true;
-    let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(opts.extra_args, vec!["--verbose", "--approve"]);
 }
 
@@ -1551,7 +1582,7 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
             .iter()
             .any(|(k, v)| k == "ANTHROPIC_BASE_URL" && v == "https://api.kimi.com/coding/")
     );
-    let opts = session_options(&meta, &state.settings, launch_env, None, None, None);
+    let opts = session_options(&meta, &state.settings, launch_env, None, None, None, None);
     assert_eq!(opts.binary_path, Some(PathBuf::from("/opt/kimi/claude")));
 }
 
@@ -1569,6 +1600,7 @@ fn session_options_injects_mcp_registration() {
         &settings,
         LaunchEnv::default(),
         Some(reg),
+        None,
         None,
         None,
     );
@@ -1598,6 +1630,7 @@ fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
         Some(reg),
         None,
         None,
+        None,
     );
 
     assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
@@ -1605,15 +1638,39 @@ fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
     assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
 
     meta.approval_mode = ApprovalMode::AutoAcceptEdits;
-    let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
 
     meta.approval_mode = ApprovalMode::ReadOnly;
-    let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(opts.approval_mode, ApprovalMode::ReadOnly);
 
     meta.approval_mode = ApprovalMode::FullAccess;
-    let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
     assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
 }
 
@@ -1624,7 +1681,15 @@ fn pi_session_options_preserve_supervised_with_native_approvals() {
     let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
     meta.approval_mode = ApprovalMode::Supervised;
 
-    let opts = session_options(&meta, &settings, LaunchEnv::default(), None, None, None);
+    let opts = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        None,
+    );
 
     assert_eq!(opts.approval_mode, ApprovalMode::Supervised);
 }
@@ -1645,6 +1710,7 @@ fn non_pi_session_options_preserve_mode_and_preview_registration() {
         &settings,
         LaunchEnv::default(),
         Some(reg),
+        None,
         None,
         None,
     );
@@ -1669,6 +1735,7 @@ fn session_options_isolates_orchestrate_registration_by_meta_flag() {
         None,
         Some(registration.clone()),
         None,
+        None,
     );
     assert!(normal.mcp_servers.is_empty());
 
@@ -1679,6 +1746,7 @@ fn session_options_isolates_orchestrate_registration_by_meta_flag() {
         LaunchEnv::default(),
         None,
         Some(registration),
+        None,
         None,
     );
     assert_eq!(
@@ -1703,6 +1771,7 @@ fn session_options_gates_computer_use_registration_on_global_setting() {
         LaunchEnv::default(),
         None,
         None,
+        None,
         Some(registration.clone()),
     );
     assert!(disabled.mcp_servers.is_empty());
@@ -1712,6 +1781,7 @@ fn session_options_gates_computer_use_registration_on_global_setting() {
         &meta,
         &settings,
         LaunchEnv::default(),
+        None,
         None,
         None,
         Some(registration),
@@ -1759,6 +1829,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
         "done",
         None,
         None,
+        None,
         false,
     );
     assert!(text.starts_with("[orchestrate] thread child (\"Title\") completed.\n"));
@@ -1770,6 +1841,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
             "Title",
             TurnStatus::Completed,
             "",
+            None,
             None,
             None,
             false
@@ -1784,6 +1856,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
         "done",
         None,
         None,
+        None,
         true,
     );
     assert!(archived.contains("completed (auto-archived; send revives it)."));
@@ -1793,6 +1866,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
         "Title",
         TurnStatus::Completed,
         &"x".repeat(5000),
+        None,
         None,
         None,
         false,
@@ -1808,6 +1882,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
         TurnStatus::Completed,
         &"x".repeat(5000),
         None,
+        None,
         Some(0),
         false,
     );
@@ -1819,6 +1894,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
         "Title",
         TurnStatus::Completed,
         &"x".repeat(5000),
+        None,
         None,
         Some(300),
         false,
@@ -1840,6 +1916,7 @@ fn callback_text_is_a_compact_digest_with_usage() {
         "Title",
         TurnStatus::Interrupted,
         "done",
+        None,
         Some(&usage),
         None,
         false,
@@ -1847,6 +1924,39 @@ fn callback_text_is_a_compact_digest_with_usage() {
     assert!(failed.starts_with("[orchestrate] thread child (\"Title\") failed. tokens:"));
     assert!(failed.ends_with("\ndone"));
     assert!(failed.contains("tokens: input 100 (+25 cached), output 40, total 165."));
+}
+
+#[test]
+fn callback_prefers_reported_result_in_full() {
+    let report = "R".repeat(5000);
+    let text = assemble_callback_text(
+        "child",
+        "Title",
+        TurnStatus::Completed,
+        "final message",
+        Some(&report),
+        None,
+        Some(300),
+        false,
+    );
+    // The reported text wins over the final message and ignores the cap.
+    assert!(text.contains("Result (reported via report_result):"));
+    assert!(text.ends_with(&report));
+    assert!(!text.contains("final message"));
+    assert!(!text.contains("Final output tail"));
+
+    // A blank report falls back to the ordinary digest.
+    let blank = assemble_callback_text(
+        "child",
+        "Title",
+        TurnStatus::Completed,
+        "final message",
+        Some("  \n"),
+        None,
+        None,
+        false,
+    );
+    assert!(blank.ends_with("\nfinal message"));
 }
 
 #[test]
@@ -1907,6 +2017,100 @@ fn terminal_callback_archives_only_when_requested() {
         assert!(
             state.find_meta("retry").unwrap().archived_at.is_none(),
             "failed child should stay visible for retries"
+        );
+    });
+}
+
+#[test]
+fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-report-result-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(|_| AppState::new(store));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+
+    state.host_update(cx, |state, cx| {
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
+
+        for id in ["reporter", "silent"] {
+            let (commands, _receiver) = smol::channel::unbounded();
+            let mut child = live_session(ProviderKind::Codex, commands);
+            child.meta.id = id.into();
+            child.meta.parent_session_id = Some("parent".into());
+            child.meta.archive_on_complete = false;
+            child.turn_in_flight = true;
+            state.sessions.push(child.meta.clone());
+            state.residents.parked.insert(child.meta.id.clone(), child);
+        }
+
+        // A report from a session that is not an orchestrated child is refused.
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::ReportResult {
+                child_id: "parent".into(),
+                text: "nope".into(),
+            },
+            reply,
+            cx,
+        );
+        assert!(response.try_recv().unwrap().is_err());
+
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::ReportResult {
+                child_id: "reporter".into(),
+                text: "the full reported RESULT".into(),
+            },
+            reply,
+            cx,
+        );
+        assert!(response.try_recv().unwrap().is_ok());
+
+        for id in ["reporter", "silent"] {
+            state.on_event(id, persisted_assistant_event("last message"), cx);
+            state.on_event(
+                id,
+                AgentEvent::TurnCompleted {
+                    turn_id: format!("turn-{id}"),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+        }
+    });
+
+    cx.run_until_parked();
+
+    let mut callbacks = Vec::new();
+    while let Ok(command) = parent_receiver.try_recv() {
+        if let SessionCommand::Steer { text, .. } = command {
+            callbacks.push(text);
+        }
+    }
+    assert_eq!(callbacks.len(), 2, "one callback per completed child");
+    let reported = callbacks
+        .iter()
+        .find(|text| text.contains("thread reporter"))
+        .unwrap();
+    assert!(reported.contains("Result (reported via report_result):\nthe full reported RESULT"));
+    assert!(!reported.contains("last message"));
+    let silent = callbacks
+        .iter()
+        .find(|text| text.contains("thread silent"))
+        .unwrap();
+    assert!(silent.ends_with("\nlast message"));
+
+    state.read_with(cx, |state, _| {
+        assert!(
+            state.child_reported_results.is_empty(),
+            "delivery should consume the stored report"
         );
     });
 }

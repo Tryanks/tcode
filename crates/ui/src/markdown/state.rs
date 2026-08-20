@@ -357,8 +357,8 @@ impl Render for MarkdownState {
 #[cfg(test)]
 mod tests {
     use gpui::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, Window, div, px,
+        AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
+        Window, div, px,
     };
     use gpui_base::TextSelectionLayer;
 
