@@ -24,48 +24,29 @@ private final class AudioFeeder: @unchecked Sendable {
     let stream: AsyncStream<AnalyzerInput>
 
     private let continuation: AsyncStream<AnalyzerInput>.Continuation
-    private let format: AVAudioFormat
     private let lock = NSLock()
-    private var frameCount: AVAudioFramePosition = 0
     private var finished = false
 
-    init(format: AVAudioFormat) {
-        self.format = format
+    init() {
         (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
     }
 
+    // No explicit bufferStartTime: the analyzer tracks the live input timeline
+    // itself, and supplying our own timestamps kept it from ever reporting
+    // results or honoring a targeted finalize.
     func feed(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
         defer { lock.unlock() }
         guard !finished else { return }
-
-        continuation.yield(
-            AnalyzerInput(
-                buffer: buffer,
-                bufferStartTime: CMTime(
-                    value: frameCount,
-                    timescale: CMTimeScale(format.sampleRate.rounded())
-                )
-            )
-        )
-        frameCount += AVAudioFramePosition(buffer.frameLength)
+        continuation.yield(AnalyzerInput(buffer: buffer))
     }
 
-    func finish() -> CMTime? {
+    func finish() {
         lock.lock()
         defer { lock.unlock() }
-        guard !finished else { return currentTime }
+        guard !finished else { return }
         finished = true
         continuation.finish()
-        return currentTime
-    }
-
-    private var currentTime: CMTime? {
-        guard frameCount > 0 else { return nil }
-        return CMTime(
-            value: frameCount,
-            timescale: CMTimeScale(format.sampleRate.rounded())
-        )
     }
 }
 
@@ -207,7 +188,7 @@ private actor VoiceCore {
             throw VoiceFailure("no compatible speech audio format")
         }
 
-        let feeder = AudioFeeder(format: analysisFormat)
+        let feeder = AudioFeeder()
         self.feeder = feeder
         self.engine = engine
         try await analyzer.prepareToAnalyze(in: analysisFormat)
@@ -225,12 +206,15 @@ private actor VoiceCore {
         input.installTap(onBus: 0, bufferSize: 1_024, format: naturalFormat) {
             buffer, _ in
             do {
-                let converted = try Self.convert(
+                // A rate-converting AVAudioConverter may legitimately emit an
+                // empty buffer while it primes; skip those instead of failing.
+                if let converted = try Self.convert(
                     buffer,
                     with: converter,
                     to: analysisFormat
-                )
-                feeder.feed(converted)
+                ) {
+                    feeder.feed(converted)
+                }
             } catch {
                 Task { [weak self] in
                     await self?.reportFailure(error)
@@ -246,7 +230,7 @@ private actor VoiceCore {
         _ input: AVAudioPCMBuffer,
         with converter: AVAudioConverter,
         to format: AVAudioFormat
-    ) throws -> AVAudioPCMBuffer {
+    ) throws -> AVAudioPCMBuffer? {
         let ratio = format.sampleRate / input.format.sampleRate
         let capacity = AVAudioFrameCount(ceil(Double(input.frameLength) * ratio)) + 1
         guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
@@ -267,10 +251,10 @@ private actor VoiceCore {
         if let conversionError {
             throw conversionError
         }
-        guard (status == .haveData || status == .inputRanDry), output.frameLength > 0 else {
-            throw VoiceFailure("microphone audio conversion produced no data")
+        guard status == .haveData || status == .inputRanDry else {
+            throw VoiceFailure("microphone audio conversion failed")
         }
-        return output
+        return output.frameLength > 0 ? output : nil
     }
 
     func stop() async {
@@ -279,12 +263,9 @@ private actor VoiceCore {
         stopCapture()
 
         do {
+            feeder?.finish()
             if let analyzer {
-                if let lastSample = feeder?.finish() {
-                    try await analyzer.finalizeAndFinish(through: lastSample)
-                } else {
-                    try await analyzer.finalizeAndFinishThroughEndOfInput()
-                }
+                try await analyzer.finalizeAndFinishThroughEndOfInput()
             }
             await analysisTask?.value
             await resultsTask?.value
@@ -298,7 +279,7 @@ private actor VoiceCore {
         guard !terminal else { return }
         stopping = true
         stopCapture()
-        _ = feeder?.finish()
+        feeder?.finish()
         if let analyzer {
             await analyzer.cancelAndFinishNow()
         }
