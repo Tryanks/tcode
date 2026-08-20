@@ -6,6 +6,8 @@ mod components;
 mod model;
 
 use components::images::PendingImage;
+#[cfg(target_os = "macos")]
+use components::voice::Voice;
 use model::*;
 
 use std::cell::Cell;
@@ -155,6 +157,9 @@ pub struct Composer {
     /// One cancellable one-second repaint loop, present only while the queue
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
+    /// Mic button + live dictation session (see `components::voice`).
+    #[cfg(target_os = "macos")]
+    voice: Voice,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -220,6 +225,10 @@ impl Composer {
                     // Recompute the active `@`/`/`/`$` trigger and re-render (also
                     // refreshes the send button's has-text state).
                     InputEvent::Change => {
+                        // An edit that did not come from the transcript writer
+                        // ends dictation (see `components::voice`).
+                        #[cfg(target_os = "macos")]
+                        this.stop_dictation_on_user_edit(cx);
                         this.recompute_trigger(cx);
                         cx.notify();
                     }
@@ -272,6 +281,8 @@ impl Composer {
             image_load_generation: 0,
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
+            #[cfg(target_os = "macos")]
+            voice: Voice::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -290,6 +301,9 @@ impl Composer {
         let Some(incoming_text) = self.text_cache.switch_to(destination, &outgoing_text) else {
             return;
         };
+        // The dictation anchor belongs to the text we are about to swap out.
+        #[cfg(target_os = "macos")]
+        self.abort_dictation(cx);
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(incoming_text, window, cx);
@@ -504,6 +518,8 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "macos")]
+        self.abort_dictation(cx);
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.pending_images.clear();
@@ -743,11 +759,18 @@ impl Render for Composer {
             .gap_1()
             .items_center();
 
+        // Absent unless this machine has a dictation engine (macOS 26+).
+        #[cfg(target_os = "macos")]
+        let mic = self.render_mic_button(cx);
+        #[cfg(not(target_os = "macos"))]
+        let mic: Option<AnyElement> = None;
+
         let control_row = if compact {
             control_row_base
                 .child(self.render_model_picker(cx))
                 .child(self.render_overflow_menu(cx))
                 .child(div().flex_1())
+                .children(mic)
                 .child(self.render_primary_action(turn_running, cx))
         } else {
             control_row_base
@@ -758,6 +781,7 @@ impl Render for Composer {
                 .child(self.render_permission_picker(cx))
                 .child(self.render_mode_chip(cx))
                 .child(div().flex_1())
+                .children(mic)
                 .child(self.render_primary_action(turn_running, cx))
         };
 
@@ -897,6 +921,13 @@ impl Render for Composer {
             .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 let key = ev.keystroke.key.as_str();
                 if this.handle_user_input_digit(ev, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                // Escape ends dictation (keeping the transcript) before it can
+                // mean anything else.
+                #[cfg(target_os = "macos")]
+                if key == "escape" && this.stop_dictation(cx) {
                     cx.stop_propagation();
                     return;
                 }
