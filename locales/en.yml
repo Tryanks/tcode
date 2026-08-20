@@ -554,6 +554,10 @@ composer:
   model_sources: "Model sources"
   model_results: "Models"
   model_option: "Model %{model}"
+  voice_start: "Dictate a message"
+  voice_preparing: "Preparing dictation…"
+  voice_stop: "Stop dictation"
+  voice_error: "Dictation failed: %{error}"
 approval:
   choose_mode: "Choose approval mode"
   mode_option: "%{label}: %{description}"

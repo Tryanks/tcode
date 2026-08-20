@@ -8433,7 +8433,15 @@ dependencies = [
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
+ "tcode-voice",
  "term",
+]
+
+[[package]]
+name = "tcode-voice"
+version = "0.1.0"
+dependencies = [
+ "log",
 ]
 
 [[package]]

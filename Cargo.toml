@@ -11,6 +11,7 @@ members = [
     "crates/orchestrate-mcp",
     "crates/computer-use-mcp",
     "crates/ui",
+    "crates/voice",
     "crates/app",
 ]
 resolver = "3"
