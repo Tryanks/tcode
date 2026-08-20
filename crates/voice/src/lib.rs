@@ -52,7 +52,11 @@ pub fn is_supported() -> bool {
 
 /// Map an app locale (`"zh-CN"`, `"en"`, …) to the dictation locale to use.
 pub fn preferred_locale(app_locale: &str) -> &'static str {
-    if app_locale.starts_with("zh") { "zh_CN" } else { "en_US" }
+    if app_locale.starts_with("zh") {
+        "zh_CN"
+    } else {
+        "en_US"
+    }
 }
 
 /// Start a microphone dictation session for `locale` (an identifier such as

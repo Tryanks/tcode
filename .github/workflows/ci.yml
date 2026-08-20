@@ -57,6 +57,7 @@ jobs:
           command_new_violations="$(
             grep -rn "Command::new(" crates --include="*.rs" \
               | grep -v -e "crates/services/src/process.rs:" -e "crates/agent/src/process.rs:" \
+              -e "crates/voice/build.rs:" \
               | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' \
               || true
           )"
