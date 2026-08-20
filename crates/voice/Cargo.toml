@@ -1,0 +1,10 @@
+[package]
+name = "tcode-voice"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(voice_shim)"] }

@@ -9,6 +9,7 @@ tcode-core = { path = "../core" }
 tcode-protocol = { path = "../protocol" }
 tcode-runtime = { path = "../runtime" }
 tcode-services = { path = "../services" }
+tcode-voice = { path = "../voice" }
 term = { path = "../term" }
 preview-mcp = { path = "../preview-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
