@@ -17,6 +17,14 @@ members = [
 resolver = "3"
 default-members = ["crates/app"]
 
+# Carries gpui commit b40c46c8 ("derive wrap_line widths from shaped
+# fragments") on top of the upstream rev pinned in Cargo.lock: soft-wrap
+# measurement matches contextual glyph shaping, so fullwidth CJK punctuation
+# no longer overflows the composer. Drop once upstream includes the fix.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { git = "https://github.com/Tryanks/zed", rev = "b40c46c8fbb8a0c8d59bec02513de65ba1be8222", version = "=0.2.2" }
+gpui_platform = { git = "https://github.com/Tryanks/zed", rev = "b40c46c8fbb8a0c8d59bec02513de65ba1be8222" }
+
 [profile.release]
 opt-level = 3
 lto = "fat"
