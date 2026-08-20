@@ -412,7 +412,8 @@ impl AppState {
             let launch_env = host_cx
                 .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
                 .await;
-            let options = session_options(&title_meta, &settings, launch_env, None, None, None);
+            let options =
+                session_options(&title_meta, &settings, launch_env, None, None, None, None);
             let title = generate_ai_title(
                 provider_launcher,
                 title_meta.provider,

@@ -28,13 +28,13 @@ The fleet table below is the authoritative allow list — user-configured profil
 
 ## Callbacks — do not poll
 
-When a child finishes, tcode sends a message tagged `[orchestrate]` with its id, status, token cost, and output — in full when short, otherwise a tail plus a pointer. Dispatch, end the turn, and wait to be woken. Use `status` only for an on-demand snapshot; never busy-wait. A digest is a claim, not evidence: fetch the full report with `result` only when the prose itself matters — verification starts from the diff and your own checks. The token figures are your per-dispatch cost accounting.
+When a child finishes, tcode sends a message tagged `[orchestrate]` with its id, status, token cost, and output. Every child carries a `report_result` tool; if the child called it, the callback delivers that reported text verbatim and in full. If not, it falls back to the child's last message — in full when short, otherwise a tail plus a pointer. Instruct children in the brief to submit their final report via `report_result`. Dispatch, end the turn, and wait to be woken. Use `status` only for an on-demand snapshot; never busy-wait. A digest is a claim, not evidence: fetch the full report with `result` only when the prose itself matters — verification starts from the diff and your own checks. The token figures are your per-dispatch cost accounting.
 
 ## Operating rules
 
 1. Read the judgment-critical context yourself before delegating; farm out only the token-hungry reading.
 2. Define executable acceptance criteria before dispatching — exact commands with expected results, plus review questions for what commands can't measure. Strongest form: write the failing test first; the criterion is "it passes". If the run may outlive your context, put the plan and criteria in a small file so a cold restart can resume.
-3. Make every brief self-contained (children see nothing of this session): context in 2–3 sentences, objective, explicit file scope, constraints, acceptance criteria verbatim, and a report format that distinguishes checks actually run from claims.
+3. Make every brief self-contained (children see nothing of this session): context in 2–3 sentences, objective, explicit file scope, constraints, acceptance criteria verbatim, and a report format that distinguishes checks actually run from claims, submitted via the child's `report_result` tool.
 4. Dispatch from a clean tree; parallelize only disjoint file scopes, otherwise serialize. Reviews and investigation use `access: read_only`.
 5. Verify child output independently: run the criteria commands yourself and read the diff for weakened tests, silenced lints, swallowed errors, hardcoded expected values, and out-of-scope edits. Reports are claims; the diff and checks are facts. The acceptance judgment is never delegatable.
 6. Commit only accepted work — a clean tree at dispatch makes retries and reverts safe. On failure, one focused `send` with the exact failing command and output. A second failure on the same piece means the brief or plan is the bug: fix it, re-plan, or escalate the profile. Two failed plans: stop and bring findings to the user.
