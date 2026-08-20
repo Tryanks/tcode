@@ -8,6 +8,7 @@ private let eventVolatile: Int32 = 1
 private let eventFinal: Int32 = 2
 private let eventError: Int32 = 3
 private let eventEnded: Int32 = 4
+private let eventLevel: Int32 = 5
 
 public typealias VoiceEventCallback = @convention(c) (
     UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?
@@ -205,6 +206,11 @@ private actor VoiceCore {
         }
         input.installTap(onBus: 0, bufferSize: 1_024, format: naturalFormat) {
             buffer, _ in
+            if let level = Self.level(of: buffer) {
+                Task { [weak self] in
+                    await self?.emitLevel(level)
+                }
+            }
             do {
                 // A rate-converting AVAudioConverter may legitimately emit an
                 // empty buffer while it primes; skip those instead of failing.
@@ -224,6 +230,22 @@ private actor VoiceCore {
         engine.prepare()
         try engine.start()
         emitReady()
+    }
+
+    /// Perceptual input level in 0...1: RMS mapped over a -50 dBFS..0 dBFS
+    /// range, which tracks speech dynamics far better than linear amplitude.
+    nonisolated private static func level(of buffer: AVAudioPCMBuffer) -> Float? {
+        guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else {
+            return nil
+        }
+        var sum: Float = 0
+        for index in 0..<Int(buffer.frameLength) {
+            sum += samples[index] * samples[index]
+        }
+        let rms = (sum / Float(buffer.frameLength)).squareRoot()
+        guard rms > 0 else { return 0 }
+        let decibels = 20 * log10(rms)
+        return min(1, max(0, (decibels + 50) / 50))
     }
 
     nonisolated private static func convert(
@@ -312,6 +334,11 @@ private actor VoiceCore {
     private func reportFailure(_ error: Error) {
         guard !stopping else { return }
         emitTerminal(kind: eventError, text: error.localizedDescription)
+    }
+
+    private func emitLevel(_ level: Float) {
+        guard !terminal, ready else { return }
+        String(format: "%.3f", level).withCString { callback(context, eventLevel, $0) }
     }
 
     private func emit(kind: Int32, text: String) {

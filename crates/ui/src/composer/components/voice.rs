@@ -34,6 +34,9 @@ struct Dictation {
     /// False between `start` and the engine's `Ready` — the first session may
     /// still be downloading speech assets, so the button shows a busy state.
     ready: bool,
+    /// Smoothed microphone level (`0.0..=1.0`) shown as a glow behind the mic
+    /// icon so the user can see their speech is being picked up.
+    level: f32,
     /// Cursor offset (UTF-8 bytes) captured when dictation started.
     anchor: usize,
     committed_len: usize,
@@ -98,11 +101,21 @@ impl Composer {
                 .child(if preparing {
                     Spinner::new().small().color(color).into_any_element()
                 } else {
-                    Icon::empty()
+                    let icon = Icon::empty()
                         .path("icons/mic.svg")
                         .small()
-                        .text_color(color)
-                        .into_any_element()
+                        .text_color(color);
+                    match dictation {
+                        // While recording, a glow behind the glyph tracks the
+                        // live input level: visible proof the mic hears you.
+                        Some(d) => div()
+                            .rounded_full()
+                            .p(px(2.))
+                            .bg(cx.theme().danger.opacity(0.08 + d.level * 0.42))
+                            .child(icon)
+                            .into_any_element(),
+                        None => icon.into_any_element(),
+                    }
                 })
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_dictation(window, cx)))
                 .into_any_element(),
@@ -159,6 +172,7 @@ impl Composer {
         self.voice.session = Some(Dictation {
             session,
             ready: false,
+            level: 0.0,
             anchor,
             committed_len: 0,
             volatile_len: 0,
@@ -204,6 +218,14 @@ impl Composer {
             DictationEvent::Ready => {
                 if let Some(dictation) = self.voice.session.as_mut() {
                     dictation.ready = true;
+                    cx.notify();
+                }
+            }
+            DictationEvent::Level(level) => {
+                if let Some(dictation) = self.voice.session.as_mut() {
+                    // Fast attack, slow decay: peaks register instantly and
+                    // fade out instead of flickering at the callback rate.
+                    dictation.level = level.max(dictation.level * 0.8);
                     cx.notify();
                 }
             }

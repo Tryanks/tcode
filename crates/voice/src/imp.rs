@@ -60,6 +60,10 @@ unsafe extern "C" fn event_callback(context: *mut c_void, kind: c_int, text: *co
         2 => (DictationEvent::Final(string()), false),
         3 => (DictationEvent::Error(string()), true),
         4 => (DictationEvent::Ended, true),
+        5 => match string().parse::<f32>() {
+            Ok(level) => (DictationEvent::Level(level.clamp(0.0, 1.0)), false),
+            Err(_) => return,
+        },
         _ => return,
     };
 

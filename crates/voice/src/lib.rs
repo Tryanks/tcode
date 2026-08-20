@@ -17,6 +17,9 @@
 pub enum DictationEvent {
     /// Speech assets are installed and the microphone is live.
     Ready,
+    /// Microphone input level in `0.0..=1.0`, reported continuously while
+    /// recording (roughly at the audio callback rate). Purely cosmetic.
+    Level(f32),
     /// In-progress hypothesis; replaces the previous `Volatile` text.
     Volatile(String),
     /// Finalized text; replaces the current volatile text and is stable.
