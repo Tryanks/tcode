@@ -548,6 +548,10 @@ composer:
   model_sources: "模型来源"
   model_results: "模型"
   model_option: "模型 %{model}"
+  voice_start: "语音输入"
+  voice_preparing: "正在准备语音输入…"
+  voice_stop: "停止语音输入"
+  voice_error: "语音输入失败：%{error}"
 approval:
   choose_mode: "选择审批模式"
   mode_option: "%{label}：%{description}"

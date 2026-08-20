@@ -151,6 +151,8 @@ jobs:
             <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>Tcode uses the microphone for voice input in the message composer.</string>
+            <key>NSSpeechRecognitionUsageDescription</key><string>Tcode transcribes your speech on-device to type messages by voice.</string>
           </dict></plist>
           PLIST
           plutil -lint "$app/Contents/Info.plist"

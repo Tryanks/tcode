@@ -61,6 +61,18 @@ pub fn start(
     imp::start(locale, on_event).map(|imp| DictationSession { imp })
 }
 
+/// Start transcription from an audio file.
+///
+/// This is an implementation hook for examples and integration testing.
+#[doc(hidden)]
+pub fn start_file(
+    locale: &str,
+    path: &str,
+    on_event: Box<dyn Fn(DictationEvent) + Send + Sync>,
+) -> Result<DictationSession, String> {
+    imp::start_file(locale, path, on_event).map(|imp| DictationSession { imp })
+}
+
 #[cfg(all(target_os = "macos", voice_shim))]
 mod imp;
 
@@ -80,6 +92,14 @@ mod imp {
 
     pub fn start(
         _locale: &str,
+        _on_event: Box<dyn Fn(DictationEvent) + Send + Sync>,
+    ) -> Result<Session, String> {
+        Err("dictation is not supported on this platform".into())
+    }
+
+    pub fn start_file(
+        _locale: &str,
+        _path: &str,
         _on_event: Box<dyn Fn(DictationEvent) + Send + Sync>,
     ) -> Result<Session, String> {
         Err("dictation is not supported on this platform".into())
