@@ -193,15 +193,86 @@ impl OrchestrateTools {
     }
 
     async fn run(&self, op: OrchestrateOp) -> CallToolResult {
-        match self
-            .broker
-            .invoke(|reply| crate::BrokerRequest { op, reply })
-            .await
-        {
-            Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
-            Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
+        run_op(&self.broker, op).await
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ReportResultParams {
+    #[schemars(
+        description = "The complete final report, verbatim. Do not summarize or truncate; this exact text is what the orchestrator receives."
+    )]
+    text: String,
+}
+
+/// The single-tool server registered with child threads: a channel for pushing
+/// the full RESULT text to the orchestrator instead of relying on whatever the
+/// child's last message happens to be.
+#[derive(Clone)]
+pub struct ChildReportTools {
+    broker: Broker,
+    child_id: String,
+    tool_router: ToolRouter<Self>,
+}
+
+#[tool_router]
+impl ChildReportTools {
+    fn new(broker: Broker, child_id: String) -> Self {
+        Self {
+            broker,
+            child_id,
+            tool_router: Self::tool_router(),
         }
     }
+
+    #[tool(
+        description = "Deliver the full text of your final report (RESULT) to the orchestrator that dispatched this thread. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). The text reaches the orchestrator verbatim and in full when this turn ends. If you never call this, only your final assistant message is sent back — truncated when long."
+    )]
+    async fn report_result(
+        &self,
+        Parameters(p): Parameters<ReportResultParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(run_op(
+            &self.broker,
+            OrchestrateOp::ReportResult {
+                child_id: self.child_id.clone(),
+                text: p.text,
+            },
+        )
+        .await)
+    }
+}
+
+async fn run_op(broker: &Broker, op: OrchestrateOp) -> CallToolResult {
+    match broker
+        .invoke(|reply| crate::BrokerRequest { op, reply })
+        .await
+    {
+        Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
+        Err(message) => CallToolResult::error(vec![ContentBlock::text(message)]),
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for ChildReportTools {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
+                "Report this thread's final result to the orchestrator that dispatched it.",
+            )
+    }
+}
+
+pub type ChildService = StreamableHttpService<ChildReportTools, LocalSessionManager>;
+
+pub fn child_service(broker: Broker, child_id: String) -> ChildService {
+    StreamableHttpService::new(
+        move || Ok(ChildReportTools::new(broker.clone(), child_id.clone())),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    )
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -282,5 +353,47 @@ mod tests {
                 "approve", "archive", "cancel", "dispatch", "result", "send", "status"
             ]
         );
+    }
+
+    #[test]
+    fn child_service_exposes_only_report_result() {
+        let (tx, _rx) = async_channel::unbounded();
+        let tools = ChildReportTools::new(
+            broker(tx, std::time::Duration::from_secs(1)),
+            "child".into(),
+        );
+        let names: Vec<_> = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(names, ["report_result"]);
+    }
+
+    #[tokio::test]
+    async fn report_result_carries_child_scope() {
+        let (tx, rx) = async_channel::unbounded();
+        let broker = broker(tx, std::time::Duration::from_secs(2));
+        let resolver = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            assert!(
+                matches!(request.op, OrchestrateOp::ReportResult { child_id, text }
+                    if child_id == "child" && text == "full report")
+            );
+            request
+                .reply
+                .send(Ok(serde_json::json!({ "ok": true })))
+                .await
+                .unwrap();
+        });
+        let result = ChildReportTools::new(broker, "child".into())
+            .report_result(Parameters(ReportResultParams {
+                text: "full report".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        resolver.await.unwrap();
     }
 }

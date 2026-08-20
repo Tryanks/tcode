@@ -467,6 +467,8 @@ pub struct McpRegistration {
 impl McpRegistration {
     pub const SERVER_NAME_PREVIEW: &'static str = "tcode_preview";
     pub const SERVER_NAME_ORCHESTRATE: &'static str = "tcode_orchestrate";
+    /// The child-thread half of orchestration: a single `report_result` tool.
+    pub const SERVER_NAME_ORCHESTRATE_REPORT: &'static str = "tcode_report";
     pub const SERVER_NAME_COMPUTER_USE: &'static str = "tcode_computer_use";
 
     /// Codex `-c` override value: an inline TOML table for a streamable-HTTP MCP

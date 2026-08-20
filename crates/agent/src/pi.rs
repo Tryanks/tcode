@@ -1506,6 +1506,10 @@ fn unattached_servers(opts: &SessionOptions) -> Vec<&'static str> {
             "orchestration",
         ),
         (
+            crate::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT,
+            "result reporting",
+        ),
+        (
             crate::McpRegistration::SERVER_NAME_COMPUTER_USE,
             "computer-use",
         ),

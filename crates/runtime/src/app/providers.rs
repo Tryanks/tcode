@@ -671,6 +671,7 @@ pub(super) fn session_options(
     launch_env: LaunchEnv,
     mcp_server: Option<agent::McpRegistration>,
     orchestrate_server: Option<agent::McpRegistration>,
+    orchestrate_report_server: Option<agent::McpRegistration>,
     computer_use_server: Option<agent::McpRegistration>,
 ) -> SessionOptions {
     // A session's binary / launch-args come from its selected profile (built-in
@@ -720,6 +721,10 @@ pub(super) fn session_options(
                 .flatten(),
             meta.orchestrate_enabled
                 .then_some(orchestrate_server)
+                .flatten(),
+            meta.parent_session_id
+                .is_some()
+                .then_some(orchestrate_report_server)
                 .flatten(),
             settings
                 .computer_use

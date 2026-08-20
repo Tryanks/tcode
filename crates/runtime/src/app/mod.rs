@@ -328,6 +328,10 @@ pub struct AppState {
     mcp: McpWiring,
     callback_last_turn: HashMap<String, usize>,
     callback_approval_requests: HashSet<(String, String)>,
+    /// RESULT text pushed by child threads via their `report_result` tool,
+    /// keyed by child id; consumed by the next completion callback (a child
+    /// that never reports falls back to its final assistant message).
+    child_reported_results: HashMap<String, String>,
     /// Live provider approvals for every resident session. This is the sole
     /// host-side authority; persisted timeline approvals remain client state.
     approvals: HashMap<String, Vec<agent::ApprovalRequest>>,
@@ -441,6 +445,7 @@ impl AppState {
             mcp: McpWiring::default(),
             callback_last_turn: HashMap::new(),
             callback_approval_requests: HashSet::new(),
+            child_reported_results: HashMap::new(),
             approvals: HashMap::new(),
             git_status: None,
             git_busy: false,

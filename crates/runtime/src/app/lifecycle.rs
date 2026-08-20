@@ -115,6 +115,7 @@ impl AppState {
             None
         };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
+        let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
         let computer_use_registration = self.mcp.computer_use_registration.clone();
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
@@ -141,6 +142,7 @@ impl AppState {
                 launch_env,
                 preview_registration,
                 orchestrate_registration,
+                orchestrate_report_registration,
                 computer_use_registration,
             );
             let result = provider_launcher.launch(meta.provider, opts).await;
@@ -490,6 +492,7 @@ impl AppState {
         for child_id in child_ids {
             self.drop_background(&child_id, cx);
             self.revoke_preview_registration(&child_id);
+            self.revoke_orchestrate_child_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
         if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)

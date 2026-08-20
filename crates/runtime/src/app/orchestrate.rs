@@ -8,6 +8,9 @@ pub(super) struct McpWiring {
     pub(super) orchestrate_url: Option<String>,
     pub(super) orchestrate_tokens: Option<orchestrate_mcp::TokenRegistry>,
     pub(super) orchestrate_registrations: HashMap<String, agent::McpRegistration>,
+    pub(super) orchestrate_child_url: Option<String>,
+    pub(super) orchestrate_child_tokens: Option<orchestrate_mcp::ChildTokenRegistry>,
+    pub(super) orchestrate_child_registrations: HashMap<String, agent::McpRegistration>,
     pub(super) orchestrate_requests:
         Option<smol::channel::Receiver<orchestrate_mcp::BrokerRequest>>,
     pub(super) computer_use_registration: Option<agent::McpRegistration>,
@@ -25,6 +28,8 @@ impl AppState {
     pub fn attach_orchestrate_mcp(&mut self, server: orchestrate_mcp::OrchestrateMcpServer) {
         self.mcp.orchestrate_url = Some(server.url);
         self.mcp.orchestrate_tokens = Some(server.tokens);
+        self.mcp.orchestrate_child_url = Some(server.child_url);
+        self.mcp.orchestrate_child_tokens = Some(server.child_tokens);
         self.mcp.orchestrate_requests = Some(server.requests);
     }
 
@@ -158,6 +163,42 @@ impl AppState {
             .orchestrate_registrations
             .insert(meta.id.clone(), registration.clone());
         Some(registration)
+    }
+
+    /// The `report_result` half of orchestration, registered with child threads
+    /// so they can push their full RESULT text up instead of relying on the
+    /// tail of their last message.
+    pub(super) fn orchestrate_child_registration_for(
+        &mut self,
+        meta: &SessionMeta,
+    ) -> Option<agent::McpRegistration> {
+        meta.parent_session_id.as_ref()?;
+        if let Some(registration) = self.mcp.orchestrate_child_registrations.get(&meta.id) {
+            return Some(registration.clone());
+        }
+        let token = self
+            .mcp
+            .orchestrate_child_tokens
+            .as_ref()?
+            .register(&meta.id);
+        let registration = agent::McpRegistration {
+            name: agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT.into(),
+            url: self.mcp.orchestrate_child_url.clone()?,
+            bearer_token: token,
+        };
+        self.mcp
+            .orchestrate_child_registrations
+            .insert(meta.id.clone(), registration.clone());
+        Some(registration)
+    }
+
+    pub(super) fn revoke_orchestrate_child_registration(&mut self, session_id: &str) {
+        self.child_reported_results.remove(session_id);
+        if let Some(registration) = self.mcp.orchestrate_child_registrations.remove(session_id)
+            && let Some(tokens) = &self.mcp.orchestrate_child_tokens
+        {
+            tokens.revoke(&registration.bearer_token);
+        }
     }
 
     pub(super) fn preview_registration_for(
@@ -373,6 +414,9 @@ impl AppState {
                         .require_child(&parent_id, &thread_id)?
                         .archived_at
                         .is_some();
+                    // A follow-up starts a new piece of work: a result reported
+                    // before it must not be delivered as the answer to it.
+                    self.child_reported_results.remove(&thread_id);
                     // A follow-up revives an archived child: it returns to the
                     // sidebar so the user can watch the retry it just received.
                     if archived {
@@ -468,6 +512,25 @@ impl AppState {
                         "ok": true,
                         "archived": thread_ids.len(),
                         "thread_ids": thread_ids,
+                    }))
+                })();
+                let _ = reply.try_send(result);
+            }
+            OrchestrateOp::ReportResult { child_id, text } => {
+                let result = (|| {
+                    let is_child = self
+                        .sessions
+                        .iter()
+                        .any(|meta| meta.id == child_id && meta.parent_session_id.is_some());
+                    if !is_child {
+                        return Err("unknown thread or not an orchestrated child".into());
+                    }
+                    let chars = text.chars().count();
+                    self.child_reported_results.insert(child_id, text);
+                    Ok(serde_json::json!({
+                        "ok": true,
+                        "chars": chars,
+                        "note": "delivered to the orchestrator in full when this turn ends",
                     }))
                 })();
                 let _ = reply.try_send(result);
@@ -791,11 +854,16 @@ impl AppState {
                 if state.callback_last_turn.get(&child_id).copied() == Some(turn) {
                     return;
                 }
+                // A report pushed via the child's report_result tool supersedes
+                // the last-message digest and is delivered in full; consuming it
+                // here keeps the fallback per turn.
+                let reported = state.child_reported_results.remove(&child_id);
                 let text = assemble_callback_text(
                     &child_id,
                     &title,
                     status,
                     &final_assistant_message(&timeline),
+                    reported.as_deref(),
                     timeline.usage.as_ref(),
                     result_max_chars,
                     auto_archive,
@@ -1245,11 +1313,13 @@ pub(super) fn token_usage_json(usage: &agent::TokenUsage) -> serde_json::Value {
     serde_json::Value::Object(value)
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the callback's data sources
 pub(super) fn assemble_callback_text(
     child_id: &str,
     title: &str,
     status: TurnStatus,
     final_message: &str,
+    reported: Option<&str>,
     usage: Option<&agent::TokenUsage>,
     max_chars: Option<u32>,
     archived: bool,
@@ -1281,7 +1351,11 @@ pub(super) fn assemble_callback_text(
     } else {
         format!(" tokens: {}.", token_parts.join(", "))
     };
-    let body = if final_message.is_empty() {
+    let body = if let Some(report) = reported.filter(|report| !report.trim().is_empty()) {
+        // The child chose this text deliberately via report_result, so it is
+        // delivered verbatim and never truncated.
+        format!("Result (reported via report_result):\n{report}")
+    } else if final_message.is_empty() {
         "(no assistant output)".to_string()
     } else {
         let count = final_message.chars().count();

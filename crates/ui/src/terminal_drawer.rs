@@ -2576,7 +2576,7 @@ fn terminal_image(graphic: GraphicData) -> Option<TerminalImage> {
                 return None;
             }
             let mut pixels = graphic.pixels;
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
             pixels
@@ -2586,7 +2586,7 @@ fn terminal_image(graphic: GraphicData) -> Option<TerminalImage> {
                 return None;
             }
             let mut pixels = Vec::with_capacity(pixel_count.checked_mul(4)?);
-            for pixel in graphic.pixels.chunks_exact(3) {
+            for pixel in graphic.pixels.as_chunks::<3>().0 {
                 pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], u8::MAX]);
             }
             pixels
