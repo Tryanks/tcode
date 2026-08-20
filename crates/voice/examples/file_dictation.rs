@@ -10,7 +10,8 @@ fn main() {
     };
 
     let (sender, receiver) = mpsc::channel();
-    let session = tcode_voice::start_file(
+    // Held for its lifetime: dropping it would cancel the session.
+    let _session = tcode_voice::start_file(
         &locale,
         &path,
         Box::new(move |event| {
@@ -30,7 +31,6 @@ fn main() {
             DictationEvent::Final(text) => println!("final: {text}"),
             DictationEvent::Error(error) => {
                 eprintln!("error: {error}");
-                drop(session);
                 process::exit(1);
             }
             DictationEvent::Ended => {
