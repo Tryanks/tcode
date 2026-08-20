@@ -82,17 +82,18 @@ private actor VoiceCore {
     func run() async {
         do {
             let requestedLocale = Locale(identifier: localeIdentifier)
-            guard let locale = await SpeechTranscriber.supportedLocale(
+            guard let locale = await DictationTranscriber.supportedLocale(
                 equivalentTo: requestedLocale
             ) else {
                 throw VoiceFailure("unsupported speech locale: \(localeIdentifier)")
             }
 
-            let transcriber = SpeechTranscriber(
+            // DictationTranscriber's progressive preset streams hypotheses
+            // every few hundred ms; SpeechTranscriber with plain
+            // volatileResults buffers everything until finalization.
+            let transcriber = DictationTranscriber(
                 locale: locale,
-                transcriptionOptions: [],
-                reportingOptions: [.volatileResults],
-                attributeOptions: []
+                preset: .progressiveLongDictation
             )
             let modules: [any SpeechModule] = [transcriber]
             try await installAssets(for: modules)
@@ -142,7 +143,7 @@ private actor VoiceCore {
         }
     }
 
-    private func startResults(from transcriber: SpeechTranscriber) {
+    private func startResults(from transcriber: DictationTranscriber) {
         resultsTask = Task { [weak self] in
             do {
                 for try await result in transcriber.results {
@@ -179,6 +180,12 @@ private actor VoiceCore {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let naturalFormat = input.outputFormat(forBus: 0)
+        let authorization = AVCaptureDevice.authorizationStatus(for: .audio)
+        voiceLog(
+            "mic start: audio authorization=\(authorization.rawValue) "
+                + "(0 notDetermined, 1 restricted, 2 denied, 3 authorized), "
+                + "format=\(naturalFormat)"
+        )
         guard naturalFormat.sampleRate > 0, naturalFormat.channelCount > 0 else {
             throw VoiceFailure("microphone has no usable audio format")
         }
@@ -342,19 +349,29 @@ private actor VoiceCore {
     }
 
     private func emit(kind: Int32, text: String) {
-        guard !terminal, ready else { return }
+        guard !terminal, ready else {
+            voiceLog("dropping event kind=\(kind) (terminal=\(terminal) ready=\(ready))")
+            return
+        }
         text.withCString { callback(context, kind, $0) }
     }
 
     private func emitTerminal(kind: Int32, text: String?) {
         guard !terminal else { return }
         terminal = true
+        voiceLog("terminal kind=\(kind) text=\(text ?? "nil")")
         if let text {
             text.withCString { callback(context, kind, $0) }
         } else {
             callback(context, kind, nil)
         }
     }
+}
+
+/// Diagnostic line on stderr; shows up in the app log next to env_logger
+/// output. Cheap and always on — dictation is short-lived and low-volume.
+private func voiceLog(_ message: String) {
+    FileHandle.standardError.write(Data("[tcode-voice] \(message)\n".utf8))
 }
 
 private struct VoiceFailure: LocalizedError {
@@ -419,7 +436,7 @@ public func voiceIsSupported(_ localeCString: UnsafePointer<CChar>?) -> Bool {
     let semaphore = DispatchSemaphore(value: 0)
     let supported = LockedFlag()
     Task {
-        let result = await SpeechTranscriber.supportedLocale(
+        let result = await DictationTranscriber.supportedLocale(
             equivalentTo: Locale(identifier: identifier)
         ) != nil
         supported.set(result)

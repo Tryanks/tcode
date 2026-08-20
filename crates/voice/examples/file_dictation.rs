@@ -25,6 +25,7 @@ fn main() {
     while let Ok(event) = receiver.recv() {
         match event {
             DictationEvent::Ready => println!("ready"),
+            DictationEvent::Level(_) => {}
             DictationEvent::Volatile(text) => println!("volatile: {text}"),
             DictationEvent::Final(text) => println!("final: {text}"),
             DictationEvent::Error(error) => {

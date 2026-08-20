@@ -34,6 +34,10 @@ struct Dictation {
     /// False between `start` and the engine's `Ready` — the first session may
     /// still be downloading speech assets, so the button shows a busy state.
     ready: bool,
+    /// True after a graceful stop: capture is over but the pump stays alive so
+    /// the engine's finalization flush still lands in the editor; the session
+    /// is dropped when the terminal event arrives.
+    stopping: bool,
     /// Smoothed microphone level (`0.0..=1.0`) shown as a glow behind the mic
     /// icon so the user can see their speech is being picked up.
     level: f32,
@@ -75,7 +79,7 @@ impl Composer {
             return None;
         }
         let dictation = self.voice.session.as_ref();
-        let preparing = dictation.is_some_and(|d| !d.ready);
+        let preparing = dictation.is_some_and(|d| !d.ready || d.stopping);
         let tooltip: SharedString = match dictation {
             None => crate::tr!("composer.voice_start"),
             Some(_) if preparing => crate::tr!("composer.voice_preparing"),
@@ -172,6 +176,7 @@ impl Composer {
         self.voice.session = Some(Dictation {
             session,
             ready: false,
+            stopping: false,
             level: 0.0,
             anchor,
             committed_len: 0,
@@ -182,15 +187,30 @@ impl Composer {
         cx.notify();
     }
 
-    /// Stop the running session, keeping every character inserted so far.
-    /// Returns whether there was one (Escape uses this to claim the keystroke).
+    /// Gracefully stop the running session: capture ends now, but the pump
+    /// stays alive so the engine's finalization flush still reaches the editor
+    /// before `Ended` clears the state. Returns whether a session existed
+    /// (Escape uses this to claim the keystroke).
     pub(in super::super) fn stop_dictation(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(dictation) = self.voice.session.take() else {
+        let Some(dictation) = self.voice.session.as_mut() else {
             return false;
         };
-        dictation.session.stop();
-        cx.notify();
+        if !dictation.stopping {
+            dictation.stopping = true;
+            dictation.session.stop();
+            cx.notify();
+        }
         true
+    }
+
+    /// Drop the session immediately, discarding any pending finalization. For
+    /// paths where a late flush would land in the wrong place: submit clears
+    /// the editor, destination switches change it, and user edits invalidate
+    /// the anchor.
+    pub(in super::super) fn abort_dictation(&mut self, cx: &mut Context<Self>) {
+        if self.voice.session.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Typing, pasting or undoing while dictating ends the session in place:
@@ -204,7 +224,7 @@ impl Composer {
             .as_ref()
             .is_some_and(|dictation| dictation.expected != value.as_ref())
         {
-            self.stop_dictation(cx);
+            self.abort_dictation(cx);
         }
     }
 
@@ -214,6 +234,10 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        match &event {
+            DictationEvent::Level(_) => {}
+            other => log::info!("dictation event: {other:?}"),
+        }
         match event {
             DictationEvent::Ready => {
                 if let Some(dictation) = self.voice.session.as_mut() {

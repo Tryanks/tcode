@@ -303,7 +303,7 @@ impl Composer {
         };
         // The dictation anchor belongs to the text we are about to swap out.
         #[cfg(target_os = "macos")]
-        self.stop_dictation(cx);
+        self.abort_dictation(cx);
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(incoming_text, window, cx);
@@ -519,7 +519,7 @@ impl Composer {
         cx: &mut Context<Self>,
     ) {
         #[cfg(target_os = "macos")]
-        self.stop_dictation(cx);
+        self.abort_dictation(cx);
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
         self.pending_images.clear();
