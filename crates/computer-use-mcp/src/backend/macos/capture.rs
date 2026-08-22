@@ -15,6 +15,7 @@ pub(super) fn capture_window(root: &RootInfo) -> Result<Vec<u8>, BackendError> {
         .arg("-x")
         .arg("-l")
         .arg(root.window_id.to_string())
+        .arg("-o")
         .arg("-t")
         .arg("png")
         .arg(&path)
