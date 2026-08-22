@@ -23,6 +23,17 @@ const KEYS: [&str; 6] = [
 fn log_line(message: &str) {
     eprintln!("{message}");
     let _ = std::io::stderr().flush();
+    // Windows-subsystem builds have no console under a scheduled task, so the
+    // on-device runner reads phases from this file instead of stderr.
+    if let Ok(path) = std::env::var("TCODE_SMOKE_LOG")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        let _ = writeln!(file, "{message}");
+        let _ = file.sync_all();
+    }
 }
 
 pub struct Watchdog {
