@@ -98,6 +98,8 @@ pub struct WorkspaceStore {
     git_status_replica: GitStatusStatus,
     background_session_flags: HashMap<String, (bool, bool, bool)>,
     active_destination: Option<ConversationDestination>,
+    /// One-shot turn navigation requested by a cross-session content search.
+    pending_chat_turn: Option<(String, usize)>,
     native_rewind_prefills: HashMap<String, String>,
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
 }
@@ -153,6 +155,7 @@ impl WorkspaceStore {
             git_status_replica: GitStatusStatus::default(),
             background_session_flags: HashMap::new(),
             active_destination: None,
+            pending_chat_turn: None,
             native_rewind_prefills: HashMap::new(),
             conversation_ui: HashMap::new(),
         };
@@ -1377,6 +1380,19 @@ impl WorkspaceStore {
         self.session_replica
             .as_ref()
             .map(|(_, timeline)| read(timeline))
+    }
+
+    pub(crate) fn pending_chat_turn(&self, session_id: &str) -> Option<usize> {
+        self.pending_chat_turn
+            .as_ref()
+            .filter(|(id, _)| id == session_id)
+            .map(|(_, turn)| *turn)
+    }
+
+    pub(crate) fn take_pending_chat_turn(&mut self, session_id: &str, turn: usize) {
+        if self.pending_chat_turn.as_ref() == Some(&(session_id.to_string(), turn)) {
+            self.pending_chat_turn = None;
+        }
     }
 
     #[cfg(test)]

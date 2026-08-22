@@ -473,6 +473,7 @@ palette:
   actions: "操作"
   results: "命令面板结果"
   threads: "对话"
+  messages: "消息"
   no_matches: "没有匹配项"
   navigate: "↑↓ 导航"
   select: "Enter 选择"

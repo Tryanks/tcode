@@ -18,9 +18,9 @@ use crate::{
 use agent::{ItemContent, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
-    InteractiveElement as _, IntoElement, ListAlignment, ListState, ParentElement as _, Render,
-    Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window,
-    div, list, prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
+    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -71,6 +71,8 @@ pub struct ChatView {
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
     session_key: Option<String>,
+    /// Turn selected from a command-palette content hit.
+    highlighted_turn: Option<usize>,
     /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
     _tick: Option<Task<()>>,
     /// Which copy button is currently showing its "Copied!" confirmation (2s):
@@ -119,6 +121,7 @@ impl ChatView {
             md_states: HashMap::new(),
             expanded: HashSet::new(),
             session_key: None,
+            highlighted_turn: None,
             _tick: None,
             copied: None,
             _copied_task: None,
@@ -172,10 +175,14 @@ impl ChatView {
             .unwrap_or_default();
 
         let session_changed = session_key != self.session_key;
+        let requested_turn = session_key
+            .as_deref()
+            .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         let list_sync = list_sync(&self.turn_items, &turn_items, session_changed);
         if session_changed {
             self.md_states.clear();
             self.expanded.clear();
+            self.highlighted_turn = None;
             self.session_key = session_key;
         }
         self.turn_items = turn_items;
@@ -198,6 +205,20 @@ impl ChatView {
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
                 }
+            }
+        }
+
+        if let Some(turn) = requested_turn.filter(|turn| *turn < self.turn_items.len()) {
+            self.list_state.set_follow_mode(FollowMode::Normal);
+            self.list_state.scroll_to(ListOffset {
+                item_ix: turn,
+                offset_in_item: px(0.),
+            });
+            self.highlighted_turn = Some(turn);
+            if let Some(session_id) = self.session_key.as_deref() {
+                self.workspace_store.update(cx, |store, _cx| {
+                    store.take_pending_chat_turn(session_id, turn);
+                });
             }
         }
 
@@ -1612,6 +1633,10 @@ impl Render for ChatView {
                     .w_full()
                     .justify_center()
                     .px(px(CONTENT_MIN_PADDING))
+                    .when(this.highlighted_turn == Some(index), |item| {
+                        item.rounded(crate::material::radius_card())
+                            .bg(cx.theme().list_active)
+                    })
                     .when(index + 1 < item_count, |item| item.pb(px(TURN_GAP)))
                     .child(div().w_full().max_w(px(CONTENT_MAX_WIDTH)).child(rendered))
                     .into_any_element()

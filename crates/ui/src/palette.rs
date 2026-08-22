@@ -5,10 +5,14 @@
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
 //! [`crate::WindowState::palette_open`] is set. Sources:
 //! - Threads: fuzzy match over session titles (enter opens the thread).
+//! - Messages: debounced full-text search over persisted conversation events.
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
 //!   "Toggle diff panel".
 //!
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::input::{Input, InputEvent, InputState};
@@ -20,10 +24,12 @@ use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_protocol::ThreadExportFormat;
+use tcode_services::session_search::{SessionSearch, SessionSearchHit};
+use tcode_services::store::SessionStore;
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
@@ -80,6 +86,7 @@ enum Action {
     },
     OpenThread {
         session_id: String,
+        turn: Option<usize>,
     },
 }
 
@@ -107,6 +114,10 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
+    content_search: Option<Arc<Mutex<SessionSearch>>>,
+    content_hits: Vec<SessionSearchHit>,
+    search_generation: u64,
+    _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -128,6 +139,7 @@ impl CommandPalette {
                 |this, _query, event, window, cx| match event {
                     InputEvent::Change => {
                         this.selected = 0;
+                        this.schedule_content_search(cx);
                         cx.notify();
                     }
                     InputEvent::PressEnter { .. } => {
@@ -144,6 +156,13 @@ impl CommandPalette {
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
+            content_search: SessionStore::open_default()
+                .ok()
+                .map(SessionSearch::new)
+                .map(|search| Arc::new(Mutex::new(search))),
+            content_hits: Vec::new(),
+            search_generation: 0,
+            _search_task: None,
             _subscriptions: subscriptions,
         }
     }
@@ -155,6 +174,45 @@ impl CommandPalette {
             state.focus(window, cx);
         });
         self.selected = 0;
+        self.content_hits.clear();
+    }
+
+    fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        self.content_hits.clear();
+
+        let raw = self.query.read(cx).value().to_string();
+        let query = raw.trim();
+        if query.is_empty() || query.starts_with('>') {
+            self._search_task = None;
+            return;
+        }
+        let Some(search) = self.content_search.clone() else {
+            return;
+        };
+        let sessions = self.store.read(cx).sidebar_sessions();
+        let query = query.to_string();
+        self._search_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let hits = cx
+                .background_executor()
+                .spawn(async move {
+                    search
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .search(&sessions, &query, 50)
+                })
+                .await;
+            let _ = this.update(cx, |palette, cx| {
+                if palette.search_generation == generation {
+                    palette.content_hits = hits;
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -289,6 +347,7 @@ impl CommandPalette {
                                 updated_at: Some(meta.updated_at),
                                 action: Action::OpenThread {
                                     session_id: meta.id.clone(),
+                                    turn: None,
                                 },
                             },
                         ));
@@ -300,6 +359,32 @@ impl CommandPalette {
                 groups.push(Group {
                     label: crate::tr!("palette.threads").into_owned(),
                     items: threads.into_iter().map(|(_, i)| i).collect(),
+                });
+            }
+
+            if !query.trim().is_empty() && !self.content_hits.is_empty() {
+                let sessions = store.sidebar_sessions();
+                let messages = self
+                    .content_hits
+                    .iter()
+                    .map(|hit| {
+                        let meta = sessions.iter().find(|meta| meta.id == hit.session_id);
+                        Item {
+                            icon: IconName::Search,
+                            label: hit.session_title.clone(),
+                            subtitle: Some(hit.snippet.clone()),
+                            provider: meta.map(|meta| meta.provider),
+                            updated_at: meta.map(|meta| meta.updated_at),
+                            action: Action::OpenThread {
+                                session_id: hit.session_id.clone(),
+                                turn: Some(hit.turn),
+                            },
+                        }
+                    })
+                    .collect();
+                groups.push(Group {
+                    label: crate::tr!("palette.messages").into_owned(),
+                    items: messages,
                 });
             }
         }
@@ -380,9 +465,14 @@ impl CommandPalette {
                     cx,
                 );
             }
-            Action::OpenThread { session_id } => {
-                self.store.update(cx, |store, _cx| {
-                    store.select_session(session_id);
+            Action::OpenThread { session_id, turn } => {
+                self.store.update(cx, |store, cx| {
+                    if let Some(turn) = turn {
+                        store.select_session_at_turn(session_id, turn);
+                        cx.notify();
+                    } else {
+                        store.select_session(session_id);
+                    }
                 });
                 self.close(cx);
             }
