@@ -18,7 +18,7 @@ use gpui::{
 
 use super::{
     inline::{Inline, InlineState},
-    link_target::{LinkTarget, resolve_link},
+    link_target::LinkTarget,
     nodes::LinkMark,
     state::MarkdownState,
 };
@@ -159,7 +159,7 @@ impl InlineFlow {
                     .on_click(move |_, window, cx| {
                         gpui_base::TextSelection::end(window, cx);
                         cx.stop_propagation();
-                        match resolve_link(&link.url, view.read(cx).base_dir()) {
+                        match view.read(cx).resolve_link(&link.url) {
                             LinkTarget::Web(url) => cx.open_url(&url),
                             LinkTarget::Local(path) => cx.open_with_system(&path),
                         }
