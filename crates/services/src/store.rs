@@ -67,6 +67,23 @@ impl SessionStore {
         self.root.join(format!("{id}.jsonl"))
     }
 
+    /// Read the native event-log bytes without parsing or normalizing them.
+    pub fn read_event_log(&self, id: &str) -> std::io::Result<Vec<u8>> {
+        match fs::read(self.events_path(id)) {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Atomically install a complete native event log for a session.
+    pub fn write_event_log(&self, id: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let destination = self.events_path(id);
+        let temporary = destination.with_extension("jsonl.tmp");
+        fs::write(&temporary, bytes)?;
+        fs::rename(temporary, destination)
+    }
+
     fn models_path(&self, provider: ProviderKind) -> PathBuf {
         let name = match provider {
             ProviderKind::Codex => "codex",
@@ -326,7 +343,7 @@ impl SessionStore {
 /// envelope and the legacy bare-event form. Envelope is tried first; a bare
 /// event lacks the `ts`/`event` keys so it can't masquerade as one, and an
 /// envelope lacks the top-level `type` tag so it can't parse as a bare event.
-fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
+pub(crate) fn parse_stored_line(line: &str) -> Result<StoredEvent, serde_json::Error> {
     match serde_json::from_str::<EventEnvelope>(line) {
         Ok(envelope) => Ok(StoredEvent {
             ts: Some(envelope.ts),

@@ -189,6 +189,63 @@ impl AppState {
         }
     }
 
+    /// Flush pending appends, then serialize and write a thread on the host's
+    /// blocking-I/O executor. The source session is only read.
+    pub fn export_thread(
+        &mut self,
+        session_id: &str,
+        destination: PathBuf,
+        format: ThreadExportFormat,
+        cx: &mut HostCx,
+    ) {
+        let Some(meta) = self.find_meta(session_id) else {
+            self.report_error(
+                RuntimeError::ExportThread {
+                    error: format!("unknown session {session_id}"),
+                },
+                cx,
+            );
+            return;
+        };
+        let barrier = self.store_write_barrier(cx);
+        let store = self.store.clone();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = match barrier.recv().await {
+                Ok(()) => {
+                    host_cx
+                        .unblock(move || export::export_thread(&store, &meta, &destination, format))
+                        .await
+                }
+                Err(error) => Err(std::io::Error::other(format!(
+                    "session-store flush failed: {error}"
+                ))),
+            };
+            host_cx.enqueue(move |state, cx| state.finish_thread_export(result, cx));
+        });
+    }
+
+    fn finish_thread_export(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
+        match result {
+            Ok(path) => {
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                emit_runtime(
+                    cx,
+                    RuntimeEvent::Notice(RuntimeNotice::ThreadExported { file }),
+                );
+            }
+            Err(error) => self.report_error(
+                RuntimeError::ExportThread {
+                    error: error.to_string(),
+                },
+                cx,
+            ),
+        }
+    }
+
     /// Toggle a project's collapsed state (persisted in settings).
     pub fn toggle_project_collapsed(&mut self, project_id: &str, cx: &mut HostCx) {
         let mut settings = self.settings.clone();

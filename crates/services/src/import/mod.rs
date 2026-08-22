@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use agent::{AgentEvent, ProviderKind, ResumeCursor, ThreadItem, TurnStatus};
 use serde_json::json;
 
+use crate::export::{ReadExportError, TcodeThreadExport, read_tcode_export};
 use crate::store::SessionStore;
 use tcode_core::project::{Project, SessionMeta};
 pub use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
@@ -113,6 +114,17 @@ pub fn import_thread(
 ) -> ImportOutcome {
     if existing.contains(&thread.external_id) {
         return ImportOutcome::SkippedDuplicate;
+    }
+
+    if thread.source == SourceTool::T3Code {
+        match read_tcode_export(&thread.file) {
+            Ok(export) => return import_tcode_thread(store, project, export, existing),
+            Err(ReadExportError::NotTcode) => {
+                // Older T3 releases persisted Claude's native transcript and
+                // are still handled by the Claude converter below.
+            }
+            Err(ReadExportError::Invalid(error)) => return ImportOutcome::Failed(error),
+        }
     }
 
     let converted = match thread.source {
@@ -243,6 +255,40 @@ pub fn import_thread(
         return ImportOutcome::Failed(format!("failed to write imported session: {err}"));
     }
     existing.insert(converted.external_id);
+    ImportOutcome::Imported
+}
+
+fn import_tcode_thread(
+    store: &SessionStore,
+    project: &Project,
+    export: TcodeThreadExport,
+    existing: &mut HashSet<String>,
+) -> ImportOutcome {
+    if export.events.is_empty() {
+        return ImportOutcome::SkippedEmpty;
+    }
+    let external_id = format!("tcode:{}", export.meta.id);
+    if existing.contains(&external_id) {
+        return ImportOutcome::SkippedDuplicate;
+    }
+
+    let mut meta = export.meta;
+    let fresh = SessionMeta::new(meta.provider, project.root.clone(), meta.model.clone());
+    meta.id = fresh.id;
+    meta.cwd = project.root.clone();
+    meta.project_id = Some(project.id.clone());
+    meta.archived_at = None;
+    meta.worktree = None;
+    meta.parent_session_id = None;
+    meta.imported_from = Some(external_id.clone());
+
+    if let Err(error) = store.write_event_log(&meta.id, &export.event_log) {
+        return ImportOutcome::Failed(format!("failed to write imported events: {error}"));
+    }
+    if let Err(error) = store.upsert_meta(&meta) {
+        return ImportOutcome::Failed(format!("failed to write imported session: {error}"));
+    }
+    existing.insert(external_id);
     ImportOutcome::Imported
 }
 

@@ -46,6 +46,7 @@ use tcode_core::settings::{
 use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
+use tcode_protocol::ThreadExportFormat;
 use tcode_protocol::{
     AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot, PathEntry,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
@@ -56,6 +57,7 @@ use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
     visible_agents,
 };
+use tcode_services::export;
 use tcode_services::git::{
     CheckoutError, checkout_if_clean, commit_diff_context, create_git_worktree, list_git_branches,
     perform_action, read_git_branch, read_status, remove_git_worktree, run_claude_headless,

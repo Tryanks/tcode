@@ -23,6 +23,7 @@ use gpui::{
     Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
+use tcode_protocol::ThreadExportFormat;
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
@@ -71,6 +72,12 @@ enum Action {
     ToggleTerminal,
     OpenPreview,
     CheckUpdates,
+    ExportThread {
+        session_id: String,
+        title: String,
+        cwd: std::path::PathBuf,
+        format: ThreadExportFormat,
+    },
     OpenThread {
         session_id: String,
     },
@@ -228,6 +235,34 @@ impl CommandPalette {
             IconName::Inbox,
             Action::CheckUpdates,
         );
+        if let Some(session_id) = store.active_session_id()
+            && let Some(meta) = store
+                .sidebar_sessions()
+                .into_iter()
+                .find(|meta| meta.id == session_id)
+        {
+            for (label, format) in [
+                (
+                    crate::tr!("palette.export_jsonl").into_owned(),
+                    ThreadExportFormat::Jsonl,
+                ),
+                (
+                    crate::tr!("palette.export_markdown").into_owned(),
+                    ThreadExportFormat::Markdown,
+                ),
+            ] {
+                push_action(
+                    label,
+                    IconName::Inbox,
+                    Action::ExportThread {
+                        session_id: meta.id.clone(),
+                        title: meta.title.clone(),
+                        cwd: meta.cwd.clone(),
+                        format,
+                    },
+                );
+            }
+        }
         actions.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let mut groups = Vec::new();
@@ -327,6 +362,23 @@ impl CommandPalette {
                 self.store
                     .update(cx, |store, _cx| store.check_provider_versions());
                 self.close(cx);
+            }
+            Action::ExportThread {
+                session_id,
+                title,
+                cwd,
+                format,
+            } => {
+                self.close(cx);
+                crate::thread_export::prompt_thread_export(
+                    self.store.clone(),
+                    session_id,
+                    title,
+                    cwd,
+                    format,
+                    window,
+                    cx,
+                );
             }
             Action::OpenThread { session_id } => {
                 self.store.update(cx, |store, _cx| {

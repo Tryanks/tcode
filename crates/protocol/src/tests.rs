@@ -260,6 +260,7 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::CreateProject { .. } => {}
         Command::StartExternalImport { .. } => {}
         Command::FinishExternalImport { .. } => {}
+        Command::ExportThread { .. } => {}
         Command::ToggleProjectCollapsed { .. } => {}
         Command::PatchSettings { .. } => {}
         Command::ArchiveSession { .. } => {}
@@ -420,6 +421,11 @@ fn every_command_and_query_crosses_ndjson() {
         },
         Command::FinishExternalImport {
             project_id: "project-1".into(),
+        },
+        Command::ExportThread {
+            session_id: "session-1".into(),
+            destination: PathBuf::from("/tmp/thread.md"),
+            format: ThreadExportFormat::Markdown,
         },
         Command::ToggleProjectCollapsed {
             project_id: "project-1".into(),
