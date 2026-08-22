@@ -631,6 +631,28 @@ fn registered_worktree_path(root: &Path, path: &Path) -> Result<Option<PathBuf>,
         .find(|registered| paths_refer_to_same_existing_path(registered, path)))
 }
 
+/// The main working tree of the repository `path` belongs to: the first
+/// `worktree ` entry in porcelain output. Removal must run from here — on
+/// Windows, `git worktree remove` fails when the process cwd is inside the
+/// worktree being removed.
+fn main_worktree_root(path: &Path) -> Result<PathBuf, GitWorktreeError> {
+    let out = crate::process::command("git")
+        .current_dir(path)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|error| GitWorktreeError(error.to_string()))?;
+    if !out.status.success() {
+        return Err(GitWorktreeError(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .ok_or_else(|| GitWorktreeError("git worktree list returned no entries".into()))
+}
+
 fn paths_refer_to_same_existing_path(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
@@ -981,8 +1003,21 @@ fn cleanup_orphaned_worktrees_at(
                 continue;
             }
         };
+        // Run removal from the main checkout: Windows cannot delete a
+        // directory that is the git process's cwd.
+        let removal_root = match main_worktree_root(&path) {
+            Ok(root) => root,
+            Err(error) => {
+                log::warn!(
+                    "failed to resolve the main checkout for orphan at {}: {error}",
+                    path.display()
+                );
+                summary.skipped.push(path);
+                continue;
+            }
+        };
         let out = crate::process::command("git")
-            .current_dir(&path)
+            .current_dir(&removal_root)
             .args([
                 "worktree",
                 "remove",
