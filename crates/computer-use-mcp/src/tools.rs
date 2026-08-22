@@ -1075,6 +1075,7 @@ mod dispatch {
         use super::*;
         use crate::outline::Frame;
 
+        #[cfg(target_os = "macos")]
         fn sparse_observation(screenshot_png: Option<Vec<u8>>) -> RootObservation {
             RootObservation {
                 root: RootInfo {
