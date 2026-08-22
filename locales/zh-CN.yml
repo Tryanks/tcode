@@ -328,6 +328,7 @@ providers:
   enable: "启用 %{name}"
   reveal_email: "点击显示邮箱"
   hide_email: "点击隐藏邮箱"
+  mcp_unavailable: "MCP 工具（电脑操作 / 预览 / 编排）不可用"
   status:
     checking: "正在检查提供方状态"
     checking_detail: "正在等待服务返回安装与认证详情。"

@@ -776,6 +776,14 @@ fn render_model_row(
                         .text_color(muted)
                         .child(glyph.xsmall())
                         .child(label)
+                })
+                .when(!row.provider.caps().mcp_servers, |this| {
+                    this.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(muted)
+                            .child(crate::tr!("providers.mcp_unavailable")),
+                    )
                 }),
         )
         .when(index < 9, |this| {
