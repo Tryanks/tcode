@@ -8,7 +8,7 @@ use tcode_core::{
     acp::AcpAgentPatch,
     project::Project,
     session::{ReviewComment, ReviewSide},
-    settings::{ProfileSettingsPatch, Settings},
+    settings::{BrowserSettings, ProfileSettingsPatch, Settings},
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
@@ -31,6 +31,29 @@ fn round_trip_client_payload(id: u64, payload: ClientPayload) {
         decode_client_line(&line).expect("decode client NDJSON"),
         message
     );
+}
+
+#[test]
+fn browser_settings_patch_preserves_native_webview_override_and_legacy_absence() {
+    let patch = SettingsPatch::Browser(BrowserSettings {
+        native_webview: Some(true),
+        ..BrowserSettings::default()
+    });
+    round_trip(&patch);
+
+    let legacy: SettingsPatch = serde_json::from_value(json!({
+        "type": "browser",
+        "content": {
+            "enabled": true,
+            "home_url": null,
+            "allow_evaluate": true
+        }
+    }))
+    .unwrap();
+    let SettingsPatch::Browser(browser) = legacy else {
+        panic!("expected browser patch");
+    };
+    assert_eq!(browser.native_webview, None);
 }
 
 #[test]

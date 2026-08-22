@@ -1052,6 +1052,14 @@ impl SettingsPage {
                 cx,
                 |s, checked| s.browser.enabled = checked,
             ),
+            self.toggle_row(
+                "browser-native-webview",
+                crate::tr!("browser.native_webview.title"),
+                crate::tr!("browser.native_webview.description"),
+                settings.browser.native_webview_enabled(),
+                cx,
+                |s, checked| s.browser.native_webview = Some(checked),
+            ),
             self.home_url_row(cx),
             self.toggle_row(
                 "browser-allow-eval",

@@ -10,8 +10,10 @@
 //!
 //! ## Platform support
 //!
-//! macOS + Windows get the real WebView. **Linux does not**: lb-wry's
-//! `build_as_child` is X11-only there *and* requires a GTK main loop (`gtk::init`
+//! macOS enables the real WebView by default. Windows builds it too, but keeps
+//! it off by default behind Settings → Browser while a WebView2 process-crash
+//! path is investigated; users may explicitly opt in. **Linux does not**:
+//! lb-wry's `build_as_child` is X11-only there *and* requires a GTK main loop (`gtk::init`
 //! plus `gtk::main_iteration_do` pumped on the UI thread), while gpui's Linux
 //! backend runs calloop/xcb and never pumps GTK — the webview would panic at
 //! construction and could never be driven. So `wry`/`gpui-wry` are not even
@@ -126,10 +128,11 @@ mod native {
         dev_ports: Vec<u16>,
         /// Discards a completed scan when a newer click has superseded it.
         port_scan_generation: u64,
-        /// Why the platform webview could not be created (Windows without the
-        /// WebView2 runtime). Set once; the tab then explains itself instead of
-        /// retrying on every frame.
+        /// Why the platform webview is unavailable. Builder failures are kept
+        /// to avoid retrying every frame; a settings-disabled error is cleared
+        /// when the user opts in again.
         webview_error: Option<String>,
+        webview_disabled_by_setting: bool,
         _subscriptions: Vec<Subscription>,
     }
 
@@ -164,6 +167,7 @@ mod native {
                 dev_ports: Vec::new(),
                 port_scan_generation: 0,
                 webview_error: None,
+                webview_disabled_by_setting: false,
                 _subscriptions: subscriptions,
             }
         }
@@ -248,16 +252,28 @@ mod native {
 
         /// Get or lazily create the WebView for `session_id`.
         ///
-        /// `None` when the platform webview cannot be created — on Windows that
-        /// means the WebView2 runtime is absent. Only the preview browser needs
-        /// it, so this is a missing feature, not a dead app: the tab explains
-        /// itself and every other surface keeps working.
+        /// `None` when native webviews are disabled or the platform webview
+        /// cannot be created. Only preview needs it, so the tab explains itself
+        /// and every other surface keeps working.
         fn ensure_webview(
             &mut self,
             session_id: &str,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Option<Entity<WebView>> {
+            if !self
+                .store
+                .read(cx)
+                .preview_browser_settings()
+                .native_webview_enabled()
+            {
+                self.mark_native_webview_disabled(cx);
+                return None;
+            }
+            if self.webview_disabled_by_setting {
+                self.webview_disabled_by_setting = false;
+                self.webview_error = None;
+            }
             if let Some(view) = self.webviews.get(session_id) {
                 return Some(view.clone());
             }
@@ -296,9 +312,27 @@ mod native {
             Some(webview)
         }
 
+        fn mark_native_webview_disabled(&mut self, cx: &mut Context<Self>) -> String {
+            for view in self.webviews.values() {
+                view.update(cx, |view, _| view.hide());
+            }
+            let message = if cfg!(target_os = "windows") {
+                crate::tr!("browser.native_webview.disabled_windows").into_owned()
+            } else {
+                crate::tr!("browser.native_webview.disabled").into_owned()
+            };
+            self.webview_error = Some(message.clone());
+            self.webview_disabled_by_setting = true;
+            message
+        }
+
         /// Navigate one conversation's WebView to `url`, remembering it.
         fn navigate(&mut self, key: &str, url: &str, window: &mut Window, cx: &mut Context<Self>) {
             let url = normalize_url(url);
+            // Preserve the target for the system-browser affordance even when
+            // the native webview is unavailable.
+            self.store
+                .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
             let Some(webview) = self.ensure_webview(key, window, cx) else {
                 cx.notify();
                 return;
@@ -307,8 +341,6 @@ mod native {
             // A navigation flushes lb-wry's pending-scripts buffer, so subsequent
             // evaluate callbacks will fire.
             self.warm.insert(key.to_string());
-            self.store
-                .update(cx, |store, cx| store.set_preview_url(key, url, cx));
             self.sync_visibility(cx);
             cx.notify();
         }
@@ -429,6 +461,29 @@ mod native {
             let browser = self.store.read(cx).preview_browser_settings();
             if !browser.enabled {
                 let _ = reply.try_send(Err(crate::tr!("browser.disabled_error").into_owned()));
+                return;
+            }
+            if !browser.native_webview_enabled() {
+                let target = match &op {
+                    PreviewOp::Open { url } => url
+                        .as_deref()
+                        .or_else(|| browser.home_url.as_deref().map(str::trim))
+                        .filter(|url| !url.is_empty()),
+                    PreviewOp::Navigate { url } => Some(url.as_str()),
+                    _ => None,
+                }
+                .map(normalize_url);
+                if matches!(&op, PreviewOp::Open { .. } | PreviewOp::Navigate { .. }) {
+                    self.store.update(cx, |store, cx| {
+                        store.open_preview_panel_for(&session_id, cx);
+                        if let Some(url) = target {
+                            store.set_preview_url(&key, url, cx);
+                        }
+                    });
+                }
+                let err = self.mark_native_webview_disabled(cx);
+                let _ = reply.try_send(Err(unavailable_message(&err)));
+                cx.notify();
                 return;
             }
             if matches!(&op, PreviewOp::Evaluate { .. }) && !browser.allow_evaluate {
@@ -943,11 +998,11 @@ mod native {
                         .text_center()
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!("preview.unavailable"))
-                        .child(
-                            div()
-                                .text_size(gpui::px(13.))
-                                .child(crate::tr!("preview.unavailable_hint")),
-                        )
+                        .child(div().text_size(gpui::px(13.)).child(
+                            self.webview_error.clone().unwrap_or_else(|| {
+                                crate::tr!("preview.unavailable_hint").into_owned()
+                            }),
+                        ))
                         .into_any_element(),
                 },
                 None => v_flex()
@@ -1179,9 +1234,8 @@ fn snapshot_reply(image: &objc2_app_kit::NSImage) -> Result<PreviewReply, String
     })
 }
 
-/// What an automation tool answers when the platform webview cannot be created
-/// (Windows without the WebView2 runtime): say so plainly, with the underlying
-/// error, rather than leaving the agent to guess why nothing happened.
+/// What an automation tool answers when the native webview is disabled or the
+/// platform component cannot be created.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 fn unavailable_message(err: &str) -> String {
     format!(

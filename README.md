@@ -104,7 +104,9 @@ to uninstall but the file itself.
 
 macOS builds aren't code-signed yet, so the first launch needs
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is not available on Linux yet; everything else is.
+browser is not available on Linux yet. On Windows its native WebView2 preview is
+off by default and can be explicitly enabled in **Settings → Browser**; everything
+else works without it.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows

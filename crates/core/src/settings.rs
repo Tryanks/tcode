@@ -563,6 +563,10 @@ pub struct BrowserSettings {
     /// TRUE; absent in legacy files → allowed.
     #[serde(default = "default_true")]
     pub allow_evaluate: bool,
+    /// Explicit native-webview override. When absent, the WebView is enabled on
+    /// macOS and disabled on Windows. Linux does not build the native preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_webview: Option<bool>,
 }
 
 impl Default for BrowserSettings {
@@ -571,11 +575,22 @@ impl Default for BrowserSettings {
             enabled: true,
             home_url: None,
             allow_evaluate: true,
+            native_webview: None,
         }
     }
 }
 
 impl BrowserSettings {
+    /// Whether this platform should create a native WebView.
+    pub fn native_webview_enabled(&self) -> bool {
+        self.native_webview_enabled_for(cfg!(target_os = "windows"))
+    }
+
+    /// Resolve the platform default while keeping it testable on every target.
+    pub fn native_webview_enabled_for(&self, is_windows: bool) -> bool {
+        self.native_webview.unwrap_or(!is_windows)
+    }
+
     fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -1127,11 +1142,22 @@ mod tests {
         assert!(legacy.browser.enabled);
         assert!(legacy.browser.allow_evaluate);
         assert_eq!(legacy.browser.home_url, None);
+        assert_eq!(legacy.browser.native_webview, None);
 
         // A partial block keeps unspecified fields at their (true) defaults.
         let partial: Settings = serde_json::from_str(r#"{"browser":{"enabled":false}}"#).unwrap();
         assert!(!partial.browser.enabled);
         assert!(partial.browser.allow_evaluate);
+        assert_eq!(partial.browser.native_webview, None);
+
+        // An absent override follows the platform default without becoming an
+        // explicit value during serde round-trips.
+        assert!(partial.browser.native_webview_enabled_for(false));
+        assert!(!partial.browser.native_webview_enabled_for(true));
+        let partial_json = serde_json::to_string(&partial).unwrap();
+        assert!(!partial_json.contains("native_webview"));
+        let partial_back: Settings = serde_json::from_str(&partial_json).unwrap();
+        assert_eq!(partial_back.browser.native_webview, None);
 
         // Default browser settings are skipped on serialize, like orchestrate.
         let json = serde_json::to_string(&Settings::default()).unwrap();
@@ -1142,12 +1168,28 @@ mod tests {
                 enabled: false,
                 home_url: Some("https://example.test".into()),
                 allow_evaluate: false,
+                native_webview: Some(true),
             },
             ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.browser, settings.browser);
+        assert!(back.browser.native_webview_enabled_for(true));
+    }
+
+    #[test]
+    fn browser_native_webview_explicit_override_wins_on_every_platform() {
+        let mut browser = BrowserSettings {
+            native_webview: Some(false),
+            ..BrowserSettings::default()
+        };
+        assert!(!browser.native_webview_enabled_for(false));
+        assert!(!browser.native_webview_enabled_for(true));
+
+        browser.native_webview = Some(true);
+        assert!(browser.native_webview_enabled_for(false));
+        assert!(browser.native_webview_enabled_for(true));
     }
 
     #[test]

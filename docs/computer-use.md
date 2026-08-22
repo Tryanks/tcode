@@ -67,8 +67,10 @@ install/signing/attribution handling entirely.
 
 Settings gains two pages:
 
-- **Browser** — enable/disable the embedded preview browser, default home URL, and
-  allow-JS-evaluate toggle. Its in-process WKWebView snapshot tool needs no TCC permission.
+- **Browser** — enable/disable the embedded preview browser, control its native-webview
+  kill-switch, set the default home URL, and allow or deny JavaScript evaluation. The native
+  webview defaults off on Windows and on elsewhere; its in-process WKWebView snapshot tool needs
+  no TCC permission on macOS.
 - **Computer Use** — master enable toggle, image mode (`auto` / `always` / `never`),
   allow-input-actions toggle (off = observe-only), and one permission row per TCC kind:
   live status, a **Grant** button (fires the TCC prompt and opens the matching

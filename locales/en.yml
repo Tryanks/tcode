@@ -251,6 +251,11 @@ browser:
   enable:
     title: "Enable embedded browser"
     description: "Show the preview panel and expose its browser automation tools to provider sessions."
+  native_webview:
+    title: "Enable native webview"
+    description: "Create the native embedded preview. It is off by default on Windows while WebView2 crash containment is investigated."
+    disabled_windows: "The embedded preview is disabled on Windows by default. Enable it in Settings → Browser, or open pages in your system browser."
+    disabled: "The native embedded preview is disabled. Enable it in Settings → Browser, or open pages in your system browser."
   home_url:
     title: "Home URL"
     description: "Page opened when the preview panel is shown without a target."

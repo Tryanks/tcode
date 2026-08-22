@@ -251,6 +251,11 @@ browser:
   enable:
     title: "启用内嵌浏览器"
     description: "显示预览面板，并向提供方会话开放其浏览器自动化工具。"
+  native_webview:
+    title: "启用原生 WebView"
+    description: "创建原生内嵌预览。调查 WebView2 崩溃隔离问题期间，Windows 默认关闭此功能。"
+    disabled_windows: "Windows 默认关闭内嵌预览。请在“设置 → 浏览器”中启用，或在系统浏览器中打开页面。"
+    disabled: "原生内嵌预览已关闭。请在“设置 → 浏览器”中启用，或在系统浏览器中打开页面。"
   home_url:
     title: "主页地址"
     description: "预览面板在没有指定目标时打开的页面。"
