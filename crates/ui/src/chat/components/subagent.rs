@@ -36,7 +36,12 @@ pub(crate) fn subagent_row(
         summary,
     }) = &entry.content
     else {
-        unreachable!();
+        log::error!(
+            "subagent row received non-subagent timeline entry `{}`",
+            entry.id
+        );
+        debug_assert!(false, "subagent row requires subagent timeline content");
+        return div().into_any_element();
     };
     let SubagentState {
         expanded,

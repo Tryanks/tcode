@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
 use std::task::{Context, Poll};
@@ -59,6 +59,16 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(20);
 
 type AcpConnection = sdk::ConnectionTo<sdk::Agent>;
+
+trait MutexExt<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> MutexExt<T> for Mutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 macro_rules! request_handler {
     ($client:expr, $request:ty, $method:ident) => {{
@@ -260,7 +270,7 @@ impl<W> ObservedWriter<W> {
         if !is_prompt {
             return;
         }
-        if let Some(delivery_id) = self.pending_deliveries.lock().unwrap().pop_front() {
+        if let Some(delivery_id) = self.pending_deliveries.lock_recover().pop_front() {
             let _ = self
                 .events
                 .try_send(AgentEvent::TurnAccepted { delivery_id });
@@ -324,9 +334,33 @@ async fn run_actor(
             return;
         }
     };
-    let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    let Some(stdin) = child.stdin.take() else {
+        let _ = ready
+            .send(Err(AgentError::Spawn(format!(
+                "ACP agent `{}` started without piped stdin",
+                agent.name
+            ))))
+            .await;
+        return;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = ready
+            .send(Err(AgentError::Spawn(format!(
+                "ACP agent `{}` started without piped stdout",
+                agent.name
+            ))))
+            .await;
+        return;
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = ready
+            .send(Err(AgentError::Spawn(format!(
+                "ACP agent `{}` started without piped stderr",
+                agent.name
+            ))))
+            .await;
+        return;
+    };
 
     // The agent's stderr is its log channel: keep the tail so a startup failure
     // can be reported in the agent's own words.
@@ -692,7 +726,7 @@ async fn handshake(
         // notifications. Our JSONL log is the authoritative history and the
         // UI has already folded it, so the replay is swallowed (see
         // `State::replaying`); we only want the session live again.
-        state.lock().unwrap().replaying = true;
+        state.lock_recover().replaying = true;
         let session_id = acp::SessionId::new(session_id);
         let loaded = connection
             .send_request(
@@ -701,7 +735,7 @@ async fn handshake(
             )
             .block_task()
             .await;
-        state.lock().unwrap().replaying = false;
+        state.lock_recover().replaying = false;
         match loaded {
             Ok(loaded) => {
                 loaded_session = Some((session_id, loaded.modes, loaded.config_options));
@@ -734,14 +768,13 @@ async fn handshake(
     let wants_plan = opts.approval_mode == ApprovalMode::ReadOnly
         || opts.interaction_mode == InteractionMode::Plan;
     {
-        let mut state = state.lock().unwrap();
+        let mut state = state.lock_recover();
         state.ingest_modes(modes.as_ref());
         state.options.ingest(None, config_options.as_deref());
     }
     let should_apply_mode = wants_plan
         || state
-            .lock()
-            .unwrap()
+            .lock_recover()
             .modes
             .as_ref()
             .is_some_and(|modes| acp_plan_mode(modes).as_ref() == Some(&modes.current_mode_id));
@@ -759,7 +792,7 @@ async fn handshake(
         )
         .await;
     }
-    let model = state.lock().unwrap().options.current_model();
+    let model = state.lock_recover().options.current_model();
 
     Ok(Session {
         session_id,
@@ -982,7 +1015,7 @@ async fn handle_command(
             *turn_seq += 1;
             let id = format!("turn-{turn_seq}");
             *turn_id = Some(id.clone());
-            state.lock().unwrap().turn = Some(id.clone());
+            state.lock_recover().turn = Some(id.clone());
 
             let request = acp::PromptRequest::new(
                 session.session_id.clone(),
@@ -990,7 +1023,7 @@ async fn handle_command(
             );
             // The observed stdio writer consumes this id when the complete
             // `session/prompt` JSON-RPC line reaches the child.
-            pending_deliveries.lock().unwrap().push_back(delivery_id);
+            pending_deliveries.lock_recover().push_back(delivery_id);
             let request = connection.send_request(request);
             let _ = events
                 .send(AgentEvent::TurnStarted {
@@ -1013,8 +1046,7 @@ async fn handle_command(
             // `cancelled` first: the protocol requires it, and the agent will
             // not settle the turn otherwise.
             let pending: Vec<Sender<acp::RequestPermissionOutcome>> = state
-                .lock()
-                .unwrap()
+                .lock_recover()
                 .approvals
                 .drain()
                 .map(|(_, (responder, _))| responder)
@@ -1033,7 +1065,7 @@ async fn handle_command(
             request_id,
             decision,
         } => {
-            let approval = state.lock().unwrap().approvals.remove(&request_id);
+            let approval = state.lock_recover().approvals.remove(&request_id);
             let Some((responder, options)) = approval else {
                 log::warn!("acp: no pending approval {request_id}");
                 return;
@@ -1060,14 +1092,14 @@ async fn handle_command(
                 .await;
         }
         SessionCommand::SetOption { id, value } => {
-            let Some(origin) = state.lock().unwrap().options.origin(&id) else {
+            let Some(origin) = state.lock_recover().options.origin(&id) else {
                 log::warn!("acp: unknown option id `{id}`");
                 return;
             };
             match set_option(connection, session, &origin, &value).await {
                 Ok(config_options) => {
                     {
-                        let mut state = state.lock().unwrap();
+                        let mut state = state.lock_recover();
                         if let Some(options) = config_options.as_deref() {
                             state.options.ingest(None, Some(options));
                         }
@@ -1170,7 +1202,7 @@ async fn apply_interaction_mode(
     connection: &AcpConnection,
     session_id: &acp::SessionId,
 ) {
-    let target = interaction_mode_target(mode, &state.lock().unwrap());
+    let target = interaction_mode_target(mode, &state.lock_recover());
     let Some(target) = target else {
         let _ = events.send(missing_mode_warning(mode)).await;
         // Republish the actual selection so the runtime rolls back its
@@ -1180,8 +1212,7 @@ async fn apply_interaction_mode(
     };
 
     if state
-        .lock()
-        .unwrap()
+        .lock_recover()
         .modes
         .as_ref()
         .is_some_and(|modes| modes.current_mode_id == target)
@@ -1198,7 +1229,7 @@ async fn apply_interaction_mode(
         .await
     {
         Ok(_) => {
-            state.lock().unwrap().select_mode(target);
+            state.lock_recover().select_mode(target);
             emit_provider_options(state, events, false).await;
         }
         Err(err) => {
@@ -1273,11 +1304,11 @@ async fn finish_turn(
     outcome: TurnOutcome,
 ) {
     // Flush whatever text was still streaming.
-    let tail = state.lock().unwrap().flush_text();
+    let tail = state.lock_recover().flush_text();
     for event in tail {
         let _ = events.send(event).await;
     }
-    state.lock().unwrap().turn = None;
+    state.lock_recover().turn = None;
 
     let (status, message, usage) = match outcome.result {
         Ok(response) => {
@@ -1307,7 +1338,7 @@ async fn finish_turn(
             .await;
     }
     // Fall back to the live context-window figure from `usage_update`.
-    let usage = usage.or_else(|| state.lock().unwrap().usage);
+    let usage = usage.or_else(|| state.lock_recover().usage);
     let _ = events
         .send(AgentEvent::TurnCompleted {
             turn_id: turn_id.to_string(),
@@ -1360,7 +1391,7 @@ async fn emit_provider_options(
     events: &Sender<AgentEvent>,
     emit_empty: bool,
 ) {
-    let event = state.lock().unwrap().provider_options();
+    let event = state.lock_recover().provider_options();
     if matches!(
         &event,
         AgentEvent::ProviderOptions { descriptors, .. } if descriptors.is_empty()
@@ -1868,7 +1899,7 @@ impl State {
                 }
                 acp::ToolCallContent::Terminal(terminal) => {
                     if let Some(terminal) = self.terminals.get(terminal.terminal_id.0.as_ref()) {
-                        let output = terminal.output.lock().unwrap();
+                        let output = terminal.output.lock_recover();
                         if !output.is_empty() {
                             parts.push(output.clone());
                         }
@@ -1894,7 +1925,7 @@ impl State {
         for content in &tool.content {
             if let acp::ToolCallContent::Terminal(terminal) = content
                 && let Some(terminal) = self.terminals.get(terminal.terminal_id.0.as_ref())
-                && let Some(status) = terminal.exit.lock().unwrap().as_ref()
+                && let Some(status) = terminal.exit.lock_recover().as_ref()
             {
                 return status.exit_code.map(|code| code as i32);
             }
@@ -2196,10 +2227,10 @@ impl AcpClient {
         // While `session/load` replays the conversation we already have on disk,
         // swallow everything: our JSONL log is the source of truth and the
         // timeline was folded from it before the process even started.
-        if self.state.lock().unwrap().replaying {
+        if self.state.lock_recover().replaying {
             return Ok(());
         }
-        let events = self.state.lock().unwrap().apply_update(args.update);
+        let events = self.state.lock_recover().apply_update(args.update);
         for event in events {
             let _ = self.events.send(event).await;
         }
@@ -2211,7 +2242,7 @@ impl AcpClient {
         args: acp::RequestPermissionRequest,
     ) -> Result<acp::RequestPermissionResponse, acp::Error> {
         let (request_id, turn) = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_recover();
             state.approval_seq += 1;
             (
                 format!("acp-approval-{}", state.approval_seq),
@@ -2221,7 +2252,7 @@ impl AcpClient {
         let request = approval_request(request_id.clone(), turn, &args.tool_call, &args.options);
         let (responder, decided) = smol::channel::bounded(1);
         {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_recover();
             state
                 .approvals
                 .insert(request_id.clone(), (responder, request.options.clone()));
@@ -2247,7 +2278,7 @@ impl AcpClient {
             .recv()
             .await
             .unwrap_or(acp::RequestPermissionOutcome::Cancelled);
-        self.state.lock().unwrap().approvals.remove(&request_id);
+        self.state.lock_recover().approvals.remove(&request_id);
         Ok(acp::RequestPermissionResponse::new(outcome))
     }
 
@@ -2255,7 +2286,7 @@ impl AcpClient {
         &self,
         args: acp::ReadTextFileRequest,
     ) -> Result<acp::ReadTextFileResponse, acp::Error> {
-        let path = self.state.lock().unwrap().resolve_path(&args.path)?;
+        let path = self.state.lock_recover().resolve_path(&args.path)?;
         let content = smol::fs::read_to_string(&path).await.map_err(|err| {
             acp::Error::new(-32603, format!("could not read {}: {err}", path.display()))
         })?;
@@ -2276,7 +2307,7 @@ impl AcpClient {
         &self,
         args: acp::WriteTextFileRequest,
     ) -> Result<acp::WriteTextFileResponse, acp::Error> {
-        let path = self.state.lock().unwrap().resolve_path(&args.path)?;
+        let path = self.state.lock_recover().resolve_path(&args.path)?;
         if let Some(parent) = path.parent() {
             smol::fs::create_dir_all(parent).await.map_err(|err| {
                 acp::Error::new(
@@ -2297,8 +2328,8 @@ impl AcpClient {
         connection: &AcpConnection,
     ) -> Result<acp::CreateTerminalResponse, acp::Error> {
         let cwd = match &args.cwd {
-            Some(cwd) => self.state.lock().unwrap().resolve_path(cwd)?,
-            None => self.state.lock().unwrap().cwd.clone(),
+            Some(cwd) => self.state.lock_recover().resolve_path(cwd)?,
+            None => self.state.lock_recover().cwd.clone(),
         };
         let terminal = Terminal::spawn(
             connection,
@@ -2310,7 +2341,7 @@ impl AcpClient {
                 .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT),
         )?;
         let id = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock_recover();
             state.terminal_seq += 1;
             let id = format!("term-{}", state.terminal_seq);
             state.terminals.insert(id.clone(), terminal);
@@ -2324,9 +2355,9 @@ impl AcpClient {
         args: acp::TerminalOutputRequest,
     ) -> Result<acp::TerminalOutputResponse, acp::Error> {
         let terminal = self.terminal(&args.terminal_id)?;
-        let output = terminal.output.lock().unwrap().clone();
-        let truncated = *terminal.truncated.lock().unwrap();
-        let exit_status = terminal.exit.lock().unwrap().clone();
+        let output = terminal.output.lock_recover().clone();
+        let truncated = *terminal.truncated.lock_recover();
+        let exit_status = terminal.exit.lock_recover().clone();
         Ok(acp::TerminalOutputResponse::new(output, truncated).exit_status(exit_status))
     }
 
@@ -2339,8 +2370,7 @@ impl AcpClient {
         let _ = terminal.done.recv().await;
         let exit_status = terminal
             .exit
-            .lock()
-            .unwrap()
+            .lock_recover()
             .clone()
             .unwrap_or_else(acp::TerminalExitStatus::new);
         Ok(acp::WaitForTerminalExitResponse::new(exit_status))
@@ -2360,8 +2390,7 @@ impl AcpClient {
     ) -> Result<acp::ReleaseTerminalResponse, acp::Error> {
         let terminal = self
             .state
-            .lock()
-            .unwrap()
+            .lock_recover()
             .terminals
             .remove(args.terminal_id.0.as_ref());
         if let Some(terminal) = terminal {
@@ -2371,8 +2400,7 @@ impl AcpClient {
     }
     fn terminal(&self, id: &acp::TerminalId) -> Result<Arc<Terminal>, acp::Error> {
         self.state
-            .lock()
-            .unwrap()
+            .lock_recover()
             .terminals
             .get(id.0.as_ref())
             .cloned()
@@ -2420,8 +2448,12 @@ impl Terminal {
         let mut child = cmd
             .spawn()
             .map_err(|err| acp::Error::new(-32603, format!("could not run `{command}`: {err}")))?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
+        let stdout = child.stdout.take().ok_or_else(|| {
+            acp::Error::new(-32603, format!("`{command}` started without piped stdout"))
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            acp::Error::new(-32603, format!("`{command}` started without piped stderr"))
+        })?;
         let (done_tx, done) = smol::channel::bounded::<()>(1);
 
         let terminal = Arc::new(Terminal {
@@ -2456,10 +2488,10 @@ impl Terminal {
             let terminal = terminal.clone();
             async move {
                 loop {
-                    let status = terminal.child.lock().unwrap().try_status();
+                    let status = terminal.child.lock_recover().try_status();
                     match status {
                         Ok(Some(status)) => {
-                            *terminal.exit.lock().unwrap() = Some(exit_status(&status));
+                            *terminal.exit.lock_recover() = Some(exit_status(&status));
                             break;
                         }
                         Err(err) => {
@@ -2479,7 +2511,7 @@ impl Terminal {
     }
 
     fn append(&self, bytes: &[u8], limit: u64) {
-        let mut output = self.output.lock().unwrap();
+        let mut output = self.output.lock_recover();
         output.push_str(&String::from_utf8_lossy(bytes));
         let limit = limit as usize;
         if output.len() > limit {
@@ -2489,12 +2521,12 @@ impl Terminal {
                 cut += 1;
             }
             output.drain(..cut);
-            *self.truncated.lock().unwrap() = true;
+            *self.truncated.lock_recover() = true;
         }
     }
 
     fn kill(&self) {
-        let _ = self.child.lock().unwrap().kill();
+        let _ = self.child.lock_recover().kill();
     }
 }
 
@@ -2602,7 +2634,7 @@ mod tests {
                 received.recv().await.unwrap(),
                 AgentEvent::TurnAccepted { delivery_id: 41 }
             ));
-            assert!(pending.lock().unwrap().is_empty());
+            assert!(pending.lock_recover().is_empty());
         });
     }
 
