@@ -1452,6 +1452,50 @@ mod tests {
     }
 
     #[test]
+    fn structured_user_input_blocks_until_resolution_or_turn_end() {
+        let request = AgentEvent::UserInputRequested {
+            request_id: "que_1".into(),
+            questions: vec![UserInputQuestion {
+                id: "que_1:0".into(),
+                header: "Scope".into(),
+                question: "Which crate?".into(),
+                options: Vec::new(),
+                multi_select: false,
+                prefill: None,
+            }],
+        };
+        let mut timeline = Timeline::default();
+        timeline.apply_at(None, &request);
+        assert_eq!(
+            timeline
+                .pending_user_input
+                .as_ref()
+                .map(|(request_id, _)| request_id.as_str()),
+            Some("que_1")
+        );
+
+        timeline.apply_at(
+            None,
+            &AgentEvent::UserInputResolved {
+                request_id: "que_1".into(),
+                answers: serde_json::Map::new(),
+            },
+        );
+        assert!(timeline.pending_user_input.is_none());
+
+        timeline.apply_at(None, &request);
+        timeline.apply_at(
+            None,
+            &AgentEvent::TurnCompleted {
+                turn_id: "opencode-1".into(),
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+        );
+        assert!(timeline.pending_user_input.is_none());
+    }
+
+    #[test]
     fn provider_conversation_rewind_is_an_append_only_timeline_marker() {
         let mut events = Vec::new();
         for index in 1..=3 {
