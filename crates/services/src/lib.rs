@@ -9,6 +9,7 @@ pub mod process;
 pub mod provider_auth;
 pub mod provider_probe;
 pub mod relaunch;
+pub mod session_search;
 pub mod settings;
 pub mod shell_env;
 pub mod store;

@@ -173,6 +173,10 @@ impl WorkspaceStore {
     pub fn select_session(&mut self, session_id: String) {
         self.dispatch(Command::SelectSession { session_id });
     }
+    pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
+        self.pending_chat_turn = Some((session_id.clone(), turn));
+        self.dispatch(Command::SelectSession { session_id });
+    }
     pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>) {
         self.dispatch(Command::SendTurn {
             text,

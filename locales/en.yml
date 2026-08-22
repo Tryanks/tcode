@@ -479,6 +479,7 @@ palette:
   actions: "Actions"
   results: "Command palette results"
   threads: "Threads"
+  messages: "Messages"
   no_matches: "No matches"
   navigate: "↑↓ Navigate"
   select: "Enter Select"
