@@ -14,6 +14,10 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # The artifact runs on machines without the Graphics Tools SDK layers;
+      # debug_assertions would make gpui request D3D11_CREATE_DEVICE_DEBUG
+      # and die at startup with DXGI_ERROR_SDK_COMPONENT_MISSING.
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "false"
     steps:
       - uses: actions/checkout@v7
 
