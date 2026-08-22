@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,6 +61,18 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
+/// Before GPUI reports its exact visible range, eight turns is comfortably
+/// more than a typical chat viewport. Its list also pre-measures four viewport
+/// heights, so the wider eviction band keeps warm rows resident without tying
+/// Markdown lifetime to measurement.
+const MARKDOWN_VIEWPORT_TURN_HINT: usize = 8;
+const MARKDOWN_BUILD_MARGIN_TURNS: usize = 8;
+/// Three build margins prevent back-and-forth scrolling from rebuilding the
+/// same parsed documents at the edge of the warm window.
+const MARKDOWN_EVICT_MARGIN_TURNS: usize = 24;
+/// The composer-adjacent tail stays ready even while inspecting old turns.
+const MARKDOWN_TAIL_PIN_TURNS: usize = 2;
+
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -68,6 +81,8 @@ pub struct ChatView {
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
     md_states: HashMap<String, MdState>,
+    markdown_visible_turns: Range<usize>,
+    markdown_scroll_top: Option<usize>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
     session_key: Option<String>,
@@ -95,6 +110,16 @@ impl ChatView {
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
+        let chat = cx.entity().downgrade();
+        list_state.set_scroll_handler(move |event, window, cx| {
+            let visible_turns = event.visible_range.clone();
+            let chat = chat.clone();
+            window.defer(cx, move |_, cx| {
+                let _ = chat.update(cx, |chat, cx| {
+                    chat.set_markdown_visible_turns(visible_turns, cx);
+                });
+            });
+        });
 
         let subscriptions = vec![
             cx.subscribe(&composer, |this, _, event, cx| {
@@ -119,6 +144,8 @@ impl ChatView {
             list_state,
             turn_items: Vec::new(),
             md_states: HashMap::new(),
+            markdown_visible_turns: 0..0,
+            markdown_scroll_top: None,
             expanded: HashSet::new(),
             session_key: None,
             highlighted_turn: None,
@@ -135,11 +162,10 @@ impl ChatView {
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
         let session_key = self.workspace_store.read(cx).active_session_id();
-        let (texts, running, turn_items) = self
+        let (running, turn_items) = self
             .workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
-                let mut texts: Vec<(String, String)> = Vec::new();
                 let turn_items = index_turns(
                     &timeline.turns,
                     &timeline.entries,
@@ -150,27 +176,7 @@ impl ChatView {
                     &timeline.children,
                     &self.expanded,
                 );
-                for entry in &timeline.entries {
-                    match &entry.content {
-                        EntryContent::Item(ItemContent::AssistantMessage { text })
-                        | EntryContent::Item(ItemContent::Reasoning { text }) => {
-                            texts.push((entry.id.clone(), text.clone()));
-                        }
-                        content if user_content(content).is_some() => {
-                            let (text, _, context_len, _) = user_content(content).unwrap();
-                            texts.push((
-                                entry.id.clone(),
-                                plain_text_as_markdown(user_visible_text(text, context_len)),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                // The proposed-plan card renders its markdown too.
-                if let Some(plan) = &timeline.proposed_plan {
-                    texts.push((format!("plan:{}", plan.item_id), plan.markdown.clone()));
-                }
-                (texts, timeline.turn_running, turn_items)
+                (timeline.turn_running, turn_items)
             })
             .unwrap_or_default();
 
@@ -184,6 +190,8 @@ impl ChatView {
             self.expanded.clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
+            self.markdown_visible_turns = tail_turn_window(turn_items.len());
+            self.markdown_scroll_top = Some(turn_items.len());
         }
         self.turn_items = turn_items;
 
@@ -208,6 +216,11 @@ impl ChatView {
             }
         }
 
+        if self.list_state.is_following_tail() {
+            self.markdown_visible_turns = tail_turn_window(self.turn_items.len());
+            self.markdown_scroll_top = Some(self.turn_items.len());
+        }
+
         if let Some(turn) = requested_turn.filter(|turn| *turn < self.turn_items.len()) {
             self.list_state.set_follow_mode(FollowMode::Normal);
             self.list_state.scroll_to(ListOffset {
@@ -215,6 +228,9 @@ impl ChatView {
                 offset_in_item: px(0.),
             });
             self.highlighted_turn = Some(turn);
+            self.markdown_visible_turns =
+                turn..(turn + MARKDOWN_VIEWPORT_TURN_HINT).min(self.turn_items.len());
+            self.markdown_scroll_top = Some(turn);
             if let Some(session_id) = self.session_key.as_deref() {
                 self.workspace_store.update(cx, |store, _cx| {
                     store.take_pending_chat_turn(session_id, turn);
@@ -222,14 +238,7 @@ impl ChatView {
             }
         }
 
-        for (id, text) in texts {
-            match self.md_states.get_mut(&id) {
-                Some(md) => md.sync(text, cx),
-                None => {
-                    self.md_states.insert(id, MdState::new(&text, cx));
-                }
-            }
-        }
+        self.sync_markdown_residency(cx);
 
         // Keep a 100ms ticker alive while a turn runs so the live elapsed timer
         // advances at decisecond precision; dropping it cancels the task.
@@ -245,6 +254,168 @@ impl ChatView {
         } else if !running {
             self._tick = None;
         }
+    }
+
+    fn sync_markdown_residency(&mut self, cx: &mut Context<Self>) {
+        let turn_count = self.turn_items.len();
+        let build_turns = expand_turn_window(
+            self.markdown_visible_turns.clone(),
+            MARKDOWN_BUILD_MARGIN_TURNS,
+            turn_count,
+        );
+        let keep_turns = expand_turn_window(
+            self.markdown_visible_turns.clone(),
+            MARKDOWN_EVICT_MARGIN_TURNS,
+            turn_count,
+        );
+        let tail_start = turn_count.saturating_sub(MARKDOWN_TAIL_PIN_TURNS);
+        let (texts, keep_ids) = self
+            .workspace_store
+            .read(cx)
+            .with_active_timeline(|timeline| {
+                let pinned = |turn: usize| {
+                    (turn_count > 0 && turn >= tail_start)
+                        || timeline.turns.get(turn).is_some_and(|turn| turn.running)
+                        || (timeline.turn_running
+                            && turn_count.checked_sub(1).is_some_and(|last| turn == last))
+                };
+                let mut texts = Vec::new();
+                let mut keep_ids = HashSet::new();
+                for entry in &timeline.entries {
+                    let keep = keep_turns.contains(&entry.turn) || pinned(entry.turn);
+                    let build = build_turns.contains(&entry.turn) || pinned(entry.turn);
+                    if !keep && !build {
+                        continue;
+                    }
+                    match &entry.content {
+                        EntryContent::Item(ItemContent::AssistantMessage { text })
+                        | EntryContent::Item(ItemContent::Reasoning { text }) => {
+                            if keep {
+                                keep_ids.insert(entry.id.clone());
+                            }
+                            if build {
+                                texts.push((entry.turn, entry.id.clone(), text.clone()));
+                            }
+                        }
+                        content => {
+                            let Some((text, _, context_len, _)) = user_content(content) else {
+                                continue;
+                            };
+                            if keep {
+                                keep_ids.insert(entry.id.clone());
+                            }
+                            if build {
+                                texts.push((
+                                    entry.turn,
+                                    entry.id.clone(),
+                                    plain_text_as_markdown(user_visible_text(text, context_len)),
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(plan) = &timeline.proposed_plan {
+                    let id = format!("plan:{}", plan.item_id);
+                    if keep_turns.contains(&plan.turn) || pinned(plan.turn) {
+                        keep_ids.insert(id.clone());
+                    }
+                    if build_turns.contains(&plan.turn) || pinned(plan.turn) {
+                        texts.push((plan.turn, id, plan.markdown.clone()));
+                    }
+                }
+                (texts, keep_ids)
+            })
+            .unwrap_or_default();
+
+        // Auto-scroll can move many rows during a drag. Do not retire any
+        // participant until mouse-up; completed-selection participants remain
+        // pinned individually below so copy keeps its full projection.
+        let selection_drag_active = self.md_states.values().any(|md| {
+            md.state
+                .read(cx)
+                .selection_handle()
+                .snapshot(cx)
+                .is_some_and(|selection| selection.is_selecting())
+        });
+        if !selection_drag_active {
+            self.md_states.retain(|id, md| {
+                if keep_ids.contains(id) {
+                    return true;
+                }
+                let state = md.state.read(cx);
+                let selection = state.selection_handle();
+                selection.snapshot(cx).is_some() || selection.has_local_selection(cx)
+            });
+        }
+
+        let mut rebuilt_turns = HashSet::new();
+        for (turn, id, text) in texts {
+            match self.md_states.get_mut(&id) {
+                Some(md) => md.sync(text, cx),
+                None => {
+                    self.md_states.insert(id, MdState::new(&text, cx));
+                    rebuilt_turns.insert(turn);
+                }
+            }
+        }
+        let mut rebuilt_turns = rebuilt_turns
+            .into_iter()
+            .filter(|turn| *turn < self.turn_items.len())
+            .collect::<Vec<_>>();
+        rebuilt_turns.sort_unstable();
+        let Some((&first, rest)) = rebuilt_turns.split_first() else {
+            return;
+        };
+        let mut range = first..first + 1;
+        for &turn in rest {
+            if turn == range.end {
+                range.end += 1;
+            } else {
+                // Eviction leaves this cache untouched. A lazy rebuild only
+                // invalidates rebuilt rows; ListState preserves the absolute
+                // scroll-top offset while it measures the parsed Markdown.
+                self.list_state.remeasure_items(range);
+                range = turn..turn + 1;
+            }
+        }
+        self.list_state.remeasure_items(range);
+    }
+
+    fn set_markdown_visible_turns(&mut self, visible_turns: Range<usize>, cx: &mut Context<Self>) {
+        let turn_count = self.turn_items.len();
+        let visible_turns = visible_turns.start.min(turn_count)..visible_turns.end.min(turn_count);
+        self.markdown_scroll_top = Some(visible_turns.start);
+        if visible_turns == self.markdown_visible_turns {
+            return;
+        }
+        self.markdown_visible_turns = visible_turns;
+        self.sync_markdown_residency(cx);
+        cx.notify();
+    }
+
+    fn sync_markdown_scroll_position(&mut self, cx: &mut Context<Self>) {
+        let turn_count = self.turn_items.len();
+        let scroll_top = self.list_state.logical_scroll_top().item_ix.min(turn_count);
+        if self.markdown_scroll_top == Some(scroll_top) {
+            return;
+        }
+        self.markdown_scroll_top = Some(scroll_top);
+        self.markdown_visible_turns = if scroll_top == turn_count {
+            tail_turn_window(turn_count)
+        } else {
+            scroll_top..(scroll_top + MARKDOWN_VIEWPORT_TURN_HINT).min(turn_count)
+        };
+        self.sync_markdown_residency(cx);
+    }
+
+    #[cfg(test)]
+    fn resident_markdown_state_count(&self) -> usize {
+        self.md_states.len()
+    }
+
+    #[cfg(test)]
+    fn has_resident_markdown_state(&self, id: &str) -> bool {
+        self.md_states.contains_key(id)
     }
 
     fn toggle_expanded(&mut self, turn: usize, key: &str, cx: &mut Context<Self>) {
@@ -1558,6 +1729,7 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_markdown_scroll_position(cx);
         let active = self.workspace_store.read(cx).chat_active_session();
 
         let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
@@ -1701,6 +1873,19 @@ impl Render for ChatView {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn tail_turn_window(turn_count: usize) -> Range<usize> {
+    turn_count.saturating_sub(MARKDOWN_VIEWPORT_TURN_HINT)..turn_count
+}
+
+fn expand_turn_window(window: Range<usize>, margin: usize, turn_count: usize) -> Range<usize> {
+    window.start.min(turn_count).saturating_sub(margin)
+        ..window
+            .end
+            .min(turn_count)
+            .saturating_add(margin)
+            .min(turn_count)
+}
+
 /// Launch `zed <cwd>` detached; surface a notification if the CLI is missing.
 /// The leading icon for a git quick-action.
 fn git_action_icon(action: GitAction) -> Icon {
@@ -1760,11 +1945,155 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::ChatView;
+    use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
     use agent::ItemContent;
-    use gpui::{AppContext as _, TestAppContext};
-    use std::sync::Arc;
+    use gpui::{AppContext as _, Entity, TestAppContext};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry, TurnMeta};
+
+    static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[gpui::test]
+    fn long_session_keeps_tail_markdown_residency_bounded(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let timeline = synthetic_markdown_timeline(240);
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let resident = view.read_with(cx, |chat, _| chat.resident_markdown_state_count());
+        assert_eq!(resident, 48);
+        assert!(
+            resident <= 96,
+            "tail window retained {resident} MarkdownStates; expected at most 96"
+        );
+    }
+
+    #[gpui::test]
+    fn scrolling_to_old_turn_rebuilds_markdown_and_evicts_distant_tail(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, VisualTestContext, px, size};
+
+        const TARGET: usize = 40;
+        let timeline = synthetic_markdown_timeline(240);
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(!view.read_with(cx, |chat, _| {
+            chat.has_resident_markdown_state("assistant-40")
+        }));
+
+        list_state.set_follow_mode(FollowMode::Normal);
+        list_state.scroll_to(ListOffset {
+            item_ix: TARGET,
+            offset_in_item: px(7.),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (resident, old_rebuilt, distant_tail_evicted, composer_tail_resident) =
+            view.read_with(cx, |chat, _| {
+                (
+                    chat.resident_markdown_state_count(),
+                    ["user-40", "reasoning-40", "assistant-40"]
+                        .iter()
+                        .all(|id| chat.has_resident_markdown_state(id)),
+                    !chat.has_resident_markdown_state("assistant-230"),
+                    ["assistant-238", "assistant-239"]
+                        .iter()
+                        .all(|id| chat.has_resident_markdown_state(id)),
+                )
+            });
+        assert!(old_rebuilt, "the old visible turn was not lazily rebuilt");
+        assert!(
+            distant_tail_evicted,
+            "a tail state outside the hysteresis band remained resident"
+        );
+        assert!(
+            composer_tail_resident,
+            "the composer-adjacent tail was evicted while viewing old turns"
+        );
+        assert!(
+            resident <= 96,
+            "old-turn window retained {resident} MarkdownStates; expected at most 96"
+        );
+        assert_eq!(resident, 78);
+        let scroll_top = list_state.logical_scroll_top();
+        assert_eq!(scroll_top.item_ix, TARGET);
+        assert_eq!(
+            scroll_top.offset_in_item,
+            px(7.),
+            "rebuilding the scroll-top turn changed the list anchor"
+        );
+    }
+
+    #[gpui::test]
+    fn turn_target_jump_rebuilds_an_evicted_region(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        const TARGET: usize = 20;
+        let timeline = synthetic_markdown_timeline(240);
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let target_store = workspace_store.clone();
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(!view.read_with(cx, |chat, _| {
+            chat.has_resident_markdown_state("assistant-20")
+        }));
+
+        target_store.update(cx, |store, cx| {
+            store.select_session_at_turn(session_id.clone(), TARGET);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let (highlighted, resident, target_resident, distant_tail_evicted, scroll_top) = view
+            .read_with(cx, |chat, _| {
+                (
+                    chat.highlighted_turn,
+                    chat.resident_markdown_state_count(),
+                    chat.has_resident_markdown_state("assistant-20"),
+                    !chat.has_resident_markdown_state("assistant-230"),
+                    chat.list_state.logical_scroll_top(),
+                )
+            });
+        assert_eq!(highlighted, Some(TARGET));
+        assert_eq!(resident, 78);
+        assert!(target_resident, "the targeted turn was not rebuilt");
+        assert!(
+            distant_tail_evicted,
+            "the target jump retained a tail state beyond the hysteresis band"
+        );
+        assert_eq!(scroll_top.item_ix, TARGET);
+        assert_eq!(scroll_top.offset_in_item, px(0.));
+        assert_eq!(
+            target_store.read_with(cx, |store, _| store.pending_chat_turn(&session_id)),
+            None,
+            "the one-shot target was not consumed"
+        );
+    }
 
     #[gpui::test]
     fn long_markdown_paints_middle_blocks_when_scrolled_in_chat_outer_list(
@@ -1953,5 +2282,75 @@ This begins after the hard break."#;
 
     fn assistant(text: &str) -> EntryContent {
         EntryContent::Item(ItemContent::AssistantMessage { text: text.into() })
+    }
+
+    fn reasoning(text: &str) -> EntryContent {
+        EntryContent::Item(ItemContent::Reasoning { text: text.into() })
+    }
+
+    fn at_turn(mut entry: Arc<TimelineEntry>, turn: usize) -> Arc<TimelineEntry> {
+        Arc::make_mut(&mut entry).turn = turn;
+        entry
+    }
+
+    fn synthetic_markdown_timeline(turn_count: usize) -> Timeline {
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default(); turn_count];
+        for turn in 0..turn_count {
+            timeline.entries.extend([
+                at_turn(
+                    entry(&format!("user-{turn}"), user_item(&format!("User {turn}"))),
+                    turn,
+                ),
+                at_turn(
+                    entry(
+                        &format!("reasoning-{turn}"),
+                        reasoning(&format!("Reasoning {turn}")),
+                    ),
+                    turn,
+                ),
+                at_turn(
+                    entry(
+                        &format!("assistant-{turn}"),
+                        assistant(&format!("Assistant {turn}")),
+                    ),
+                    turn,
+                ),
+            ]);
+        }
+        timeline
+    }
+
+    fn seed_chat(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let data_root = std::env::temp_dir().join(format!(
+            "tcode-chat-residency-test-{}-{}-{}",
+            std::process::id(),
+            tcode_services::store::now_millis(),
+            NEXT_RESIDENCY_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let store = SessionStore::open_at(data_root).expect("test session store");
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
+            let active = state.residents.active.as_mut().expect("active draft");
+            active.timeline = timeline;
+            active.draft = false;
+            (active.meta.id.clone(), active.timeline.clone())
+        }))
+        .expect("seed markdown host");
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(host, cx));
+        workspace_store.update(cx, |store, _| {
+            store.set_session_replica_for_test(session_id.clone(), timeline);
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        (workspace_store, window_state, session_id)
     }
 }
