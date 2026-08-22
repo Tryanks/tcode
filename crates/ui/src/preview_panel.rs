@@ -19,6 +19,15 @@
 //! table in Cargo.toml); the tab renders a placeholder and every `preview_*` MCP
 //! tool answers with an error. The MCP server itself still starts, harmlessly.
 //!
+//! Windows creation is deliberately asynchronous. WebView2 construction is
+//! asynchronous underneath, but wry's synchronous `build_as_child` waits by
+//! running a nested Win32 message pump. That pump can dispatch GPUI teardown
+//! while the parent HWND is still underneath the creation call. We instead use
+//! `build_as_child_async` on GPUI's window foreground executor and generation-tag
+//! each pending child, so teardown can cancel the slot without re-entering GPUI
+//! or allowing a stale completion to replace a newer preview. macOS keeps the
+//! proven synchronous child-view path.
+//!
 //! ## Known caveat — native overlay
 //!
 //! A `gpui-wry` WebView is a **native child view drawn over** the gpui window,
@@ -74,6 +83,10 @@ pub use placeholder::PreviewPanel;
 #[cfg(not(target_os = "linux"))]
 mod native {
     use std::collections::{HashMap, HashSet};
+    #[cfg(target_os = "windows")]
+    use std::future::Future as _;
+    #[cfg(target_os = "windows")]
+    use std::rc::Rc;
     use std::time::Duration;
 
     use crate::theme::ActiveTheme as _;
@@ -96,6 +109,99 @@ mod native {
     use crate::window_caption;
     use crate::window_state::WindowState;
 
+    const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
+    #[cfg(target_os = "windows")]
+    const SMOKE_CREATION_QUEUED: &str = "preview creation is queued";
+    #[cfg(target_os = "windows")]
+    const SMOKE_CREATION_IN_FLIGHT: &str = "preview creation is in flight";
+    #[cfg(target_os = "windows")]
+    const SMOKE_CREATION_PAUSE: Duration = Duration::from_millis(50);
+
+    enum WebViewSlot {
+        #[cfg(target_os = "windows")]
+        Creating {
+            id: u64,
+            phase: CreationPhase,
+            pending_url: Option<String>,
+        },
+        Ready(Entity<WebView>),
+    }
+
+    impl WebViewSlot {
+        fn ready(&self) -> Option<&Entity<WebView>> {
+            match self {
+                #[cfg(target_os = "windows")]
+                Self::Creating { .. } => None,
+                Self::Ready(view) => Some(view),
+            }
+        }
+
+        fn is_ready(&self) -> bool {
+            self.ready().is_some()
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CreationPhase {
+        Queued,
+        InFlight,
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    enum WebViewAvailability {
+        Starting,
+        Ready(Entity<WebView>),
+        Unavailable,
+    }
+
+    fn set_webview_visible(view: &mut WebView, visible: bool) {
+        // gpui-wry keeps its own visibility bit but does not expose the native
+        // result. Repeat the idempotent native operation once so teardown races
+        // are observable instead of silently discarded.
+        if visible {
+            view.show();
+            if let Err(error) = view.raw().set_visible(true) {
+                log::debug!("preview: failed to show native webview: {error}");
+            }
+        } else {
+            view.hide();
+            if let Err(error) = view.raw().focus_parent() {
+                log::debug!("preview: failed to focus parent while hiding webview: {error}");
+            }
+            if let Err(error) = view.raw().set_visible(false) {
+                log::debug!("preview: failed to hide native webview: {error}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_web_context() -> Result<Rc<smol::lock::Mutex<wry::WebContext>>, String> {
+        let store = tcode_services::store::SessionStore::open_default()
+            .map_err(|error| format!("failed to resolve tcode data directory: {error}"))?;
+        let user_data_dir = store.root().join("WebView2");
+        std::fs::create_dir_all(&user_data_dir).map_err(|error| {
+            format!(
+                "failed to create WebView2 user-data directory {}: {error}",
+                user_data_dir.display()
+            )
+        })?;
+        log::debug!(
+            "preview: using WebView2 user-data directory {}",
+            user_data_dir.display()
+        );
+        Ok(Rc::new(smol::lock::Mutex::new(wry::WebContext::new(Some(
+            user_data_dir,
+        )))))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn drop_raw_webview(raw: wry::WebView, key: &str, reason: &str) {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(raw))).is_err() {
+            log::error!("preview: raw webview drop panicked for {key} after {reason}");
+        }
+    }
+
     fn wait_timeout_message(pending: &[String]) -> String {
         format!(
             "preview_wait_for timed out; unmet conditions: {}",
@@ -106,8 +212,17 @@ mod native {
     pub struct PreviewPanel {
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
-        /// One native WebView per session id, created on first use.
-        webviews: HashMap<String, Entity<WebView>>,
+        /// One native WebView slot per session id, created on first use.
+        webviews: HashMap<String, WebViewSlot>,
+        /// All Windows previews share one explicit app-local WebView2 profile.
+        /// The async mutex keeps wry's `&mut WebContext` borrow exclusive across
+        /// concurrent child creations without blocking the UI thread.
+        #[cfg(target_os = "windows")]
+        web_context: Option<Rc<smol::lock::Mutex<wry::WebContext>>>,
+        /// Monotonic identity that prevents a cancelled completion from filling
+        /// a replacement slot at the same conversation key.
+        #[cfg(target_os = "windows")]
+        next_creation_id: u64,
         /// Sessions whose WebView has begun a navigation. lb-wry queues (and drops
         /// the callback of) `evaluate_script_with_callback` until the first
         /// navigation starts flushing its pending-scripts buffer, so value-returning
@@ -147,6 +262,16 @@ mod native {
             let url_input = cx.new(|cx| {
                 InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
             });
+            #[cfg(target_os = "windows")]
+            let (web_context, webview_error) = match windows_web_context() {
+                Ok(context) => (Some(context), None),
+                Err(error) => {
+                    log::warn!("preview: no webview ({error})");
+                    (None, Some(error))
+                }
+            };
+            #[cfg(not(target_os = "windows"))]
+            let webview_error = None;
             let subscriptions = vec![
                 cx.observe(&store, |this, _, cx| {
                     // Native child views outlive GPUI layout nodes. Visibility
@@ -162,13 +287,17 @@ mod native {
                 store,
                 window_state,
                 webviews: HashMap::new(),
+                #[cfg(target_os = "windows")]
+                web_context,
+                #[cfg(target_os = "windows")]
+                next_creation_id: 0,
                 warm: HashSet::new(),
                 url_input,
                 mirrored: None,
                 active_identity: None,
                 dev_ports: Vec::new(),
                 port_scan_generation: 0,
-                webview_error: None,
+                webview_error,
                 smoke_active_key: None,
                 smoke_visible: false,
                 _subscriptions: subscriptions,
@@ -246,13 +375,16 @@ mod native {
                 )
                 .map(str::to_string)
             };
-            for (key, view) in &self.webviews {
+            for (key, slot) in &self.webviews {
+                let Some(view) = slot.ready() else {
+                    continue;
+                };
                 let should_show = Some(key) == visible.as_ref();
                 view.update(cx, |view, _| {
                     if should_show && allow_show {
-                        view.show();
+                        set_webview_visible(view, true);
                     } else if !should_show {
-                        view.hide();
+                        set_webview_visible(view, false);
                     }
                 });
             }
@@ -260,22 +392,54 @@ mod native {
 
         /// Get or lazily create the WebView for `session_id`.
         ///
-        /// `None` when the platform webview cannot be created — on Windows that
-        /// means the WebView2 runtime is absent. Only the preview browser needs
-        /// it, so this is a missing feature, not a dead app: the tab explains
-        /// itself and every other surface keeps working.
+        /// `Unavailable` when the platform webview cannot be created — on
+        /// Windows that usually means the WebView2 runtime is absent. Only the
+        /// preview browser needs it, so this is a missing feature, not a dead
+        /// app: the tab explains itself and every other surface keeps working.
         fn ensure_webview(
             &mut self,
             session_id: &str,
             window: &mut Window,
             cx: &mut Context<Self>,
-        ) -> Option<Entity<WebView>> {
-            if let Some(view) = self.webviews.get(session_id) {
-                return Some(view.clone());
+        ) -> WebViewAvailability {
+            if let Some(slot) = self.webviews.get(session_id) {
+                return match slot {
+                    #[cfg(target_os = "windows")]
+                    WebViewSlot::Creating { .. } => WebViewAvailability::Starting,
+                    WebViewSlot::Ready(view) => WebViewAvailability::Ready(view.clone()),
+                };
             }
             if self.webview_error.is_some() {
-                return None;
+                return WebViewAvailability::Unavailable;
             }
+
+            #[cfg(target_os = "windows")]
+            {
+                self.start_webview_creation(session_id, window, cx)
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.create_webview_sync(session_id, window, cx)
+            }
+        }
+
+        fn record_webview_error(&mut self, error: String, cx: &mut Context<Self>) {
+            log::warn!("preview: no webview ({error})");
+            self.webview_error = Some(error);
+            // An unavailable platform component invalidates every queued build.
+            // Already-ready children remain usable until their normal teardown.
+            self.webviews.retain(|_, slot| slot.is_ready());
+            cx.notify();
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        fn create_webview_sync(
+            &mut self,
+            session_id: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> WebViewAvailability {
             // Start on about:blank so lb-wry begins a navigation and flushes its
             // pending-scripts buffer, making later `evaluate_script` callbacks
             // fire (see the `warm` field docs).
@@ -292,20 +456,247 @@ mod native {
                 });
             let raw = match built {
                 Ok(raw) => raw,
-                Err(err) => {
-                    log::warn!("preview: no webview ({err})");
-                    self.webview_error = Some(err);
-                    return None;
+                Err(error) => {
+                    self.record_webview_error(error, cx);
+                    return WebViewAvailability::Unavailable;
                 }
             };
             let webview = cx.new(|cx| {
                 let mut view = WebView::new(raw, window, cx);
-                view.hide();
+                set_webview_visible(&mut view, false);
                 view
             });
             self.webviews
-                .insert(session_id.to_string(), webview.clone());
-            Some(webview)
+                .insert(session_id.to_string(), WebViewSlot::Ready(webview.clone()));
+            WebViewAvailability::Ready(webview)
+        }
+
+        #[cfg(target_os = "windows")]
+        fn start_webview_creation(
+            &mut self,
+            session_id: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> WebViewAvailability {
+            let Some(web_context) = self.web_context.clone() else {
+                return WebViewAvailability::Unavailable;
+            };
+            let parent = match window.window_handle() {
+                Ok(handle) => handle.as_raw(),
+                Err(error) => {
+                    self.record_webview_error(error.to_string(), cx);
+                    return WebViewAvailability::Unavailable;
+                }
+            };
+
+            self.next_creation_id = self.next_creation_id.wrapping_add(1).max(1);
+            let creation_id = self.next_creation_id;
+            let creation_key = session_id.to_string();
+            let pending_url = self.store.read(cx).preview_url(session_id);
+            let smoke_creation = self.smoke_active_key.is_some();
+            self.webviews.insert(
+                creation_key.clone(),
+                WebViewSlot::Creating {
+                    id: creation_id,
+                    phase: CreationPhase::Queued,
+                    pending_url,
+                },
+            );
+
+            cx.spawn_in(window, async move |panel, cx| {
+                // WebViewBuilder borrows WebContext mutably for the lifetime of
+                // its future. Serialize that borrow without blocking GPUI; a
+                // cancelled queued slot is discarded before wry is ever polled.
+                let mut web_context = web_context.lock().await;
+                let slot_is_live = panel
+                    .read_with(cx, |panel, _| panel.has_creation(creation_id))
+                    .unwrap_or(false);
+                if !slot_is_live {
+                    return;
+                }
+                if cx.update(|_, _| ()).is_err() {
+                    let _ = panel.update(cx, |panel, cx| {
+                        panel.remove_creation(creation_id);
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                // SAFETY: this task is confined to GPUI's UI thread and just
+                // revalidated the owning GPUI window without yielding. wry reads
+                // the handle synchronously on the first poll, before awaiting
+                // WebView2's environment/controller callbacks. The HWND may be
+                // destroyed after that await by design; the async wry path then
+                // completes with either an error or a raw child we immediately
+                // discard unless the same window/panel/slot are still live.
+                let parent = unsafe { raw_window_handle::WindowHandle::borrow_raw(parent) };
+                let built = {
+                    let builder = wry::WebViewBuilder::new_with_web_context(&mut web_context)
+                        .with_devtools(true)
+                        .with_url("about:blank");
+                    let mut build = Box::pin(builder.build_as_child_async(&parent));
+                    let first_poll = std::future::poll_fn(|task_cx| {
+                        std::task::Poll::Ready(match build.as_mut().poll(task_cx) {
+                            std::task::Poll::Ready(result) => Some(result),
+                            std::task::Poll::Pending => None,
+                        })
+                    })
+                    .await;
+                    match first_poll {
+                        Some(result) => result,
+                        None => {
+                            let _ = panel.update(cx, |panel, cx| {
+                                if panel.mark_creation_in_flight(creation_id) {
+                                    cx.notify();
+                                }
+                            });
+                            // Give the lifecycle harness a deterministic window
+                            // in which to remove an actually-polled creation.
+                            if smoke_creation {
+                                cx.background_executor().timer(SMOKE_CREATION_PAUSE).await;
+                            }
+                            build.as_mut().await
+                        }
+                    }
+                };
+                drop(web_context);
+
+                match built {
+                    Ok(raw) => {
+                        let mut raw = Some(raw);
+                        let installed = matches!(
+                            cx.update(|window, app| {
+                                panel.update(app, |panel, cx| {
+                                    let Some((key, pending_url)) =
+                                        panel.remove_creation(creation_id)
+                                    else {
+                                        return false;
+                                    };
+                                    panel.install_created_webview(
+                                        key,
+                                        pending_url,
+                                        raw.take().expect("raw webview already consumed"),
+                                        window,
+                                        cx,
+                                    );
+                                    true
+                                })
+                            }),
+                            Ok(Ok(true))
+                        );
+                        if let Some(raw) = raw {
+                            drop_raw_webview(raw, &creation_key, "creation cancellation");
+                        }
+                        if !installed {
+                            log::debug!(
+                                "preview: discarded stale creation {creation_id} for {creation_key}"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        let recorded = matches!(
+                            cx.update(|_, app| {
+                                panel.update(app, |panel, cx| {
+                                    if !panel.has_creation(creation_id) {
+                                        return false;
+                                    }
+                                    panel.record_webview_error(error.clone(), cx);
+                                    true
+                                })
+                            }),
+                            Ok(Ok(true))
+                        );
+                        if !recorded {
+                            log::debug!(
+                                "preview: creation {creation_id} for {creation_key} failed after teardown: {error}"
+                            );
+                        }
+                    }
+                }
+            })
+            .detach();
+
+            WebViewAvailability::Starting
+        }
+
+        #[cfg(target_os = "windows")]
+        fn has_creation(&self, creation_id: u64) -> bool {
+            self.webviews.values().any(|slot| {
+                matches!(
+                    slot,
+                    WebViewSlot::Creating { id, .. } if *id == creation_id
+                )
+            })
+        }
+
+        #[cfg(target_os = "windows")]
+        fn mark_creation_in_flight(&mut self, creation_id: u64) -> bool {
+            for slot in self.webviews.values_mut() {
+                if let WebViewSlot::Creating { id, phase, .. } = slot
+                    && *id == creation_id
+                {
+                    *phase = CreationPhase::InFlight;
+                    return true;
+                }
+            }
+            false
+        }
+
+        #[cfg(target_os = "windows")]
+        fn remove_creation(&mut self, creation_id: u64) -> Option<(String, Option<String>)> {
+            let key = self.webviews.iter().find_map(|(key, slot)| {
+                matches!(
+                    slot,
+                    WebViewSlot::Creating { id, .. } if *id == creation_id
+                )
+                .then(|| key.clone())
+            })?;
+            let WebViewSlot::Creating { pending_url, .. } = self.webviews.remove(&key)? else {
+                unreachable!("creation key stopped referring to a creating slot");
+            };
+            Some((key, pending_url))
+        }
+
+        #[cfg(target_os = "windows")]
+        fn install_created_webview(
+            &mut self,
+            key: String,
+            pending_url: Option<String>,
+            raw: wry::WebView,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) {
+            let url = self.store.read(cx).preview_url(&key).or(pending_url);
+            let warm = if let Some(url) = &url {
+                match raw.load_url(url) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        log::warn!("preview: failed to replay URL for {key}: {error}");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if let Err(error) = raw.set_bounds(wry::Rect::default()) {
+                log::debug!("preview: failed to reset created webview bounds for {key}: {error}");
+            }
+            if let Err(error) = raw.set_visible(false) {
+                log::debug!("preview: failed to hide created webview for {key}: {error}");
+            }
+            let webview = cx.new(|cx| {
+                let mut view = WebView::new(raw, window, cx);
+                set_webview_visible(&mut view, false);
+                view
+            });
+            self.webviews
+                .insert(key.clone(), WebViewSlot::Ready(webview));
+            if warm {
+                self.warm.insert(key);
+            }
+            self.sync_visibility(cx);
+            cx.notify();
         }
 
         pub(crate) fn smoke_create(
@@ -317,10 +708,23 @@ mod native {
         ) -> Result<(), String> {
             self.smoke_active_key = Some(key.to_string());
             self.smoke_visible = true;
-            self.navigate(key, url, window, cx);
-            match &self.webview_error {
-                Some(error) => Err(error.clone()),
-                None => Ok(()),
+            match self.navigate(key, url, window, cx) {
+                WebViewAvailability::Ready(_) => Ok(()),
+                WebViewAvailability::Unavailable => Err(self
+                    .webview_error
+                    .clone()
+                    .unwrap_or_else(|| unavailable_message("unknown creation failure"))),
+                WebViewAvailability::Starting => {
+                    #[cfg(target_os = "windows")]
+                    if let Some(WebViewSlot::Creating { phase, .. }) = self.webviews.get(key) {
+                        return Err(match phase {
+                            CreationPhase::Queued => SMOKE_CREATION_QUEUED,
+                            CreationPhase::InFlight => SMOKE_CREATION_IN_FLIGHT,
+                        }
+                        .into());
+                    }
+                    Err(STARTING_MESSAGE.into())
+                }
             }
         }
 
@@ -365,20 +769,45 @@ mod native {
         }
 
         /// Navigate one conversation's WebView to `url`, remembering it.
-        fn navigate(&mut self, key: &str, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        fn navigate(
+            &mut self,
+            key: &str,
+            url: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> WebViewAvailability {
             let url = normalize_url(url);
-            let Some(webview) = self.ensure_webview(key, window, cx) else {
-                cx.notify();
-                return;
-            };
-            webview.update(cx, |view, _| view.load_url(&url));
-            // A navigation flushes lb-wry's pending-scripts buffer, so subsequent
-            // evaluate callbacks will fire.
-            self.warm.insert(key.to_string());
             self.store
-                .update(cx, |store, cx| store.set_preview_url(key, url, cx));
+                .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
+            let availability = self.ensure_webview(key, window, cx);
+            match &availability {
+                WebViewAvailability::Ready(webview) => {
+                    match webview.read(cx).raw().load_url(&url) {
+                        Ok(()) => {
+                            // A navigation flushes lb-wry's pending-scripts buffer,
+                            // so subsequent evaluate callbacks will fire.
+                            self.warm.insert(key.to_string());
+                        }
+                        Err(error) => {
+                            log::warn!("preview: failed to navigate {key}: {error}");
+                        }
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                WebViewAvailability::Starting => {
+                    if let Some(WebViewSlot::Creating { pending_url, .. }) =
+                        self.webviews.get_mut(key)
+                    {
+                        *pending_url = Some(url);
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                WebViewAvailability::Starting => {}
+                WebViewAvailability::Unavailable => {}
+            }
             self.sync_visibility(cx);
             cx.notify();
+            availability
         }
 
         fn on_url_event(
@@ -400,7 +829,7 @@ mod native {
 
         /// Run raw JS on the active WebView via history/reload (fire-and-forget).
         fn eval_fire(&self, session_id: &str, script: &str, cx: &Context<Self>) {
-            if let Some(view) = self.webviews.get(session_id) {
+            if let Some(view) = self.webviews.get(session_id).and_then(WebViewSlot::ready) {
                 let _ = view.read(cx).raw().evaluate_script(script);
             }
         }
@@ -409,10 +838,12 @@ mod native {
 
         fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             if let Some(id) = self.active_key(cx)
-                && let Some(view) = self.ensure_webview(&id, window, cx)
+                && let WebViewAvailability::Ready(view) = self.ensure_webview(&id, window, cx)
             {
                 view.update(cx, |view, _| {
-                    let _ = view.back();
+                    if let Err(error) = view.back() {
+                        log::debug!("preview: failed to navigate back during teardown: {error}");
+                    }
                 });
             }
         }
@@ -686,10 +1117,17 @@ mod native {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) {
-            if self.ensure_webview(key, window, cx).is_none() {
-                let err = self.webview_error.clone().unwrap_or_default();
-                let _ = reply.try_send(Err(unavailable_message(&err)));
-                return;
+            match self.ensure_webview(key, window, cx) {
+                WebViewAvailability::Ready(_) => {}
+                WebViewAvailability::Starting => {
+                    let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
+                    return;
+                }
+                WebViewAvailability::Unavailable => {
+                    let error = self.webview_error.clone().unwrap_or_default();
+                    let _ = reply.try_send(Err(unavailable_message(&error)));
+                    return;
+                }
             }
             let cold = !self.warm.contains(key);
             let key = key.to_string();
@@ -816,10 +1254,17 @@ mod native {
             cx: &mut Context<Self>,
         ) {
             // Ensure the WebView exists (and has begun loading about:blank).
-            if self.ensure_webview(session_id, window, cx).is_none() {
-                let err = self.webview_error.clone().unwrap_or_default();
-                let _ = reply.try_send(Err(unavailable_message(&err)));
-                return;
+            match self.ensure_webview(session_id, window, cx) {
+                WebViewAvailability::Ready(_) => {}
+                WebViewAvailability::Starting => {
+                    let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
+                    return;
+                }
+                WebViewAvailability::Unavailable => {
+                    let error = self.webview_error.clone().unwrap_or_default();
+                    let _ = reply.try_send(Err(unavailable_message(&error)));
+                    return;
+                }
             }
             if self.warm.contains(session_id) {
                 self.eval_now(session_id, script, reply, cx);
@@ -843,7 +1288,7 @@ mod native {
 
         /// Run `script` on the (already-warm) WebView, answering from the callback.
         fn eval_now(&self, session_id: &str, script: &str, reply: ReplyTx, cx: &Context<Self>) {
-            let Some(view) = self.webviews.get(session_id) else {
+            let Some(view) = self.webviews.get(session_id).and_then(WebViewSlot::ready) else {
                 let _ = reply.try_send(Err("preview browser is not open".into()));
                 return;
             };
@@ -902,7 +1347,7 @@ mod native {
                 return;
             }
 
-            let Some(view) = self.webviews.get(key) else {
+            let Some(view) = self.webviews.get(key).and_then(WebViewSlot::ready) else {
                 let _ = reply.try_send(Err("preview browser is not open".into()));
                 return;
             };
@@ -979,7 +1424,7 @@ mod native {
 
             let body: AnyElement = match &active {
                 Some(id) => match self.ensure_webview(id, window, cx) {
-                    Some(view) => {
+                    WebViewAvailability::Ready(view) => {
                         if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
                             div()
                                 .flex()
@@ -1001,7 +1446,16 @@ mod native {
                             div().flex_1().min_h_0().child(view).into_any_element()
                         }
                     }
-                    None => v_flex()
+                    WebViewAvailability::Starting => v_flex()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .px_8()
+                        .text_center()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Preview is starting…")
+                        .into_any_element(),
+                    WebViewAvailability::Unavailable => v_flex()
                         .flex_1()
                         .gap_2()
                         .items_center()
