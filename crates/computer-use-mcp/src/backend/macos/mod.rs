@@ -1,6 +1,7 @@
 mod ax;
 mod capture;
 mod input;
+mod ocr;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -20,7 +21,7 @@ use super::{
     ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, CapturePolicy,
     ObserveRequest, RootFilters, RootInfo, RootObservation,
 };
-use crate::outline::{UiNode, interactive_count};
+use crate::outline::{UiNode, picture_only_nodes, should_fallback_to_ocr};
 
 pub(super) struct MacosBackend;
 
@@ -97,7 +98,7 @@ impl MacosBackend {
         root: &RootInfo,
         request: ObserveRequest,
     ) -> Result<RootObservation, BackendError> {
-        let tree = if request.semantic {
+        let mut tree = if request.semantic {
             ax::observe_tree(root)?
         } else {
             UiNode {
@@ -108,14 +109,23 @@ impl MacosBackend {
                 ..UiNode::default()
             }
         };
+        let should_ocr = request.capture != CapturePolicy::Never && should_fallback_to_ocr(&tree);
         let should_capture = match request.capture {
             CapturePolicy::Never => false,
             CapturePolicy::Always => true,
-            CapturePolicy::IfSparse => interactive_count(&tree) <= 3,
+            CapturePolicy::IfSparse => should_ocr,
         };
         let screenshot_png = should_capture
             .then(|| capture::capture_window(root))
             .transpose()?;
+        if should_ocr && let Some(png) = screenshot_png.as_deref() {
+            match ocr::recognize_text(png) {
+                Ok(recognized) => tree
+                    .children
+                    .extend(picture_only_nodes(root.frame, &recognized)),
+                Err(error) => log::warn!("computer-use-mcp: {error}"),
+            }
+        }
         Ok(RootObservation {
             root: root.clone(),
             tree,
@@ -137,6 +147,22 @@ impl MacosBackend {
                 })
             }
             ActionKind::Click => {
+                if request.target_picture_only {
+                    let frame = request
+                        .target_frame
+                        .filter(|frame| frame.has_area())
+                        .ok_or_else(|| {
+                            BackendError::new(
+                                BackendErrorCode::InvalidAction,
+                                "pictureOnly OCR target has no clickable frame",
+                            )
+                        })?;
+                    let (x, y) = frame.center();
+                    input::click(x, y, request.button, request.click_count)?;
+                    return Ok(ActionResult::unknown(
+                        "physical click events were posted at the pictureOnly OCR box center",
+                    ));
+                }
                 if request.target_path.is_some()
                     && request.target_actions.iter().any(|a| a == "press")
                 {
