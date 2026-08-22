@@ -34,11 +34,10 @@ Core contract, inherited from pi-computer-use:
 - **Bounded output.** Model-visible text is capped; oversized results return a preview plus a
   continuation ref for `read_text`.
 
-Deliberate deviations from pi-computer-use (documented so later work can close them): no
-Windows/UIAutomation backend, no CDP browser roots (browser automation stays on the
+Deliberate v1 deviations from pi-computer-use (documented so later work can close them):
+no OCR/`pictureOnly` nodes, no CDP browser roots (browser automation stays on the
 `tcode_preview` server and the embedded WebView), no separate helper app (see below), and a
-simplified successor-diff heuristic. The earlier v1 OCR deviation is closed on macOS: sparse
-desktop observations now gain Vision-derived `pictureOnly` nodes.
+simplified successor-diff heuristic.
 
 ## Architecture
 
@@ -48,8 +47,7 @@ desktop observations now gain Vision-derived `pictureOnly` nodes.
   - `tools.rs` — rmcp `ToolRouter` (same streamable-HTTP + bearer-token shape as
     `preview-mcp` / `orchestrate-mcp`).
   - `backend/` — `Backend` trait; `backend/macos/` implements it with the AX C API
-    (`AXUIElement*`), CGEvent input synthesis, `screencapture -l <windowid>` capture, and
-    Vision (`VNRecognizeTextRequest`) fallback OCR;
+    (`AXUIElement*`), CGEvent input synthesis, and `screencapture -l <windowid>` capture;
     other platforms get a stub backend whose tools return a clear "unsupported platform" error.
   - `permissions.rs` — TCC checks/requests (see below), public API also consumed by the
     settings UI.
@@ -62,34 +60,6 @@ desktop observations now gain Vision-derived `pictureOnly` nodes.
 Unlike pi-computer-use, tcode needs **no helper app**: tcode is itself a signed `.app`, so
 Accessibility and Screen Recording grants attach directly to tcode. That removes helper
 install/signing/attribution handling entirely.
-
-## OCR fallback and image mode
-
-On macOS, a non-trivial observed region (at least 20,000 square screen points) is considered
-text-sparse when its AX descendants contain fewer than three text-bearing nodes. The root window
-title is not counted. When capture is allowed, tcode captures that window once, runs one accurate,
-automatic-language `VNRecognizeTextRequest` over the same PNG, and adds each recognized line as a
-`static_text` leaf.
-The leaf is marked `pictureOnly` in the rendered outline and as `picture_only: true` in
-`inspect_ui`; it has a `click` capability but no live AX element. `search_ui`, `expand_ui`,
-`inspect_ui`, and `read_text` operate on these cached leaves like other state-owned nodes.
-
-Vision reports normalized boxes from the image's lower-left corner. tcode maps them into the
-outline's absolute screen-point coordinates by scaling through the captured window frame and
-flipping the y-axis. Window shadows are omitted from capture so the image and window frame share
-the same bounds. Clicking a `pictureOnly` ref posts the normal pointer input at the cached box
-center; semantic-only actions are rejected for those refs.
-
-Image mode is also the OCR policy:
-
-- `auto` captures and runs OCR only when the outline meets the sparse rule. If Screen Recording
-  permission is absent, both are skipped and the observation reports a warning.
-- `always` attaches one screenshot to every `observe_ui` result, but runs OCR only for a sparse
-  outline.
-- `never` disables both screenshots and OCR, including for explicit visual/fused observations.
-
-Thus an adequate AX tree never incurs Vision work, and a captured image is never OCRed more than
-once in one observation.
 
 ## macOS permissions
 
@@ -132,6 +102,5 @@ own "Quit & Reopen" dialog. tcode therefore treats any permission flow as a pote
   grant permissions inside the VM, then inspect permission status via SSH.
 - CI (macOS/Linux/Windows) builds the platform fallback paths and runs the platform-neutral unit
   tests:
-  outline folding and search ranking, OCR fallback decisions and coordinate/node synthesis,
-  state-store eviction and staleness, tool schemas, settings serde round-trips, and MCP
-  registration wiring for all three provider paths.
+  outline folding and search ranking, state-store eviction and staleness, tool schemas,
+  settings serde round-trips, and MCP registration wiring for all three provider paths.

@@ -9,8 +9,6 @@ pub const MAX_MODEL_LINES: usize = 2_000;
 pub const PREVIEW_BYTES: usize = 16 * 1024;
 pub const PAGE_BYTES: usize = 16 * 1024;
 pub const SEARCH_LIMIT: usize = 20;
-pub const OCR_TEXT_NODE_THRESHOLD: usize = 3;
-pub const OCR_MIN_REGION_AREA: f64 = 20_000.0;
 
 const FOLDED_DEPTH: usize = 7;
 const FOLDED_LINES: usize = 500;
@@ -54,18 +52,12 @@ pub struct UiNode {
     pub actions: Vec<String>,
     pub enabled: bool,
     pub focused: bool,
-    #[serde(default)]
-    pub picture_only: bool,
     pub children: Vec<UiNode>,
 }
 
 impl UiNode {
     pub fn is_interactive(&self) -> bool {
         is_interactive_role(&self.role) || !self.actions.is_empty()
-    }
-
-    pub fn is_picture_only(&self) -> bool {
-        self.picture_only
     }
 
     pub fn text(&self) -> String {
@@ -88,121 +80,6 @@ impl UiNode {
         }
         self.children.iter().find_map(|child| child.find(ref_id))
     }
-}
-
-/// One OCR result in Vision's normalized image coordinate space (origin at
-/// the lower-left corner).
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecognizedTextBox {
-    pub text: String,
-    pub normalized_frame: Frame,
-}
-
-/// OCR is useful only for a non-trivial region whose semantic descendants do
-/// not already expose enough text. The root's own window title is deliberately
-/// excluded because it says nothing about the window contents.
-pub fn should_fallback_to_ocr(root: &UiNode) -> bool {
-    let area = root.frame.w * root.frame.h;
-    root.frame.has_area()
-        && area.is_finite()
-        && area >= OCR_MIN_REGION_AREA
-        && !has_enough_text_bearing_descendants(root)
-}
-
-pub fn text_bearing_descendant_count(root: &UiNode) -> usize {
-    root.children
-        .iter()
-        .map(|child| usize::from(node_has_text(child)) + text_bearing_descendant_count(child))
-        .sum()
-}
-
-fn has_enough_text_bearing_descendants(root: &UiNode) -> bool {
-    let mut count = 0;
-    let mut pending: Vec<_> = root.children.iter().collect();
-    while let Some(node) = pending.pop() {
-        if node_has_text(node) {
-            count += 1;
-            if count >= OCR_TEXT_NODE_THRESHOLD {
-                return true;
-            }
-        }
-        pending.extend(&node.children);
-    }
-    false
-}
-
-fn node_has_text(node: &UiNode) -> bool {
-    [&node.value, &node.title, &node.description]
-        .into_iter()
-        .any(|value| !value.trim().is_empty())
-}
-
-/// Map Vision's normalized, lower-left-origin box into absolute screen points,
-/// whose y-axis grows down from the top of the captured region.
-pub fn vision_frame_to_screen(normalized: Frame, region: Frame) -> Option<Frame> {
-    if !region.has_area()
-        || [
-            normalized.x,
-            normalized.y,
-            normalized.w,
-            normalized.h,
-            region.x,
-            region.y,
-            region.w,
-            region.h,
-        ]
-        .into_iter()
-        .any(|value| !value.is_finite())
-    {
-        return None;
-    }
-
-    let left = normalized.x.clamp(0.0, 1.0);
-    let right = (normalized.x + normalized.w).clamp(0.0, 1.0);
-    let bottom = normalized.y.clamp(0.0, 1.0);
-    let top = (normalized.y + normalized.h).clamp(0.0, 1.0);
-    if right <= left || top <= bottom {
-        return None;
-    }
-
-    Some(Frame {
-        x: region.x + left * region.w,
-        y: region.y + (1.0 - top) * region.h,
-        w: (right - left) * region.w,
-        h: (top - bottom) * region.h,
-    })
-}
-
-/// Synthesize stable, searchable outline leaves from OCR results. Nodes are
-/// sorted into screen reading order so refs do not depend on Vision's result
-/// ordering.
-pub fn picture_only_nodes(region: Frame, recognized: &[RecognizedTextBox]) -> Vec<UiNode> {
-    let mut nodes: Vec<_> = recognized
-        .iter()
-        .filter_map(|recognized| {
-            let title = recognized.text.trim();
-            if title.is_empty() {
-                return None;
-            }
-            Some(UiNode {
-                role: "static_text".into(),
-                title: title.into(),
-                frame: vision_frame_to_screen(recognized.normalized_frame, region)?,
-                actions: vec!["click".into()],
-                enabled: true,
-                picture_only: true,
-                ..UiNode::default()
-            })
-        })
-        .collect();
-    nodes.sort_by(|left, right| {
-        left.frame
-            .y
-            .total_cmp(&right.frame.y)
-            .then_with(|| left.frame.x.total_cmp(&right.frame.x))
-            .then_with(|| left.title.cmp(&right.title))
-    });
-    nodes
 }
 
 pub fn is_interactive_role(role: &str) -> bool {
@@ -261,7 +138,7 @@ pub fn assign_refs(root: &mut UiNode) {
 pub fn assign_refs_from_previous(previous: &UiNode, successor: &mut UiNode) {
     let old = flatten(previous);
     let mut by_path = HashMap::new();
-    let mut by_signature: HashMap<(String, String, bool), Vec<String>> = HashMap::new();
+    let mut by_signature: HashMap<(String, String), Vec<String>> = HashMap::new();
     let mut next = 1_u64;
     for entry in &old {
         by_path.insert(
@@ -412,12 +289,8 @@ pub fn render_line(node: &UiNode, depth: usize) -> String {
     if !node.value.is_empty() && node.value != node.title {
         line.push_str(&format!(" value=\"{}\"", display_string(&node.value, 320)));
     }
-    let mut capabilities = node.actions.clone();
-    if node.picture_only {
-        capabilities.push("pictureOnly".into());
-    }
-    if !capabilities.is_empty() {
-        line.push_str(&format!(" [{}]", capabilities.join(",")));
+    if !node.actions.is_empty() {
+        line.push_str(&format!(" [{}]", node.actions.join(",")));
     }
     if !node.enabled {
         line.push_str(" disabled");
@@ -691,14 +564,13 @@ fn node_changed(left: &UiNode, right: &UiNode) -> bool {
         || left.actions != right.actions
         || left.enabled != right.enabled
         || left.focused != right.focused
-        || left.picture_only != right.picture_only
 }
 
 struct FlatNode<'a> {
     node: &'a UiNode,
     ref_id: String,
     path: Vec<usize>,
-    signature: (String, String, bool),
+    signature: (String, String),
 }
 
 fn flatten(root: &UiNode) -> Vec<FlatNode<'_>> {
@@ -714,12 +586,8 @@ fn flatten(root: &UiNode) -> Vec<FlatNode<'_>> {
     entries
 }
 
-fn node_signature(node: &UiNode) -> (String, String, bool) {
-    (
-        canonical_role(&node.role),
-        node.title.trim().to_lowercase(),
-        node.picture_only,
-    )
+fn node_signature(node: &UiNode) -> (String, String) {
+    (canonical_role(&node.role), node.title.trim().to_lowercase())
 }
 
 fn ref_number(ref_id: &str) -> Option<u64> {
@@ -851,112 +719,6 @@ mod tests {
         let diff = diff_trees(&old, &new);
         assert!(diff.text.contains("+1 ~1 -0"));
         assert!(!diff.use_full_view);
-    }
-
-    #[test]
-    fn ocr_fallback_requires_a_large_text_sparse_outline() {
-        let mut sparse = node(
-            "window",
-            "Canvas shell",
-            vec![
-                node("button", "Menu", Vec::new()),
-                node("static_text", "Score", Vec::new()),
-            ],
-        );
-        sparse.frame = Frame {
-            x: 50.0,
-            y: 25.0,
-            w: 800.0,
-            h: 600.0,
-        };
-        assert!(should_fallback_to_ocr(&sparse));
-
-        sparse
-            .children
-            .push(node("static_text", "Ready", Vec::new()));
-        assert!(!should_fallback_to_ocr(&sparse));
-
-        sparse.children.pop();
-        sparse.frame.w = 100.0;
-        sparse.frame.h = 100.0;
-        assert!(!should_fallback_to_ocr(&sparse));
-    }
-
-    #[test]
-    fn ocr_nodes_map_vision_boxes_to_screen_points_in_reading_order() {
-        let region = Frame {
-            x: 100.0,
-            y: 200.0,
-            w: 800.0,
-            h: 600.0,
-        };
-        let recognized = vec![
-            RecognizedTextBox {
-                text: "Bottom".into(),
-                normalized_frame: Frame {
-                    x: 0.1,
-                    y: 0.1,
-                    w: 0.2,
-                    h: 0.1,
-                },
-            },
-            RecognizedTextBox {
-                text: " Top ".into(),
-                normalized_frame: Frame {
-                    x: 0.25,
-                    y: 0.75,
-                    w: 0.5,
-                    h: 0.1,
-                },
-            },
-            RecognizedTextBox {
-                text: "   ".into(),
-                normalized_frame: Frame {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 1.0,
-                    h: 1.0,
-                },
-            },
-        ];
-
-        let nodes = picture_only_nodes(region, &recognized);
-        assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].title, "Top");
-        assert_eq!(nodes[1].title, "Bottom");
-        assert!(nodes.iter().all(UiNode::is_picture_only));
-        assert!(nodes.iter().all(|node| node.actions == ["click"]));
-        assert_eq!(nodes[0].role, "static_text");
-        assert_frame_close(
-            nodes[0].frame,
-            Frame {
-                x: 300.0,
-                y: 290.0,
-                w: 400.0,
-                h: 60.0,
-            },
-        );
-        assert_frame_close(
-            nodes[1].frame,
-            Frame {
-                x: 180.0,
-                y: 680.0,
-                w: 160.0,
-                h: 60.0,
-            },
-        );
-        assert!(render_line(&nodes[0], 0).contains("[click,pictureOnly]"));
-    }
-
-    fn assert_frame_close(actual: Frame, expected: Frame) {
-        for (actual, expected) in [
-            (actual.x, expected.x),
-            (actual.y, expected.y),
-            (actual.w, expected.w),
-            (actual.h, expected.h),
-        ] {
-            assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
-        }
     }
 
     #[test]

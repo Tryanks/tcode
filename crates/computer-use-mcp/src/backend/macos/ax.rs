@@ -397,7 +397,6 @@ fn walk_element(
         actions,
         enabled,
         focused,
-        picture_only: false,
         children: Vec::new(),
     };
 

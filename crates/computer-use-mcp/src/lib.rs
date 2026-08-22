@@ -3,8 +3,8 @@
 //! refs, transactional actions). See `docs/computer-use.md` for the design.
 //!
 //! Served over the shared loopback streamable-HTTP host with a distinct bearer
-//! token. The macOS backend talks to the AX C API, CGEvent, `screencapture`,
-//! and Vision OCR; other platforms report that computer use is unsupported.
+//! token. The macOS backend talks to the AX C API, CGEvent, and `screencapture`;
+//! other platforms report that computer use is unsupported.
 
 pub mod backend;
 pub mod config;
