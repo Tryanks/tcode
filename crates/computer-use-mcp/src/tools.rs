@@ -405,15 +405,15 @@ mod dispatch {
 
     pub(super) async fn observe_ui(params: ObserveUiParams) -> CallToolResult {
         let permissions = permissions();
+        let config = crate::config::get();
         let needs_accessibility = !matches!(params.mode, Some(ObserveMode::Visual));
-        let needs_screen_recording =
-            matches!(params.mode, Some(ObserveMode::Visual | ObserveMode::Fused));
+        let needs_screen_recording = config.image_mode != crate::config::ImageMode::Never
+            && matches!(params.mode, Some(ObserveMode::Visual | ObserveMode::Fused));
         if let Some(result) =
             permission_gate(permissions, needs_accessibility, needs_screen_recording)
         {
             return result;
         }
-        let config = crate::config::get();
         if config.image_mode == crate::config::ImageMode::Always
             && let Some(result) = permission_gate(permissions, false, true)
         {
@@ -858,6 +858,9 @@ mod dispatch {
             count_nodes(&observation.tree),
             outline::interactive_count(&observation.tree)
         );
+        if observed.text_sparse {
+            text.push_str("\ntext_sparse: true");
+        }
         if let Some(warning) = warning {
             text.push_str("\nwarning: ");
             text.push_str(warning);
@@ -1065,6 +1068,89 @@ mod dispatch {
 
     fn tool_error(message: &str) -> CallToolResult {
         CallToolResult::error(vec![ContentBlock::text(message)])
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::outline::Frame;
+
+        fn sparse_observation(screenshot_png: Option<Vec<u8>>) -> RootObservation {
+            RootObservation {
+                root: RootInfo {
+                    ref_id: "@r1".into(),
+                    app_name: "Canvas App".into(),
+                    title: "Canvas".into(),
+                    frame: Frame {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 800.0,
+                        h: 600.0,
+                    },
+                    ..RootInfo::default()
+                },
+                tree: UiNode {
+                    role: "window".into(),
+                    title: "Canvas".into(),
+                    frame: Frame {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 800.0,
+                        h: 600.0,
+                    },
+                    ..UiNode::default()
+                },
+                text_sparse: true,
+                screenshot_png,
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn auto_with_permission_returns_sparse_flag_and_image() {
+            let permissions = crate::permissions::PermissionStatus {
+                accessibility: true,
+                screen_recording: true,
+            };
+            let policy = capture_policy(
+                crate::config::ImageMode::Auto,
+                Some(ObserveMode::Semantic),
+                &permissions,
+            );
+            assert_eq!(policy, CapturePolicy::IfSparse);
+            assert!(policy.should_capture(true));
+
+            let result =
+                save_observation(sparse_observation(Some(vec![0x89, b'P', b'N', b'G'])), None);
+            assert!(matches!(
+                result.content.as_slice(),
+                [ContentBlock::Text(text), ContentBlock::Image(image)]
+                    if text.text.contains("text_sparse: true")
+                        && image.mime_type == "image/png"
+            ));
+        }
+
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn never_returns_sparse_flag_without_image() {
+            let permissions = crate::permissions::PermissionStatus {
+                accessibility: true,
+                screen_recording: true,
+            };
+            let policy = capture_policy(
+                crate::config::ImageMode::Never,
+                Some(ObserveMode::Visual),
+                &permissions,
+            );
+            assert_eq!(policy, CapturePolicy::Never);
+            assert!(!policy.should_capture(true));
+
+            let result = save_observation(sparse_observation(None), None);
+            assert!(matches!(
+                result.content.as_slice(),
+                [ContentBlock::Text(text)] if text.text.contains("text_sparse: true")
+            ));
+        }
     }
 }
 

@@ -17,10 +17,10 @@ use core_graphics::window::{
 };
 
 use super::{
-    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, CapturePolicy,
-    ObserveRequest, RootFilters, RootInfo, RootObservation,
+    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, ObserveRequest,
+    RootFilters, RootInfo, RootObservation,
 };
-use crate::outline::{UiNode, interactive_count};
+use crate::outline::{UiNode, is_text_sparse};
 
 pub(super) struct MacosBackend;
 
@@ -108,17 +108,15 @@ impl MacosBackend {
                 ..UiNode::default()
             }
         };
-        let should_capture = match request.capture {
-            CapturePolicy::Never => false,
-            CapturePolicy::Always => true,
-            CapturePolicy::IfSparse => interactive_count(&tree) <= 3,
-        };
+        let text_sparse = is_text_sparse(&tree);
+        let should_capture = request.capture.should_capture(text_sparse);
         let screenshot_png = should_capture
             .then(|| capture::capture_window(root))
             .transpose()?;
         Ok(RootObservation {
             root: root.clone(),
             tree,
+            text_sparse,
             screenshot_png,
         })
     }
