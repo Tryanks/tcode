@@ -610,6 +610,10 @@ fn available_worktree_branch(root: &Path, requested: &str) -> Result<String, Git
 }
 
 fn path_is_registered_worktree(root: &Path, path: &Path) -> Result<bool, GitWorktreeError> {
+    Ok(registered_worktree_path(root, path)?.is_some())
+}
+
+fn registered_worktree_path(root: &Path, path: &Path) -> Result<Option<PathBuf>, GitWorktreeError> {
     let out = crate::process::command("git")
         .current_dir(root)
         .args(["worktree", "list", "--porcelain"])
@@ -623,7 +627,18 @@ fn path_is_registered_worktree(root: &Path, path: &Path) -> Result<bool, GitWork
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix("worktree "))
-        .any(|registered| Path::new(registered) == path))
+        .map(PathBuf::from)
+        .find(|registered| paths_refer_to_same_existing_path(registered, path)))
+}
+
+fn paths_refer_to_same_existing_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn prune_worktrees(root: &Path) -> Result<(), GitWorktreeError> {
@@ -648,9 +663,16 @@ pub fn remove_git_worktree(root: &Path, path: &Path) -> Result<(), GitWorktreeEr
     if !path.exists() {
         return prune_worktrees(root);
     }
+    let registered_path =
+        registered_worktree_path(root, path)?.unwrap_or_else(|| path.to_path_buf());
     let out = crate::process::command("git")
         .current_dir(root)
-        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &registered_path.to_string_lossy(),
+        ])
         .output()
         .map_err(|e| GitWorktreeError(e.to_string()))?;
     if !out.status.success() {
@@ -943,9 +965,30 @@ fn cleanup_orphaned_worktrees_at(
         if known_session_ids.contains(&session_id) || !is_directory {
             continue;
         }
+        let registered_path = match registered_worktree_path(&path, &path) {
+            Ok(Some(registered_path)) => registered_path,
+            Ok(None) => {
+                log::warn!("leaving non-worktree directory at {}", path.display());
+                summary.skipped.push(path);
+                continue;
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to inspect possible orphan at {}: {error}",
+                    path.display()
+                );
+                summary.skipped.push(path);
+                continue;
+            }
+        };
         let out = crate::process::command("git")
             .current_dir(&path)
-            .args(["worktree", "remove", "--force", &path.to_string_lossy()])
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                &registered_path.to_string_lossy(),
+            ])
             .output();
         match out {
             Ok(out) if out.status.success() => {
@@ -1169,6 +1212,7 @@ mod tests {
         let root = temp.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         run(&root, &["init", "-b", "main"]);
+        run(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
         run(&root, &["add", "tracked.txt"]);
         run(&root, &["commit", "-m", "initial"]);
@@ -1443,6 +1487,25 @@ mod tests {
         assert!(path.is_dir());
         std::fs::write(path.join("untracked.txt"), "force removal\n").unwrap();
         assert_eq!(remove_git_worktree(&root, &path), Ok(()));
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_removal_accepts_a_canonical_equivalent_path_spelling() {
+        let (temp, root) = scratch_repo("tcode-worktree-equivalent-path-test");
+        let path = temp.join("worktree");
+        create_git_worktree(&root, &path, "tcode/equivalent-path", "main").unwrap();
+        std::fs::create_dir(path.join("nested")).unwrap();
+        let alternate_spelling = path.join("nested").join("..");
+
+        assert_ne!(alternate_spelling, path);
+        assert!(paths_refer_to_same_existing_path(
+            &alternate_spelling,
+            &path
+        ));
+        assert_eq!(remove_git_worktree(&root, &alternate_spelling), Ok(()));
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(temp);
