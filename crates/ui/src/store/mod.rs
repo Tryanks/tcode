@@ -978,6 +978,8 @@ impl WorkspaceStore {
         })
     }
 
+    /// Only the native preview panel prunes by liveness; Linux compiles it out.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
         let mut keys = self
             .index_replica
