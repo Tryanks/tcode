@@ -360,6 +360,14 @@ an aggregate 512 MiB limit. The list is entirely user-controlled: including
 `.env` files or other credentials copies those secrets into
 `~/.tcode/worktrees`, where they remain until the worktree is removed.
 
+A clean worktree session can merge its committed branch back into the clean,
+branch-attached original checkout. Descendants fast-forward; divergent history
+uses a merge commit, with conflicts aborted for manual resolution. Worktrees are
+never auto-committed or removed by merge-back. Orchestration can opt children
+into the same worktree/session-metadata path globally or per dispatch; non-Git
+cwd and creation failures fall back to the resolved cwd and are reported in the
+dispatch response.
+
 ### Empty state
 Centered "Pick a thread to continue" (20px semibold) over "Select an existing
 thread or create a new one to get started." (14px muted). No composer rendered.

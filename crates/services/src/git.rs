@@ -480,6 +480,42 @@ pub struct WorktreeCleanupSummary {
     pub skipped: Vec<PathBuf>,
 }
 
+/// How a clean dedicated-worktree branch was integrated into its original
+/// checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeWorktreeOutcome {
+    FastForward,
+    MergeCommit,
+}
+
+/// A merge-back refusal or failure. Preconditions are deliberately represented
+/// separately so callers can localize the actionable cases without parsing Git
+/// output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeWorktreeError {
+    WorktreeMissing,
+    DirtyWorktree,
+    DestinationDetached,
+    DirtyDestination,
+    DivergedConflict,
+    Git(String),
+}
+
+impl std::fmt::Display for MergeWorktreeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorktreeMissing => formatter.write_str("worktree is missing"),
+            Self::DirtyWorktree => formatter.write_str("worktree has uncommitted changes"),
+            Self::DestinationDetached => formatter.write_str("destination is not on a branch"),
+            Self::DirtyDestination => formatter.write_str("destination has uncommitted changes"),
+            Self::DivergedConflict => formatter.write_str("branches diverged and conflict"),
+            Self::Git(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for MergeWorktreeError {}
+
 /// The path a session's dedicated worktree lives at (`~/.tcode/worktrees/<id>`),
 /// falling back to a temp dir when the home directory is unknown.
 pub fn worktree_path_for(session_id: &str) -> PathBuf {
@@ -702,6 +738,64 @@ pub fn remove_git_worktree(root: &Path, path: &Path) -> Result<(), GitWorktreeEr
         return Err(GitWorktreeError(stderr.trim().to_string()));
     }
     Ok(())
+}
+
+/// Integrate a dedicated worktree branch into the branch currently checked out
+/// at `destination`. Both trees must be clean. A descendant is fast-forwarded;
+/// otherwise Git may create a merge commit. Conflicts are always aborted, and
+/// this function never checks out, resets, or removes either tree.
+pub fn merge_worktree_back(
+    destination: &Path,
+    worktree: &Path,
+    branch: &str,
+) -> Result<MergeWorktreeOutcome, MergeWorktreeError> {
+    if !worktree.is_dir() {
+        return Err(MergeWorktreeError::WorktreeMissing);
+    }
+    if !git_tree_is_clean(worktree)? {
+        return Err(MergeWorktreeError::DirtyWorktree);
+    }
+    run_git(destination, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|_| MergeWorktreeError::DestinationDetached)?;
+    if !git_tree_is_clean(destination)? {
+        return Err(MergeWorktreeError::DirtyDestination);
+    }
+
+    let ancestor = crate::process::command("git")
+        .args(["merge-base", "--is-ancestor", "HEAD", branch])
+        .current_dir(destination)
+        .status()
+        .map_err(|error| MergeWorktreeError::Git(error.to_string()))?;
+    if ancestor.success() {
+        run_git(destination, &["merge", "--ff-only", branch]).map_err(MergeWorktreeError::Git)?;
+        return Ok(MergeWorktreeOutcome::FastForward);
+    }
+    if ancestor.code() != Some(1) {
+        return Err(MergeWorktreeError::Git(
+            "git merge-base --is-ancestor failed".into(),
+        ));
+    }
+
+    match run_git(destination, &["merge", "--no-ff", "--no-edit", branch]) {
+        Ok(_) => Ok(MergeWorktreeOutcome::MergeCommit),
+        Err(error) => {
+            let conflicted = destination.join(".git/MERGE_HEAD").exists()
+                || run_git(destination, &["diff", "--name-only", "--diff-filter=U"])
+                    .is_ok_and(|paths| !paths.trim().is_empty());
+            if conflicted {
+                run_git(destination, &["merge", "--abort"]).map_err(MergeWorktreeError::Git)?;
+                Err(MergeWorktreeError::DivergedConflict)
+            } else {
+                Err(MergeWorktreeError::Git(error))
+            }
+        }
+    }
+}
+
+fn git_tree_is_clean(cwd: &Path) -> Result<bool, MergeWorktreeError> {
+    run_git(cwd, &["status", "--porcelain"])
+        .map(|status| status.trim().is_empty())
+        .map_err(MergeWorktreeError::Git)
 }
 
 #[derive(Debug)]
@@ -1524,6 +1618,101 @@ mod tests {
         assert_eq!(remove_git_worktree(&root, &path), Ok(()));
         assert!(!path.exists());
 
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    fn commit_file(root: &Path, path: &str, contents: &str, message: &str) {
+        std::fs::write(root.join(path), contents).unwrap();
+        run(root, &["add", path]);
+        run(root, &["commit", "-m", message]);
+    }
+
+    #[test]
+    fn merge_worktree_back_fast_forwards_descendant() {
+        let (temp, root) = scratch_repo("tcode-merge-back-ff-test");
+        let worktree = temp.join("worktree");
+        create_git_worktree(&root, &worktree, "tcode/ff", "main").unwrap();
+        commit_file(&worktree, "feature.txt", "feature\n", "feature");
+
+        assert_eq!(
+            merge_worktree_back(&root, &worktree, "tcode/ff"),
+            Ok(MergeWorktreeOutcome::FastForward)
+        );
+        assert_eq!(
+            run_git(&root, &["rev-parse", "HEAD"]).unwrap(),
+            run_git(&worktree, &["rev-parse", "HEAD"]).unwrap()
+        );
+        remove_git_worktree(&root, &worktree).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn merge_worktree_back_creates_merge_commit_for_clean_divergence() {
+        let (temp, root) = scratch_repo("tcode-merge-back-diverged-test");
+        let worktree = temp.join("worktree");
+        create_git_worktree(&root, &worktree, "tcode/diverged", "main").unwrap();
+        commit_file(&worktree, "feature.txt", "feature\n", "feature");
+        commit_file(&root, "destination.txt", "destination\n", "destination");
+
+        assert_eq!(
+            merge_worktree_back(&root, &worktree, "tcode/diverged"),
+            Ok(MergeWorktreeOutcome::MergeCommit)
+        );
+        let parents = run_git(&root, &["show", "-s", "--format=%P", "HEAD"]).unwrap();
+        assert_eq!(parents.split_whitespace().count(), 2);
+        remove_git_worktree(&root, &worktree).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn merge_worktree_back_refuses_dirty_worktree() {
+        let (temp, root) = scratch_repo("tcode-merge-back-dirty-worktree-test");
+        let worktree = temp.join("worktree");
+        create_git_worktree(&root, &worktree, "tcode/dirty-worktree", "main").unwrap();
+        std::fs::write(worktree.join("tracked.txt"), "dirty\n").unwrap();
+
+        assert_eq!(
+            merge_worktree_back(&root, &worktree, "tcode/dirty-worktree"),
+            Err(MergeWorktreeError::DirtyWorktree)
+        );
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn merge_worktree_back_refuses_dirty_destination() {
+        let (temp, root) = scratch_repo("tcode-merge-back-dirty-destination-test");
+        let worktree = temp.join("worktree");
+        create_git_worktree(&root, &worktree, "tcode/dirty-destination", "main").unwrap();
+        commit_file(&worktree, "feature.txt", "feature\n", "feature");
+        std::fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
+
+        assert_eq!(
+            merge_worktree_back(&root, &worktree, "tcode/dirty-destination"),
+            Err(MergeWorktreeError::DirtyDestination)
+        );
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn merge_worktree_back_aborts_conflict_and_restores_clean_destination() {
+        let (temp, root) = scratch_repo("tcode-merge-back-conflict-test");
+        let worktree = temp.join("worktree");
+        create_git_worktree(&root, &worktree, "tcode/conflict", "main").unwrap();
+        commit_file(&worktree, "tracked.txt", "worktree\n", "worktree edit");
+        commit_file(&root, "tracked.txt", "destination\n", "destination edit");
+
+        assert_eq!(
+            merge_worktree_back(&root, &worktree, "tcode/conflict"),
+            Err(MergeWorktreeError::DivergedConflict)
+        );
+        assert!(
+            run_git(&root, &["status", "--porcelain"])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+        assert!(!root.join(".git/MERGE_HEAD").exists());
+        remove_git_worktree(&root, &worktree).unwrap();
         let _ = std::fs::remove_dir_all(temp);
     }
 

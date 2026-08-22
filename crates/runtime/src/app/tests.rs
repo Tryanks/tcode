@@ -5079,6 +5079,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 title: "Child".into(),
                 brief: "Inspect the workspace".into(),
                 cwd: Some(missing.to_string_lossy().into_owned()),
+                worktree: None,
                 archive_on_complete: None,
                 result_max_chars: None,
             },
@@ -5097,5 +5098,72 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
         response.try_recv().unwrap().unwrap_err(),
         format!("invalid cwd: {}", missing.display())
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
+    let cx = &mut TestAppContext::default();
+    let root =
+        std::env::temp_dir().join(format!("tcode-dispatch-worktree-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]).unwrap();
+    run_git(&root, &["config", "user.name", "tcode"]).unwrap();
+    run_git(&root, &["config", "user.email", "tcode@localhost"]).unwrap();
+    std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
+    run_git(&root, &["add", "tracked.txt"]).unwrap();
+    run_git(&root, &["commit", "-m", "initial"]).unwrap();
+
+    let test_store = TestStore::new("tcode-dispatch-worktree-data");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+    let parent_id = parent.id.clone();
+    let (reply, response) = smol::channel::bounded(1);
+
+    state.host_update(cx, |state, cx| {
+        state.sessions.push(parent);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Dispatch {
+                parent_id,
+                provider: "codex".into(),
+                model: Some("gpt-5.6-sol".into()),
+                effort: None,
+                profile: None,
+                access: None,
+                title: "Isolated child".into(),
+                brief: "Inspect the workspace".into(),
+                cwd: None,
+                worktree: Some(true),
+                archive_on_complete: None,
+                result_max_chars: None,
+            },
+            reply,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let response = response.try_recv().unwrap().unwrap();
+    let child_id = response["thread_id"].as_str().unwrap().to_string();
+    let expected_branch = format!("tcode/{child_id}");
+    let expected_path = worktree_path_for(&child_id);
+    assert_eq!(
+        response["worktree_path"],
+        expected_path.display().to_string(),
+        "dispatch response: {response}"
+    );
+    assert_eq!(response["worktree_branch"], expected_branch);
+    state.update(cx, |state, _| {
+        let child = state.find_meta(&child_id).unwrap();
+        assert_eq!(child.cwd, expected_path);
+        assert_eq!(
+            child
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.branch.as_str()),
+            Some(expected_branch.as_str())
+        );
+    });
+    remove_git_worktree(&root, &expected_path).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }

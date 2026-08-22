@@ -252,6 +252,15 @@ impl AppState {
             result_max_chars,
         );
         meta.title = title;
+        self.install_child_session(meta, brief, cx)
+    }
+
+    fn install_child_session(
+        &mut self,
+        meta: SessionMeta,
+        brief: String,
+        cx: &mut HostCx,
+    ) -> Result<String, String> {
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),
@@ -307,6 +316,7 @@ impl AppState {
                 title,
                 brief,
                 cwd,
+                worktree,
                 archive_on_complete,
                 result_max_chars,
             } => {
@@ -335,7 +345,8 @@ impl AppState {
                 };
                 let archive_on_complete =
                     archive_on_complete.unwrap_or(self.settings.orchestrate.archive_on_complete);
-                let Some(cwd) = cwd else {
+                let isolate = worktree.unwrap_or(self.settings.orchestrate.child_worktrees);
+                if cwd.is_none() && !isolate {
                     let result = self
                         .create_child_session(
                             &parent_id,
@@ -354,17 +365,32 @@ impl AppState {
                         .map(|id| serde_json::json!({ "thread_id": id }));
                     let _ = reply.try_send(result);
                     return;
-                };
-                let Some(parent_cwd) = self.find_meta(&parent_id).map(|meta| meta.cwd) else {
+                }
+                let Some(parent) = self.find_meta(&parent_id) else {
                     let _ = reply.try_send(Err("unknown parent session".to_string()));
                     return;
                 };
-                let path = PathBuf::from(cwd);
-                let path = if path.is_absolute() {
+                let path = PathBuf::from(cwd.unwrap_or_default());
+                let path = if path.as_os_str().is_empty() {
+                    parent.cwd.clone()
+                } else if path.is_absolute() {
                     path
                 } else {
-                    parent_cwd.join(path)
+                    parent.cwd.join(path)
                 };
+                let mut meta = build_child_meta(
+                    &parent,
+                    provider,
+                    Some(model),
+                    effort,
+                    profile_id,
+                    approval_mode,
+                    path.clone(),
+                    archive_on_complete,
+                    result_max_chars,
+                );
+                meta.title = title;
+                let child_id = meta.id.clone();
                 let host_cx = cx.clone();
                 HostCx::spawn_detached(cx, async move {
                     let resolved_cwd = host_cx
@@ -375,30 +401,39 @@ impl AppState {
                             if !canonical.is_dir() {
                                 return Err(format!("invalid cwd: {}", canonical.display()));
                             }
-                            Ok(canonical)
+                            if isolate {
+                                Ok(resolve_child_worktree(canonical, &child_id))
+                            } else {
+                                Ok((canonical, None, None))
+                            }
                         })
                         .await;
                     let result = match resolved_cwd {
-                        Ok(cwd) => host_cx
+                        Ok((cwd, worktree, warning)) => host_cx
                             .enqueue_and_wait(move |state, cx| {
-                                state.create_child_session(
-                                    &parent_id,
-                                    provider,
-                                    Some(model),
-                                    effort,
-                                    profile_id,
-                                    approval_mode,
-                                    title,
-                                    Some(cwd),
-                                    brief,
-                                    archive_on_complete,
-                                    result_max_chars,
-                                    cx,
-                                )
+                                meta.cwd = cwd;
+                                meta.worktree = worktree;
+                                let worktree_info = meta.worktree.clone();
+                                state
+                                    .install_child_session(meta, brief, cx)
+                                    .map(|id| (id, worktree_info, warning))
                             })
                             .await
                             .unwrap_or_else(|_| Err("application closed".to_string()))
-                            .map(|id| serde_json::json!({ "thread_id": id })),
+                            .map(|(id, worktree, warning)| {
+                                let mut response = serde_json::json!({ "thread_id": id });
+                                if let Some(worktree) = worktree {
+                                    response["worktree_path"] = serde_json::json!(
+                                        worktree_path_for(&id).display().to_string()
+                                    );
+                                    response["worktree_branch"] =
+                                        serde_json::json!(worktree.branch);
+                                }
+                                if let Some(warning) = warning {
+                                    response["warning"] = serde_json::json!(warning);
+                                }
+                                response
+                            }),
                         Err(err) => Err(err),
                     };
                     let _ = reply.try_send(result);
@@ -1208,6 +1243,55 @@ pub(super) fn provider_name(provider: ProviderKind) -> &'static str {
         ProviderKind::Pi => "pi",
         ProviderKind::OpenCode => "opencode",
         ProviderKind::Acp => "acp",
+    }
+}
+
+fn resolve_child_worktree(
+    cwd: PathBuf,
+    child_id: &str,
+) -> (PathBuf, Option<WorktreeInfo>, Option<String>) {
+    let repo_root = run_git(&cwd, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|root| PathBuf::from(root.trim()))
+        .and_then(|root| root.canonicalize().ok());
+    if repo_root.as_ref() != Some(&cwd) {
+        let warning = format!(
+            "worktree isolation unavailable: {} is not a Git repository root; using the plain cwd",
+            cwd.display()
+        );
+        log::warn!("orchestrate dispatch: {warning}");
+        return (cwd, None, Some(warning));
+    }
+
+    let base = run_git(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .or_else(|_| run_git(&cwd, &["rev-parse", "HEAD"]))
+        .map(|base| base.trim().to_string());
+    let base = match base {
+        Ok(base) => base,
+        Err(error) => {
+            let warning = format!(
+                "worktree isolation unavailable: could not resolve the base revision ({error}); using the plain cwd"
+            );
+            log::warn!("orchestrate dispatch: {warning}");
+            return (cwd, None, Some(warning));
+        }
+    };
+    let path = worktree_path_for(child_id);
+    let requested_branch = format!("tcode/{child_id}");
+    match create_git_worktree(&cwd, &path, &requested_branch, &base) {
+        Ok(created) => {
+            let info = WorktreeInfo {
+                root_project_path: cwd,
+                base,
+                branch: created.branch,
+            };
+            (created.path, Some(info), None)
+        }
+        Err(error) => {
+            let warning = format!("worktree isolation failed ({error}); using the plain cwd");
+            log::warn!("orchestrate dispatch: {warning}");
+            (cwd, None, Some(warning))
+        }
     }
 }
 
