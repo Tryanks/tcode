@@ -130,6 +130,10 @@ mod native {
         /// WebView2 runtime). Set once; the tab then explains itself instead of
         /// retrying on every frame.
         webview_error: Option<String>,
+        /// Harness-only routing override. Normal runs leave this unset and use
+        /// the active conversation identity from `WorkspaceStore`.
+        smoke_active_key: Option<String>,
+        smoke_visible: bool,
         _subscriptions: Vec<Subscription>,
     }
 
@@ -148,6 +152,7 @@ mod native {
                     // Native child views outlive GPUI layout nodes. Visibility
                     // therefore follows WorkspaceStore directly, even while this
                     // entity is no longer mounted in the right-panel tree.
+                    this.prune_deleted_webviews(cx);
                     this.sync_visibility(cx);
                     cx.notify();
                 }),
@@ -164,6 +169,8 @@ mod native {
                 dev_ports: Vec::new(),
                 port_scan_generation: 0,
                 webview_error: None,
+                smoke_active_key: None,
+                smoke_visible: false,
                 _subscriptions: subscriptions,
             }
         }
@@ -172,6 +179,9 @@ mod native {
         /// Draft -> stored-thread commits retain the same session id, so move
         /// all cached browser state across that one key transition.
         fn active_key(&mut self, cx: &Context<Self>) -> Option<String> {
+            if let Some(key) = &self.smoke_active_key {
+                return Some(key.clone());
+            }
             let current = self.store.read(cx).preview_active_identity();
 
             if let (Some((old_session, old_key)), Some((session, key))) =
@@ -224,7 +234,9 @@ mod native {
 
         fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
             let active = self.active_key(cx);
-            let visible = {
+            let visible = if self.smoke_active_key.is_some() {
+                self.smoke_visible.then_some(active).flatten()
+            } else {
                 let window_state = self.window_state.read(cx);
                 visible_preview_key(
                     active.as_deref(),
@@ -294,6 +306,62 @@ mod native {
             self.webviews
                 .insert(session_id.to_string(), webview.clone());
             Some(webview)
+        }
+
+        pub(crate) fn smoke_create(
+            &mut self,
+            key: &str,
+            url: &str,
+            window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> Result<(), String> {
+            self.smoke_active_key = Some(key.to_string());
+            self.smoke_visible = true;
+            self.navigate(key, url, window, cx);
+            match &self.webview_error {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+
+        pub(crate) fn smoke_set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
+            if let Some(key) = key {
+                self.smoke_active_key = Some(key.to_string());
+                self.smoke_visible = true;
+            } else {
+                self.smoke_visible = false;
+            }
+            self.update_visibility(true, cx);
+            cx.notify();
+        }
+
+        pub(crate) fn smoke_drop(&mut self, key: &str, cx: &mut Context<Self>) {
+            self.drop_webview(key);
+            cx.notify();
+        }
+
+        fn drop_webview(&mut self, key: &str) {
+            self.webviews.remove(key);
+            self.warm.remove(key);
+            if self.mirrored.as_deref() == Some(key) {
+                self.mirrored = None;
+            }
+        }
+
+        fn prune_deleted_webviews(&mut self, cx: &Context<Self>) {
+            if self.smoke_active_key.is_some() {
+                return;
+            }
+            let live = self.store.read(cx).preview_live_keys();
+            let deleted = self
+                .webviews
+                .keys()
+                .filter(|key| !live.contains(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            for key in deleted {
+                self.drop_webview(&key);
+            }
         }
 
         /// Navigate one conversation's WebView to `url`, remembering it.
@@ -377,8 +445,7 @@ mod native {
         /// recreates a fresh webview on demand.
         fn close_panel(&mut self, cx: &mut Context<Self>) {
             if let Some(key) = self.active_key(cx) {
-                self.webviews.remove(&key);
-                self.warm.remove(&key);
+                self.drop_webview(&key);
                 self.store
                     .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
             }

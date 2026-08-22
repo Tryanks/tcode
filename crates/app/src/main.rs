@@ -21,6 +21,9 @@ use tcode_ui::{assets, settings};
 use tcode_ui::overlay::{DialogActions, OverlayExt as _, OverlayHost};
 use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
+#[cfg(not(target_os = "linux"))]
+mod preview_smoke;
+
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
 /// macOS vibrancy can be disabled with `TCODE_NO_VIBRANCY=1` as a diagnostic
@@ -168,6 +171,17 @@ fn handle_quit(
 
 fn main() {
     env_logger::init();
+
+    let preview_smoke = std::env::args().any(|arg| arg == "--preview-smoke");
+    #[cfg(target_os = "linux")]
+    if preview_smoke {
+        use std::io::Write as _;
+        eprintln!("preview-smoke: SKIP (no native webview)");
+        let _ = std::io::stderr().flush();
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let preview_smoke_watchdog = preview_smoke.then(preview_smoke::Watchdog::start);
 
     // A Finder/Dock launch inherits launchd's minimal PATH, under which none of
     // the provider CLIs resolve — import the login shell's environment first,
@@ -330,6 +344,8 @@ fn main() {
             };
 
             cx.spawn(async move |cx| {
+                let smoke_shell = std::rc::Rc::new(std::cell::RefCell::new(None));
+                let smoke_shell_for_window = smoke_shell.clone();
                 let window = cx
                     .open_window(window_options, {
                         let theme_store = workspace_store.clone();
@@ -349,6 +365,7 @@ fn main() {
                             }
                             let shell = cx
                                 .new(|cx| AppShell::new(workspace_store, window_state, window, cx));
+                            *smoke_shell_for_window.borrow_mut() = Some(shell.clone());
                             cx.new(|cx| OverlayHost::new(shell, window, cx))
                         }
                     })
@@ -358,6 +375,16 @@ fn main() {
                     window.set_window_title("tcode");
                     window.activate_window();
                 });
+
+                #[cfg(not(target_os = "linux"))]
+                if let Some(watchdog) = preview_smoke_watchdog {
+                    let shell = smoke_shell
+                        .borrow_mut()
+                        .take()
+                        .expect("preview smoke shell was not captured");
+                    preview_smoke::run(watchdog, shell, window, cx).await;
+                    return;
+                }
 
                 if open_latest {
                     let _ = host.dispatch(Command::OpenLatestSession);
