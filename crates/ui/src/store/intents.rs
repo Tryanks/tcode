@@ -278,6 +278,18 @@ impl WorkspaceStore {
     pub fn finish_external_import(&mut self, project_id: String) {
         self.dispatch(Command::FinishExternalImport { project_id });
     }
+    pub fn export_thread(
+        &mut self,
+        session_id: String,
+        destination: PathBuf,
+        format: tcode_protocol::ThreadExportFormat,
+    ) {
+        self.dispatch(Command::ExportThread {
+            session_id,
+            destination,
+            format,
+        });
+    }
     pub fn toggle_project_collapsed(&mut self, project_id: String) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });
     }

@@ -21,6 +21,7 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
+use tcode_protocol::ThreadExportFormat;
 
 use tcode_core::{
     project::{ProjectGroup, SessionMeta},
@@ -329,6 +330,12 @@ struct ThreadCopyPath(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadCopyId(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadExportJsonl(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadExportMarkdown(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadArchive(String);
@@ -682,6 +689,51 @@ impl SessionsSidebar {
 
     fn on_copy_id(&mut self, action: &ThreadCopyId, _window: &mut Window, cx: &mut Context<Self>) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(action.0.clone()));
+    }
+
+    fn prompt_export(
+        &self,
+        session_id: &str,
+        format: ThreadExportFormat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(meta) = self
+            .store
+            .read(cx)
+            .sidebar_sessions()
+            .into_iter()
+            .find(|meta| meta.id == session_id)
+        else {
+            return;
+        };
+        crate::thread_export::prompt_thread_export(
+            self.store.clone(),
+            meta.id,
+            meta.title,
+            meta.cwd,
+            format,
+            window,
+            cx,
+        );
+    }
+
+    fn on_export_jsonl(
+        &mut self,
+        action: &ThreadExportJsonl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_export(&action.0, ThreadExportFormat::Jsonl, window, cx);
+    }
+
+    fn on_export_markdown(
+        &mut self,
+        action: &ThreadExportMarkdown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompt_export(&action.0, ThreadExportFormat::Markdown, window, cx);
     }
 
     fn on_archive(&mut self, action: &ThreadArchive, window: &mut Window, cx: &mut Context<Self>) {
@@ -1553,6 +1605,15 @@ impl SessionsSidebar {
                 Box::new(ThreadCopyId(id.clone())),
             )
             .separator()
+            .menu(
+                crate::tr!("sidebar.ctx_export_jsonl").into_owned(),
+                Box::new(ThreadExportJsonl(id.clone())),
+            )
+            .menu(
+                crate::tr!("sidebar.ctx_export_markdown").into_owned(),
+                Box::new(ThreadExportMarkdown(id.clone())),
+            )
+            .separator()
             .menu_with_enable(
                 crate::tr!("sidebar.archive").into_owned(),
                 Box::new(ThreadArchive(id.clone())),
@@ -2180,6 +2241,8 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_mark_unread))
             .on_action(cx.listener(Self::on_copy_path))
             .on_action(cx.listener(Self::on_copy_id))
+            .on_action(cx.listener(Self::on_export_jsonl))
+            .on_action(cx.listener(Self::on_export_markdown))
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_project_archive_all))

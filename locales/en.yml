@@ -149,6 +149,8 @@ sidebar:
   ctx_mark_unread: "Mark unread"
   ctx_copy_path: "Copy workspace path"
   ctx_copy_id: "Copy thread ID"
+  ctx_export_jsonl: "Export as tcode JSONL"
+  ctx_export_markdown: "Export as Markdown"
   ctx_delete: "Delete"
   delete_title: 'Delete thread "%{title}"?'
   delete_description: "This permanently clears conversation history for this thread."
@@ -472,6 +474,8 @@ palette:
   toggle_terminal: "Toggle terminal"
   open_preview: "Open preview"
   check_updates: "Check for provider updates"
+  export_jsonl: "Export active thread as tcode JSONL"
+  export_markdown: "Export active thread as Markdown"
   actions: "Actions"
   results: "Command palette results"
   threads: "Threads"
@@ -686,6 +690,7 @@ errors:
   provider_closed_reason: "Provider session closed unexpectedly: %{reason}"
   provider_closed: "Provider session closed unexpectedly."
   persist_event: "Failed to persist event: %{error}"
+  export_thread: "Failed to export thread: %{error}"
   update_failed: "Failed to update %{provider}"
   update_unknown: "Don't know how to update %{provider} automatically — please update it manually."
   worktree_add: "Failed to create worktree: %{error}"
@@ -693,6 +698,7 @@ errors:
   zed_cli_missing: "Zed CLI not found (tried `zed`, `zeditor`, `zed-cli`; install via Zed → Install CLI)"
 notice:
   switched_branch: "Switched to %{branch}"
+  thread_exported: "Exported thread to %{file}"
   dirty_tree: "Working tree has uncommitted changes"
   update_available: "Update Available: %{provider} v%{version}"
   updating_provider: "Updating %{provider}…"

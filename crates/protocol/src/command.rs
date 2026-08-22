@@ -15,6 +15,16 @@ use tcode_core::{
 
 use crate::ExternalThread;
 
+/// User-selectable thread export formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadExportFormat {
+    /// A tcode metadata record followed by the session's native JSONL event log.
+    Jsonl,
+    /// A readable, deterministic rendering of the folded conversation timeline.
+    Markdown,
+}
+
 /// A field-scoped settings mutation applied to the host's current settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
@@ -154,6 +164,11 @@ pub enum Command {
     },
     FinishExternalImport {
         project_id: String,
+    },
+    ExportThread {
+        session_id: String,
+        destination: PathBuf,
+        format: ThreadExportFormat,
     },
     ToggleProjectCollapsed {
         project_id: String,

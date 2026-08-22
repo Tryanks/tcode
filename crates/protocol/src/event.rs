@@ -306,6 +306,7 @@ pub enum RuntimeError {
     ProviderClosed { reason: Option<String> },
     PersistSessionIndex { error: String },
     ProviderMessage(String),
+    ExportThread { error: String },
 }
 
 #[non_exhaustive]
@@ -331,5 +332,8 @@ pub enum RuntimeNotice {
     },
     SwitchedBranch {
         branch: String,
+    },
+    ThreadExported {
+        file: String,
     },
 }

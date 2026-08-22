@@ -630,6 +630,11 @@ fn dispatch_command(
             }
         }
         Command::FinishExternalImport { project_id } => app.finish_external_import(&project_id, cx),
+        Command::ExportThread {
+            session_id,
+            destination,
+            format,
+        } => app.export_thread(&session_id, destination, format, cx),
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
