@@ -1,6 +1,7 @@
 //! App-owned Git process and filesystem infrastructure.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 
 use agent::{FileChange, FileChangeKind};
 use tcode_core::git::{GitAction, GitStatus, parse_status};
@@ -8,6 +9,7 @@ pub use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
 
 const MAX_RAW_DIFF_BYTES: usize = 200 * 1024;
 const MAX_FILE_TEXT_BYTES: u64 = 512 * 1024;
+const WORKTREE_SEED_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 
 fn working_tree_diff_args(ignore_whitespace: bool) -> Vec<String> {
     let mut args = vec!["diff".into(), "HEAD".into()];
@@ -454,28 +456,122 @@ impl std::fmt::Display for GitWorktreeError {
 
 impl std::error::Error for GitWorktreeError {}
 
+/// Result of copying the paths selected by `.worktreeinclude`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeSeedSummary {
+    pub manifest_found: bool,
+    pub copied_files: usize,
+    pub skipped: Vec<String>,
+    pub limit_reached: bool,
+}
+
+/// A newly-created dedicated worktree and the branch Git actually assigned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedGitWorktree {
+    pub path: PathBuf,
+    pub branch: String,
+    pub seed: WorktreeSeedSummary,
+}
+
+/// Result of checking the app-owned worktree directory for orphaned sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorktreeCleanupSummary {
+    pub removed: Vec<PathBuf>,
+    pub skipped: Vec<PathBuf>,
+}
+
 /// The path a session's dedicated worktree lives at (`~/.tcode/worktrees/<id>`),
 /// falling back to a temp dir when the home directory is unknown.
 pub fn worktree_path_for(session_id: &str) -> PathBuf {
+    worktrees_root().join(session_id)
+}
+
+fn worktrees_root() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".tcode")
         .join("worktrees")
-        .join(session_id)
 }
 
 /// Create a dedicated worktree at `path` branching `branch` from `base`, run
-/// from the project checkout `root`. Returns the created worktree path.
+/// from the project checkout `root`.
+///
+/// If `branch` already exists, a numeric suffix is appended (starting at `-2`)
+/// rather than reusing mutable state left by an earlier session. An existing,
+/// unregistered target path is treated as crash residue: Git's worktree records
+/// are pruned before creation is retried once.
+///
+/// After Git materializes tracked files, paths selected by the optional
+/// `.worktreeinclude` are copied (never linked) from `root`. Existing destination
+/// files are not overwritten. The list is user-controlled and may copy secrets
+/// such as `.env.local` into the app-owned `~/.tcode/worktrees` directory.
 pub fn create_git_worktree(
     root: &Path,
     path: &Path,
     branch: &str,
     base: &str,
-) -> Result<PathBuf, GitWorktreeError> {
+) -> Result<CreatedGitWorktree, GitWorktreeError> {
+    create_git_worktree_with_seed_limit(root, path, branch, base, WORKTREE_SEED_LIMIT_BYTES)
+}
+
+fn create_git_worktree_with_seed_limit(
+    root: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+    seed_limit: u64,
+) -> Result<CreatedGitWorktree, GitWorktreeError> {
+    let seed_plan = read_worktree_seed_plan(root)?;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|error| GitWorktreeError(error.to_string()))?;
     }
-    let out = crate::process::command("git")
+    let actual_branch = available_worktree_branch(root, branch)?;
+    if path_is_registered_worktree(root, path)? {
+        return Err(GitWorktreeError(format!(
+            "worktree target is already registered: {}",
+            path.display()
+        )));
+    }
+    if path.exists() {
+        prune_worktrees(root)?;
+    }
+
+    let mut out = add_worktree(root, path, &actual_branch, base)?;
+    if !out.status.success() && !path_is_registered_worktree(root, path)? {
+        prune_worktrees(root)?;
+        out = add_worktree(root, path, &actual_branch, base)?;
+    }
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(GitWorktreeError(stderr.trim().to_string()));
+    }
+
+    let seed = match seed_worktree(path, seed_plan, seed_limit) {
+        Ok(summary) => summary,
+        Err(error) => {
+            if let Err(cleanup_error) = remove_git_worktree(root, path) {
+                log::warn!(
+                    "failed to remove worktree after seeding failed at {}: {cleanup_error}",
+                    path.display()
+                );
+            }
+            return Err(error);
+        }
+    };
+    Ok(CreatedGitWorktree {
+        path: path.to_path_buf(),
+        branch: actual_branch,
+        seed,
+    })
+}
+
+fn add_worktree(
+    root: &Path,
+    path: &Path,
+    branch: &str,
+    base: &str,
+) -> Result<std::process::Output, GitWorktreeError> {
+    crate::process::command("git")
         .current_dir(root)
         .args([
             "worktree",
@@ -486,19 +582,119 @@ pub fn create_git_worktree(
             base,
         ])
         .output()
-        .map_err(|e| GitWorktreeError(e.to_string()))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(GitWorktreeError(stderr.trim().to_string()));
+        .map_err(|error| GitWorktreeError(error.to_string()))
+}
+
+fn available_worktree_branch(root: &Path, requested: &str) -> Result<String, GitWorktreeError> {
+    for suffix in 1_u64.. {
+        let candidate = if suffix == 1 {
+            requested.to_string()
+        } else {
+            format!("{requested}-{suffix}")
+        };
+        let status = crate::process::command("git")
+            .current_dir(root)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{candidate}"),
+            ])
+            .status()
+            .map_err(|error| GitWorktreeError(error.to_string()))?;
+        if !status.success() {
+            return Ok(candidate);
+        }
     }
-    Ok(path.to_path_buf())
+    unreachable!("the branch suffix space is finite but cannot be exhausted in practice")
+}
+
+fn path_is_registered_worktree(root: &Path, path: &Path) -> Result<bool, GitWorktreeError> {
+    Ok(registered_worktree_path(root, path)?.is_some())
+}
+
+fn registered_worktree_path(root: &Path, path: &Path) -> Result<Option<PathBuf>, GitWorktreeError> {
+    let out = crate::process::command("git")
+        .current_dir(root)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|error| GitWorktreeError(error.to_string()))?;
+    if !out.status.success() {
+        return Err(GitWorktreeError(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .find(|registered| paths_refer_to_same_existing_path(registered, path)))
+}
+
+/// The main working tree of the repository `path` belongs to: the first
+/// `worktree ` entry in porcelain output. Removal must run from here — on
+/// Windows, `git worktree remove` fails when the process cwd is inside the
+/// worktree being removed.
+fn main_worktree_root(path: &Path) -> Result<PathBuf, GitWorktreeError> {
+    let out = crate::process::command("git")
+        .current_dir(path)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|error| GitWorktreeError(error.to_string()))?;
+    if !out.status.success() {
+        return Err(GitWorktreeError(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .ok_or_else(|| GitWorktreeError("git worktree list returned no entries".into()))
+}
+
+fn paths_refer_to_same_existing_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn prune_worktrees(root: &Path) -> Result<(), GitWorktreeError> {
+    let out = crate::process::command("git")
+        .current_dir(root)
+        .args(["worktree", "prune"])
+        .output()
+        .map_err(|error| GitWorktreeError(error.to_string()))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(GitWorktreeError(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ))
+    }
 }
 
 /// Remove the worktree at `path` (force), run from the project checkout `root`.
+/// A path already removed outside tcode is treated as success and stale Git
+/// metadata is pruned.
 pub fn remove_git_worktree(root: &Path, path: &Path) -> Result<(), GitWorktreeError> {
+    if !path.exists() {
+        return prune_worktrees(root);
+    }
+    let registered_path =
+        registered_worktree_path(root, path)?.unwrap_or_else(|| path.to_path_buf());
     let out = crate::process::command("git")
         .current_dir(root)
-        .args(["worktree", "remove", "--force", &path.to_string_lossy()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &registered_path.to_string_lossy(),
+        ])
         .output()
         .map_err(|e| GitWorktreeError(e.to_string()))?;
     if !out.status.success() {
@@ -506,6 +702,349 @@ pub fn remove_git_worktree(root: &Path, path: &Path) -> Result<(), GitWorktreeEr
         return Err(GitWorktreeError(stderr.trim().to_string()));
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct WorktreeSeedPlan {
+    manifest_found: bool,
+    root: PathBuf,
+    entries: Vec<(String, PathBuf, PathBuf)>,
+    missing: Vec<String>,
+}
+
+fn read_worktree_seed_plan(root: &Path) -> Result<WorktreeSeedPlan, GitWorktreeError> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        GitWorktreeError(format!(
+            "cannot resolve repository root {}: {error}",
+            root.display()
+        ))
+    })?;
+    let manifest = root.join(".worktreeinclude");
+    let contents = match std::fs::read_to_string(&manifest) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(WorktreeSeedPlan {
+                manifest_found: false,
+                root: canonical_root,
+                entries: Vec::new(),
+                missing: Vec::new(),
+            });
+        }
+        Err(error) => {
+            return Err(GitWorktreeError(format!(
+                "cannot read {}: {error}",
+                manifest.display()
+            )));
+        }
+    };
+    let mut entries = Vec::new();
+    let mut missing = Vec::new();
+    for (index, raw) in contents.lines().enumerate() {
+        let entry = raw.trim();
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+        let relative = PathBuf::from(entry);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(GitWorktreeError(format!(
+                "invalid .worktreeinclude entry on line {}: {entry:?} must be relative and cannot contain '..'",
+                index + 1
+            )));
+        }
+        let source = root.join(&relative);
+        let canonical_source = match source.canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                log::info!("skipping missing .worktreeinclude entry {entry:?}");
+                missing.push(entry.to_string());
+                continue;
+            }
+            Err(error) => {
+                return Err(GitWorktreeError(format!(
+                    "cannot resolve .worktreeinclude entry {entry:?}: {error}"
+                )));
+            }
+        };
+        if !canonical_source.starts_with(&canonical_root) {
+            return Err(GitWorktreeError(format!(
+                ".worktreeinclude entry {entry:?} resolves outside the repository"
+            )));
+        }
+        entries.push((entry.to_string(), canonical_source, relative));
+    }
+    Ok(WorktreeSeedPlan {
+        manifest_found: true,
+        root: canonical_root,
+        entries,
+        missing,
+    })
+}
+
+fn seed_worktree(
+    worktree: &Path,
+    plan: WorktreeSeedPlan,
+    limit: u64,
+) -> Result<WorktreeSeedSummary, GitWorktreeError> {
+    let canonical_worktree = worktree.canonicalize().map_err(|error| {
+        GitWorktreeError(format!(
+            "cannot resolve new worktree {}: {error}",
+            worktree.display()
+        ))
+    })?;
+    let mut summary = WorktreeSeedSummary {
+        manifest_found: plan.manifest_found,
+        skipped: plan.missing,
+        ..WorktreeSeedSummary::default()
+    };
+    let mut copied_bytes = 0_u64;
+    let mut visited_directories = HashSet::new();
+    for (display, source, relative) in plan.entries {
+        copy_seed_entry(
+            &plan.root,
+            &canonical_worktree,
+            &source,
+            &canonical_worktree.join(relative),
+            &display,
+            limit,
+            &mut copied_bytes,
+            &mut visited_directories,
+            &mut summary,
+        )?;
+    }
+    if summary.limit_reached {
+        log::warn!(
+            "worktree seed limit reached for {}; skipped: {}",
+            worktree.display(),
+            summary.skipped.join(", ")
+        );
+    }
+    Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_seed_entry(
+    source_root: &Path,
+    destination_root: &Path,
+    source: &Path,
+    destination: &Path,
+    display: &str,
+    limit: u64,
+    copied_bytes: &mut u64,
+    visited_directories: &mut HashSet<PathBuf>,
+    summary: &mut WorktreeSeedSummary,
+) -> Result<(), GitWorktreeError> {
+    let canonical_source = source.canonicalize().map_err(|error| {
+        GitWorktreeError(format!(
+            "cannot resolve seed source {}: {error}",
+            source.display()
+        ))
+    })?;
+    if !canonical_source.starts_with(source_root) {
+        return Err(GitWorktreeError(format!(
+            ".worktreeinclude path {display:?} resolves outside the repository"
+        )));
+    }
+    let metadata = std::fs::metadata(&canonical_source).map_err(|error| {
+        GitWorktreeError(format!(
+            "cannot inspect seed source {}: {error}",
+            source.display()
+        ))
+    })?;
+    if destination_has_unsafe_ancestor(destination_root, destination)? {
+        summary.skipped.push(display.to_string());
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        if !visited_directories.insert(canonical_source.clone()) {
+            summary.skipped.push(display.to_string());
+            return Ok(());
+        }
+        if let Ok(destination_metadata) = std::fs::symlink_metadata(destination) {
+            if !destination_metadata.is_dir() || destination_metadata.file_type().is_symlink() {
+                summary.skipped.push(display.to_string());
+                return Ok(());
+            }
+        } else {
+            std::fs::create_dir(destination).map_err(|error| {
+                GitWorktreeError(format!(
+                    "cannot create seed directory {}: {error}",
+                    destination.display()
+                ))
+            })?;
+        }
+        let children = std::fs::read_dir(&canonical_source).map_err(|error| {
+            GitWorktreeError(format!(
+                "cannot read seed directory {}: {error}",
+                canonical_source.display()
+            ))
+        })?;
+        for child in children {
+            let child = child.map_err(|error| GitWorktreeError(error.to_string()))?;
+            let name = child.file_name();
+            let child_display = format!("{display}/{}", name.to_string_lossy());
+            copy_seed_entry(
+                source_root,
+                destination_root,
+                &child.path(),
+                &destination.join(name),
+                &child_display,
+                limit,
+                copied_bytes,
+                visited_directories,
+                summary,
+            )?;
+        }
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(destination).is_ok() {
+        summary.skipped.push(display.to_string());
+        return Ok(());
+    }
+    if summary.limit_reached || copied_bytes.saturating_add(metadata.len()) > limit {
+        summary.limit_reached = true;
+        summary.skipped.push(display.to_string());
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| GitWorktreeError(error.to_string()))?;
+    }
+    std::fs::copy(&canonical_source, destination).map_err(|error| {
+        GitWorktreeError(format!(
+            "cannot seed {} into {}: {error}",
+            canonical_source.display(),
+            destination.display()
+        ))
+    })?;
+    *copied_bytes += metadata.len();
+    summary.copied_files += 1;
+    Ok(())
+}
+
+fn destination_has_unsafe_ancestor(
+    destination_root: &Path,
+    destination: &Path,
+) -> Result<bool, GitWorktreeError> {
+    let relative = destination.strip_prefix(destination_root).map_err(|_| {
+        GitWorktreeError(format!(
+            "seed destination escapes the worktree: {}",
+            destination.display()
+        ))
+    })?;
+    let mut current = destination_root.to_path_buf();
+    let Some(parent) = relative.parent() else {
+        return Ok(false);
+    };
+    for component in parent.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Ok(true);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(GitWorktreeError(error.to_string())),
+        }
+    }
+    Ok(false)
+}
+
+/// Remove app-owned worktrees whose directory name is not a known session id.
+/// Symlinks and directories that are not valid linked Git worktrees are left in
+/// place. Only immediate children of `~/.tcode/worktrees` are considered.
+pub fn cleanup_orphaned_worktrees(known_session_ids: &HashSet<String>) -> WorktreeCleanupSummary {
+    cleanup_orphaned_worktrees_at(&worktrees_root(), known_session_ids)
+}
+
+fn cleanup_orphaned_worktrees_at(
+    worktrees: &Path,
+    known_session_ids: &HashSet<String>,
+) -> WorktreeCleanupSummary {
+    let mut summary = WorktreeCleanupSummary::default();
+    let entries = match std::fs::read_dir(worktrees) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return summary,
+        Err(error) => {
+            log::warn!(
+                "failed to scan {} for orphaned worktrees: {error}",
+                worktrees.display()
+            );
+            return summary;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let session_id = entry.file_name().to_string_lossy().into_owned();
+        let is_directory = entry
+            .file_type()
+            .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink());
+        if known_session_ids.contains(&session_id) || !is_directory {
+            continue;
+        }
+        let registered_path = match registered_worktree_path(&path, &path) {
+            Ok(Some(registered_path)) => registered_path,
+            Ok(None) => {
+                log::warn!("leaving non-worktree directory at {}", path.display());
+                summary.skipped.push(path);
+                continue;
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to inspect possible orphan at {}: {error}",
+                    path.display()
+                );
+                summary.skipped.push(path);
+                continue;
+            }
+        };
+        // Run removal from the main checkout: Windows cannot delete a
+        // directory that is the git process's cwd.
+        let removal_root = match main_worktree_root(&path) {
+            Ok(root) => root,
+            Err(error) => {
+                log::warn!(
+                    "failed to resolve the main checkout for orphan at {}: {error}",
+                    path.display()
+                );
+                summary.skipped.push(path);
+                continue;
+            }
+        };
+        let out = crate::process::command("git")
+            .current_dir(&removal_root)
+            .args([
+                "worktree",
+                "remove",
+                "--force",
+                &registered_path.to_string_lossy(),
+            ])
+            .output();
+        match out {
+            Ok(out) if out.status.success() => {
+                log::info!("removed orphaned tcode worktree {}", path.display());
+                summary.removed.push(path);
+            }
+            Ok(out) => {
+                log::warn!(
+                    "leaving possible orphan at {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                summary.skipped.push(path);
+            }
+            Err(error) => {
+                log::warn!("leaving possible orphan at {}: {error}", path.display());
+                summary.skipped.push(path);
+            }
+        }
+    }
+    summary
 }
 
 pub fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
@@ -708,6 +1247,7 @@ mod tests {
         let root = temp.join("repo");
         std::fs::create_dir_all(&root).unwrap();
         run(&root, &["init", "-b", "main"]);
+        run(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
         run(&root, &["add", "tracked.txt"]);
         run(&root, &["commit", "-m", "initial"]);
@@ -975,14 +1515,162 @@ mod tests {
         let (temp, root) = scratch_repo("tcode-worktree-round-trip-test");
         let path = temp.join("nested").join("worktree");
 
-        assert_eq!(
-            create_git_worktree(&root, &path, "tcode/test", "main"),
-            Ok(path.clone())
-        );
+        let created = create_git_worktree(&root, &path, "tcode/test", "main").unwrap();
+        assert_eq!(created.path, path);
+        assert_eq!(created.branch, "tcode/test");
+        assert_eq!(created.seed, WorktreeSeedSummary::default());
         assert!(path.is_dir());
         std::fs::write(path.join("untracked.txt"), "force removal\n").unwrap();
         assert_eq!(remove_git_worktree(&root, &path), Ok(()));
         assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_removal_accepts_a_canonical_equivalent_path_spelling() {
+        let (temp, root) = scratch_repo("tcode-worktree-equivalent-path-test");
+        let path = temp.join("worktree");
+        create_git_worktree(&root, &path, "tcode/equivalent-path", "main").unwrap();
+        std::fs::create_dir(path.join("nested")).unwrap();
+        let alternate_spelling = path.join("nested").join("..");
+
+        assert_ne!(alternate_spelling, path);
+        assert!(paths_refer_to_same_existing_path(
+            &alternate_spelling,
+            &path
+        ));
+        assert_eq!(remove_git_worktree(&root, &alternate_spelling), Ok(()));
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_seeds_selected_file_and_directory_without_overwriting() {
+        let (temp, root) = scratch_repo("tcode-worktree-seed-test");
+        std::fs::write(root.join(".env.local"), "TOKEN=test-only\n").unwrap();
+        std::fs::create_dir(root.join("ignored-config")).unwrap();
+        std::fs::write(root.join("ignored-config/settings.json"), "{}\n").unwrap();
+        std::fs::write(
+            root.join(".worktreeinclude"),
+            "# local build inputs\n.env.local\nignored-config\nmissing.file\ntracked.txt\n",
+        )
+        .unwrap();
+        let path = temp.join("seeded");
+
+        let created = create_git_worktree(&root, &path, "tcode/seed", "main").unwrap();
+
+        assert_eq!(created.seed.copied_files, 2);
+        assert!(!created.seed.limit_reached);
+        assert_eq!(created.seed.skipped, ["missing.file", "tracked.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(path.join(".env.local")).unwrap(),
+            "TOKEN=test-only\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("ignored-config/settings.json")).unwrap(),
+            "{}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("tracked.txt")).unwrap(),
+            "initial\n"
+        );
+
+        remove_git_worktree(&root, &path).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_seed_rejects_traversal() {
+        let (temp, root) = scratch_repo("tcode-worktree-seed-traversal-test");
+        std::fs::write(root.join(".worktreeinclude"), "../outside\n").unwrap();
+        let path = temp.join("worktree");
+
+        let error = create_git_worktree(&root, &path, "tcode/traversal", "main").unwrap_err();
+
+        assert!(error.to_string().contains("cannot contain '..'"));
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_seed_stops_at_total_size_limit() {
+        let (temp, root) = scratch_repo("tcode-worktree-seed-limit-test");
+        std::fs::write(root.join("first.bin"), b"1234").unwrap();
+        std::fs::write(root.join("second.bin"), b"5678").unwrap();
+        std::fs::write(root.join(".worktreeinclude"), "first.bin\nsecond.bin\n").unwrap();
+        let path = temp.join("worktree");
+
+        let created =
+            create_git_worktree_with_seed_limit(&root, &path, "tcode/limit", "main", 4).unwrap();
+
+        assert_eq!(created.seed.copied_files, 1);
+        assert!(created.seed.limit_reached);
+        assert_eq!(created.seed.skipped, ["second.bin"]);
+        assert_eq!(std::fs::read(path.join("first.bin")).unwrap(), b"1234");
+        assert!(!path.join("second.bin").exists());
+
+        remove_git_worktree(&root, &path).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn orphan_cleanup_removes_only_unknown_session_worktrees() {
+        let (temp, root) = scratch_repo("tcode-worktree-orphan-test");
+        let worktrees = temp.join("owned-worktrees");
+        let orphan = worktrees.join("orphan");
+        let kept = worktrees.join("kept");
+        create_git_worktree(&root, &orphan, "tcode/orphan", "main").unwrap();
+        create_git_worktree(&root, &kept, "tcode/kept", "main").unwrap();
+        let known = HashSet::from(["kept".to_string()]);
+
+        let summary = cleanup_orphaned_worktrees_at(&worktrees, &known);
+
+        assert_eq!(summary.removed.as_slice(), std::slice::from_ref(&orphan));
+        assert!(summary.skipped.is_empty());
+        assert!(!orphan.exists());
+        assert!(kept.exists());
+        remove_git_worktree(&root, &kept).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_creation_recovers_an_unregistered_stale_path() {
+        let (temp, root) = scratch_repo("tcode-worktree-stale-path-test");
+        let path = temp.join("worktree");
+        std::fs::create_dir(&path).unwrap();
+
+        let created = create_git_worktree(&root, &path, "tcode/stale", "main").unwrap();
+
+        assert_eq!(created.path, path);
+        assert!(created.path.join("tracked.txt").exists());
+        remove_git_worktree(&root, &created.path).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_branch_collision_uses_numeric_suffix() {
+        let (temp, root) = scratch_repo("tcode-worktree-branch-collision-test");
+        run(&root, &["branch", "tcode/collision"]);
+        let path = temp.join("worktree");
+
+        let created = create_git_worktree(&root, &path, "tcode/collision", "main").unwrap();
+
+        assert_eq!(created.branch, "tcode/collision-2");
+        remove_git_worktree(&root, &path).unwrap();
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_removal_is_idempotent_after_external_deletion() {
+        let (temp, root) = scratch_repo("tcode-worktree-remove-idempotent-test");
+        let path = temp.join("worktree");
+        create_git_worktree(&root, &path, "tcode/remove", "main").unwrap();
+
+        std::fs::remove_dir_all(&path).unwrap();
+        assert_eq!(remove_git_worktree(&root, &path), Ok(()));
+        assert_eq!(remove_git_worktree(&root, &path), Ok(()));
 
         let _ = std::fs::remove_dir_all(temp);
     }

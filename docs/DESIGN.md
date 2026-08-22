@@ -350,6 +350,16 @@ reaper and no timer** — T3 Code hard-kills provider processes after 30 minutes
 without a user message, which silently destroys autonomous overnight sessions;
 tcode's rule is "finish what you were given, then rest".
 
+Dedicated worktree sessions live under `~/.tcode/worktrees/<session-id>`. At
+startup, tcode removes entries in that app-owned directory whose session is no
+longer present in the session store. Projects may place a `.worktreeinclude` at
+their repository root to copy required ignored files or directories into each
+new worktree. Entries are relative paths, one per line; blank lines and `#`
+comments are ignored. Copies never overwrite files Git materialized and stop at
+an aggregate 512 MiB limit. The list is entirely user-controlled: including
+`.env` files or other credentials copies those secrets into
+`~/.tcode/worktrees`, where they remain until the worktree is removed.
+
 ### Empty state
 Centered "Pick a thread to continue" (20px semibold) over "Select an existing
 thread or create a new one to get started." (14px muted). No composer rendered.

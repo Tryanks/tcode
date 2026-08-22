@@ -349,4 +349,9 @@ pub enum RuntimeNotice {
     ThreadExported {
         file: String,
     },
+    WorktreeSeeded {
+        copied_files: usize,
+        skipped: Vec<String>,
+        limit_reached: bool,
+    },
 }
