@@ -5,7 +5,7 @@ use std::{
     io::{self, ErrorKind, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -26,6 +26,16 @@ use rio_vt::{
 use crate::{DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, DEFAULT_COLS, DEFAULT_ROWS, pty_info};
 
 const READ_BUFFER_SIZE: usize = 0x10_0000;
+
+trait MutexExt<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> MutexExt<T> for Mutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 fn initial_window_size() -> WindowSize {
     WindowSize {
@@ -222,8 +232,7 @@ impl PtyHandle {
 
     pub fn working_directory(&self) -> PathBuf {
         self.shared
-            .lock()
-            .unwrap()
+            .lock_recover()
             .working_directory
             .clone()
             .unwrap_or_else(|| self.cwd.clone())
@@ -231,24 +240,23 @@ impl PtyHandle {
 
     pub fn label(&self) -> String {
         self.shared
-            .lock()
-            .unwrap()
+            .lock_recover()
             .process_name
             .clone()
             .unwrap_or_else(|| self.shell_name.clone())
     }
 
     pub fn exited(&self) -> bool {
-        self.shared.lock().unwrap().exited
+        self.shared.lock_recover().exited
     }
 
     pub fn exit_code(&self) -> Option<i32> {
-        self.shared.lock().unwrap().exit_code
+        self.shared.lock_recover().exit_code
     }
 
     pub(crate) fn write_input_inner(&self, bytes: Vec<u8>) -> io::Result<bool> {
         let label_changed = {
-            let mut shared = self.shared.lock().unwrap();
+            let mut shared = self.shared.lock_recover();
             let previous_label = shared.command_label.clone();
             track_command_input(&mut shared, &bytes);
             shared.command_label != previous_label
@@ -519,7 +527,7 @@ impl RawPtyEventLoop {
     }
 
     fn record_exit(&self, exit_code: Option<i32>) {
-        let mut shared = self.shared.lock().unwrap();
+        let mut shared = self.shared.lock_recover();
         shared.exited = true;
         shared.exit_code = exit_code;
         shared.command_label = None;
@@ -567,7 +575,7 @@ fn refresh_process_info(
     notifications: &async_channel::Sender<PtyEvent>,
 ) {
     if let Some(process) = info.load() {
-        let mut shared = shared.lock().unwrap();
+        let mut shared = shared.lock_recover();
         let changed = shared.process_name.as_deref() != Some(&process.name)
             || shared.working_directory.as_ref() != Some(&process.cwd);
         shared.process_name = Some(process.name.clone());

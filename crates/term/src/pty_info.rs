@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -9,6 +9,16 @@ use std::fs::File;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
+
+trait MutexExt<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> MutexExt<T> for Mutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessInfo {
@@ -42,7 +52,7 @@ impl PtyInfo {
     }
 
     pub fn should_refresh(&self) -> bool {
-        let mut last = self.last_refresh.lock().unwrap();
+        let mut last = self.last_refresh.lock_recover();
         if last.is_some_and(|time| time.elapsed() < Duration::from_millis(250)) {
             return false;
         }

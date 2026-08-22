@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -31,6 +31,16 @@ use crate::{
 };
 #[cfg(test)]
 use crate::{DEFAULT_COLS, DEFAULT_ROWS};
+
+trait MutexExt<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> MutexExt<T> for Mutex<T> {
+    fn lock_recover(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
 
 impl From<SelectionSide> for RioSide {
     fn from(side: SelectionSide) -> Self {
@@ -144,13 +154,13 @@ impl EventListener for GridListener {
     fn send_event(&self, event: RioEvent, _window_id: WindowId) {
         match event {
             RioEvent::Title(title) => {
-                *self.osc_title.lock().unwrap() = Some(title.clone());
+                *self.osc_title.lock_recover() = Some(title.clone());
                 let _ = self
                     .notifications
                     .try_send(GridEvent::TitleChanged(Some(title)));
             }
             RioEvent::ResetTitle => {
-                *self.osc_title.lock().unwrap() = None;
+                *self.osc_title.lock_recover() = None;
                 let _ = self.notifications.try_send(GridEvent::TitleChanged(None));
             }
             RioEvent::CursorBlinkingChange | RioEvent::CursorBlinkingChangeOnRoute(_) => {
@@ -182,7 +192,7 @@ impl EventListener for GridListener {
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
             }
             RioEvent::UpdateGraphics { queues, .. } => {
-                merge_graphics_updates(&mut self.graphics_updates.lock().unwrap(), queues);
+                merge_graphics_updates(&mut self.graphics_updates.lock_recover(), queues);
                 let _ = self.notifications.try_send(GridEvent::Wakeup);
             }
             RioEvent::GlyphProtocolInstalled { .. } | RioEvent::GlyphProtocolQuery { .. } => {
@@ -619,7 +629,7 @@ impl GridEmulator {
             .term
             .peek_damage_event()
             .unwrap_or(TerminalDamage::Noop);
-        let mut graphics_updates = self.core.graphics_updates.lock().unwrap().take();
+        let mut graphics_updates = self.core.graphics_updates.lock_recover().take();
         if let Some(queues) = state.term.graphics_take_queues() {
             merge_graphics_updates(&mut graphics_updates, queues);
         }
@@ -701,7 +711,7 @@ impl GridEmulator {
         let lines_evicted = state.term.lines_evicted();
         let cursor_blinking = state.term.blinking_cursor;
         drop(state);
-        let lifecycle = self.core.lifecycle.lock().unwrap();
+        let lifecycle = self.core.lifecycle.lock_recover();
         TermSnapshot {
             cols,
             screen_lines,
@@ -738,26 +748,25 @@ impl GridEmulator {
 
     /// Set the non-OSC title used when the emulated terminal has no title.
     pub fn set_fallback_title(&self, title: impl Into<String>) {
-        *self.core.fallback_title.lock().unwrap() = title.into();
+        *self.core.fallback_title.lock_recover() = title.into();
     }
 
     pub fn title(&self) -> String {
         self.core
             .osc_title
-            .lock()
-            .unwrap()
+            .lock_recover()
             .clone()
-            .unwrap_or_else(|| self.core.fallback_title.lock().unwrap().clone())
+            .unwrap_or_else(|| self.core.fallback_title.lock_recover().clone())
     }
 
     /// Return the title set by terminal output, excluding the fallback title.
     pub fn osc_title(&self) -> Option<String> {
-        self.core.osc_title.lock().unwrap().clone()
+        self.core.osc_title.lock_recover().clone()
     }
 
     /// Apply a host-side exit data event to this client-side snapshot.
     pub fn set_exited(&self, exit_code: Option<i32>) {
-        let mut lifecycle = self.core.lifecycle.lock().unwrap();
+        let mut lifecycle = self.core.lifecycle.lock_recover();
         lifecycle.exited = true;
         lifecycle.exit_code = exit_code;
     }
@@ -880,6 +889,22 @@ fn query_color(index: usize) -> ColorRgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutex_recovery_keeps_poisoned_state_available() {
+        let value = Arc::new(Mutex::new(0));
+        let poisoned = value.clone();
+        assert!(
+            thread::spawn(move || {
+                *poisoned.lock_recover() = 42;
+                panic!("poison the test mutex");
+            })
+            .join()
+            .is_err()
+        );
+
+        assert_eq!(*value.lock_recover(), 42);
+    }
 
     #[test]
     fn scripted_byte_boundary_matches_combined_feed_snapshot() {
