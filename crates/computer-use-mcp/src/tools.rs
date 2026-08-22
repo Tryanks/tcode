@@ -405,15 +405,15 @@ mod dispatch {
 
     pub(super) async fn observe_ui(params: ObserveUiParams) -> CallToolResult {
         let permissions = permissions();
-        let config = crate::config::get();
         let needs_accessibility = !matches!(params.mode, Some(ObserveMode::Visual));
-        let needs_screen_recording = config.image_mode != crate::config::ImageMode::Never
-            && matches!(params.mode, Some(ObserveMode::Visual | ObserveMode::Fused));
+        let needs_screen_recording =
+            matches!(params.mode, Some(ObserveMode::Visual | ObserveMode::Fused));
         if let Some(result) =
             permission_gate(permissions, needs_accessibility, needs_screen_recording)
         {
             return result;
         }
+        let config = crate::config::get();
         if config.image_mode == crate::config::ImageMode::Always
             && let Some(result) = permission_gate(permissions, false, true)
         {
@@ -438,7 +438,7 @@ mod dispatch {
 
     pub(super) async fn search_ui(params: SearchUiParams) -> CallToolResult {
         let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, false, false) {
+        if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
         let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
@@ -468,7 +468,7 @@ mod dispatch {
 
     pub(super) async fn expand_ui(params: ExpandUiParams) -> CallToolResult {
         let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, false, false) {
+        if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
         let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
@@ -489,7 +489,7 @@ mod dispatch {
 
     pub(super) async fn inspect_ui(params: InspectUiParams) -> CallToolResult {
         let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, false, false) {
+        if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
         let observation = match crate::state::global().lock().unwrap().get(&params.state_id) {
@@ -510,7 +510,6 @@ mod dispatch {
             "actions": node.actions,
             "enabled": node.enabled,
             "focused": node.focused,
-            "picture_only": node.picture_only,
             "child_count": node.children.len(),
         });
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
@@ -617,7 +616,7 @@ mod dispatch {
 
     pub(super) async fn read_text(params: ReadTextParams) -> CallToolResult {
         let permissions = permissions();
-        if let Some(result) = permission_gate(permissions, false, false) {
+        if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
         let offset = match params.offset.map(usize::try_from).transpose() {
@@ -888,13 +887,6 @@ mod dispatch {
             Ok::<_, String>((node, path))
         });
         let target = target.transpose()?;
-        if target
-            .as_ref()
-            .is_some_and(|(node, _)| node.is_picture_only())
-            && action.action != UiActionKind::Click
-        {
-            return Err("pictureOnly OCR refs support click actions only".into());
-        }
         Ok(ActionRequest {
             kind: action.action,
             target_path: target.as_ref().map(|(_, path)| path.clone()),
@@ -905,9 +897,6 @@ mod dispatch {
                 .as_ref()
                 .map(|(node, _)| node.actions.clone())
                 .unwrap_or_default(),
-            target_picture_only: target
-                .as_ref()
-                .is_some_and(|(node, _)| node.is_picture_only()),
             x: action.x,
             y: action.y,
             text: action.text.clone(),
@@ -1076,62 +1065,6 @@ mod dispatch {
 
     fn tool_error(message: &str) -> CallToolResult {
         CallToolResult::error(vec![ContentBlock::text(message)])
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use crate::outline::{Frame, UiNode, assign_refs};
-
-        #[test]
-        fn picture_only_refs_prepare_clicks_from_the_cached_box() {
-            let ocr_frame = Frame {
-                x: 120.0,
-                y: 240.0,
-                w: 80.0,
-                h: 20.0,
-            };
-            let mut tree = UiNode {
-                role: "window".into(),
-                enabled: true,
-                children: vec![UiNode {
-                    role: "static_text".into(),
-                    title: "Continue".into(),
-                    frame: ocr_frame,
-                    actions: vec!["click".into()],
-                    enabled: true,
-                    picture_only: true,
-                    ..UiNode::default()
-                }],
-                ..UiNode::default()
-            };
-            assign_refs(&mut tree);
-            let click = UiAction {
-                action: UiActionKind::Click,
-                r#ref: Some(tree.children[0].ref_id.clone()),
-                x: None,
-                y: None,
-                text: None,
-                keys: None,
-                scroll_x: None,
-                scroll_y: None,
-                path: None,
-                button: None,
-                click_count: None,
-            };
-
-            let request = prepare_action(&tree, &click).unwrap();
-            assert!(request.target_picture_only);
-            assert_eq!(request.target_frame, Some(ocr_frame));
-            assert_eq!(request.target_frame.unwrap().center(), (160.0, 250.0));
-
-            let mut press = click;
-            press.action = UiActionKind::Press;
-            assert_eq!(
-                prepare_action(&tree, &press).unwrap_err(),
-                "pictureOnly OCR refs support click actions only"
-            );
-        }
     }
 }
 
