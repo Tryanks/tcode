@@ -136,6 +136,29 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeNotice::ThreadExported { file } => {
                     crate::tr!("notice.thread_exported", file = file).into_owned()
                 }
+                RuntimeNotice::WorktreeSeeded {
+                    copied_files,
+                    skipped,
+                    limit_reached,
+                } => {
+                    let skipped_count = skipped.len();
+                    let skipped = skipped.join(", ");
+                    if *limit_reached {
+                        crate::tr!(
+                            "notice.worktree_seeded_limit",
+                            copied = copied_files,
+                            skipped = skipped
+                        )
+                        .into_owned()
+                    } else {
+                        crate::tr!(
+                            "notice.worktree_seeded",
+                            copied = copied_files,
+                            skipped = skipped_count
+                        )
+                        .into_owned()
+                    }
+                }
                 _ => format!("Unknown runtime notice: {notice:?}"),
             };
             (RuntimeEventSeverity::Success, message)
@@ -365,6 +388,16 @@ mod tests {
             },
             RuntimeNotice::ThreadExported {
                 file: "thread.md".into(),
+            },
+            RuntimeNotice::WorktreeSeeded {
+                copied_files: 2,
+                skipped: vec!["missing.file".into()],
+                limit_reached: false,
+            },
+            RuntimeNotice::WorktreeSeeded {
+                copied_files: 1,
+                skipped: vec!["large.bin".into()],
+                limit_reached: true,
             },
         ];
         let retry = GitActionRequest {

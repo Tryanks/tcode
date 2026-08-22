@@ -694,6 +694,8 @@ errors:
 notice:
   switched_branch: "已切换到 %{branch}"
   thread_exported: "对话已导出至 %{file}"
+  worktree_seeded: "工作树已填充：复制了 %{copied} 个文件，跳过了 %{skipped} 个"
+  worktree_seeded_limit: "工作树填充已达到大小上限（已复制 %{copied} 个文件）；已跳过：%{skipped}"
   dirty_tree: "工作树中有未提交的更改"
   update_available: "有可用更新：%{provider} v%{version}"
   updating_provider: "正在更新 %{provider}…"

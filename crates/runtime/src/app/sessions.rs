@@ -774,6 +774,28 @@ impl AppState {
 
     // -- worktree mode (Group C) --------------------------------------------
 
+    /// Remove app-owned worktrees whose session is absent from the loaded store.
+    pub(crate) fn recover_orphaned_worktrees(&self, cx: &mut HostCx) {
+        let known_ids = self
+            .sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let summary = host_cx
+                .unblock(move || cleanup_orphaned_worktrees(&known_ids))
+                .await;
+            if !summary.removed.is_empty() || !summary.skipped.is_empty() {
+                log::info!(
+                    "worktree orphan recovery removed {}, left {}",
+                    summary.removed.len(),
+                    summary.skipped.len()
+                );
+            }
+        });
+    }
+
     /// Choose the draft's workspace mode (checkout-row picker). No-op unless the
     /// active thread is an unstarted draft.
     pub fn set_draft_workspace(&mut self, mode: WorkspaceMode, _cx: &mut HostCx) {
@@ -814,9 +836,9 @@ impl AppState {
                         &branch_for_task,
                         &base_for_task,
                     )
-                    .map(|worktree_path| {
-                        let git_branch = read_git_branch(&worktree_path);
-                        (worktree_path, git_branch)
+                    .map(|created| {
+                        let git_branch = read_git_branch(&created.path);
+                        (created, git_branch)
                     })
                 })
                 .await;
@@ -831,15 +853,25 @@ impl AppState {
                 };
                 active.preparing_worktree = false;
                 match result {
-                    Ok((worktree_path, git_branch)) => {
-                        active.meta.cwd = worktree_path.clone();
+                    Ok((created, git_branch)) => {
+                        active.meta.cwd = created.path.clone();
                         active.meta.worktree = Some(WorktreeInfo {
                             root_project_path: root,
                             base,
-                            branch,
+                            branch: created.branch,
                         });
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
                         active.git_branch = git_branch;
+                        if created.seed.manifest_found {
+                            emit_runtime(
+                                cx,
+                                RuntimeEvent::Notice(RuntimeNotice::WorktreeSeeded {
+                                    copied_files: created.seed.copied_files,
+                                    skipped: created.seed.skipped,
+                                    limit_reached: created.seed.limit_reached,
+                                }),
+                            );
+                        }
                         // Now that the worktree exists, run the deferred send.
                         state.send_turn_assembled(text, attachments, cx);
                     }
