@@ -1342,6 +1342,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         run(&root, &["init", "-b", "main"]);
         run(&root, &["config", "core.autocrlf", "false"]);
+        // Production merge-back commits in this repo; CI runners have no
+        // global git identity, so pin one at the repo level.
+        run(&root, &["config", "user.name", "tcode"]);
+        run(&root, &["config", "user.email", "tcode@localhost"]);
         std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
         run(&root, &["add", "tracked.txt"]);
         run(&root, &["commit", "-m", "initial"]);
