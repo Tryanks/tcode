@@ -27,7 +27,7 @@ use crate::{diff::model::sub_runs, highlight};
 use super::{
     inline::{Inline, InlineState},
     inline_flow::{InlineCodeStyle, InlineFlow, InlineFlowItem},
-    link_target::{LinkTarget, resolve_link},
+    link_target::LinkTarget,
     nodes::{BlockNode, CodeBlock, ColumnumnAlign, Paragraph, Table, TextMark},
     state::MarkdownState,
     utils::list_item_prefix,
@@ -506,7 +506,7 @@ fn render_paragraph(
                             .on_click(move |_, window, cx| {
                                 gpui_base::TextSelection::end(window, cx);
                                 cx.stop_propagation();
-                                match resolve_link(&link.url, view.read(cx).base_dir()) {
+                                match view.read(cx).resolve_link(&link.url) {
                                     LinkTarget::Web(url) => cx.open_url(&url),
                                     LinkTarget::Local(path) => cx.open_with_system(&path),
                                 }

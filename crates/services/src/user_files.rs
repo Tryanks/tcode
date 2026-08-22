@@ -1,8 +1,48 @@
+use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+const WORKSPACE_ROOT_CACHE_CAPACITY: usize = 8;
+
+#[derive(Default)]
+struct WorkspaceRootCache {
+    entries: VecDeque<(PathBuf, PathBuf)>,
+}
+
+impl WorkspaceRootCache {
+    fn resolve(&mut self, cwd: &Path) -> PathBuf {
+        if let Some(index) = self.entries.iter().position(|(root, _)| root == cwd) {
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("cache index should exist");
+            let resolved = entry.1.clone();
+            self.entries.push_back(entry);
+            return resolved;
+        }
+
+        let resolved = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        if self.entries.len() == WORKSPACE_ROOT_CACHE_CAPACITY {
+            self.entries.pop_front();
+        }
+        self.entries
+            .push_back((cwd.to_path_buf(), resolved.clone()));
+        resolved
+    }
+}
+
+fn canonical_workspace_root(cwd: &Path) -> PathBuf {
+    static CACHE: OnceLock<Mutex<WorkspaceRootCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(WorkspaceRootCache::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .resolve(cwd)
+}
 
 pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
-    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let canonical_cwd = canonical_workspace_root(cwd);
     let path_buf = Path::new(path);
     path_buf
         .strip_prefix(cwd)
@@ -140,6 +180,31 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relativization_reuses_the_resolved_workspace_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("relativize-cache");
+        let workspace = root.join("workspace");
+        let workspace_link = root.join("workspace-link");
+        std::fs::create_dir_all(&workspace).unwrap();
+        symlink(&workspace, &workspace_link).unwrap();
+        let path = workspace.canonicalize().unwrap().join("src/main.rs");
+
+        assert_eq!(
+            relativize_to_workspace(path.to_str().unwrap(), &workspace_link),
+            "src/main.rs"
+        );
+        std::fs::remove_file(&workspace_link).unwrap();
+        assert_eq!(
+            relativize_to_workspace(path.to_str().unwrap(), &workspace_link),
+            "src/main.rs"
+        );
+
         std::fs::remove_dir_all(root).unwrap();
     }
 }

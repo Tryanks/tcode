@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use super::{
-    link_target::{LinkTarget, resolve_link},
+    link_target::LinkTarget,
     nodes::LinkMark,
     state::{MarkdownState, PendingLinkMenu},
 };
@@ -264,7 +264,7 @@ impl Element for Inline {
         self.interactive_text = InteractiveText::new(self.id.clone(), styled_text).tooltip(
             move |position, window, cx| {
                 let (_, link) = links.iter().find(|(range, _)| range.contains(&position))?;
-                let text = resolve_link(&link.url, view.read(cx).base_dir()).tooltip_text();
+                let text = view.read(cx).resolve_link(&link.url).tooltip_text();
                 Some(Tooltip::new(text).build(window, cx))
             },
         );
@@ -368,7 +368,7 @@ impl Element for Inline {
                 }
                 let pending = Self::link_and_range_for_position(&layout, &links, event.position)
                     .map(|(range, link)| {
-                        let target = resolve_link(&link.url, view.read(cx).base_dir());
+                        let target = view.read(cx).resolve_link(&link.url);
                         let text = text.get(range).map(SharedString::from).unwrap_or_default();
                         PendingLinkMenu {
                             target,
@@ -396,7 +396,7 @@ impl Element for Inline {
                 if let Some(link) = Self::link_for_position(&layout, &links, event.position) {
                     gpui_base::TextSelection::end(window, cx);
                     cx.stop_propagation();
-                    match resolve_link(&link.url, view.read(cx).base_dir()) {
+                    match view.read(cx).resolve_link(&link.url) {
                         LinkTarget::Web(url) => cx.open_url(&url),
                         LinkTarget::Local(path) => cx.open_with_system(&path),
                     }
