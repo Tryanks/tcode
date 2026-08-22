@@ -264,6 +264,7 @@ impl AppShell {
                 let notification = match presented.severity {
                     RuntimeEventSeverity::Error => Notification::error(presented.message),
                     RuntimeEventSeverity::Success => Notification::success(presented.message),
+                    RuntimeEventSeverity::Warning => Notification::warning(presented.message),
                 };
                 window.push_notification(notification, cx);
                 return;

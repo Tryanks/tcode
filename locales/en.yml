@@ -329,6 +329,7 @@ providers:
   enable: "Enable %{name}"
   reveal_email: "Click to reveal email"
   hide_email: "Click to hide email"
+  mcp_unavailable: "MCP tools (computer use / preview / orchestrate) unavailable"
   # Status dot + summary copy (T3 §2)
   status:
     checking: "Checking provider status"

@@ -11,6 +11,7 @@ use crate::toast::ToastKind;
 pub(super) enum RuntimeEventSeverity {
     Error,
     Success,
+    Warning,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,7 +139,12 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 }
                 _ => format!("Unknown runtime notice: {notice:?}"),
             };
-            (RuntimeEventSeverity::Success, message)
+            let severity = if matches!(notice, RuntimeNotice::ProviderMessage(_)) {
+                RuntimeEventSeverity::Warning
+            } else {
+                RuntimeEventSeverity::Success
+            };
+            (severity, message)
         }
         RuntimeEvent::Toast(_) => unreachable!("rich toasts use present_runtime_toast"),
         RuntimeEvent::Effect(_) => unreachable!("runtime effects are not presentable"),
@@ -418,7 +424,12 @@ mod tests {
             }
             for notice in &notices {
                 let presented = present_runtime_event(&RuntimeEvent::Notice(notice.clone()));
-                assert_eq!(presented.severity, RuntimeEventSeverity::Success);
+                let expected = if matches!(notice, RuntimeNotice::ProviderMessage(_)) {
+                    RuntimeEventSeverity::Warning
+                } else {
+                    RuntimeEventSeverity::Success
+                };
+                assert_eq!(presented.severity, expected);
                 assert!(!presented.message.is_empty());
             }
             for toast in &toasts {
@@ -569,5 +580,14 @@ mod tests {
         }
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
+    }
+
+    #[test]
+    fn provider_warning_notice_is_presented_as_warning() {
+        let presented = present_runtime_event(&RuntimeEvent::Notice(
+            RuntimeNotice::ProviderMessage("pi MCP tools unavailable".into()),
+        ));
+
+        assert_eq!(presented.severity, RuntimeEventSeverity::Warning);
     }
 }

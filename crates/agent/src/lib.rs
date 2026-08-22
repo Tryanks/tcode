@@ -45,6 +45,8 @@ pub struct Caps {
     pub options_apply_live: bool,
     pub live_approval_mode_switch: bool,
     pub live_option_push: LiveOptionPush,
+    /// Whether this adapter can attach tcode's HTTP MCP servers to a session.
+    pub mcp_servers: bool,
     pub preview_mcp: bool,
     pub launch_args: bool,
     pub downgrade_approval_without_native_approvals: bool,
@@ -91,6 +93,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_approval_mode_switch: true,
                 live_option_push: LiveOptionPush::None,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
@@ -106,6 +109,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: false,
                 downgrade_approval_without_native_approvals: false,
@@ -121,6 +125,9 @@ impl ProviderKind {
                 options_apply_live: true,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
+                // ACP support is negotiated per agent; capable agents receive
+                // every tcode HTTP MCP registration in session/new or load.
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
@@ -136,6 +143,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                mcp_servers: false,
                 preview_mcp: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: true,
@@ -151,6 +159,7 @@ impl ProviderKind {
                 options_apply_live: false,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
@@ -188,6 +197,7 @@ mod provider_caps_tests {
                 options_apply_live: false,
                 live_approval_mode_switch: true,
                 live_option_push: LiveOptionPush::None,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
@@ -206,6 +216,7 @@ mod provider_caps_tests {
                 options_apply_live: false,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: false,
                 downgrade_approval_without_native_approvals: false,
@@ -224,6 +235,7 @@ mod provider_caps_tests {
                 options_apply_live: true,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::All,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
@@ -242,6 +254,7 @@ mod provider_caps_tests {
                 options_apply_live: false,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
+                mcp_servers: false,
                 preview_mcp: false,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: true,
@@ -260,6 +273,7 @@ mod provider_caps_tests {
                 options_apply_live: false,
                 live_approval_mode_switch: false,
                 live_option_push: LiveOptionPush::None,
+                mcp_servers: true,
                 preview_mcp: true,
                 launch_args: true,
                 downgrade_approval_without_native_approvals: false,
@@ -268,6 +282,12 @@ mod provider_caps_tests {
                 trust_project_extensions: false,
             }
         );
+    }
+
+    #[test]
+    fn pi_cannot_attach_mcp_servers_but_claude_can() {
+        assert!(!ProviderKind::Pi.caps().mcp_servers);
+        assert!(ProviderKind::ClaudeCode.caps().mcp_servers);
     }
 }
 

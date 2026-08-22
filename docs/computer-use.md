@@ -1,8 +1,10 @@
 # Computer use
 
-tcode gives every provider (Claude Code, Codex, and all ACP agents that advertise
-`mcpCapabilities.http`) a set of desktop computer-use tools, served by the in-process
-`tcode_computer_use` MCP server. The design follows
+tcode gives MCP-capable providers (Claude Code, Codex, OpenCode, and ACP agents that
+advertise `mcpCapabilities.http`) a set of desktop computer-use tools, served by the
+in-process `tcode_computer_use` MCP server. pi has no MCP client, so its provider card
+and model-picker rows identify computer use, preview, and orchestrate as unavailable
+before a session starts. The design follows
 [pi-computer-use](https://github.com/injaneity/pi-computer-use): accessibility-tree-first,
 state-scoped observation, transactional actions — not blind pixel clicking.
 
@@ -50,8 +52,9 @@ simplified successor-diff heuristic.
   - `permissions.rs` — TCC checks/requests (see below), public API also consumed by the
     settings UI.
 - Registration: `SessionOptions.computer_use_server: Option<McpRegistration>` threaded exactly
-  like `orchestrate_server` — Claude via `--mcp-config`, Codex via `-c mcp_servers.*`, ACP via
-  `session/new` `mcpServers` (HTTP-capability-gated). Enabled/disabled per
+  like `orchestrate_server` — Claude via `--mcp-config`, Codex via `-c mcp_servers.*`, OpenCode
+  via its server config, and ACP via `session/new` `mcpServers` (HTTP-capability-gated).
+  Enabled/disabled per
   `Settings.computer_use.enabled`.
 
 Unlike pi-computer-use, tcode needs **no helper app**: tcode is itself a signed `.app`, so

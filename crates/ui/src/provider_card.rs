@@ -167,7 +167,15 @@ impl ProviderCard {
                     .min_w_0()
                     .gap_0p5()
                     .child(title)
-                    .child(self.render_summary_line(&summary, cx)),
+                    .child(self.render_summary_line(&summary, cx))
+                    .when(!provider.caps().mcp_servers, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(muted)
+                                .child(crate::tr!("providers.mcp_unavailable")),
+                        )
+                    }),
             )
             .tooltip({
                 let name = name.clone();
