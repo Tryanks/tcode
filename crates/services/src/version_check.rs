@@ -1,15 +1,97 @@
-//! Provider CLI version checks and self-update command mapping (s3 §6).
+//! Provider CLI and tcode release version checks (s3 §6).
 //!
-//! Pure helpers: parse a version out of `<provider> --version` output, compare
-//! it against the latest published version, guess how the binary was installed
-//! (Homebrew / npm / native installer), and derive the update command for that
-//! install source. All I/O (spawning `--version`, `npm view`, the update
-//! command itself) lives in the later runtime caller; this module stays
-//! unit-testable.
+//! Helpers parse and compare versions, infer provider install sources, and map
+//! those sources to update commands. The tcode release lookup lives here beside
+//! its fixture-testable JSON parser; process spawning and provider updates stay
+//! in the runtime caller.
 
+use std::io::Read as _;
 use std::path::Path;
+use std::time::Duration;
 
 use agent::ProviderKind;
+use serde::Deserialize;
+
+const TCODE_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Tryanks/tcode/releases/latest";
+
+/// The release metadata needed by the app's update notice.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TcodeRelease {
+    pub tag_name: String,
+    pub html_url: String,
+    #[serde(default)]
+    pub prerelease: bool,
+}
+
+/// Fetch the latest published tcode release. Network, rate-limit, and response
+/// errors deliberately collapse to `None`: update checks must never disrupt
+/// app startup or provider checks.
+pub fn fetch_latest_tcode_release() -> Option<TcodeRelease> {
+    let response = ureq::get(TCODE_LATEST_RELEASE_URL)
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2022-11-28")
+        .set("User-Agent", "tcode-update-check")
+        .timeout(Duration::from_secs(10))
+        .call()
+        .ok()?;
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(1024 * 1024)
+        .read_to_end(&mut body)
+        .ok()?;
+    parse_tcode_release(&body)
+}
+
+/// Parse the subset of GitHub's release JSON used by the update surface.
+pub fn parse_tcode_release(bytes: &[u8]) -> Option<TcodeRelease> {
+    serde_json::from_slice(bytes).ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TcodeVersion {
+    core: (u32, u32, u32),
+    prerelease: bool,
+}
+
+fn parse_tcode_version(raw: &str) -> Option<TcodeVersion> {
+    let raw = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
+    let without_build = raw.split_once('+').map_or(raw, |(core, _)| core);
+    let (core, prerelease) = match without_build.split_once('-') {
+        Some((core, suffix)) if !suffix.is_empty() => (core, true),
+        Some(_) => return None,
+        None => (without_build, false),
+    };
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(TcodeVersion {
+        core: (major, minor, patch),
+        prerelease,
+    })
+}
+
+/// Compare a running app version with a GitHub release tag.
+///
+/// Prerelease releases are ignored for stable builds. A prerelease build may
+/// advance to a newer prerelease numeric triple or to the stable release with
+/// the same numeric triple. Malformed input returns `None`.
+pub fn tcode_update_available(running: &str, latest_tag: &str) -> Option<bool> {
+    let running = parse_tcode_version(running)?;
+    let latest = parse_tcode_version(latest_tag)?;
+    if latest.prerelease && !running.prerelease {
+        return Some(false);
+    }
+    Some(match latest.core.cmp(&running.core) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => running.prerelease && !latest.prerelease,
+    })
+}
 
 /// The npm package name whose published version is the provider's "latest".
 /// `npm view <pkg> version` works for every native provider (verified 2026-07);
@@ -216,6 +298,52 @@ mod tests {
         assert!(is_update_available("codex-cli 0.144.1", "0.145.0"));
         // Unparseable → no update claimed.
         assert!(!is_update_available("unknown", "2.0.0"));
+    }
+
+    #[test]
+    fn compares_tcode_release_versions() {
+        assert_eq!(tcode_update_available("0.4.0", "v0.4.0"), Some(false));
+        assert_eq!(tcode_update_available("0.4.0", "v0.4.1"), Some(true));
+        assert_eq!(tcode_update_available("0.4.1", "v0.4.0"), Some(false));
+    }
+
+    #[test]
+    fn handles_tcode_prereleases() {
+        assert_eq!(
+            tcode_update_available("0.4.0", "v0.5.0-beta.1"),
+            Some(false)
+        );
+        assert_eq!(tcode_update_available("0.5.0-beta.1", "v0.5.0"), Some(true));
+        assert_eq!(
+            tcode_update_available("0.5.0-beta.1", "v0.6.0-beta.1"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn malformed_tcode_release_tag_has_no_comparison() {
+        assert_eq!(tcode_update_available("0.4.0", "latest"), None);
+        assert_eq!(tcode_update_available("0.4", "v0.4.1"), None);
+    }
+
+    #[test]
+    fn parses_github_release_json() {
+        let release = parse_tcode_release(
+            br#"{
+                "tag_name": "v0.4.1",
+                "html_url": "https://github.com/Tryanks/tcode/releases/tag/v0.4.1",
+                "prerelease": false,
+                "assets": [{"name": "SHA256SUMS.txt"}]
+            }"#,
+        )
+        .expect("release fixture should parse");
+
+        assert_eq!(release.tag_name, "v0.4.1");
+        assert_eq!(
+            release.html_url,
+            "https://github.com/Tryanks/tcode/releases/tag/v0.4.1"
+        );
+        assert!(!release.prerelease);
     }
 
     #[test]

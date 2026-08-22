@@ -223,7 +223,7 @@ settings:
     description: "当出现步骤时自动打开右侧的计划和任务面板。"
   provider_updates:
     title: "提供方更新检查"
-    description: "启动时检查更新的提供方 CLI 版本。"
+    description: "启动时检查 tcode 和提供方 CLI 的新版本。"
   title_generation:
     title: "对话命名模型"
     description: "选择负责为新对话命名的提供方和模型。命名请求始终使用 low 推理强度。"
@@ -365,6 +365,11 @@ providers:
   updating: "更新中"
   update_manual: "或者手动更新："
   copy_command: "复制命令"
+  tcode_update_available: "tcode %{version} 可用"
+  tcode_update_aria: "tcode 有可用更新 — 查看详情"
+  tcode_update_title: "tcode 有可用更新"
+  tcode_update_message: "从 GitHub 下载最新版本。"
+  view_release: "查看发布版本"
   # 单个配置的设置对话框（点击提供方行的齿轮图标打开）。
   configure: "配置 %{name}"
   dialog:
@@ -697,6 +702,7 @@ notice:
   thread_exported: "对话已导出至 %{file}"
   dirty_tree: "工作树中有未提交的更改"
   update_available: "有可用更新：%{provider} v%{version}"
+  tcode_update_available: "tcode %{version} 可用"
   updating_provider: "正在更新 %{provider}…"
   update_done: "%{provider} 已更新"
 attach:

@@ -223,7 +223,7 @@ settings:
     description: "Open the right-side plan and task panel automatically when steps appear."
   provider_updates:
     title: "Provider update checks"
-    description: "Check for newer provider CLI versions on launch."
+    description: "Check for newer tcode and provider CLI versions on launch."
   title_generation:
     title: "Thread title model"
     description: "Choose the provider and model used to name new threads. Title requests always use low reasoning effort."
@@ -369,6 +369,11 @@ providers:
   updating: "Updating"
   update_manual: "or, update manually using"
   copy_command: "Copy command"
+  tcode_update_available: "tcode %{version} available"
+  tcode_update_aria: "tcode update available — view details"
+  tcode_update_title: "tcode update available"
+  tcode_update_message: "Download the latest release from GitHub."
+  view_release: "View release"
   # Per-profile settings dialog (opened from a provider row's gear).
   configure: "Configure %{name}"
   dialog:
@@ -703,6 +708,7 @@ notice:
   thread_exported: "Exported thread to %{file}"
   dirty_tree: "Working tree has uncommitted changes"
   update_available: "Update Available: %{provider} v%{version}"
+  tcode_update_available: "tcode %{version} available"
   updating_provider: "Updating %{provider}…"
   update_done: "%{provider} updated"
 attach:

@@ -737,6 +737,52 @@ impl SettingsPage {
             .into_any_element()
     }
 
+    fn render_tcode_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.store.read(cx).tcode_update_status();
+        let version = status.latest.unwrap_or_default();
+        let release_url = status.release_url.unwrap_or_default();
+
+        crate::material::overlay_popover("tcode-update-popover")
+            .trigger(
+                Button::new("tcode-update-available")
+                    .ghost()
+                    .xsmall()
+                    .icon(Icon::empty().path("icons/download.svg"))
+                    .label(crate::tr!(
+                        "providers.tcode_update_available",
+                        version = version
+                    ))
+                    .tooltip(crate::tr!("providers.tcode_update_aria")),
+            )
+            .content(move |_, _, cx| {
+                let muted = cx.theme().muted_foreground;
+                let release_url = release_url.clone();
+                v_flex()
+                    .w(px(320.))
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_semibold()
+                            .child(crate::tr!("providers.tcode_update_title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(muted)
+                            .child(crate::tr!("providers.tcode_update_message")),
+                    )
+                    .child(
+                        Button::new("view-tcode-release")
+                            .primary()
+                            .small()
+                            .label(crate::tr!("providers.view_release"))
+                            .on_click(move |_, _, cx| cx.open_url(&release_url)),
+                    )
+            })
+            .into_any_element()
+    }
+
     /// Settings → Providers: native providers and installed ACP agents share one
     /// bordered list. The marketplace lives behind the Add agent dialog.
     fn render_providers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
@@ -780,6 +826,9 @@ impl SettingsPage {
                     .text_color(muted)
                     .child(crate::tr!("providers.checked", when = ago).into_owned()),
             );
+        }
+        if self.store.read(cx).tcode_update_status().update_available {
+            header = header.child(self.render_tcode_update_popover(cx));
         }
         header = header.child(
             Button::new("add-acp-agent")

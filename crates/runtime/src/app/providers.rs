@@ -4,6 +4,7 @@ pub struct ProviderCatalog {
     pub model_catalogs: HashMap<ProviderKind, Vec<ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
+    pub tcode_update: TcodeUpdateState,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
 }
@@ -17,6 +18,7 @@ impl ProviderCatalog {
             model_catalogs,
             models_loading: HashMap::new(),
             provider_versions: HashMap::new(),
+            tcode_update: TcodeUpdateState::default(),
             provider_snapshots: HashMap::new(),
             provider_secret_names,
         }
@@ -49,6 +51,13 @@ impl ProviderCatalog {
                     )
                 })
                 .collect(),
+            tcode_update: TcodeUpdateStatus {
+                current: self.tcode_update.current.clone(),
+                latest: self.tcode_update.latest.clone(),
+                release_url: self.tcode_update.release_url.clone(),
+                update_available: self.tcode_update.update_available,
+                checking: self.tcode_update.checking,
+            },
             provider_snapshots: self.provider_snapshots.clone(),
             acp_marketplace_items,
             acp_registry_loading,
@@ -66,7 +75,8 @@ impl ProviderCatalog {
                 || self
                     .provider_versions
                     .values()
-                    .any(|status| status.checking),
+                    .any(|status| status.checking)
+                || self.tcode_update.checking,
             secret_names: self.provider_secret_names.clone(),
         }
     }
@@ -384,9 +394,8 @@ impl AppState {
         }
     }
 
-    /// Check every provider's installed vs. latest version in the background,
-    /// storing results in `provider_versions` and toasting once per provider
-    /// that has an update available.
+    /// Check every provider and the running tcode build in the background,
+    /// storing results and toasting once for each newly available update.
     pub fn check_provider_versions(&mut self, cx: &mut HostCx) {
         for provider in NATIVE_PROVIDER_KINDS {
             let binary = self.resolve_provider_binary(provider);
@@ -473,6 +482,41 @@ impl AppState {
                 });
             });
         }
+
+        if self.providers.tcode_update.checking {
+            return;
+        }
+        self.providers.tcode_update.checking = true;
+        let current = self.providers.tcode_update.current.clone();
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let release = host_cx.unblock(fetch_latest_tcode_release).await;
+            host_cx.enqueue(move |state, cx| {
+                let already = state.providers.tcode_update.update_available;
+                let update_available = release.as_ref().is_some_and(|release| {
+                    (!release.prerelease || current.contains('-'))
+                        && tcode_update_available(&current, &release.tag_name).unwrap_or(false)
+                });
+                let status = &mut state.providers.tcode_update;
+                status.checking = false;
+                status.latest = release
+                    .as_ref()
+                    .map(|release| release.tag_name.trim_start_matches('v').to_string());
+                status.release_url = release.as_ref().map(|release| release.html_url.clone());
+                status.update_available = update_available;
+                if update_available
+                    && !already
+                    && let Some(version) = &status.latest
+                {
+                    emit_runtime(
+                        cx,
+                        RuntimeEvent::Notice(RuntimeNotice::TcodeUpdateAvailable {
+                            version: version.clone(),
+                        }),
+                    );
+                }
+            });
+        });
     }
 
     /// Run the provider's self-update command (per its detected install source),

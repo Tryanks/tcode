@@ -50,8 +50,8 @@ use tcode_protocol::ThreadExportFormat;
 use tcode_protocol::{
     AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot, PathEntry,
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
-    RecentDir, ServerEvent, SessionEventRecord, SessionStatus, TerminalContextStatus,
-    TerminalSplitStatus, TerminalStatus, Topic,
+    RecentDir, ServerEvent, SessionEventRecord, SessionStatus, TcodeUpdateStatus,
+    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -74,8 +74,8 @@ use tcode_services::settings::SettingsStore;
 use tcode_services::store::{SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
 use tcode_services::version_check::{
-    InstallSource, detect_install_source, is_update_available, npm_package, parse_version,
-    update_command, update_command_string,
+    InstallSource, detect_install_source, fetch_latest_tcode_release, is_update_available,
+    npm_package, parse_version, tcode_update_available, update_command, update_command_string,
 };
 use tcode_services::workspace::list_workspace;
 
@@ -282,6 +282,28 @@ pub struct ProviderVersionState {
     pub updating: bool,
     /// How the binary was installed (drives the update command).
     pub install_source: InstallSource,
+}
+
+/// The result of checking the running tcode build against GitHub Releases.
+#[derive(Debug, Clone)]
+pub struct TcodeUpdateState {
+    pub current: String,
+    pub latest: Option<String>,
+    pub release_url: Option<String>,
+    pub update_available: bool,
+    pub checking: bool,
+}
+
+impl Default for TcodeUpdateState {
+    fn default() -> Self {
+        Self {
+            current: env!("CARGO_PKG_VERSION").to_string(),
+            latest: None,
+            release_url: None,
+            update_available: false,
+            checking: false,
+        }
+    }
 }
 
 pub struct AppState {

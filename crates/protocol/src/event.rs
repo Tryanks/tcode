@@ -85,6 +85,7 @@ pub struct ProvidersStatus {
     pub model_catalogs: HashMap<ProviderKind, Vec<agent::ModelSpec>>,
     pub models_loading: HashMap<ProviderKind, bool>,
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
+    pub tcode_update: TcodeUpdateStatus,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
     pub acp_marketplace_items: Vec<AcpMarketplaceItem>,
     pub acp_registry_loading: bool,
@@ -105,6 +106,15 @@ pub struct ProviderVersionStatus {
     pub checking: bool,
     pub updating: bool,
     pub update_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TcodeUpdateStatus {
+    pub current: String,
+    pub latest: Option<String>,
+    pub release_url: Option<String>,
+    pub update_available: bool,
+    pub checking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +326,9 @@ pub enum RuntimeNotice {
     ProviderMessage(String),
     UpdateAvailable {
         provider: ProviderKind,
+        version: String,
+    },
+    TcodeUpdateAvailable {
         version: String,
     },
     UpdatingProvider {

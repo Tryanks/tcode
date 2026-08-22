@@ -110,6 +110,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                     version = version
                 )
                 .into_owned(),
+                RuntimeNotice::TcodeUpdateAvailable { version } => {
+                    crate::tr!("notice.tcode_update_available", version = version).into_owned()
+                }
                 RuntimeNotice::UpdatingProvider { provider } => crate::tr!(
                     "notice.updating_provider",
                     provider = provider.display_name()
@@ -352,6 +355,9 @@ mod tests {
             RuntimeNotice::ProviderMessage("provider-warning\0diagnostic".into()),
             RuntimeNotice::UpdateAvailable {
                 provider: ProviderKind::Codex,
+                version: "1.2.3".into(),
+            },
+            RuntimeNotice::TcodeUpdateAvailable {
                 version: "1.2.3".into(),
             },
             RuntimeNotice::UpdatingProvider {
