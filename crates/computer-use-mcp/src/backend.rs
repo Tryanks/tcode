@@ -116,6 +116,7 @@ pub struct ActionRequest {
     pub target_role: Option<String>,
     pub target_title: Option<String>,
     pub target_actions: Vec<String>,
+    pub target_picture_only: bool,
     pub x: Option<f64>,
     pub y: Option<f64>,
     pub text: Option<String>,
