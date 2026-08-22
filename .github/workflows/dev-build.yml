@@ -37,5 +37,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: tcode-windows-x64-debug
-          path: target/debug/tcode.exe
+          path: |
+            target/debug/tcode.exe
+            target/debug/tcode.pdb
           retention-days: 3
