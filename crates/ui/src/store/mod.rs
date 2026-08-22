@@ -1067,6 +1067,10 @@ impl WorkspaceStore {
             .cloned()
     }
 
+    pub fn tcode_update_status(&self) -> tcode_protocol::TcodeUpdateStatus {
+        self.providers_replica.tcode_update.clone()
+    }
+
     pub fn provider_profile_accent(&self, profile_id: &str) -> Option<u32> {
         let raw = self
             .settings_replica
