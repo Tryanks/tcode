@@ -227,6 +227,11 @@ fn round_trips_top_level_wire_types() {
     });
 }
 
+#[test]
+fn orchestrate_child_worktrees_patch_round_trips() {
+    round_trip(&SettingsPatch::OrchestrateChildWorktrees(true));
+}
+
 fn assert_command_crosses_ndjson(id: u64, command: Command) {
     match &command {
         Command::ApplyPendingRelaunch => {}
@@ -275,6 +280,7 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::AutoArchiveSweep { .. } => {}
         Command::RenameSession { .. } => {}
         Command::ForkThread { .. } => {}
+        Command::MergeWorktree { .. } => {}
         Command::DeleteSession { .. } => {}
         Command::DeleteProject { .. } => {}
         Command::MarkSessionUnread { .. } => {}

@@ -323,6 +323,10 @@ pub struct OrchestrateSettings {
     pub child_models: Vec<OrchestrateChildModel>,
     #[serde(default)]
     pub child_approval: ChildApprovalMode,
+    /// Give dispatched children dedicated Git worktrees when their resolved cwd
+    /// is itself a repository root. Dispatch-level `worktree` overrides this.
+    #[serde(default)]
+    pub child_worktrees: bool,
     /// Archive completed children automatically once their terminal result has
     /// been delivered to the parent. Per-dispatch `archive_on_complete`
     /// overrides this; failed children always stay visible for retries.
@@ -393,6 +397,7 @@ impl Default for OrchestrateSettings {
                 },
             ],
             child_approval: ChildApprovalMode::default(),
+            child_worktrees: false,
             archive_on_complete: true,
         }
     }
@@ -1169,6 +1174,23 @@ mod tests {
             let back: OrchestrateSettings = serde_json::from_str(&json).unwrap();
             assert_eq!(back.child_approval, mode);
         }
+    }
+
+    #[test]
+    fn orchestrate_child_worktrees_default_false_and_round_trip() {
+        let legacy: OrchestrateSettings = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.child_worktrees);
+
+        let settings = OrchestrateSettings {
+            child_worktrees: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""child_worktrees":true"#));
+        assert_eq!(
+            serde_json::from_str::<OrchestrateSettings>(&json).unwrap(),
+            settings
+        );
     }
 
     #[test]
