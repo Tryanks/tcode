@@ -14,8 +14,8 @@ pub use event::{
     AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
     ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError,
     RuntimeNotice, RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent,
-    SessionEventRecord, SessionStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    Topic,
+    SessionEventRecord, SessionStatus, TcodeUpdateStatus, TerminalContextStatus,
+    TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,

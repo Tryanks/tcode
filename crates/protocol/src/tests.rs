@@ -170,6 +170,13 @@ fn round_trips_top_level_wire_types() {
                     update_command: Some("npm install -g @openai/codex@latest".into()),
                 },
             )]),
+            tcode_update: TcodeUpdateStatus {
+                current: "1.2.3".into(),
+                latest: Some("1.2.4".into()),
+                release_url: Some("https://github.com/Tryanks/tcode/releases/tag/v1.2.4".into()),
+                update_available: true,
+                checking: false,
+            },
             provider_snapshots: HashMap::from([(
                 "codex".into(),
                 tcode_core::provider_status::ProviderSnapshot {
