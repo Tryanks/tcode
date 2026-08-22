@@ -21,7 +21,7 @@ use crate::{
     Attachment, ChangeCompleteness, DeltaKind, FileChange, FileChangeKind, InteractionMode,
     ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection,
     ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, SelectOption, SessionCommand,
-    SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    SessionHandle, SessionOptions, ThreadItem, TokenUsage, UserInputOption, UserInputQuestion,
 };
 
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
@@ -159,6 +159,7 @@ async fn run_actor(
         interaction_mode: opts.interaction_mode,
         approval_mode: opts.approval_mode,
         pending_permissions: HashSet::new(),
+        pending_questions: HashMap::new(),
     };
     actor
         .events
@@ -201,6 +202,7 @@ struct OpenCodeActor {
     interaction_mode: InteractionMode,
     approval_mode: ApprovalMode,
     pending_permissions: HashSet<String>,
+    pending_questions: HashMap<String, Vec<String>>,
 }
 
 impl SessionActor for OpenCodeActor {
@@ -254,8 +256,31 @@ impl OpenCodeActor {
         for request_id in mapped.permission_ids {
             self.pending_permissions.insert(request_id);
         }
+        for (request_id, question_ids) in mapped.question_requests {
+            self.pending_questions.insert(request_id, question_ids);
+        }
+        for (request_id, answers) in mapped.question_resolutions {
+            let Some(question_ids) = self.pending_questions.remove(&request_id) else {
+                continue;
+            };
+            self.events
+                .emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: answers
+                        .map(|answers| canonical_question_answers(&question_ids, &answers))
+                        .unwrap_or_default(),
+                })
+                .await;
+        }
+        let turn_completed = mapped
+            .events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
         for event in mapped.events {
             self.events.emit(event).await;
+        }
+        if turn_completed {
+            self.cancel_pending_questions().await;
         }
         if mapped.fetch_diff {
             match self.fetch_diff() {
@@ -319,6 +344,7 @@ impl OpenCodeActor {
             }
             SessionCommand::Interrupt => {
                 self.mapper.interrupted = true;
+                self.cancel_pending_questions().await;
                 self.server
                     .http
                     .post_json(
@@ -392,12 +418,35 @@ impl OpenCodeActor {
                     .await;
                 Ok(())
             }
-            SessionCommand::RespondUserInput { .. } => {
+            SessionCommand::RespondUserInput {
+                request_id,
+                answers,
+            } => {
+                let Some(question_ids) = self.pending_questions.get(&request_id) else {
+                    return Ok(());
+                };
+                match native_question_response(question_ids, &answers) {
+                    None => {
+                        self.server
+                            .http
+                            .post_json(&format!("/question/{request_id}/reject"), &json!({}))
+                            .map_err(|err| err.to_string())?;
+                    }
+                    Some(answers) => {
+                        self.server
+                            .http
+                            .post_json(
+                                &format!("/question/{request_id}/reply"),
+                                &json!({"answers":answers}),
+                            )
+                            .map_err(|err| err.to_string())?;
+                    }
+                }
+                self.pending_questions.remove(&request_id);
                 self.events
-                    .emit(AgentEvent::Warning {
-                        message:
-                            "OpenCode structured questions are not yet bridged by this adapter"
-                                .into(),
+                    .emit(AgentEvent::UserInputResolved {
+                        request_id,
+                        answers,
                     })
                     .await;
                 Ok(())
@@ -427,6 +476,7 @@ impl OpenCodeActor {
     }
 
     async fn shutdown(&mut self) {
+        self.cancel_pending_questions().await;
         let pending: Vec<String> = self.pending_permissions.drain().collect();
         for request_id in pending {
             let _ = self.server.http.post_json(
@@ -436,12 +486,39 @@ impl OpenCodeActor {
         }
         self.server.stop();
     }
+
+    async fn cancel_pending_questions(&mut self) {
+        let pending: Vec<String> = self.pending_questions.drain().map(|(id, _)| id).collect();
+        for request_id in pending {
+            if let Err(err) = self
+                .server
+                .http
+                .post_json(&format!("/question/{request_id}/reject"), &json!({}))
+            {
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!(
+                            "failed to reject pending OpenCode question {request_id}: {err}"
+                        ),
+                    })
+                    .await;
+            }
+            self.events
+                .emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: serde_json::Map::new(),
+                })
+                .await;
+        }
+    }
 }
 
 #[derive(Default)]
 struct MappedEvent {
     events: Vec<AgentEvent>,
     permission_ids: Vec<String>,
+    question_requests: Vec<(String, Vec<String>)>,
+    question_resolutions: Vec<(String, Option<Vec<Vec<String>>>)>,
     fetch_diff: bool,
 }
 
@@ -619,6 +696,36 @@ impl OpenCodeMapper {
                     };
                     mapped.permission_ids.push(request.id.clone());
                     mapped.events.push(AgentEvent::ApprovalRequested(request));
+                }
+            }
+            "question.asked" | "question.v2.asked" => {
+                if let Some((request_id, questions)) = map_questions(properties) {
+                    let question_ids = questions
+                        .iter()
+                        .map(|question| question.id.clone())
+                        .collect();
+                    mapped
+                        .question_requests
+                        .push((request_id.clone(), question_ids));
+                    mapped.events.push(AgentEvent::UserInputRequested {
+                        request_id,
+                        questions,
+                    });
+                }
+            }
+            "question.replied" | "question.v2.replied" => {
+                if let Some(request_id) = properties.get("requestID").and_then(Value::as_str) {
+                    mapped.question_resolutions.push((
+                        request_id.to_owned(),
+                        Some(native_answers(properties.get("answers"))),
+                    ));
+                }
+            }
+            "question.rejected" | "question.v2.rejected" => {
+                if let Some(request_id) = properties.get("requestID").and_then(Value::as_str) {
+                    mapped
+                        .question_resolutions
+                        .push((request_id.to_owned(), None));
                 }
             }
             "session.compacted" => mapped.events.push(AgentEvent::ContextCompacted),
@@ -905,6 +1012,112 @@ fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
         kind,
         options: Vec::new(),
     })
+}
+
+fn map_questions(properties: &Value) -> Option<(String, Vec<UserInputQuestion>)> {
+    let request_id = properties.get("id")?.as_str()?.to_owned();
+    let questions = properties
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .map(|(index, question)| UserInputQuestion {
+            id: format!("{request_id}:{index}"),
+            header: question
+                .get("header")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("Question {}", index + 1)),
+            question: question
+                .get("question")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            options: question
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|option| UserInputOption {
+                    label: option
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    description: option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                })
+                .collect(),
+            multi_select: question
+                .get("multiple")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            prefill: None,
+        })
+        .collect();
+    Some((request_id, questions))
+}
+
+fn native_question_answers(
+    question_ids: &[String],
+    answers: &serde_json::Map<String, Value>,
+) -> Vec<Vec<String>> {
+    question_ids
+        .iter()
+        .map(|question_id| match answers.get(question_id) {
+            Some(Value::String(answer)) => vec![answer.clone()],
+            Some(Value::Array(answers)) => answers
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn native_question_response(
+    question_ids: &[String],
+    answers: &serde_json::Map<String, Value>,
+) -> Option<Vec<Vec<String>>> {
+    (!answers.is_empty()).then(|| native_question_answers(question_ids, answers))
+}
+
+fn native_answers(value: Option<&Value>) -> Vec<Vec<String>> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|answer| {
+            answer
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .collect()
+}
+
+fn canonical_question_answers(
+    question_ids: &[String],
+    answers: &[Vec<String>],
+) -> serde_json::Map<String, Value> {
+    question_ids
+        .iter()
+        .zip(answers)
+        .map(|(question_id, answers)| {
+            let answer = match answers.as_slice() {
+                [answer] => Value::String(answer.clone()),
+                answers => Value::Array(answers.iter().cloned().map(Value::String).collect()),
+            };
+            (question_id.clone(), answer)
+        })
+        .collect()
 }
 
 fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
@@ -1681,6 +1894,99 @@ mod tests {
                 [AgentEvent::ApprovalRequested(_)]
             ));
         }
+    }
+
+    #[test]
+    fn maps_structured_question_notification() {
+        let mut mapper = OpenCodeMapper::new("ses_target".into());
+        let mapped = mapper.on_event(&json!({
+            "type":"question.asked",
+            "properties":{
+                "id":"que_1",
+                "sessionID":"ses_target",
+                "questions":[
+                    {
+                        "header":"Scope",
+                        "question":"Which crates?",
+                        "options":[
+                            {"label":"Agent","description":"Adapter only"},
+                            {"label":"All","description":"Whole workspace"}
+                        ],
+                        "multiple":true,
+                        "custom":true
+                    },
+                    {
+                        "header":"Notes",
+                        "question":"Anything else?",
+                        "options":[],
+                        "multiple":false,
+                        "custom":true
+                    }
+                ]
+            }
+        }));
+        assert!(matches!(
+            mapped.events.as_slice(),
+            [AgentEvent::UserInputRequested { request_id, questions }]
+                if request_id == "que_1"
+                    && questions.len() == 2
+                    && questions[0].id == "que_1:0"
+                    && questions[0].multi_select
+                    && questions[0].options[0].label == "Agent"
+                    && questions[1].id == "que_1:1"
+                    && questions[1].options.is_empty()
+        ));
+    }
+
+    #[test]
+    fn translates_ordered_multi_question_answers_and_cancellation() {
+        let question_ids = vec!["que_1:0".into(), "que_1:1".into(), "que_1:2".into()];
+        let answers = serde_json::Map::from_iter([
+            ("que_1:2".into(), json!("free text")),
+            ("que_1:0".into(), json!(["Agent", "Core"])),
+            ("unrelated".into(), json!("ignored")),
+        ]);
+        assert_eq!(
+            native_question_response(&question_ids, &answers),
+            Some(vec![
+                vec!["Agent".into(), "Core".into()],
+                Vec::new(),
+                vec!["free text".into()]
+            ])
+        );
+        assert_eq!(
+            native_question_response(&question_ids, &serde_json::Map::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn maps_native_question_resolution_events() {
+        let mut mapper = OpenCodeMapper::new("ses_target".into());
+        let replied = mapper.on_event(&json!({
+            "type":"question.replied",
+            "properties":{
+                "sessionID":"ses_target",
+                "requestID":"que_1",
+                "answers":[["Agent", "Core"], ["free text"]]
+            }
+        }));
+        assert_eq!(
+            replied.question_resolutions,
+            vec![(
+                "que_1".into(),
+                Some(vec![
+                    vec!["Agent".into(), "Core".into()],
+                    vec!["free text".into()]
+                ])
+            )]
+        );
+
+        let rejected = mapper.on_event(&json!({
+            "type":"question.v2.rejected",
+            "properties":{"sessionID":"ses_target","requestID":"que_2"}
+        }));
+        assert_eq!(rejected.question_resolutions, vec![("que_2".into(), None)]);
     }
 
     #[test]
