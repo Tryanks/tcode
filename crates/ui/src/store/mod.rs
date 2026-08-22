@@ -981,6 +981,21 @@ impl WorkspaceStore {
         })
     }
 
+    /// Only the native preview panel prunes by liveness; Linux compiles it out.
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
+        let mut keys = self
+            .index_replica
+            .0
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<HashSet<_>>();
+        if let Some(destination) = &self.active_destination {
+            keys.insert(destination.preference_key());
+        }
+        keys
+    }
+
     pub fn preview_panel_showing(&self) -> bool {
         self.active_conversation_ui()
             .is_some_and(|ui| ui.right_panel_open && ui.right_tab == RightTab::Preview)
