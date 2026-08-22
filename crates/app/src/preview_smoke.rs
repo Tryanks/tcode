@@ -3,14 +3,18 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{AsyncApp, Entity, WindowHandle, px, size};
 use tcode_ui::{AppShell, overlay::OverlayHost};
 
 const STEP_DELAY: Duration = Duration::from_millis(20);
 const RAPID_DELAY: Duration = Duration::from_millis(5);
+const CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(120);
+const DROP_DURING_CREATE_KEY: &str = "preview-smoke-drop-during-create";
+#[cfg(target_os = "windows")]
+const CREATION_IN_FLIGHT: &str = "preview creation is in flight";
 const KEYS: [&str; 6] = [
     "preview-smoke-0",
     "preview-smoke-1",
@@ -79,6 +83,75 @@ async fn yield_for(cx: &AsyncApp, delay: Duration) {
     cx.background_executor().timer(delay).await;
 }
 
+fn create_once(
+    shell: &Entity<AppShell>,
+    window: WindowHandle<OverlayHost>,
+    key: &str,
+    url: &str,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    window
+        .update(cx, |_, window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.preview_smoke_create(key, url, window, cx)
+            })
+        })
+        .expect("preview smoke window closed during webview creation")
+}
+
+fn creation_is_pending(error: &str) -> bool {
+    error.starts_with("preview creation is ") || error.starts_with("preview is starting")
+}
+
+async fn create_and_wait(
+    shell: &Entity<AppShell>,
+    window: WindowHandle<OverlayHost>,
+    key: &str,
+    url: &str,
+    cx: &mut AsyncApp,
+) {
+    let deadline = Instant::now() + CREATION_TIMEOUT;
+    loop {
+        match create_once(shell, window, key, url, cx) {
+            Ok(()) => return,
+            Err(error) if creation_is_pending(&error) => {}
+            Err(error) => panic!("native preview webview creation failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native preview webview creation timed out for {key}"
+        );
+        yield_for(cx, RAPID_DELAY).await;
+    }
+}
+
+/// Wait until wry's Windows future has returned `Pending` at least once. The
+/// panel's smoke-only pause keeps that already-polled future alive long enough
+/// for the harness to deterministically remove its generation.
+#[cfg(target_os = "windows")]
+async fn start_and_wait_until_in_flight(
+    shell: &Entity<AppShell>,
+    window: WindowHandle<OverlayHost>,
+    key: &str,
+    url: &str,
+    cx: &mut AsyncApp,
+) {
+    let deadline = Instant::now() + CREATION_TIMEOUT;
+    loop {
+        match create_once(shell, window, key, url, cx) {
+            Err(error) if error == CREATION_IN_FLIGHT => return,
+            Err(error) if creation_is_pending(&error) => {}
+            Ok(()) => panic!("drop-during-create completed before teardown could race it"),
+            Err(error) => panic!("native preview webview creation failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native preview webview creation never entered flight"
+        );
+        yield_for(cx, RAPID_DELAY).await;
+    }
+}
+
 pub async fn run(
     watchdog: Watchdog,
     shell: Entity<AppShell>,
@@ -86,14 +159,7 @@ pub async fn run(
     cx: &mut AsyncApp,
 ) {
     watchdog.start_phase("create-first");
-    window
-        .update(cx, |_, window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell.preview_smoke_create(KEYS[0], "about:blank", window, cx)
-            })
-        })
-        .expect("preview smoke window closed during create-first")
-        .expect("native preview webview creation failed");
+    create_and_wait(&shell, window, KEYS[0], "about:blank", cx).await;
     yield_for(cx, STEP_DELAY).await;
     watchdog.finish_phase("create-first");
 
@@ -110,14 +176,7 @@ pub async fn run(
 
     watchdog.start_phase("multi-create");
     for key in &KEYS[1..] {
-        window
-            .update(cx, |_, window, cx| {
-                shell.update(cx, |shell, cx| {
-                    shell.preview_smoke_create(key, "about:blank", window, cx)
-                })
-            })
-            .expect("preview smoke window closed during multi-create")
-            .expect("native preview webview creation failed");
+        create_and_wait(&shell, window, key, "about:blank", cx).await;
         yield_for(cx, STEP_DELAY).await;
     }
     watchdog.finish_phase("multi-create");
@@ -145,14 +204,7 @@ pub async fn run(
     watchdog.start_phase("navigate-all");
     for (ix, key) in KEYS.iter().enumerate() {
         let url = format!("about:blank#preview-smoke-{ix}");
-        window
-            .update(cx, |_, window, cx| {
-                shell.update(cx, |shell, cx| {
-                    shell.preview_smoke_create(key, &url, window, cx)
-                })
-            })
-            .expect("preview smoke window closed during navigate-all")
-            .expect("native preview navigation failed");
+        create_and_wait(&shell, window, key, &url, cx).await;
         yield_for(cx, STEP_DELAY).await;
     }
     watchdog.finish_phase("navigate-all");
@@ -166,26 +218,50 @@ pub async fn run(
     watchdog.finish_phase("drop-one");
 
     watchdog.start_phase("drop-during-create");
-    let close_window = window;
-    window
-        .update(cx, |_, window, cx| {
-            shell.update(cx, |shell, cx| {
-                cx.defer(move |cx| {
-                    let _ = close_window.update(cx, |_, window, _| window.remove_window());
-                });
-                shell.preview_smoke_create(
-                    "preview-smoke-drop-during-create",
-                    "about:blank#drop-during-create",
-                    window,
-                    cx,
-                )
-            })
-        })
-        .expect("preview smoke window closed before drop-during-create")
-        .expect("native preview webview creation failed");
-    drop(shell);
+    #[cfg(target_os = "windows")]
+    start_and_wait_until_in_flight(
+        &shell,
+        window,
+        DROP_DURING_CREATE_KEY,
+        "about:blank#drop-during-create",
+        cx,
+    )
+    .await;
+    #[cfg(not(target_os = "windows"))]
+    create_and_wait(
+        &shell,
+        window,
+        DROP_DURING_CREATE_KEY,
+        "about:blank#drop-during-create",
+        cx,
+    )
+    .await;
+    // Model a conversation switch that removes the old conversation's native
+    // child while its Windows creation future is still alive. Keep the primary
+    // window open so a premature process exit is observable as a missing phase.
+    shell.update(cx, |shell, cx| {
+        shell.preview_smoke_set_visible(Some(KEYS[1]), cx);
+        shell.preview_smoke_drop(DROP_DURING_CREATE_KEY, cx);
+    });
     yield_for(cx, STEP_DELAY).await;
     watchdog.finish_phase("drop-during-create");
+
+    watchdog.start_phase("recreate-after-inflight-drop");
+    // Reuse the exact key. Its replacement generation is serialized behind the
+    // cancelled raw build, so reaching Ready proves that stale completion was
+    // discarded and did not dead-end or overwrite the new slot.
+    create_and_wait(
+        &shell,
+        window,
+        DROP_DURING_CREATE_KEY,
+        "about:blank#replacement-after-drop",
+        cx,
+    )
+    .await;
+    shell.update(cx, |shell, cx| {
+        shell.preview_smoke_drop(DROP_DURING_CREATE_KEY, cx)
+    });
+    watchdog.finish_phase("recreate-after-inflight-drop");
 
     watchdog.start_phase("quit");
     watchdog.finish_phase("quit");
