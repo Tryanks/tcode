@@ -388,6 +388,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             let mut cx = HostCx::new(mailbox_tx, event_tx, pending);
             state.pump_orchestrate_requests(&mut cx);
             if services.background_startup_probes {
+                state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(&mut cx);

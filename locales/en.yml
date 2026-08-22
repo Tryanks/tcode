@@ -706,6 +706,8 @@ errors:
 notice:
   switched_branch: "Switched to %{branch}"
   thread_exported: "Exported thread to %{file}"
+  worktree_seeded: "Worktree seeded: %{copied} files copied, %{skipped} skipped"
+  worktree_seeded_limit: "Worktree seed limit reached after %{copied} files; skipped: %{skipped}"
   dirty_tree: "Working tree has uncommitted changes"
   update_available: "Update Available: %{provider} v%{version}"
   tcode_update_available: "tcode %{version} available"

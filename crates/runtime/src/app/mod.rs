@@ -59,9 +59,9 @@ use tcode_services::acp_registry::{
 };
 use tcode_services::export;
 use tcode_services::git::{
-    CheckoutError, checkout_if_clean, commit_diff_context, create_git_worktree, list_git_branches,
-    perform_action, read_git_branch, read_status, remove_git_worktree, run_claude_headless,
-    worktree_path_for,
+    CheckoutError, checkout_if_clean, cleanup_orphaned_worktrees, commit_diff_context,
+    create_git_worktree, list_git_branches, perform_action, read_git_branch, read_status,
+    remove_git_worktree, run_claude_headless, worktree_path_for,
 };
 use tcode_services::import::{
     ExternalImportUpdate, ExternalRoots, ImportOutcome, existing_external_ids, import_thread,
