@@ -252,6 +252,17 @@ pub struct GitActionRequest {
     pub feature_branch: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeWorktreeFailure {
+    Missing,
+    DirtyWorktree,
+    DestinationDetached,
+    DirtyDestination,
+    DivergedConflict,
+    Git,
+}
+
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
@@ -353,5 +364,11 @@ pub enum RuntimeNotice {
         copied_files: usize,
         skipped: Vec<String>,
         limit_reached: bool,
+    },
+    WorktreeMergedFastForward,
+    WorktreeMergedCommit,
+    WorktreeMergeFailed {
+        reason: MergeWorktreeFailure,
+        detail: Option<String>,
     },
 }
