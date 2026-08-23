@@ -29,6 +29,11 @@ struct DispatchParams {
     cwd: Option<String>,
     #[serde(default)]
     #[schemars(
+        description = "Override Settings → Orchestrate child-worktree isolation for this dispatch. When true and cwd resolves to a Git repository root, the child runs on branch tcode/<thread-id> in a dedicated worktree. The response includes its path and branch. Non-Git cwd or creation failure falls back to cwd and reports a warning."
+    )]
+    worktree: Option<bool>,
+    #[serde(default)]
+    #[schemars(
         description = "Override the auto-archive policy for this child. By default (per Settings → Orchestrate) a completed child is archived once its terminal result reaches you; failed children always stay visible. Set false to keep a completed child in the sidebar; send to an archived child unarchives it."
     )]
     archive_on_complete: Option<bool>,
@@ -82,7 +87,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries."
+        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries."
     )]
     async fn dispatch(
         &self,
@@ -99,6 +104,7 @@ impl OrchestrateTools {
                 title: p.title,
                 brief: p.brief,
                 cwd: p.cwd,
+                worktree: p.worktree,
                 archive_on_complete: p.archive_on_complete,
                 result_max_chars: p.result_max_chars,
             })

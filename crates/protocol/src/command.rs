@@ -40,6 +40,7 @@ pub enum SettingsPatch {
     AutoArchiveKeepCount(usize),
     AutoArchiveNoticeShown(bool),
     Orchestrate(OrchestrateSettings),
+    OrchestrateChildWorktrees(bool),
     ComputerUse(ComputerUseSettings),
     Browser(BrowserSettings),
     TitleGeneration(TitleGenerationSettings),
@@ -195,6 +196,9 @@ pub enum Command {
     DeleteSession {
         session_id: String,
         remove_worktree: bool,
+    },
+    MergeWorktree {
+        session_id: String,
     },
     DeleteProject {
         project_id: String,

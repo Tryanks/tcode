@@ -323,6 +323,9 @@ struct ThreadRename(String);
 struct ThreadFork(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
+struct ThreadMergeWorktree(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
 struct ThreadMarkUnread(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
@@ -638,6 +641,17 @@ impl SessionsSidebar {
         let id = action.0.clone();
         self.store.update(cx, |store, _cx| {
             store.fork_thread(id);
+        });
+    }
+
+    fn on_merge_worktree(
+        &mut self,
+        action: &ThreadMergeWorktree,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.update(cx, |store, _cx| {
+            store.merge_worktree(action.0.clone());
         });
     }
 
@@ -1578,6 +1592,7 @@ impl SessionsSidebar {
         session_id: String,
         running: bool,
         can_fork: bool,
+        is_worktree: bool,
     ) -> gpui::AnyElement {
         row.context_menu(move |menu, _window, _cx| {
             let id = session_id.clone();
@@ -1589,6 +1604,12 @@ impl SessionsSidebar {
                 menu.menu(
                     crate::tr!("sidebar.ctx_fork").into_owned(),
                     Box::new(ThreadFork(id.clone())),
+                )
+            })
+            .when(is_worktree, |menu| {
+                menu.menu(
+                    crate::tr!("sidebar.ctx_merge_worktree").into_owned(),
+                    Box::new(ThreadMergeWorktree(id.clone())),
                 )
             })
             .menu(
@@ -1724,7 +1745,7 @@ impl SessionsSidebar {
             })
         };
 
-        Self::thread_context_menu(row, session_id, working, state.menu_can_fork)
+        Self::thread_context_menu(row, session_id, working, state.menu_can_fork, is_worktree)
     }
 
     fn render_flat_thread_right_slot(
@@ -1977,7 +1998,13 @@ impl SessionsSidebar {
             row.child(line_one).child(line_two)
         };
 
-        Self::thread_context_menu(row, session_id, working, state.menu_can_fork)
+        Self::thread_context_menu(
+            row,
+            session_id,
+            working,
+            state.menu_can_fork,
+            meta.worktree.is_some(),
+        )
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2238,6 +2265,7 @@ impl Render for SessionsSidebar {
             .text_color(cx.theme().sidebar_foreground)
             .on_action(cx.listener(Self::on_rename))
             .on_action(cx.listener(Self::on_fork))
+            .on_action(cx.listener(Self::on_merge_worktree))
             .on_action(cx.listener(Self::on_mark_unread))
             .on_action(cx.listener(Self::on_copy_path))
             .on_action(cx.listener(Self::on_copy_id))

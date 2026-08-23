@@ -48,10 +48,11 @@ use tcode_core::ui::{
 };
 use tcode_protocol::ThreadExportFormat;
 use tcode_protocol::{
-    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot, PathEntry,
-    ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
-    RecentDir, ServerEvent, SessionEventRecord, SessionStatus, TcodeUpdateStatus,
-    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot,
+    MergeWorktreeFailure, PathEntry, ProviderVersionStatus as ProtocolProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RecentDir, ServerEvent, SessionEventRecord,
+    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -59,9 +60,10 @@ use tcode_services::acp_registry::{
 };
 use tcode_services::export;
 use tcode_services::git::{
-    CheckoutError, checkout_if_clean, cleanup_orphaned_worktrees, commit_diff_context,
-    create_git_worktree, list_git_branches, perform_action, read_git_branch, read_status,
-    remove_git_worktree, run_claude_headless, worktree_path_for,
+    CheckoutError, MergeWorktreeError, MergeWorktreeOutcome, checkout_if_clean,
+    cleanup_orphaned_worktrees, commit_diff_context, create_git_worktree, list_git_branches,
+    merge_worktree_back, perform_action, read_git_branch, read_status, remove_git_worktree,
+    run_claude_headless, run_git, worktree_path_for,
 };
 use tcode_services::import::{
     ExternalImportUpdate, ExternalRoots, ImportOutcome, existing_external_ids, import_thread,

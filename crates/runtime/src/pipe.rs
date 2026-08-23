@@ -647,6 +647,7 @@ fn dispatch_command(
         }
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
         Command::ForkThread { id } => app.fork_thread(&id, cx),
+        Command::MergeWorktree { session_id } => app.merge_worktree(&session_id, cx),
         Command::DeleteSession {
             session_id,
             remove_worktree,

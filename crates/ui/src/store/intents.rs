@@ -80,7 +80,17 @@ impl WorkspaceStore {
             self.set_auto_archive_notice_shown(after.auto_archive_notice_shown);
         }
         if before.orchestrate != after.orchestrate {
-            self.patch_settings(SettingsPatch::Orchestrate(after.orchestrate));
+            let mut before_without_child_worktrees = before.orchestrate.clone();
+            let mut after_without_child_worktrees = after.orchestrate.clone();
+            before_without_child_worktrees.child_worktrees = false;
+            after_without_child_worktrees.child_worktrees = false;
+            if before_without_child_worktrees == after_without_child_worktrees {
+                self.patch_settings(SettingsPatch::OrchestrateChildWorktrees(
+                    after.orchestrate.child_worktrees,
+                ));
+            } else {
+                self.patch_settings(SettingsPatch::Orchestrate(after.orchestrate));
+            }
         }
         if before.computer_use != after.computer_use {
             self.patch_settings(SettingsPatch::ComputerUse(after.computer_use));
@@ -160,6 +170,9 @@ impl WorkspaceStore {
     }
     pub fn fork_thread(&mut self, id: String) {
         self.dispatch(Command::ForkThread { id });
+    }
+    pub fn merge_worktree(&mut self, session_id: String) {
+        self.dispatch(Command::MergeWorktree { session_id });
     }
     pub fn delete_session(&mut self, session_id: String, remove_worktree: bool) {
         self.dispatch(Command::DeleteSession {

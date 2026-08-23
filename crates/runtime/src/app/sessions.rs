@@ -246,6 +246,58 @@ impl AppState {
         }
     }
 
+    /// Merge a clean dedicated-worktree branch into its clean original checkout
+    /// without blocking the host owner thread.
+    pub fn merge_worktree(&mut self, session_id: &str, cx: &mut HostCx) {
+        let Some(meta) = self.find_meta(session_id) else {
+            return;
+        };
+        let Some(worktree) = meta.worktree else {
+            return;
+        };
+        let destination = worktree.root_project_path;
+        let worktree_path = meta.cwd;
+        let branch = worktree.branch;
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let result = host_cx
+                .unblock(move || merge_worktree_back(&destination, &worktree_path, &branch))
+                .await;
+            host_cx.enqueue(move |_state, cx| {
+                let notice = match result {
+                    Ok(MergeWorktreeOutcome::FastForward) => {
+                        RuntimeNotice::WorktreeMergedFastForward
+                    }
+                    Ok(MergeWorktreeOutcome::MergeCommit) => RuntimeNotice::WorktreeMergedCommit,
+                    Err(error) => {
+                        let (reason, detail) = match error {
+                            MergeWorktreeError::WorktreeMissing => {
+                                (MergeWorktreeFailure::Missing, None)
+                            }
+                            MergeWorktreeError::DirtyWorktree => {
+                                (MergeWorktreeFailure::DirtyWorktree, None)
+                            }
+                            MergeWorktreeError::DestinationDetached => {
+                                (MergeWorktreeFailure::DestinationDetached, None)
+                            }
+                            MergeWorktreeError::DirtyDestination => {
+                                (MergeWorktreeFailure::DirtyDestination, None)
+                            }
+                            MergeWorktreeError::DivergedConflict => {
+                                (MergeWorktreeFailure::DivergedConflict, None)
+                            }
+                            MergeWorktreeError::Git(detail) => {
+                                (MergeWorktreeFailure::Git, Some(detail))
+                            }
+                        };
+                        RuntimeNotice::WorktreeMergeFailed { reason, detail }
+                    }
+                };
+                emit_runtime(cx, RuntimeEvent::Notice(notice));
+            });
+        });
+    }
+
     /// Toggle a project's collapsed state (persisted in settings).
     pub fn toggle_project_collapsed(&mut self, project_id: &str, cx: &mut HostCx) {
         let mut settings = self.settings.clone();
@@ -342,6 +394,9 @@ impl AppState {
                 settings.auto_archive_notice_shown = value;
             }
             tcode_protocol::SettingsPatch::Orchestrate(value) => settings.orchestrate = value,
+            tcode_protocol::SettingsPatch::OrchestrateChildWorktrees(value) => {
+                settings.orchestrate.child_worktrees = value;
+            }
             tcode_protocol::SettingsPatch::ComputerUse(value) => settings.computer_use = value,
             tcode_protocol::SettingsPatch::Browser(value) => settings.browser = value,
             tcode_protocol::SettingsPatch::TitleGeneration(value) => {

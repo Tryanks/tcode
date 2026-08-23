@@ -78,6 +78,9 @@ enum Action {
     ToggleTerminal,
     OpenPreview,
     CheckUpdates,
+    MergeWorktree {
+        session_id: String,
+    },
     ExportThread {
         session_id: String,
         title: String,
@@ -299,6 +302,15 @@ impl CommandPalette {
                 .into_iter()
                 .find(|meta| meta.id == session_id)
         {
+            if meta.worktree.is_some() {
+                push_action(
+                    crate::tr!("palette.merge_worktree").into_owned(),
+                    IconName::Inbox,
+                    Action::MergeWorktree {
+                        session_id: meta.id.clone(),
+                    },
+                );
+            }
             for (label, format) in [
                 (
                     crate::tr!("palette.export_jsonl").into_owned(),
@@ -446,6 +458,12 @@ impl CommandPalette {
             Action::CheckUpdates => {
                 self.store
                     .update(cx, |store, _cx| store.check_provider_versions());
+                self.close(cx);
+            }
+            Action::MergeWorktree { session_id } => {
+                self.store.update(cx, |store, _cx| {
+                    store.merge_worktree(session_id);
+                });
                 self.close(cx);
             }
             Action::ExportThread {

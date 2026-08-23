@@ -16,6 +16,7 @@ pub enum OrchestrateOp {
         title: String,
         brief: String,
         cwd: Option<String>,
+        worktree: Option<bool>,
         archive_on_complete: Option<bool>,
         result_max_chars: Option<u32>,
     },

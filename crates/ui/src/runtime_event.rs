@@ -1,5 +1,6 @@
 use agent::RewindMode;
 use tcode_core::git::GitAction;
+use tcode_protocol::MergeWorktreeFailure;
 use tcode_runtime::event::{
     GitActionRequest, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice, RuntimeOperationId,
     RuntimeToast,
@@ -10,8 +11,8 @@ use crate::toast::ToastKind;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RuntimeEventSeverity {
     Error,
-    Success,
     Warning,
+    Success,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +103,14 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
             (RuntimeEventSeverity::Error, message)
         }
         RuntimeEvent::Notice(notice) => {
+            let severity = if matches!(
+                notice,
+                RuntimeNotice::WorktreeMergeFailed { .. } | RuntimeNotice::ProviderMessage(_)
+            ) {
+                RuntimeEventSeverity::Warning
+            } else {
+                RuntimeEventSeverity::Success
+            };
             let message = match notice {
                 RuntimeNotice::ProviderMessage(message) => message.clone(),
                 RuntimeNotice::UpdateAvailable { provider, version } => crate::tr!(
@@ -163,12 +172,35 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                         .into_owned()
                     }
                 }
+                RuntimeNotice::WorktreeMergedFastForward => {
+                    crate::tr!("notice.worktree_merged_fast_forward").into_owned()
+                }
+                RuntimeNotice::WorktreeMergedCommit => {
+                    crate::tr!("notice.worktree_merged_commit").into_owned()
+                }
+                RuntimeNotice::WorktreeMergeFailed { reason, detail } => match reason {
+                    MergeWorktreeFailure::Missing => {
+                        crate::tr!("notice.worktree_merge_missing").into_owned()
+                    }
+                    MergeWorktreeFailure::DirtyWorktree => {
+                        crate::tr!("notice.worktree_merge_dirty_worktree").into_owned()
+                    }
+                    MergeWorktreeFailure::DestinationDetached => {
+                        crate::tr!("notice.worktree_merge_destination_detached").into_owned()
+                    }
+                    MergeWorktreeFailure::DirtyDestination => {
+                        crate::tr!("notice.worktree_merge_dirty_destination").into_owned()
+                    }
+                    MergeWorktreeFailure::DivergedConflict => {
+                        crate::tr!("notice.worktree_merge_conflict").into_owned()
+                    }
+                    MergeWorktreeFailure::Git => crate::tr!(
+                        "notice.worktree_merge_git_error",
+                        error = detail.as_deref().unwrap_or_default()
+                    )
+                    .into_owned(),
+                },
                 _ => format!("Unknown runtime notice: {notice:?}"),
-            };
-            let severity = if matches!(notice, RuntimeNotice::ProviderMessage(_)) {
-                RuntimeEventSeverity::Warning
-            } else {
-                RuntimeEventSeverity::Success
             };
             (severity, message)
         }
@@ -411,7 +443,21 @@ mod tests {
                 skipped: vec!["large.bin".into()],
                 limit_reached: true,
             },
+            RuntimeNotice::WorktreeMergedFastForward,
+            RuntimeNotice::WorktreeMergedCommit,
         ];
+        let warnings = [
+            MergeWorktreeFailure::Missing,
+            MergeWorktreeFailure::DirtyWorktree,
+            MergeWorktreeFailure::DestinationDetached,
+            MergeWorktreeFailure::DirtyDestination,
+            MergeWorktreeFailure::DivergedConflict,
+            MergeWorktreeFailure::Git,
+        ]
+        .map(|reason| RuntimeNotice::WorktreeMergeFailed {
+            reason,
+            detail: Some("git detail".into()),
+        });
         let retry = GitActionRequest {
             action: GitAction::CommitPush,
             message: Some("exact message".into()),
@@ -469,6 +515,11 @@ mod tests {
                     RuntimeEventSeverity::Success
                 };
                 assert_eq!(presented.severity, expected);
+                assert!(!presented.message.is_empty());
+            }
+            for warning in &warnings {
+                let presented = present_runtime_event(&RuntimeEvent::Notice(warning.clone()));
+                assert_eq!(presented.severity, RuntimeEventSeverity::Warning);
                 assert!(!presented.message.is_empty());
             }
             for toast in &toasts {
