@@ -5053,6 +5053,19 @@ fn plan_workspace_save_completes_after_background_executor_runs() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// Dispatch replies arrive from a real blocking thread, which
+/// `run_until_parked` does not wait for; poll with a bounded budget.
+fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<T>) -> T {
+    for _ in 0..500 {
+        cx.run_until_parked();
+        if let Ok(reply) = rx.try_recv() {
+            return reply;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("dispatch reply did not arrive within the polling budget");
+}
+
 #[test]
 fn orchestrate_dispatch_resolves_cwd_before_reply() {
     let cx = &mut TestAppContext::default();
@@ -5092,10 +5105,8 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
         "cwd resolution must not reply from the GPUI update"
     );
 
-    cx.run_until_parked();
-
     assert_eq!(
-        response.try_recv().unwrap().unwrap_err(),
+        recv_dispatch_reply(cx, &response).unwrap_err(),
         format!("invalid cwd: {}", missing.display())
     );
     let _ = std::fs::remove_dir_all(&root);
@@ -5141,9 +5152,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
             cx,
         );
     });
-    cx.run_until_parked();
-
-    let response = response.try_recv().unwrap().unwrap();
+    let response = recv_dispatch_reply(cx, &response).unwrap();
     let child_id = response["thread_id"].as_str().unwrap().to_string();
     let expected_branch = format!("tcode/{child_id}");
     let expected_path = worktree_path_for(&child_id);
