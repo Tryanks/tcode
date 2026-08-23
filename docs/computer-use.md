@@ -34,10 +34,12 @@ Core contract, inherited from pi-computer-use:
 - **Bounded output.** Model-visible text is capped; oversized results return a preview plus a
   continuation ref for `read_text`.
 
-Deliberate v1 deviations from pi-computer-use (documented so later work can close them):
-no OCR/`pictureOnly` nodes, no CDP browser roots (browser automation stays on the
+Deliberate deviations from pi-computer-use (documented so later work can close them): no
+Windows/UIAutomation backend, no CDP browser roots (browser automation stays on the
 `tcode_preview` server and the embedded WebView), no separate helper app (see below), and a
-simplified successor-diff heuristic.
+simplified successor-diff heuristic. The earlier no-OCR/`pictureOnly`-node deviation is resolved
+by raw-image pass-through for text-sparse accessibility trees. By maintainer decision this
+fallback does not run OCR or synthesize text nodes; the model reads the attached pixels directly.
 
 ## Architecture
 
@@ -60,6 +62,25 @@ simplified successor-diff heuristic.
 Unlike pi-computer-use, tcode needs **no helper app**: tcode is itself a signed `.app`, so
 Accessibility and Screen Recording grants attach directly to tcode. That removes helper
 install/signing/attribution handling entirely.
+
+## Text-sparse image fallback
+
+An observed window of at least 20,000 square screen points is considered text-sparse when fewer
+than three accessibility descendants expose a title, value, or description. The root window
+title is excluded. A sparse observation includes `text_sparse: true` so the agent knows the AX
+outline does not adequately describe the window.
+
+Image mode controls the raw screenshot attachment through the same capture path as other
+observations:
+
+- `auto` attaches one window screenshot only when the sparse rule triggers and Screen Recording
+  permission is available. Without permission, it returns the plain sparse tree and a warning.
+- `always` attaches one screenshot to every observation; sparse observations still include the
+  marker.
+- `never` never captures or attaches an image; sparse observations still include the marker.
+
+The window is captured at most once per observation. The fallback is intentionally OCR-free and
+does not add `pictureOnly` or other synthesized nodes.
 
 ## macOS permissions
 
@@ -102,5 +123,6 @@ own "Quit & Reopen" dialog. tcode therefore treats any permission flow as a pote
   grant permissions inside the VM, then inspect permission status via SSH.
 - CI (macOS/Linux/Windows) builds the platform fallback paths and runs the platform-neutral unit
   tests:
-  outline folding and search ranking, state-store eviction and staleness, tool schemas,
-  settings serde round-trips, and MCP registration wiring for all three provider paths.
+  outline folding, search ranking, text-sparse fallback decisions and observation shape,
+  state-store eviction and staleness, tool schemas, settings serde round-trips, and MCP
+  registration wiring for all three provider paths.

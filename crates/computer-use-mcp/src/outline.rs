@@ -9,6 +9,8 @@ pub const MAX_MODEL_LINES: usize = 2_000;
 pub const PREVIEW_BYTES: usize = 16 * 1024;
 pub const PAGE_BYTES: usize = 16 * 1024;
 pub const SEARCH_LIMIT: usize = 20;
+pub const TEXT_SPARSE_DESCENDANT_THRESHOLD: usize = 3;
+pub const TEXT_SPARSE_MIN_FRAME_AREA: f64 = 20_000.0;
 
 const FOLDED_DEPTH: usize = 7;
 const FOLDED_LINES: usize = 500;
@@ -123,6 +125,30 @@ pub fn interactive_count(root: &UiNode) -> usize {
         count += interactive_count(child);
     }
     count
+}
+
+/// A large accessibility tree is text-sparse when fewer than three of its
+/// descendants expose a title, value, or description. The root window's own
+/// title is deliberately excluded because it does not describe the contents.
+pub fn is_text_sparse(root: &UiNode) -> bool {
+    let area = root.frame.w * root.frame.h;
+    root.frame.has_area()
+        && area.is_finite()
+        && area >= TEXT_SPARSE_MIN_FRAME_AREA
+        && text_bearing_descendant_count(root) < TEXT_SPARSE_DESCENDANT_THRESHOLD
+}
+
+fn text_bearing_descendant_count(root: &UiNode) -> usize {
+    root.children
+        .iter()
+        .map(|child| usize::from(node_has_text(child)) + text_bearing_descendant_count(child))
+        .sum()
+}
+
+fn node_has_text(node: &UiNode) -> bool {
+    [&node.title, &node.value, &node.description]
+        .into_iter()
+        .any(|text| !text.trim().is_empty())
 }
 
 pub fn assign_refs(root: &mut UiNode) {
@@ -719,6 +745,49 @@ mod tests {
         let diff = diff_trees(&old, &new);
         assert!(diff.text.contains("+1 ~1 -0"));
         assert!(!diff.use_full_view);
+    }
+
+    fn framed_tree(children: Vec<UiNode>) -> UiNode {
+        UiNode {
+            frame: Frame {
+                x: 20.0,
+                y: 30.0,
+                w: 800.0,
+                h: 600.0,
+            },
+            children,
+            ..node("window", "Root window title", Vec::new())
+        }
+    }
+
+    #[test]
+    fn large_tree_with_fewer_than_three_text_descendants_is_sparse() {
+        let tree = framed_tree(vec![
+            node("button", "Menu", Vec::new()),
+            node("static_text", "Score", Vec::new()),
+        ]);
+
+        assert!(is_text_sparse(&tree));
+    }
+
+    #[test]
+    fn large_tree_with_three_text_descendants_is_adequate() {
+        let tree = framed_tree(vec![
+            node("button", "Menu", Vec::new()),
+            node("static_text", "Score", Vec::new()),
+            node("static_text", "Ready", Vec::new()),
+        ]);
+
+        assert!(!is_text_sparse(&tree));
+    }
+
+    #[test]
+    fn small_tree_is_not_sparse_even_without_text_descendants() {
+        let mut tree = framed_tree(Vec::new());
+        tree.frame.w = 100.0;
+        tree.frame.h = 100.0;
+
+        assert!(!is_text_sparse(&tree));
     }
 
     #[test]
