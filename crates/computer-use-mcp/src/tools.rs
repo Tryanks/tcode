@@ -1070,12 +1070,11 @@ mod dispatch {
         CallToolResult::error(vec![ContentBlock::text(message)])
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     mod tests {
         use super::*;
         use crate::outline::Frame;
 
-        #[cfg(target_os = "macos")]
         fn sparse_observation(screenshot_png: Option<Vec<u8>>) -> RootObservation {
             RootObservation {
                 root: RootInfo {
