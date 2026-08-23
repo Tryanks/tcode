@@ -70,6 +70,16 @@ pub enum CapturePolicy {
     IfSparse,
 }
 
+impl CapturePolicy {
+    pub fn should_capture(self, text_sparse: bool) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Always => true,
+            Self::IfSparse => text_sparse,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ObserveRequest {
     pub semantic: bool,
@@ -80,6 +90,7 @@ pub struct ObserveRequest {
 pub struct RootObservation {
     pub root: RootInfo,
     pub tree: UiNode,
+    pub text_sparse: bool,
     pub screenshot_png: Option<Vec<u8>>,
 }
 
