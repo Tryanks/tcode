@@ -485,10 +485,16 @@ impl McpRegistration {
     /// server. Codex rejects a literal `bearer_token` for HTTP, so the token
     /// rides in `http_headers.Authorization` instead (verified against
     /// codex `config/src/mcp_types.rs`). Returns the full `key=value` argument.
+    ///
+    /// `default_tools_approval_mode = "approve"` exempts tcode's own servers
+    /// from codex's MCP tool-call approval (added in codex 0.149): these
+    /// servers are trusted by construction, and the prompt otherwise surfaces
+    /// as an `mcpServer/elicitation/request` whose form schema tcode cannot
+    /// render, so it auto-declines and the tool call fails.
     pub fn codex_config_override(&self) -> String {
         // TOML basic strings; our url/token are ASCII with no quotes/backslashes.
         format!(
-            "mcp_servers.{name}={{url=\"{url}\",http_headers={{Authorization=\"Bearer {token}\"}}}}",
+            "mcp_servers.{name}={{url=\"{url}\",http_headers={{Authorization=\"Bearer {token}\"}},default_tools_approval_mode=\"approve\"}}",
             name = self.name,
             url = self.url,
             token = self.bearer_token,
@@ -1575,6 +1581,11 @@ mod mcp_registration_tests {
             Some("Bearer abc123")
         );
         assert!(table.get("bearer_token").is_none());
+        // tcode's own servers are exempt from codex's MCP tool-call approval.
+        assert_eq!(
+            table["default_tools_approval_mode"].as_str(),
+            Some("approve")
+        );
     }
 }
 
