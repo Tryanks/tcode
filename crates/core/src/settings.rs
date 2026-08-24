@@ -583,6 +583,7 @@ pub enum SettingsPatch {
     SkipDeleteConfirmation(bool),
     AutoOpenTaskPanel(bool),
     ProviderUpdateChecksDisabled(bool),
+    InactiveFrameThrottleDisabled(bool),
     AutoArchiveDisabled(bool),
     AutoArchiveMaxIdleDays(u32),
     AutoArchiveKeepCount(usize),
@@ -669,6 +670,10 @@ pub struct Settings {
     /// on) even for legacy settings files that lack the field.
     #[serde(default)]
     pub provider_update_checks_disabled: bool,
+    /// Whether inactive-window frame throttling is DISABLED. Stored inverted so
+    /// the throttle defaults to on even for legacy settings files that lack the field.
+    #[serde(default)]
+    pub inactive_frame_throttle_disabled: bool,
     /// Whether automatic archiving is DISABLED. Stored inverted so the feature
     /// defaults to on even for legacy settings files that lack the field.
     #[serde(default)]
@@ -751,6 +756,7 @@ impl Default for Settings {
             skip_delete_confirmation: false,
             auto_open_task_panel: false,
             provider_update_checks_disabled: false,
+            inactive_frame_throttle_disabled: false,
             auto_archive_disabled: false,
             auto_archive_max_idle_days: default_auto_archive_max_idle_days(),
             auto_archive_keep_count: default_auto_archive_keep_count(),
@@ -783,6 +789,9 @@ impl Settings {
             SettingsPatch::AutoOpenTaskPanel(value) => self.auto_open_task_panel = value,
             SettingsPatch::ProviderUpdateChecksDisabled(value) => {
                 self.provider_update_checks_disabled = value;
+            }
+            SettingsPatch::InactiveFrameThrottleDisabled(value) => {
+                self.inactive_frame_throttle_disabled = value;
             }
             SettingsPatch::AutoArchiveDisabled(value) => self.auto_archive_disabled = value,
             SettingsPatch::AutoArchiveMaxIdleDays(value) => {

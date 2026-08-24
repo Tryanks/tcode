@@ -346,7 +346,9 @@ fn main() {
                 // Throttle background redraws (spinners, streaming output) to
                 // ~2 FPS while the window is inactive; gpui lifts the cap the
                 // moment the window is active or receiving high-rate input.
-                inactive_frame_interval: Some(Duration::from_millis(500)),
+                // This setting is captured at window creation and requires a restart.
+                inactive_frame_interval: (!initial_settings.inactive_frame_throttle_disabled)
+                    .then(|| Duration::from_millis(500)),
                 ..Default::default()
             };
 

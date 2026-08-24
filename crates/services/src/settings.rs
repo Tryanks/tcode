@@ -182,6 +182,7 @@ mod tests {
             skip_delete_confirmation: true,
             auto_open_task_panel: true,
             provider_update_checks_disabled: true,
+            inactive_frame_throttle_disabled: true,
             auto_archive_disabled: false,
             auto_archive_max_idle_days: 7,
             auto_archive_keep_count: 30,
