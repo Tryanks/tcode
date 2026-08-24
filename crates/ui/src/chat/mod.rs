@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) mod components;
 mod model;
+mod residency;
 
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
@@ -51,6 +52,9 @@ use self::model::{
     user_visible_text, work_log_auto_expands, work_log_capsule_label, work_log_counts,
     work_log_outcome, work_log_row_entries,
 };
+use self::residency::{
+    MarkdownEntry, ResidencyInput, decide, tail_turn_window, viewport_turn_window,
+};
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
 };
@@ -61,18 +65,6 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
-/// Before GPUI reports its exact visible range, eight turns is comfortably
-/// more than a typical chat viewport. Its list also pre-measures four viewport
-/// heights, so the wider eviction band keeps warm rows resident without tying
-/// Markdown lifetime to measurement.
-const MARKDOWN_VIEWPORT_TURN_HINT: usize = 8;
-const MARKDOWN_BUILD_MARGIN_TURNS: usize = 8;
-/// Three build margins prevent back-and-forth scrolling from rebuilding the
-/// same parsed documents at the edge of the warm window.
-const MARKDOWN_EVICT_MARGIN_TURNS: usize = 24;
-/// The composer-adjacent tail stays ready even while inspecting old turns.
-const MARKDOWN_TAIL_PIN_TURNS: usize = 2;
-
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -228,8 +220,7 @@ impl ChatView {
                 offset_in_item: px(0.),
             });
             self.highlighted_turn = Some(turn);
-            self.markdown_visible_turns =
-                turn..(turn + MARKDOWN_VIEWPORT_TURN_HINT).min(self.turn_items.len());
+            self.markdown_visible_turns = viewport_turn_window(turn, self.turn_items.len());
             self.markdown_scroll_top = Some(turn);
             if let Some(session_id) = self.session_key.as_deref() {
                 self.workspace_store.update(cx, |store, _cx| {
@@ -238,7 +229,7 @@ impl ChatView {
             }
         }
 
-        self.sync_markdown_residency(cx);
+        self.sync_markdown_residency(requested_turn, cx);
 
         // Keep a 100ms ticker alive while a turn runs so the live elapsed timer
         // advances at decisecond precision; dropping it cancels the task.
@@ -256,97 +247,103 @@ impl ChatView {
         }
     }
 
-    fn sync_markdown_residency(&mut self, cx: &mut Context<Self>) {
+    fn sync_markdown_residency(
+        &mut self,
+        one_shot_turn_target: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let turn_count = self.turn_items.len();
-        let build_turns = expand_turn_window(
-            self.markdown_visible_turns.clone(),
-            MARKDOWN_BUILD_MARGIN_TURNS,
-            turn_count,
-        );
-        let keep_turns = expand_turn_window(
-            self.markdown_visible_turns.clone(),
-            MARKDOWN_EVICT_MARGIN_TURNS,
-            turn_count,
-        );
-        let tail_start = turn_count.saturating_sub(MARKDOWN_TAIL_PIN_TURNS);
-        let (texts, keep_ids) = self
+        // Auto-scroll can move many rows during a drag. Do not retire any
+        // participant until mouse-up; completed-selection participants remain
+        // pinned individually below so copy keeps its full projection.
+        let mut selection_drag_active = false;
+        let mut selection_participants = HashSet::new();
+        for (id, md) in &self.md_states {
+            let state = md.state.read(cx);
+            let selection = state.selection_handle();
+            let snapshot = selection.snapshot(cx);
+            selection_drag_active |= snapshot
+                .as_ref()
+                .is_some_and(|selection| selection.is_selecting());
+            if snapshot.is_some() || selection.has_local_selection(cx) {
+                selection_participants.insert(id.clone());
+            }
+        }
+        let resident_ids = self.md_states.keys().cloned().collect();
+        let (texts, decisions) = self
             .workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
-                let pinned = |turn: usize| {
-                    (turn_count > 0 && turn >= tail_start)
-                        || timeline.turns.get(turn).is_some_and(|turn| turn.running)
-                        || (timeline.turn_running
-                            && turn_count.checked_sub(1).is_some_and(|last| turn == last))
-                };
-                let mut texts = Vec::new();
-                let mut keep_ids = HashSet::new();
+                let mut entries = Vec::new();
                 for entry in &timeline.entries {
-                    let keep = keep_turns.contains(&entry.turn) || pinned(entry.turn);
-                    let build = build_turns.contains(&entry.turn) || pinned(entry.turn);
-                    if !keep && !build {
+                    let markdown_bearing = matches!(
+                        entry.content,
+                        EntryContent::Item(ItemContent::AssistantMessage { .. })
+                            | EntryContent::Item(ItemContent::Reasoning { .. })
+                    ) || user_content(&entry.content).is_some();
+                    if markdown_bearing {
+                        entries.push(MarkdownEntry {
+                            id: entry.id.clone(),
+                            turn: entry.turn,
+                            turn_running: timeline
+                                .turns
+                                .get(entry.turn)
+                                .is_some_and(|turn| turn.running),
+                        });
+                    }
+                }
+                if let Some(plan) = &timeline.proposed_plan {
+                    entries.push(MarkdownEntry {
+                        id: format!("plan:{}", plan.item_id),
+                        turn: plan.turn,
+                        turn_running: timeline
+                            .turns
+                            .get(plan.turn)
+                            .is_some_and(|turn| turn.running),
+                    });
+                }
+                let decisions = decide(ResidencyInput {
+                    turn_count,
+                    visible_turns: self.markdown_visible_turns.clone(),
+                    one_shot_turn_target,
+                    entries: &entries,
+                    stream_running: timeline.turn_running,
+                    resident_ids: &resident_ids,
+                    selection_participants: &selection_participants,
+                    selection_drag_active,
+                });
+                let mut texts = Vec::new();
+                for entry in &timeline.entries {
+                    if !decisions.build.contains(&entry.id) {
                         continue;
                     }
                     match &entry.content {
                         EntryContent::Item(ItemContent::AssistantMessage { text })
                         | EntryContent::Item(ItemContent::Reasoning { text }) => {
-                            if keep {
-                                keep_ids.insert(entry.id.clone());
-                            }
-                            if build {
-                                texts.push((entry.turn, entry.id.clone(), text.clone()));
-                            }
+                            texts.push((entry.turn, entry.id.clone(), text.clone()));
                         }
                         content => {
                             let Some((text, _, context_len, _)) = user_content(content) else {
                                 continue;
                             };
-                            if keep {
-                                keep_ids.insert(entry.id.clone());
-                            }
-                            if build {
-                                texts.push((
-                                    entry.turn,
-                                    entry.id.clone(),
-                                    plain_text_as_markdown(user_visible_text(text, context_len)),
-                                ));
-                            }
+                            texts.push((
+                                entry.turn,
+                                entry.id.clone(),
+                                plain_text_as_markdown(user_visible_text(text, context_len)),
+                            ));
                         }
                     }
                 }
                 if let Some(plan) = &timeline.proposed_plan {
                     let id = format!("plan:{}", plan.item_id);
-                    if keep_turns.contains(&plan.turn) || pinned(plan.turn) {
-                        keep_ids.insert(id.clone());
-                    }
-                    if build_turns.contains(&plan.turn) || pinned(plan.turn) {
+                    if decisions.build.contains(&id) {
                         texts.push((plan.turn, id, plan.markdown.clone()));
                     }
                 }
-                (texts, keep_ids)
+                (texts, decisions)
             })
             .unwrap_or_default();
-
-        // Auto-scroll can move many rows during a drag. Do not retire any
-        // participant until mouse-up; completed-selection participants remain
-        // pinned individually below so copy keeps its full projection.
-        let selection_drag_active = self.md_states.values().any(|md| {
-            md.state
-                .read(cx)
-                .selection_handle()
-                .snapshot(cx)
-                .is_some_and(|selection| selection.is_selecting())
-        });
-        if !selection_drag_active {
-            self.md_states.retain(|id, md| {
-                if keep_ids.contains(id) {
-                    return true;
-                }
-                let state = md.state.read(cx);
-                let selection = state.selection_handle();
-                selection.snapshot(cx).is_some() || selection.has_local_selection(cx)
-            });
-        }
+        self.md_states.retain(|id, _| !decisions.evict.contains(id));
 
         let mut rebuilt_turns = HashSet::new();
         for (turn, id, text) in texts {
@@ -389,7 +386,7 @@ impl ChatView {
             return;
         }
         self.markdown_visible_turns = visible_turns;
-        self.sync_markdown_residency(cx);
+        self.sync_markdown_residency(None, cx);
         cx.notify();
     }
 
@@ -403,9 +400,9 @@ impl ChatView {
         self.markdown_visible_turns = if scroll_top == turn_count {
             tail_turn_window(turn_count)
         } else {
-            scroll_top..(scroll_top + MARKDOWN_VIEWPORT_TURN_HINT).min(turn_count)
+            viewport_turn_window(scroll_top, turn_count)
         };
-        self.sync_markdown_residency(cx);
+        self.sync_markdown_residency(None, cx);
     }
 
     #[cfg(test)]
@@ -1873,19 +1870,6 @@ impl Render for ChatView {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn tail_turn_window(turn_count: usize) -> Range<usize> {
-    turn_count.saturating_sub(MARKDOWN_VIEWPORT_TURN_HINT)..turn_count
-}
-
-fn expand_turn_window(window: Range<usize>, margin: usize, turn_count: usize) -> Range<usize> {
-    window.start.min(turn_count).saturating_sub(margin)
-        ..window
-            .end
-            .min(turn_count)
-            .saturating_add(margin)
-            .min(turn_count)
-}
-
 /// Launch `zed <cwd>` detached; surface a notification if the CLI is missing.
 /// The leading icon for a git quick-action.
 fn git_action_icon(action: GitAction) -> Icon {
@@ -1958,29 +1942,7 @@ mod tests {
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[gpui::test]
-    fn long_session_keeps_tail_markdown_residency_bounded(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        let timeline = synthetic_markdown_timeline(240);
-        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
-        let (view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let resident = view.read_with(cx, |chat, _| chat.resident_markdown_state_count());
-        assert_eq!(resident, 48);
-        assert!(
-            resident <= 96,
-            "tail window retained {resident} MarkdownStates; expected at most 96"
-        );
-    }
-
-    #[gpui::test]
-    fn scrolling_to_old_turn_rebuilds_markdown_and_evicts_distant_tail(cx: &mut TestAppContext) {
+    fn chat_view_applies_markdown_residency_decisions(cx: &mut TestAppContext) {
         use gpui::{FollowMode, ListOffset, VisualTestContext, px, size};
 
         const TARGET: usize = 40;
@@ -1993,6 +1955,10 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        assert_eq!(
+            view.read_with(cx, |chat, _| chat.resident_markdown_state_count()),
+            48
+        );
         let list_state = view.read_with(cx, |chat, _| chat.list_state.clone());
         assert!(!view.read_with(cx, |chat, _| {
             chat.has_resident_markdown_state("assistant-40")
@@ -2041,57 +2007,6 @@ mod tests {
             scroll_top.offset_in_item,
             px(7.),
             "rebuilding the scroll-top turn changed the list anchor"
-        );
-    }
-
-    #[gpui::test]
-    fn turn_target_jump_rebuilds_an_evicted_region(cx: &mut TestAppContext) {
-        use gpui::{VisualTestContext, px, size};
-
-        const TARGET: usize = 20;
-        let timeline = synthetic_markdown_timeline(240);
-        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
-        let target_store = workspace_store.clone();
-        let (view, cx) = cx
-            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
-        let cx: &mut VisualTestContext = cx;
-        cx.simulate_resize(size(px(1_024.), px(700.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        assert!(!view.read_with(cx, |chat, _| {
-            chat.has_resident_markdown_state("assistant-20")
-        }));
-
-        target_store.update(cx, |store, cx| {
-            store.select_session_at_turn(session_id.clone(), TARGET);
-            cx.notify();
-        });
-        cx.run_until_parked();
-
-        let (highlighted, resident, target_resident, distant_tail_evicted, scroll_top) = view
-            .read_with(cx, |chat, _| {
-                (
-                    chat.highlighted_turn,
-                    chat.resident_markdown_state_count(),
-                    chat.has_resident_markdown_state("assistant-20"),
-                    !chat.has_resident_markdown_state("assistant-230"),
-                    chat.list_state.logical_scroll_top(),
-                )
-            });
-        assert_eq!(highlighted, Some(TARGET));
-        assert_eq!(resident, 78);
-        assert!(target_resident, "the targeted turn was not rebuilt");
-        assert!(
-            distant_tail_evicted,
-            "the target jump retained a tail state beyond the hysteresis band"
-        );
-        assert_eq!(scroll_top.item_ix, TARGET);
-        assert_eq!(scroll_top.offset_in_item, px(0.));
-        assert_eq!(
-            target_store.read_with(cx, |store, _| store.pending_chat_turn(&session_id)),
-            None,
-            "the one-shot target was not consumed"
         );
     }
 
