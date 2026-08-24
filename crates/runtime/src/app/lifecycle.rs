@@ -109,7 +109,7 @@ impl AppState {
         let meta = active.meta.clone();
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();
-        let preview_registration = if meta.provider.caps().preview_mcp {
+        let preview_registration = if meta.provider.caps().mcp_servers {
             self.preview_registration_for(&meta)
         } else {
             None

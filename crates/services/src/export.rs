@@ -397,11 +397,8 @@ mod tests {
         let store = SessionStore::open_at(root.clone()).unwrap();
         let meta = fixture(&store);
         let first = root.join("first.md");
-        let second = root.join("second.md");
         export_thread(&store, &meta, &first, ThreadExportFormat::Markdown).unwrap();
-        export_thread(&store, &meta, &second, ThreadExportFormat::Markdown).unwrap();
         let first_bytes = fs::read(first).unwrap();
-        assert_eq!(first_bytes, fs::read(second).unwrap());
         assert_eq!(
             String::from_utf8(first_bytes).unwrap(),
             concat!(

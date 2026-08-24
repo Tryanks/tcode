@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, MutexGuard, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -27,20 +27,10 @@ use rio_vt::{
 
 use crate::{
     DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, SelectedText, SelectionKind, SelectionSide,
-    TermSnapshot, hyperlinks,
+    TermSnapshot, hyperlinks, sync::MutexExt as _,
 };
 #[cfg(test)]
 use crate::{DEFAULT_COLS, DEFAULT_ROWS};
-
-trait MutexExt<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> MutexExt<T> for Mutex<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
 
 impl From<SelectionSide> for RioSide {
     fn from(side: SelectionSide) -> Self {
