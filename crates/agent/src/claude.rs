@@ -109,7 +109,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // Resolve model-scoped launch options from the persisted selections
     // (effort/context/fast/thinking are launch-time only; mid-session changes
     // ride the resume-restart machinery).
-    let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
+    let launch = ClaudeLaunchOptions::resolve(
+        opts.model.as_deref(),
+        &opts.option_selections,
+        opts.abort_on_model_fallback,
+    );
     let base_permission_mode = permission_mode_flag(opts.approval_mode);
     let launch_permission_mode = initial_permission_mode(opts.approval_mode, opts.interaction_mode);
     // Launch arguments are deliberately appended last, so the tracker must
@@ -312,8 +316,56 @@ struct ClaudeLaunchOptions {
     ultrathink: bool,
 }
 
+fn fallback_guard_models(model: &str) -> Vec<String> {
+    let base = model.split('[').next().unwrap_or(model);
+    let primary = if base.contains("fable") {
+        "fable"
+    } else {
+        base
+    };
+    let mut allow = vec![primary.to_string()];
+    for extra in ["sonnet", "haiku"] {
+        if !allow.iter().any(|m| m == extra) {
+            allow.push(extra.to_string());
+        }
+    }
+    allow
+}
+
+fn launch_settings_json(
+    model: Option<&str>,
+    abort_on_model_fallback: bool,
+    thinking: Option<bool>,
+    fast_mode: bool,
+    ultracode: bool,
+) -> Option<String> {
+    let mut settings = serde_json::Map::new();
+    if let Some(thinking) = thinking {
+        settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
+    }
+    if fast_mode {
+        settings.insert("fastMode".into(), json!(true));
+    }
+    if ultracode {
+        settings.insert("ultracode".into(), json!(true));
+    }
+    if abort_on_model_fallback && let Some(model) = model {
+        settings.insert(
+            "availableModels".into(),
+            json!(fallback_guard_models(model)),
+        );
+        settings.insert("switchModelsOnFlag".into(), json!(false));
+    }
+    (!settings.is_empty())
+        .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default())
+}
+
 impl ClaudeLaunchOptions {
-    fn resolve(model: Option<&str>, selections: &[OptionSelection]) -> Self {
+    fn resolve(
+        model: Option<&str>,
+        selections: &[OptionSelection],
+        abort_on_model_fallback: bool,
+    ) -> Self {
         let spec = model.and_then(model_spec);
         let raw_effort = selection_str(selections, "reasoningEffort");
         let resolved_effort = resolve_claude_effort(spec.as_ref(), raw_effort.as_deref());
@@ -346,18 +398,13 @@ impl ClaudeLaunchOptions {
             None
         };
 
-        let mut settings = serde_json::Map::new();
-        if let Some(thinking) = thinking {
-            settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
-        }
-        if fast_mode {
-            settings.insert("fastMode".into(), json!(true));
-        }
-        if ultracode {
-            settings.insert("ultracode".into(), json!(true));
-        }
-        let settings_json = (!settings.is_empty())
-            .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default());
+        let settings_json = launch_settings_json(
+            model,
+            abort_on_model_fallback,
+            thinking,
+            fast_mode,
+            ultracode,
+        );
 
         ClaudeLaunchOptions {
             model_id,
@@ -3220,6 +3267,7 @@ mod tests {
                     value: json!(true),
                 },
             ],
+            false,
         );
         assert_eq!(launch.model_id.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(launch.effort.as_deref(), Some("xhigh"));
@@ -3242,6 +3290,7 @@ mod tests {
                     value: json!("1m"),
                 },
             ],
+            false,
         );
         assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5[1m]"));
         assert_eq!(launch.effort, None);
@@ -3255,10 +3304,45 @@ mod tests {
                 id: "thinking".into(),
                 value: json!(true),
             }],
+            false,
         );
         let settings: Value =
             serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
         assert_eq!(settings["alwaysThinkingEnabled"], true);
+    }
+
+    #[test]
+    fn fallback_guard_settings_merge_with_launch_settings() {
+        let parse = |model, thinking, fast_mode, ultracode| -> Value {
+            serde_json::from_str(
+                launch_settings_json(Some(model), true, thinking, fast_mode, ultracode)
+                    .as_deref()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+
+        let fable = parse("claude-fable-5", Some(true), true, true);
+        assert_eq!(
+            fable["availableModels"],
+            json!(["fable", "sonnet", "haiku"])
+        );
+        assert_eq!(fable["switchModelsOnFlag"], false);
+        assert_eq!(fable["alwaysThinkingEnabled"], true);
+        assert_eq!(fable["fastMode"], true);
+        assert_eq!(fable["ultracode"], true);
+
+        let opus = parse("claude-opus-5", None, false, false);
+        assert_eq!(
+            opus["availableModels"],
+            json!(["claude-opus-5", "sonnet", "haiku"])
+        );
+
+        let opus_1m = parse("claude-opus-5[1m]", None, false, false);
+        assert_eq!(
+            opus_1m["availableModels"],
+            json!(["claude-opus-5", "sonnet", "haiku"])
+        );
     }
 
     #[test]

@@ -240,6 +240,8 @@ fn settings_patches_round_trip() {
         SettingsPatch::LiveCommandPanelDisabled(true),
         SettingsPatch::ProviderUpdateChecksDisabled(true),
         SettingsPatch::InactiveFrameThrottleDisabled(true),
+        SettingsPatch::AbortOnModelFallback(false),
+        SettingsPatch::FallbackReviewAdvisor(true),
         SettingsPatch::AutoArchiveDisabled(true),
         SettingsPatch::AutoArchiveMaxIdleDays(14),
         SettingsPatch::AutoArchiveKeepCount(42),
@@ -259,6 +261,9 @@ fn settings_patches_round_trip() {
         SettingsPatch::TitleGenerationProvider(ProviderKind::ClaudeCode),
         SettingsPatch::TitleGenerationModel("claude-sonnet".into()),
         SettingsPatch::TitleGenerationProfileId(Some("work".into())),
+        SettingsPatch::FallbackReviewProvider(ProviderKind::ClaudeCode),
+        SettingsPatch::FallbackReviewModel("claude-opus-5".into()),
+        SettingsPatch::FallbackReviewProfileId(Some("review".into())),
         SettingsPatch::SidebarLayout(SidebarLayout::Grouped),
     ];
 
