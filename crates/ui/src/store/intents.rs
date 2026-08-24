@@ -41,7 +41,7 @@ impl WorkspaceStore {
     }
 }
 
-// Settings intents (26).
+// Settings intents (27).
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
         self.dispatch(Command::PatchSettings { patch });
@@ -64,6 +64,9 @@ impl WorkspaceStore {
     }
     pub fn set_provider_update_checks_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ProviderUpdateChecksDisabled(value));
+    }
+    pub fn set_inactive_frame_throttle_disabled(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::InactiveFrameThrottleDisabled(value));
     }
     pub fn set_auto_archive_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AutoArchiveDisabled(value));

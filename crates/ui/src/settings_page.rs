@@ -703,6 +703,15 @@ impl SettingsPage {
                 cx,
                 |store, checked| store.set_provider_update_checks_disabled(!checked),
             ),
+            self.toggle_row(
+                "inactive-frame-throttle",
+                crate::tr!("settings.inactive_frame_throttle.title"),
+                crate::tr!("settings.inactive_frame_throttle.description"),
+                // Stored inverted: checked = enabled.
+                !settings.inactive_frame_throttle_disabled,
+                cx,
+                |store, checked| store.set_inactive_frame_throttle_disabled(!checked),
+            ),
         ];
         v_flex()
             .gap(px(24.))

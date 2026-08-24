@@ -225,6 +225,9 @@ settings:
   provider_updates:
     title: "提供方更新检查"
     description: "启动时检查 tcode 和提供方 CLI 的新版本。"
+  inactive_frame_throttle:
+    title: "后台帧率限制"
+    description: "窗口失焦时将刷新率降至约 2 FPS 以节省能耗。重启后生效。"
   title_generation:
     title: "对话命名模型"
     description: "选择负责为新对话命名的提供方和模型。命名请求始终使用 low 推理强度。"

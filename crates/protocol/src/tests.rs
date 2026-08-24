@@ -238,6 +238,7 @@ fn settings_patches_round_trip() {
         SettingsPatch::SkipDeleteConfirmation(true),
         SettingsPatch::AutoOpenTaskPanel(true),
         SettingsPatch::ProviderUpdateChecksDisabled(true),
+        SettingsPatch::InactiveFrameThrottleDisabled(true),
         SettingsPatch::AutoArchiveDisabled(true),
         SettingsPatch::AutoArchiveMaxIdleDays(14),
         SettingsPatch::AutoArchiveKeepCount(42),
