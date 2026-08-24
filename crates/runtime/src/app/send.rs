@@ -198,6 +198,15 @@ impl AppState {
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
+        if self
+            .residents
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.native_subagent.is_some())
+        {
+            log::warn!("refusing to send to a read-only native subagent mirror session");
+            return;
+        }
         if self.relay_confirmation().is_some() {
             log::warn!("send deferred until the pending conversation relay is confirmed");
             return;

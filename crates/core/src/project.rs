@@ -114,6 +114,11 @@ pub struct SessionMeta {
     /// Parent orchestrator thread for native child sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// Set when this session mirrors a provider-native subagent transcript.
+    /// Value is the parent-timeline Subagent item id (reattach key). Mirror
+    /// sessions are read-only: no composer, no provider process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_subagent: Option<String>,
     /// Whether this session receives the tcode_orchestrate MCP registration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub orchestrate_enabled: bool,
@@ -148,6 +153,7 @@ impl SessionMeta {
             interaction_mode: InteractionMode::default(),
             acp_agent_id: None,
             parent_session_id: None,
+            native_subagent: None,
             orchestrate_enabled: false,
             archive_on_complete: false,
             result_max_chars: None,

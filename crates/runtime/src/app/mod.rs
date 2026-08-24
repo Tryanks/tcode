@@ -10,9 +10,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agent::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalMode, Attachment, InteractionMode,
-    ItemContent, LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors, OptionSelection,
-    PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand, SessionHandle,
-    SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionDescriptors,
+    OptionSelection, PlanResolution, ProviderCommand, ProviderKind, RewindMode, SessionCommand,
+    SessionHandle, SessionOptions, ThreadItem, TurnOptions, TurnStatus, list_models,
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -251,6 +251,7 @@ mod send;
 mod sessions;
 mod snapshots;
 mod store_write;
+mod subagents;
 mod terminals;
 
 #[cfg(test)]
@@ -332,6 +333,8 @@ pub struct AppState {
     /// Kept here (rather than in persisted session metadata) because the
     /// provider response is the only authority that can complete it.
     pending_native_rewinds: HashMap<String, (String, RewindMode)>,
+    /// Provider-native subagent item ids mapped to their read-only mirror sessions.
+    native_subagent_sessions: HashMap<(String, String), String>,
     pub settings: Settings,
     pub providers: ProviderCatalog,
     terminal_preferences_path: PathBuf,
@@ -457,6 +460,7 @@ impl AppState {
             terminal_workspaces: HashMap::new(),
             terminal_registry,
             pending_native_rewinds: HashMap::new(),
+            native_subagent_sessions: HashMap::new(),
             settings,
             providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
             terminal_preferences_path,
