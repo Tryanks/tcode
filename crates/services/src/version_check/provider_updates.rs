@@ -22,14 +22,6 @@ pub struct CheckInput<'a> {
     pub latest_output: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnknownReason {
-    InstalledVersionUnavailable,
-    LatestVersionUnavailable,
-    InvalidInstalledVersion,
-    InvalidLatestVersion,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Assessment {
     UpToDate {
@@ -43,7 +35,6 @@ pub enum Assessment {
         install_source: InstallSource,
     },
     Unknown {
-        reason: UnknownReason,
         current: Option<String>,
         latest: Option<String>,
         install_source: InstallSource,
@@ -63,7 +54,6 @@ pub fn check(input: CheckInput<'_>) -> Assessment {
 
     let Some(installed_output) = input.installed_output else {
         return Assessment::Unknown {
-            reason: UnknownReason::InstalledVersionUnavailable,
             current,
             latest,
             install_source,
@@ -71,7 +61,6 @@ pub fn check(input: CheckInput<'_>) -> Assessment {
     };
     let Some(latest_output) = input.latest_output else {
         return Assessment::Unknown {
-            reason: UnknownReason::LatestVersionUnavailable,
             current,
             latest,
             install_source,
@@ -79,7 +68,6 @@ pub fn check(input: CheckInput<'_>) -> Assessment {
     };
     let Some(installed_version) = parse_version(installed_output) else {
         return Assessment::Unknown {
-            reason: UnknownReason::InvalidInstalledVersion,
             current,
             latest,
             install_source,
@@ -87,7 +75,6 @@ pub fn check(input: CheckInput<'_>) -> Assessment {
     };
     let Some(latest_version) = parse_version(latest_output) else {
         return Assessment::Unknown {
-            reason: UnknownReason::InvalidLatestVersion,
             current,
             latest,
             install_source,
@@ -263,11 +250,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_and_missing_outputs_are_typed_unknowns() {
+    fn invalid_and_missing_outputs_are_unknown() {
         assert!(matches!(
             check(input(None, Some("2.0.0"))),
             Assessment::Unknown {
-                reason: UnknownReason::InstalledVersionUnavailable,
                 current: None,
                 latest: Some(latest),
                 ..
@@ -276,7 +262,6 @@ mod tests {
         assert!(matches!(
             check(input(Some("1.0.0"), None)),
             Assessment::Unknown {
-                reason: UnknownReason::LatestVersionUnavailable,
                 current: Some(current),
                 latest: None,
                 ..
@@ -285,7 +270,6 @@ mod tests {
         assert!(matches!(
             check(input(Some("build 5"), Some("2.0.0"))),
             Assessment::Unknown {
-                reason: UnknownReason::InvalidInstalledVersion,
                 current: Some(current),
                 ..
             } if current == "build 5"
@@ -293,7 +277,6 @@ mod tests {
         assert!(matches!(
             check(input(Some("1.0.0"), Some("nonsense"))),
             Assessment::Unknown {
-                reason: UnknownReason::InvalidLatestVersion,
                 latest: Some(latest),
                 ..
             } if latest == "nonsense"

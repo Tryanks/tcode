@@ -72,11 +72,12 @@ use tcode_services::provider_probe::{
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::{SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
-use tcode_services::version_check::app_releases::{self, Assessment as AppReleaseAssessment};
-use tcode_services::version_check::fetch_latest_tcode_release_json;
 use tcode_services::version_check::provider_updates::{
     self, Assessment as ProviderUpdateAssessment, CheckInput as ProviderCheckInput, InstallSource,
     npm_package, update_command, update_command_string,
+};
+use tcode_services::version_check::{
+    self as app_releases, Assessment as AppReleaseAssessment, fetch_latest_tcode_release_json,
 };
 use tcode_services::workspace::list_workspace;
 use tcode_services::worktree::{
