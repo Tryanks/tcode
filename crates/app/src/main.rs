@@ -172,6 +172,13 @@ fn handle_quit(
 fn main() {
     env_logger::init();
 
+    if std::env::args().any(|arg| arg == "--cu-smoke") {
+        use std::io::Write as _;
+        print!("{}", computer_use_mcp::smoke());
+        let _ = std::io::stdout().flush();
+        return;
+    }
+
     let preview_smoke = std::env::args().any(|arg| arg == "--preview-smoke");
     #[cfg(target_os = "linux")]
     if preview_smoke {

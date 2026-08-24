@@ -9,6 +9,11 @@ use crate::outline::{Frame, UiNode};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "backend/windows/map.rs"]
+mod windows_map_tests;
 
 const UNSUPPORTED_MESSAGE: &str = "computer use is unsupported on this platform";
 
@@ -218,7 +223,11 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
     {
         macos::MacosBackend.list_roots(filters)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::WindowsBackend.list_roots(filters)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = filters;
         Err(BackendError::unsupported())
@@ -230,7 +239,11 @@ pub fn observe(root: &RootInfo, request: ObserveRequest) -> Result<RootObservati
     {
         macos::MacosBackend.observe(root, request)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::WindowsBackend.observe(root, request)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (root, request);
         Err(BackendError::unsupported())
@@ -245,7 +258,11 @@ pub fn perform_action(
     {
         macos::MacosBackend.perform_action(root, request)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows::WindowsBackend.perform_action(root, request)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (root, request);
         Err(BackendError::unsupported())
@@ -302,9 +319,19 @@ pub fn parse_key_chord(keys: &[String]) -> Result<KeyChord, String> {
     Ok(KeyChord { keycode, modifiers })
 }
 
+#[cfg(target_os = "windows")]
+pub fn keycode_for_name(name: &str) -> Option<u16> {
+    windows_keycode_for_name(name)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn keycode_for_name(name: &str) -> Option<u16> {
+    macos_keycode_for_name(name)
+}
+
 /// US ANSI virtual key codes. Key names are layout-independent controls or
 /// physical letter/number keys; text entry uses Unicode events instead.
-pub fn keycode_for_name(name: &str) -> Option<u16> {
+pub fn macos_keycode_for_name(name: &str) -> Option<u16> {
     Some(match name.trim().to_ascii_lowercase().as_str() {
         "a" => 0x00,
         "s" => 0x01,
@@ -392,20 +419,148 @@ pub fn keycode_for_name(name: &str) -> Option<u16> {
     })
 }
 
+/// Windows virtual-key codes. Printable names identify the corresponding
+/// physical US keyboard keys; text entry uses `KEYEVENTF_UNICODE` instead.
+pub fn windows_keycode_for_name(name: &str) -> Option<u16> {
+    let name = name.trim().to_ascii_lowercase();
+    let bytes = name.as_bytes();
+    if bytes.len() == 1 && bytes[0].is_ascii_alphabetic() {
+        return Some(bytes[0].to_ascii_uppercase().into());
+    }
+    if bytes.len() == 1 && bytes[0].is_ascii_digit() {
+        return Some(bytes[0].into());
+    }
+    if let Some(number) = name
+        .strip_prefix('f')
+        .and_then(|value| value.parse::<u16>().ok())
+        && (1..=20).contains(&number)
+    {
+        return Some(0x70 + number - 1);
+    }
+    Some(match name.as_str() {
+        "enter" | "return" => 0x0D,
+        "tab" => 0x09,
+        "space" => 0x20,
+        "delete" | "backspace" => 0x08,
+        "forward_delete" => 0x2E,
+        "escape" | "esc" => 0x1B,
+        "help" | "insert" => 0x2D,
+        "home" => 0x24,
+        "page_up" | "pageup" => 0x21,
+        "end" => 0x23,
+        "page_down" | "pagedown" => 0x22,
+        "left" | "left_arrow" => 0x25,
+        "up" | "up_arrow" => 0x26,
+        "right" | "right_arrow" => 0x27,
+        "down" | "down_arrow" => 0x28,
+        ";" | "semicolon" => 0xBA,
+        "=" | "equal" => 0xBB,
+        "," | "comma" => 0xBC,
+        "-" | "minus" => 0xBD,
+        "." | "period" => 0xBE,
+        "/" | "slash" => 0xBF,
+        "`" | "grave" => 0xC0,
+        "[" | "left_bracket" => 0xDB,
+        "\\" | "backslash" => 0xDC,
+        "]" | "right_bracket" => 0xDD,
+        "'" | "quote" => 0xDE,
+        _ => return None,
+    })
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bool {
+    if filters.pid.is_some_and(|pid| root.pid != pid)
+        || filters.kind.is_some_and(|kind| root.kind != kind)
+    {
+        return false;
+    }
+    if filters
+        .app
+        .as_deref()
+        .is_some_and(|app| !contains_case_insensitive(&root.app_name, app))
+        || filters
+            .bundle_id
+            .as_deref()
+            .is_some_and(|bundle| !contains_case_insensitive(&root.bundle_id, bundle))
+    {
+        return false;
+    }
+    filters.text.as_deref().is_none_or(|text| {
+        contains_case_insensitive(&root.app_name, text)
+            || contains_case_insensitive(&root.title, text)
+            || contains_case_insensitive(&root.bundle_id, text)
+    })
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn key_names_and_chords_map_to_macos_virtual_codes() {
-        assert_eq!(keycode_for_name("enter"), Some(0x24));
-        assert_eq!(keycode_for_name("left_arrow"), Some(0x7B));
-        assert_eq!(keycode_for_name("F12"), Some(0x6F));
-        assert_eq!(keycode_for_name("definitely-not-a-key"), None);
+        assert_eq!(macos_keycode_for_name("enter"), Some(0x24));
+        assert_eq!(macos_keycode_for_name("left_arrow"), Some(0x7B));
+        assert_eq!(macos_keycode_for_name("F12"), Some(0x6F));
+        assert_eq!(macos_keycode_for_name("definitely-not-a-key"), None);
+    }
 
+    #[test]
+    fn key_chord_parser_tracks_modifiers() {
         let chord = parse_key_chord(&["cmd+shift+s".into()]).unwrap();
-        assert_eq!(chord.keycode, 0x01);
+        assert_eq!(chord.keycode, keycode_for_name("s").unwrap());
         assert!(chord.modifiers.command);
         assert!(chord.modifiers.shift);
+    }
+
+    #[test]
+    fn key_names_map_to_windows_virtual_keys() {
+        assert_eq!(windows_keycode_for_name("enter"), Some(0x0D));
+        assert_eq!(windows_keycode_for_name("left_arrow"), Some(0x25));
+        assert_eq!(windows_keycode_for_name("F12"), Some(0x7B));
+        assert_eq!(windows_keycode_for_name("s"), Some(0x53));
+        assert_eq!(windows_keycode_for_name("definitely-not-a-key"), None);
+    }
+
+    #[test]
+    fn root_filters_match_all_windows_fields_case_insensitively() {
+        let root = RootInfo {
+            app_name: "Windows Terminal".into(),
+            bundle_id: "WindowsTerminal.exe".into(),
+            pid: 42,
+            title: "PowerShell — tcode".into(),
+            kind: RootKind::Window,
+            ..RootInfo::default()
+        };
+
+        assert!(matches_root_filters(
+            &root,
+            &RootFilters {
+                text: Some("TCODE".into()),
+                app: Some("terminal".into()),
+                bundle_id: Some("windowsterminal".into()),
+                pid: Some(42),
+                kind: Some(RootKind::Window),
+            }
+        ));
+        assert!(!matches_root_filters(
+            &root,
+            &RootFilters {
+                pid: Some(7),
+                ..RootFilters::default()
+            }
+        ));
+        assert!(!matches_root_filters(
+            &root,
+            &RootFilters {
+                kind: Some(RootKind::Dialog),
+                ..RootFilters::default()
+            }
+        ));
     }
 }
