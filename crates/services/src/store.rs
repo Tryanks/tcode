@@ -688,17 +688,21 @@ mod tests {
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
         assert_eq!(meta.parent_session_id, None);
+        assert_eq!(meta.native_subagent, None);
         assert!(!meta.orchestrate_enabled);
         let json = serde_json::to_string(&meta).unwrap();
         assert!(!json.contains("parent_session_id"));
+        assert!(!json.contains("native_subagent"));
         assert!(!json.contains("orchestrate_enabled"));
 
         let mut meta = meta;
         meta.parent_session_id = Some("parent".into());
+        meta.native_subagent = Some("spawn-1".into());
         meta.orchestrate_enabled = true;
         let back: SessionMeta =
             serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
         assert_eq!(back.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(back.native_subagent.as_deref(), Some("spawn-1"));
         assert!(back.orchestrate_enabled);
     }
 

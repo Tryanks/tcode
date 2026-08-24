@@ -140,11 +140,7 @@ impl SessionSearch {
 pub fn extract_searchable_entries(events: &[StoredEvent]) -> Vec<SearchableEntry> {
     let timeline = Timeline::fold_events(events.iter().cloned());
     let mut entries = Vec::new();
-    for entry in timeline
-        .entries
-        .iter()
-        .chain(timeline.children.values().flatten())
-    {
+    for entry in &timeline.entries {
         let text = match &entry.content {
             EntryContent::Item(content) => searchable_item_text(content),
             EntryContent::Steer {

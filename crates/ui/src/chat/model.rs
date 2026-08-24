@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::ops::Range;
 use std::path::Path;
@@ -770,7 +770,6 @@ pub(crate) fn index_turns(
     turns: &[TurnMeta],
     entries: &[Arc<TimelineEntry>],
     proposed_plan: Option<(usize, &str, &str)>,
-    children: &HashMap<String, Vec<Arc<TimelineEntry>>>,
     expanded: &HashSet<String>,
 ) -> Vec<TurnListItem> {
     debug_assert!(entries.windows(2).all(|pair| pair[0].turn <= pair[1].turn));
@@ -798,21 +797,6 @@ pub(crate) fn index_turns(
                 std::mem::discriminant(&entry.content).hash(&mut content);
                 entry.ts.hash(&mut content);
                 hash_entry_shape(&entry.content, &mut content);
-                if let EntryContent::Item(ItemContent::Subagent { status, .. }) = &entry.content {
-                    let key = format!("subagent-{}", entry.id);
-                    let subagent_expanded =
-                        auto_expanded(expanded, &key, matches!(status, ItemStatus::InProgress));
-                    subagent_expanded.hash(&mut content);
-                    if subagent_expanded {
-                        let child_entries = children.get(&entry.id).map_or(&[][..], Vec::as_slice);
-                        child_entries.len().hash(&mut content);
-                        for child in child_entries {
-                            child.id.hash(&mut content);
-                            child.ts.hash(&mut content);
-                            hash_entry_shape(&child.content, &mut content);
-                        }
-                    }
-                }
                 // A disclosure row (orchestrate context / callback) grows a tall
                 // scroll card when expanded, so its toggle state must change the
                 // turn fingerprint or the list keeps the collapsed measurement.
@@ -1015,7 +999,7 @@ pub(crate) fn list_sync(
 mod tests {
     use super::*;
     use agent::{FileChange, FileChangeKind, ItemContent, ItemStatus, ProviderKind};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tcode_core::project::{Project, SessionMeta};
@@ -1188,20 +1172,19 @@ mod tests {
     #[test]
     fn turn_list_index_and_sync_cover_stream_append_truncate_and_session_switch() {
         let turns = vec![TurnMeta::default()];
-        let children = HashMap::new();
         let expanded = HashSet::new();
         let mut entries = vec![
             entry("user-0", user_item("go")),
             entry("assistant-0", assistant("working")),
         ];
-        let initial = index_turns(&turns, &entries, None, &children, &expanded);
+        let initial = index_turns(&turns, &entries, None, &expanded);
         assert_eq!(initial.len(), 1);
         assert_eq!(initial[0].entry_range, 0..2);
 
         // Another entry joins the current turn: identity stays at item index 0,
         // but its variable height must be measured again.
         entries.push(command("command-0"));
-        let current_turn_append = index_turns(&turns, &entries, None, &children, &expanded);
+        let current_turn_append = index_turns(&turns, &entries, None, &expanded);
         assert_eq!(current_turn_append[0].entry_range, 0..3);
         assert_eq!(
             list_sync(&initial, &current_turn_append, false),
@@ -1215,7 +1198,7 @@ mod tests {
         // remeasured because it gains the visual inter-turn gap.
         let turns = vec![TurnMeta::default(), TurnMeta::default()];
         entries.push(at_turn(entry("user-1", user_item("next")), 1));
-        let new_turn = index_turns(&turns, &entries, None, &children, &expanded);
+        let new_turn = index_turns(&turns, &entries, None, &expanded);
         assert_eq!(new_turn[0].entry_range, 0..3);
         assert_eq!(new_turn[1].entry_range, 3..4);
         assert_eq!(
@@ -1239,7 +1222,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_expansion_and_live_children_remeasure_the_turn() {
+    fn subagent_status_change_remeasures_the_turn() {
         let turns = vec![TurnMeta::default()];
         let entries = vec![entry(
             "spawn",
@@ -1250,26 +1233,18 @@ mod tests {
                 summary: None,
             }),
         )];
-        let mut children = HashMap::new();
-        let automatic = index_turns(&turns, &entries, None, &children, &HashSet::new());
-
-        let collapsed_keys = HashSet::from(["manual-subagent-spawn".to_string()]);
-        let collapsed = index_turns(&turns, &entries, None, &children, &collapsed_keys);
+        let running = index_turns(&turns, &entries, None, &HashSet::new());
+        let mut completed_entries = entries;
+        if let EntryContent::Item(ItemContent::Subagent {
+            status, summary, ..
+        }) = &mut Arc::make_mut(&mut completed_entries[0]).content
+        {
+            *status = ItemStatus::Completed;
+            *summary = Some("Found the event envelope".into());
+        }
+        let completed = index_turns(&turns, &completed_entries, None, &HashSet::new());
         assert_eq!(
-            list_sync(&automatic, &collapsed, false),
-            ListSync::Incremental {
-                append: None,
-                remeasure: vec![0],
-            }
-        );
-
-        children.insert(
-            "spawn".to_string(),
-            vec![entry("spawn:child", assistant("Found the event envelope"))],
-        );
-        let with_child = index_turns(&turns, &entries, None, &children, &HashSet::new());
-        assert_eq!(
-            list_sync(&automatic, &with_child, false),
+            list_sync(&running, &completed, false),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -1381,7 +1356,6 @@ mod tests {
             running: true,
             ..Default::default()
         }];
-        let children = HashMap::new();
         let expanded = HashSet::new();
         let pending = entry(
             "steer",
@@ -1397,7 +1371,6 @@ mod tests {
             &turns,
             &[pending.clone(), assistant.clone()],
             None,
-            &children,
             &expanded,
         );
 
@@ -1409,7 +1382,6 @@ mod tests {
             &turns,
             &[accepted.clone(), assistant.clone()],
             None,
-            &children,
             &expanded,
         );
         assert_eq!(
@@ -1420,7 +1392,7 @@ mod tests {
             }
         );
 
-        let reordered = index_turns(&turns, &[assistant, accepted], None, &children, &expanded);
+        let reordered = index_turns(&turns, &[assistant, accepted], None, &expanded);
         assert_eq!(
             list_sync(&status_changed, &reordered, false),
             ListSync::Reset { count: 1 }

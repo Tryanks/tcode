@@ -630,7 +630,9 @@ impl AppState {
         self.sessions
             .iter()
             .find(|meta| {
-                meta.id == thread_id && meta.parent_session_id.as_deref() == Some(parent_id)
+                meta.id == thread_id
+                    && meta.parent_session_id.as_deref() == Some(parent_id)
+                    && meta.native_subagent.is_none()
             })
             .ok_or_else(|| "unknown thread or not a child of this parent".into())
     }
@@ -688,6 +690,7 @@ impl AppState {
             .sessions
             .iter()
             .filter(|meta| meta.parent_session_id.as_deref() == Some(&parent_id))
+            .filter(|meta| meta.native_subagent.is_none())
             .filter(|meta| thread_id.as_ref().is_none_or(|id| id == &meta.id))
             .cloned()
             .collect();

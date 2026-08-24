@@ -17,12 +17,12 @@ use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
-use agent::{ItemContent, ItemStatus, RewindMode};
+use agent::{ItemContent, RewindMode};
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, Entity, FollowMode,
-    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement as _,
-    Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    Window, div, list, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
+    FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
+    ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -46,11 +46,11 @@ use crate::window_state::WindowState;
 use self::components::assistant::MdState;
 use self::model::{
     ListSync, Segment, TurnListItem, TurnRenderArgs, activity_run_duration_ms, auto_expanded,
-    displayed_error_text, divergent_served_model, format_compact_span, format_span, index_turns,
-    latest_message_ids, list_sync, live_activity_segment, live_edit_rows, manual_override_key,
-    plain_text_as_markdown, segment_entries, start_hub_projects, timeline_overdraw, user_content,
-    user_visible_text, work_log_auto_expands, work_log_capsule_label, work_log_counts,
-    work_log_outcome, work_log_row_entries,
+    displayed_error_text, divergent_served_model, format_span, index_turns, latest_message_ids,
+    list_sync, live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
+    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
+    work_log_auto_expands, work_log_capsule_label, work_log_counts, work_log_outcome,
+    work_log_row_entries,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, decide, tail_turn_window, viewport_turn_window,
@@ -165,7 +165,6 @@ impl ChatView {
                         .proposed_plan
                         .as_ref()
                         .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
-                    &timeline.children,
                     &self.expanded,
                 );
                 (timeline.turn_running, turn_items)
@@ -419,9 +418,8 @@ impl ChatView {
         if !self.expanded.remove(key) {
             self.expanded.insert(key.to_string());
         }
-        // Refresh the cached turn fingerprint immediately. Subagent keys feed
-        // `index_turns`, while the direct remeasure below still covers every
-        // other collapsible whose state is intentionally not fingerprinted.
+        // Refresh the cached turn fingerprint immediately; the direct remeasure
+        // below covers collapsibles whose state is intentionally not fingerprinted.
         self.sync_markdown_states(cx);
         self.list_state.remeasure_items(turn..turn + 1);
         cx.notify();
@@ -963,64 +961,25 @@ impl ChatView {
     }
 
     fn compose_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
-        let EntryContent::Item(ItemContent::Subagent { status, .. }) = &entry.content else {
-            unreachable!();
-        };
-        let key = format!("subagent-{}", entry.id);
-        let automatic = matches!(status, ItemStatus::InProgress);
-        let expanded = auto_expanded(&self.expanded, &key, automatic);
-        let parent_id = entry.id.clone();
-        let (children, truncated) = self
-            .workspace_store
-            .read(cx)
-            .with_active_timeline(|timeline| {
-                (
-                    timeline.children(&parent_id).to_vec(),
-                    timeline.children_truncated(&parent_id),
-                )
-            })
-            .unwrap_or_default();
-        let duration = (!automatic).then(|| {
-            let end = children
-                .iter()
-                .rev()
-                .find_map(|child| child.ts)
-                .or(entry.ts)
-                .unwrap_or(0);
-            format_compact_span(end.saturating_sub(entry.ts.unwrap_or(end)) / 1000)
+        let active_id = self.workspace_store.read(cx).active_session_id();
+        let mirror_id = active_id.as_deref().and_then(|active_id| {
+            self.workspace_store
+                .read(cx)
+                .sidebar_sessions()
+                .into_iter()
+                .find(|meta| {
+                    meta.parent_session_id.as_deref() == Some(active_id)
+                        && meta.native_subagent.as_deref() == Some(entry.id.as_str())
+                })
+                .map(|meta| meta.id)
         });
-        let rendered_children = children
-            .iter()
-            .map(|child| self.compose_subagent_child(child, cx))
-            .collect();
-        let turn = entry.turn;
-        let click_key = key;
-        components::subagent::subagent_row(
-            entry,
-            components::subagent::SubagentState {
-                expanded,
-                truncated,
-                duration,
-            },
-            rendered_children,
-            cx.listener(move |this, _, _, cx| {
-                this.toggle_auto_expanded(turn, &click_key, automatic, cx);
-            }),
-            cx,
-        )
-    }
-
-    fn compose_subagent_child(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
-        let fallback = match &entry.content {
-            EntryContent::Item(ItemContent::UserMessage { .. })
-            | EntryContent::Steer { .. }
-            | EntryContent::Item(ItemContent::AssistantMessage { .. })
-            | EntryContent::Error { .. }
-            | EntryContent::ProviderStartError { .. }
-            | EntryContent::Item(ItemContent::FileChange { .. }) => None,
-            _ => Some(self.compose_activity_row(entry, true, false, cx)),
-        };
-        components::subagent::subagent_child(entry, fallback, cx)
+        let on_open = mirror_id.map(|mirror_id| {
+            let store = self.workspace_store.clone();
+            Box::new(move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                store.update(cx, |store, _| store.select_session(mirror_id.clone()));
+            }) as components::subagent::ClickHandler
+        });
+        components::subagent::subagent_row(entry, on_open, cx)
     }
 
     fn compose_proposed_plan_card(
@@ -1737,6 +1696,15 @@ impl Render for ChatView {
                 .child(self.render_empty_state(window, cx));
         };
 
+        let active_session_id = self.workspace_store.read(cx).active_session_id();
+        let native_subagent_readonly = active_session_id.as_deref().is_some_and(|active_id| {
+            self.workspace_store
+                .read(cx)
+                .sidebar_sessions()
+                .iter()
+                .any(|meta| meta.id == active_id && meta.native_subagent.is_some())
+        });
+
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
         let panel = self.workspace_store.read(cx).chat_panel_state();
@@ -1816,6 +1784,18 @@ impl Render for ChatView {
         .min_h_0()
         .py_6();
 
+        let composer: AnyElement = if native_subagent_readonly {
+            div()
+                .w_full()
+                .py_3()
+                .text_center()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::tr!("chat.subagent_readonly"))
+                .into_any_element()
+        } else {
+            self.composer.clone().into_any_element()
+        };
         let main = v_flex()
             .size_full()
             .min_h_0()
@@ -1833,7 +1813,7 @@ impl Render for ChatView {
                         |this| this.child(self.render_scroll_pill(cx)),
                     ),
             )
-            .child(self.composer.clone());
+            .child(composer);
 
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
