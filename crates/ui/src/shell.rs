@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_base::{ResizableState, h_resizable, resizable_panel};
 use tcode_core::ui::RightTab;
-use tcode_runtime::event::{RuntimeEffect, RuntimeEvent, RuntimeOperationId};
+use tcode_protocol::{RuntimeEffect, RuntimeNotification as RuntimeEvent, RuntimeOperationId};
 
 use crate::chat::ChatView;
 use crate::diff::DiffPanel;

@@ -14,8 +14,7 @@ use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
-use crate::event::HostEvent;
-use crate::host::{HostCx, HostMsg};
+use crate::host::{HostCx, HostEvent, HostMsg};
 use crate::terminal::LocalTerminalRegistry;
 
 /// Optional process-local services attached before the host starts accepting

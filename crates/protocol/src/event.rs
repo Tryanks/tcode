@@ -224,7 +224,7 @@ pub struct IndexSnapshot {
     pub projects: Vec<Project>,
 }
 
-/// Protocol-owned mirror of `tcode_runtime::event::RuntimeEvent`.
+/// A transient runtime notification delivered to clients.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum RuntimeNotification {
@@ -371,4 +371,29 @@ pub enum RuntimeNotice {
         reason: MergeWorktreeFailure,
         detail: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeSeverity {
+    Success,
+    Warning,
+}
+
+impl RuntimeNotice {
+    pub fn severity(&self) -> NoticeSeverity {
+        match self {
+            Self::ProviderMessage(_) | Self::WorktreeMergeFailed { .. } => NoticeSeverity::Warning,
+            Self::UpdateAvailable { .. }
+            | Self::TcodeUpdateAvailable { .. }
+            | Self::UpdatingProvider { .. }
+            | Self::UpdateDone { .. }
+            | Self::NativeRewindCompleted { .. }
+            | Self::PlanSaved { .. }
+            | Self::SwitchedBranch { .. }
+            | Self::ThreadExported { .. }
+            | Self::WorktreeSeeded { .. }
+            | Self::WorktreeMergedFastForward
+            | Self::WorktreeMergedCommit => NoticeSeverity::Success,
+        }
+    }
 }
