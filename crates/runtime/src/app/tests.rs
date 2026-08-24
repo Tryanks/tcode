@@ -2002,6 +2002,71 @@ fn callback_prefers_reported_result_in_full() {
 }
 
 #[test]
+fn short_report_appends_final_message_digest() {
+    let final_message = "f".repeat(3000);
+    let text = assemble_callback_text(
+        "child",
+        "Title",
+        TurnStatus::Completed,
+        &final_message,
+        Some("done."),
+        None,
+        None,
+        false,
+    );
+    assert!(text.contains("Result (reported via report_result):\ndone."));
+    assert!(text.contains("The report is brief; the final assistant message follows:"));
+    assert!(text.contains("Final output tail (3000 chars total"));
+
+    // A substantive report stands alone.
+    let report = "R".repeat(400);
+    let alone = assemble_callback_text(
+        "child",
+        "Title",
+        TurnStatus::Completed,
+        &final_message,
+        Some(&report),
+        None,
+        None,
+        false,
+    );
+    assert!(alone.ends_with(&report));
+    assert!(!alone.contains("The report is brief"));
+}
+
+#[test]
+fn dispatched_brief_carries_report_contract_footer() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-brief-footer-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(|_| AppState::new(store));
+    state.host_update(cx, |state, cx| {
+        let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
+        let parent_id = parent.id.clone();
+        state.sessions.push(parent);
+        let child_id = state
+            .create_child_session(
+                &parent_id,
+                ProviderKind::Codex,
+                Some("gpt-test".into()),
+                None,
+                None,
+                ApprovalMode::FullAccess,
+                "Child".into(),
+                None,
+                "Inspect the workspace".into(),
+                true,
+                None,
+                cx,
+            )
+            .unwrap();
+        let queued = state.resident(&child_id).unwrap().queue[0].text.clone();
+        assert!(queued.starts_with("Inspect the workspace"));
+        assert!(queued.contains("report_result"), "brief: {queued}");
+    });
+}
+
+#[test]
 fn terminal_callback_archives_only_when_requested() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-callback-archive-test");
@@ -2361,6 +2426,60 @@ fn child_approval_always_allow_responds_without_parent_callback() {
         assert!(
             parent_receiver.try_recv().is_err(),
             "always-allow must not notify the parent"
+        );
+    });
+}
+
+#[test]
+fn child_report_result_approval_is_auto_approved_in_every_mode() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-approval-report-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(|_| AppState::new(store));
+    let (parent_commands, parent_receiver) = smol::channel::unbounded();
+    let (child_commands, child_receiver) = smol::channel::unbounded();
+
+    state.host_update(cx, |state, cx| {
+        // Default routing (Orchestrator) — the report tool must never reach it.
+        let mut parent = live_session(ProviderKind::Codex, parent_commands);
+        parent.meta.id = "parent".into();
+        parent.turn_in_flight = true;
+        state
+            .residents
+            .parked
+            .insert(parent.meta.id.clone(), parent);
+
+        let mut child = live_session(ProviderKind::ClaudeCode, child_commands);
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        state.sessions.push(child.meta.clone());
+        state.residents.parked.insert(child.meta.id.clone(), child);
+
+        state.on_event(
+            "child",
+            AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                id: "approval-report".into(),
+                turn_id: None,
+                kind: agent::ApprovalKind::ToolUse {
+                    name: "mcp__tcode_report__report_result".into(),
+                    input: serde_json::json!({ "text": "full report" }),
+                    detail: "mcp__tcode_report__report_result".into(),
+                },
+                options: Vec::new(),
+            }),
+            cx,
+        );
+
+        assert!(matches!(
+            child_receiver.try_recv(),
+            Ok(SessionCommand::RespondApproval {
+                request_id,
+                decision: ApprovalDecision::ApproveForSession,
+            }) if request_id == "approval-report"
+        ));
+        assert!(
+            parent_receiver.try_recv().is_err(),
+            "the report tool must not surface an approval to the orchestrator"
         );
     });
 }
