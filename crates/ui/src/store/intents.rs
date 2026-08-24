@@ -62,6 +62,9 @@ impl WorkspaceStore {
     pub fn set_auto_open_task_panel(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AutoOpenTaskPanel(value));
     }
+    pub fn set_live_command_panel_disabled(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::LiveCommandPanelDisabled(value));
+    }
     pub fn set_provider_update_checks_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ProviderUpdateChecksDisabled(value));
     }

@@ -794,6 +794,10 @@ impl WorkspaceStore {
         self.settings_replica.clone()
     }
 
+    pub fn live_command_panel(&self) -> bool {
+        !self.settings_replica.live_command_panel_disabled
+    }
+
     pub fn archived_groups(&self) -> Vec<ProjectGroup> {
         let archived: Vec<_> = self
             .index_replica

@@ -60,7 +60,7 @@ pub(crate) enum GridEvent {
 /// This type accepts raw output bytes and owns all terminal grid state. It has
 /// no PTY, child-process, or platform process types in its public API.
 #[derive(Clone)]
-pub(crate) struct GridEmulator {
+pub struct GridEmulator {
     core: Arc<GridCore>,
     events: async_channel::Receiver<GridEvent>,
 }
@@ -266,12 +266,11 @@ impl GridSize {
 impl GridEmulator {
     /// Create an 80×24 emulator with 1,000 lines of scrollback.
     #[cfg(test)]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_size(DEFAULT_COLS, DEFAULT_ROWS)
     }
 
     /// Create an emulator with an explicit initial grid size.
-    #[cfg(test)]
     pub fn with_size(cols: usize, rows: usize) -> Self {
         Self::with_size_and_title(cols, rows, String::new())
     }
@@ -362,7 +361,7 @@ impl GridEmulator {
     ///
     /// Cloned receivers compete for events. Install one draining task and fan
     /// out from there when multiple consumers are needed.
-    pub fn events(&self) -> async_channel::Receiver<GridEvent> {
+    pub(crate) fn events(&self) -> async_channel::Receiver<GridEvent> {
         self.events.clone()
     }
 

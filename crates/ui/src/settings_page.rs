@@ -684,6 +684,14 @@ impl SettingsPage {
                 cx,
                 WorkspaceStore::set_auto_open_task_panel,
             ),
+            self.toggle_row(
+                "live-command-panel",
+                crate::tr!("settings.live_command_panel.title"),
+                crate::tr!("settings.live_command_panel.description"),
+                !settings.live_command_panel_disabled,
+                cx,
+                |store, checked| store.set_live_command_panel_disabled(!checked),
+            ),
         ];
         let workspace = vec![
             self.toggle_row(

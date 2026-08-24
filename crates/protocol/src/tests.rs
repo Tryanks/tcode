@@ -237,6 +237,7 @@ fn settings_patches_round_trip() {
         SettingsPatch::WordWrapDiffs(true),
         SettingsPatch::SkipDeleteConfirmation(true),
         SettingsPatch::AutoOpenTaskPanel(true),
+        SettingsPatch::LiveCommandPanelDisabled(true),
         SettingsPatch::ProviderUpdateChecksDisabled(true),
         SettingsPatch::InactiveFrameThrottleDisabled(true),
         SettingsPatch::AutoArchiveDisabled(true),

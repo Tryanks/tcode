@@ -14,10 +14,9 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 use agent::{ItemContent, ItemStatus};
 use tcode_core::session::{EntryContent, TimelineEntry};
 
-use super::super::model::{one_line, one_line_with_break_markers, output_tail, tool_brief};
+use super::super::model::{one_line, one_line_with_break_markers, tool_brief};
+use super::command_panel::CommandPanelCache;
 use super::indicator;
-
-const ACTIVITY_OUTPUT_TAIL_LINES: usize = 20;
 
 /// One Work Log activity row: a muted status icon + a one-line summary.
 pub(crate) fn activity_row(
@@ -25,6 +24,26 @@ pub(crate) fn activity_row(
     compact: bool,
     live_reasoning: bool,
     expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> AnyElement {
+    activity_row_with_command_detail(
+        entry,
+        compact,
+        live_reasoning,
+        expanded,
+        None,
+        on_toggle,
+        cx,
+    )
+}
+
+pub(crate) fn activity_row_with_command_detail(
+    entry: &TimelineEntry,
+    compact: bool,
+    live_reasoning: bool,
+    expanded: bool,
+    command_detail: Option<AnyElement>,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> AnyElement {
@@ -154,7 +173,7 @@ pub(crate) fn activity_row(
 
     let mut block = v_flex().w_full().gap_1().child(row);
     if expanded && expandable {
-        block = block.child(activity_detail(entry, cx));
+        block = block.child(activity_detail(entry, command_detail, cx));
     }
     block.into_any_element()
 }
@@ -210,32 +229,18 @@ fn argument(text: String) -> Option<AnyElement> {
     (!text.is_empty()).then(|| text.into_any_element())
 }
 
-fn activity_detail(entry: &TimelineEntry, cx: &App) -> AnyElement {
+fn activity_detail(
+    entry: &TimelineEntry,
+    command_detail: Option<AnyElement>,
+    cx: &App,
+) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let mono = cx.theme().mono_font_family.clone();
     let detail = match &entry.content {
         EntryContent::Item(ItemContent::CommandExecution {
             command, output, ..
-        }) => v_flex()
-            .w_full()
-            .gap_2()
-            .child(activity_detail_section(
-                crate::tr!("chat.command").into_owned(),
-                command.clone(),
-                true,
-                mono.clone(),
-                muted,
-            ))
-            .when(!output.is_empty(), |detail| {
-                detail.child(activity_detail_section(
-                    crate::tr!("chat.output").into_owned(),
-                    output_tail(output, ACTIVITY_OUTPUT_TAIL_LINES),
-                    true,
-                    mono.clone(),
-                    muted,
-                ))
-            })
-            .into_any_element(),
+        }) => command_detail
+            .unwrap_or_else(|| CommandPanelCache::new().render(&entry.id, command, output, cx)),
         EntryContent::Item(ItemContent::ToolCall { input, output, .. }) => {
             let mut input_brief = tool_brief(input);
             if input_brief.is_empty() {

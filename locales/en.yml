@@ -222,6 +222,9 @@ settings:
   auto_open_task_panel:
     title: "Auto-open task panel"
     description: "Open the right-side plan and task panel automatically when steps appear."
+  live_command_panel:
+    title: "Live command panel"
+    description: "Automatically show command output while it runs, then hide the panel when it finishes."
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer tcode and provider CLI versions on launch."

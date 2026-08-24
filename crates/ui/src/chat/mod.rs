@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
@@ -44,6 +45,7 @@ use crate::window_drag_area;
 use crate::window_state::WindowState;
 
 use self::components::assistant::MdState;
+use self::components::command_panel::CommandPanelCache;
 use self::model::{
     ListSync, Segment, TurnListItem, TurnRenderArgs, activity_run_duration_ms, auto_expanded,
     displayed_error_text, divergent_served_model, format_compact_span, format_span, index_turns,
@@ -77,6 +79,7 @@ pub struct ChatView {
     markdown_scroll_top: Option<usize>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
+    command_panels: RefCell<CommandPanelCache>,
     session_key: Option<String>,
     /// Turn selected from a command-palette content hit.
     highlighted_turn: Option<usize>,
@@ -139,6 +142,7 @@ impl ChatView {
             markdown_visible_turns: 0..0,
             markdown_scroll_top: None,
             expanded: HashSet::new(),
+            command_panels: RefCell::new(CommandPanelCache::new()),
             session_key: None,
             highlighted_turn: None,
             _tick: None,
@@ -180,6 +184,7 @@ impl ChatView {
         if session_changed {
             self.md_states.clear();
             self.expanded.clear();
+            self.command_panels.borrow_mut().clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
             self.markdown_visible_turns = tail_turn_window(turn_items.len());
@@ -947,14 +952,37 @@ impl ChatView {
             return self.compose_subagent_row(entry, cx);
         }
         let key = format!("activity-{}", entry.id);
-        let expanded = self.expanded.contains(&key);
+        let automatic = self.workspace_store.read(cx).live_command_panel()
+            && matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::CommandExecution {
+                    status: ItemStatus::InProgress,
+                    ..
+                })
+            );
+        let expanded = automatic || self.expanded.contains(&key);
+        let command_detail = if expanded {
+            match &entry.content {
+                EntryContent::Item(ItemContent::CommandExecution {
+                    command, output, ..
+                }) => Some(
+                    self.command_panels
+                        .borrow_mut()
+                        .render(&entry.id, command, output, cx),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let turn = entry.turn;
         let click_key = key;
-        components::activity::activity_row(
+        components::activity::activity_row_with_command_detail(
             entry,
             compact,
             live_reasoning,
             expanded,
+            command_detail,
             cx.listener(move |this, _, _, cx| {
                 this.toggle_expanded(turn, &click_key, cx);
             }),
