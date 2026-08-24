@@ -266,6 +266,8 @@ impl AppState {
             AgentEvent::ProviderRelay { .. }
             | AgentEvent::PlanResolved { .. }
             | AgentEvent::ServedModel { .. }
+            | AgentEvent::ModelFallbackDetected { .. }
+            | AgentEvent::TurnBlocked { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }
             | AgentEvent::ItemStarted(_)

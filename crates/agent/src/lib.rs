@@ -993,6 +993,24 @@ pub enum PlanResolution {
     Dismissed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierCategory {
+    Cyber,
+    Bio,
+    Other(String),
+}
+
+impl ClassifierCategory {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cyber" => Self::Cyber,
+            "bio" => Self::Bio,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -1030,6 +1048,21 @@ pub enum AgentEvent {
     ServedModel {
         model: String,
         reason: Option<String>,
+    },
+    ModelFallbackDetected {
+        expected: String,
+        actual: String,
+        category: Option<ClassifierCategory>,
+        /// Claude's `refused_user_message_uuid` — the native rewind checkpoint for the refused turn.
+        checkpoint_id: Option<String>,
+        parent_tool_use_id: Option<String>,
+    },
+    TurnBlocked {
+        category: Option<ClassifierCategory>,
+        /// The selected model that refused (NOT "<synthetic>").
+        model: Option<String>,
+        /// Human-readable detail from Claude's error text.
+        detail: String,
     },
     TurnStarted {
         turn_id: String,

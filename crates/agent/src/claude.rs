@@ -34,11 +34,11 @@ use smol::process::Stdio;
 use crate::pending::{PendingRequests, drain_resolved};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus,
-    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode, SelectOption,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
-    UserInputOption, UserInputQuestion, selection_bool, selection_str,
+    Attachment, ClassifierCategory, DeltaKind, FileChange, FileChangeKind, InteractionMode,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
+    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
@@ -280,6 +280,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         applied_permission_mode,
         opts.approval_mode,
         native_rewind,
+        opts.model.clone(),
         stderr_tail,
         stderr_task,
     ))
@@ -449,6 +450,7 @@ async fn actor_loop(
     applied_permission_mode: String,
     approval_mode: ApprovalMode,
     native_rewind: bool,
+    expected_model: Option<String>,
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
@@ -459,6 +461,7 @@ async fn actor_loop(
         applied_permission_mode,
         approval_mode,
         native_rewind,
+        expected_model,
     );
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
@@ -1090,8 +1093,12 @@ pub(crate) struct Mapper {
     native_rewind: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
+    /// Model selected for this session, used when Claude reports a synthetic refusal message.
+    expected_model: Option<String>,
     /// Latest structured stop reason for the active turn.
     stop_reason: Option<String>,
+    /// Classifier category captured from the active turn's structured refusal details.
+    pending_refusal_category: Option<ClassifierCategory>,
     /// Warning-bearing stop reason already emitted for this occurrence.
     warned_stop_reason: Option<String>,
 }
@@ -1106,6 +1113,7 @@ impl Mapper {
             "default".to_owned(),
             ApprovalMode::Supervised,
             false,
+            None,
         )
     }
 
@@ -1116,6 +1124,7 @@ impl Mapper {
         applied_permission_mode: String,
         approval_mode: ApprovalMode,
         native_rewind: bool,
+        expected_model: Option<String>,
     ) -> Self {
         Mapper {
             session_started: false,
@@ -1148,7 +1157,9 @@ impl Mapper {
             pending_rewinds: HashMap::new(),
             native_rewind,
             last_served_model: None,
+            expected_model,
             stop_reason: None,
+            pending_refusal_category: None,
             warned_stop_reason: None,
         }
     }
@@ -1170,6 +1181,7 @@ impl Mapper {
         self.awaiting_turn_checkpoint = self.native_rewind;
         self.exit_plan_captured = false;
         self.stop_reason = None;
+        self.pending_refusal_category = None;
         self.warned_stop_reason = None;
         id
     }
@@ -1423,6 +1435,7 @@ impl Mapper {
             Some("task_updated") => return self.on_task_updated(msg),
             Some("task_notification") => return self.on_task_notification(msg),
             Some("background_tasks_changed") => return self.on_background_tasks_changed(msg),
+            Some("model_refusal_fallback") => return self.on_model_refusal_fallback(msg),
             other => {
                 log::debug!("claude: ignoring system/{other:?}");
                 return Vec::new();
@@ -1449,6 +1462,32 @@ impl Mapper {
             events.push(AgentEvent::ProviderCommands { commands });
         }
         events
+    }
+
+    fn on_model_refusal_fallback(&self, msg: &Value) -> Vec<AgentEvent> {
+        let (Some(expected), Some(actual)) = (
+            msg.get("original_model").and_then(Value::as_str),
+            msg.get("fallback_model").and_then(Value::as_str),
+        ) else {
+            log::debug!("claude: ignoring malformed model_refusal_fallback");
+            return Vec::new();
+        };
+        vec![AgentEvent::ModelFallbackDetected {
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+            category: msg
+                .get("api_refusal_category")
+                .and_then(Value::as_str)
+                .map(ClassifierCategory::parse),
+            checkpoint_id: msg
+                .get("refused_user_message_uuid")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            parent_tool_use_id: msg
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }]
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -1706,6 +1745,16 @@ impl Mapper {
             None => return Vec::new(),
         };
         let mut out = Vec::new();
+        if message
+            .pointer("/stop_details/type")
+            .and_then(Value::as_str)
+            == Some("refusal")
+        {
+            self.pending_refusal_category = message
+                .pointer("/stop_details/category")
+                .and_then(Value::as_str)
+                .map(ClassifierCategory::parse);
+        }
         if let Some(model) = message.get("model").and_then(Value::as_str)
             && self.last_served_model.as_deref() != Some(model)
         {
@@ -2271,6 +2320,19 @@ impl Mapper {
             events.push(AgentEvent::Error {
                 message: format!("claude turn failed ({subtype}): {detail}"),
                 fatal: false,
+            });
+        }
+        if self.stop_reason.as_deref() == Some("refusal") {
+            let detail = msg
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or("Claude blocked this turn after a safety classifier refusal.")
+                .to_owned();
+            events.push(AgentEvent::TurnBlocked {
+                category: self.pending_refusal_category.take(),
+                model: self.expected_model.clone(),
+                detail,
             });
         }
         // Publish the current background-task liveness with every result, not
@@ -3068,6 +3130,80 @@ mod tests {
     }
 
     #[test]
+    fn model_refusal_fallback_emits_model_fallback_detected() {
+        let mut mapper = Mapper::new();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"cf7703ac-420b-4038-9f32-582077b27352","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
+        );
+
+        assert_eq!(
+            events,
+            [AgentEvent::ModelFallbackDetected {
+                expected: "claude-fable-5".into(),
+                actual: "claude-opus-4-8".into(),
+                category: Some(ClassifierCategory::Cyber),
+                checkpoint_id: Some("cf7703ac-420b-4038-9f32-582077b27352".into()),
+                parent_tool_use_id: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn classifier_refusal_result_emits_turn_blocked() {
+        let mut mapper = Mapper::new_configured(
+            false,
+            InteractionMode::Build,
+            "default",
+            "default".into(),
+            ApprovalMode::Supervised,
+            false,
+            Some("claude-fable-5".into()),
+        );
+        mapper.start_turn();
+
+        let assistant_events = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-refusal","model":"<synthetic>","stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered cyber content restrictions."},"content":[{"type":"text","text":"API Error: safeguards flagged this message. Details: `[cyber]`"}]},"parent_tool_use_id":null}"#,
+        );
+        assert_eq!(
+            mapper.pending_refusal_category,
+            Some(ClassifierCategory::Cyber)
+        );
+        assert!(
+            assistant_events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Warning { .. }))
+        );
+
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"success","is_error":true,"stop_reason":"refusal","result":"API Error: safeguards flagged this message. Details: `[cyber]`","terminal_reason":"api_error","modelUsage":{"claude-fable-5":{"inputTokens":1,"outputTokens":0}}}"#,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnBlocked {
+                category: Some(ClassifierCategory::Cyber),
+                model: Some(model),
+                detail,
+            } if model == "claude-fable-5" && detail.contains("[cyber]")
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { fatal: false, .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn replayed_user_message_exposes_native_turn_checkpoint() {
         let mut mapper = Mapper::new();
         mapper.native_rewind = true;
@@ -3415,6 +3551,7 @@ mod tests {
             launch_mode.into(),
             ApprovalMode::Supervised,
             false,
+            None,
         );
 
         assert_eq!(m.applied_permission_mode, "plan");
