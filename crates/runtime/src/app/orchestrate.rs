@@ -2,7 +2,7 @@ use super::*;
 
 /// Appended to every dispatched brief so the report contract reaches the child
 /// regardless of what the orchestrator wrote.
-pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nWhen your work is complete, call the tcode_report report_result tool with your full final report, then end your turn. The orchestrator that dispatched you receives ONLY that text — it cannot see your transcript — so make the report self-contained: what you did, files changed, every command you ran with its outcome, and your findings or conclusions in full. One or two summary sentences is not an acceptable report.";
+pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_result tool is the only channel through which your work reaches the orchestrator that dispatched you; it cannot see your transcript. When your work is complete, send your complete final report through it, then end your turn. Make the report self-contained: what you did, files changed, every command you ran with its outcome, and your findings or conclusions in full. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
 
 #[derive(Default)]
 pub(super) struct McpWiring {
