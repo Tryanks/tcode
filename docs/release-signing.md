@@ -24,7 +24,7 @@ New repository secret**:
 
 | Secret | What it is | How to get it |
 | --- | --- | --- |
-| `MACOS_CERTIFICATE` | base64 of your Developer ID `.p12` | Export the cert **with its private key** from Keychain Access as `cert.p12`, then `base64 -i cert.p12 \| pbcopy` |
+| `MACOS_CERTIFICATE` | base64 of your Developer ID `.p12` | In Keychain Access, **My Certificates** category (not *Certificates* — that omits the private key) → right-click the *Developer ID Application* row → Export → Personal Information Exchange (`.p12`), then `base64 -i cert.p12 \| pbcopy` |
 | `MACOS_CERTIFICATE_PASSWORD` | the password you set on that `.p12` export | you chose it during export |
 | `MACOS_SIGN_IDENTITY` | the exact identity string | `security find-identity -v -p codesigning` → e.g. `Developer ID Application: Your Name (ABCDE12345)` |
 | `MACOS_NOTARY_APPLE_ID` | the Apple ID email for notarization | your developer-account email |
@@ -35,11 +35,15 @@ New repository secret**:
 
 Cut a prerelease tag (e.g. `v0.0.0-signtest`) and watch the **Sign and
 notarize macOS app** step: it should print `macOS build signed and notarized`.
-Download the `.dmg`, then locally:
+Download the `.dmg` and the `.zip`, then locally:
 
 ```sh
-spctl -a -vvv -t install /Applications/Tcode.app   # → "accepted, source=Notarized Developer ID"
-xcrun stapler validate /Applications/Tcode.app      # → "The validate action worked!"
+# The DMG container (must pass before you even mount it)
+spctl -a -vvv -t open --context context:primary-signature ~/Downloads/tcode-*.dmg
+xcrun stapler validate ~/Downloads/tcode-*.dmg
+# The app itself (unzip or drag from the DMG to /Applications first)
+spctl -a -vvv -t exec /Applications/Tcode.app     # → "accepted  source=Notarized Developer ID"
+xcrun stapler validate /Applications/Tcode.app    # → "The validate action worked!"
 ```
 
 ## Not covered

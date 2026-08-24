@@ -156,10 +156,12 @@ jobs:
           PLIST
           plutil -lint "$app/Contents/Info.plist"
 
-      # Signs and notarizes the app when the Developer ID secrets are configured
-      # (see docs/release-signing.md). Absent secrets → the step no-ops and the
-      # release ships unsigned, exactly as before, so tags never fail to publish.
-      - name: Sign and notarize macOS app
+      # Signs, notarizes, and packages the macOS build. When the Developer ID
+      # secrets are configured (see docs/release-signing.md) the app AND the DMG
+      # are each signed, notarized, and stapled — a DMG carries its own ticket,
+      # separate from the app inside it. Absent the secrets the step ships
+      # unsigned .zip/.dmg exactly as before, so tags never fail to publish.
+      - name: Sign, notarize, and package macOS
         id: macos_sign
         if: matrix.platform == 'macos'
         shell: bash
@@ -173,70 +175,105 @@ jobs:
         run: |
           set -euo pipefail
           app="dist/Tcode.app"
-          if [[ -z "${MACOS_CERTIFICATE:-}" || -z "${MACOS_SIGN_IDENTITY:-}" ]]; then
+          zip="dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
+          dmg="dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
+
+          # All-or-nothing on the six secrets: none → unsigned build; a partial
+          # set is a misconfiguration we fail loudly on rather than 20 minutes
+          # later inside notarytool.
+          missing=()
+          for var in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD MACOS_SIGN_IDENTITY \
+                     MACOS_NOTARY_APPLE_ID MACOS_NOTARY_TEAM_ID MACOS_NOTARY_PASSWORD; do
+            [[ -n "${!var:-}" ]] || missing+=("$var")
+          done
+          signed=false
+          if (( ${#missing[@]} == 0 )); then
+            signed=true
+          elif (( ${#missing[@]} < 6 )); then
+            echo "::error::macOS signing partially configured; missing: ${missing[*]}" >&2
+            exit 1
+          else
             echo "::notice::macOS signing secrets not configured — shipping an unsigned build."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
 
-          # Import the Developer ID Application cert into an ephemeral keychain.
-          keychain="$RUNNER_TEMP/tcode-signing.keychain-db"
-          keychain_password="$(openssl rand -base64 24)"
-          cert_path="$RUNNER_TEMP/developer_id.p12"
-          echo "$MACOS_CERTIFICATE" | base64 --decode > "$cert_path"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$cert_path" -P "$MACOS_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: \
-            -k "$keychain_password" "$keychain" >/dev/null
-          security list-keychain -d user -s "$keychain" login.keychain-db
-          rm -f "$cert_path"
+          notarize() { # notarize() <path>: submit, surface the log on rejection, wait
+            local out status id
+            out="$(xcrun notarytool submit "$1" \
+              --apple-id "$MACOS_NOTARY_APPLE_ID" --team-id "$MACOS_NOTARY_TEAM_ID" \
+              --password "$MACOS_NOTARY_PASSWORD" --wait --output-format json)"
+            status="$(printf '%s' "$out" | plutil -extract status raw -)"
+            id="$(printf '%s' "$out" | plutil -extract id raw -)"
+            if [[ "$status" != "Accepted" ]]; then
+              echo "::error::notarization $status for $1" >&2
+              xcrun notarytool log "$id" --apple-id "$MACOS_NOTARY_APPLE_ID" \
+                --team-id "$MACOS_NOTARY_TEAM_ID" --password "$MACOS_NOTARY_PASSWORD" >&2 || true
+              exit 1
+            fi
+          }
 
-          # Hardened runtime + entitlements, required for notarization.
-          codesign --force --timestamp --options runtime \
-            --entitlements assets/macos/tcode.entitlements \
-            --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/MacOS/tcode"
-          codesign --force --timestamp --options runtime \
-            --entitlements assets/macos/tcode.entitlements \
-            --sign "$MACOS_SIGN_IDENTITY" "$app"
-          codesign --verify --deep --strict --verbose=2 "$app"
+          if [[ "$signed" == "true" ]]; then
+            # Ephemeral keychain; the trap guarantees teardown + temp cleanup on
+            # every exit path, so a mid-run failure can't leak the private key or
+            # leave the user search list rewritten (matters on self-hosted runners).
+            keychain="$RUNNER_TEMP/tcode-signing.keychain-db"
+            cert_path="$RUNNER_TEMP/developer_id.p12"
+            trap 'security delete-keychain "$keychain" 2>/dev/null || true; rm -f "$cert_path"' EXIT
+            keychain_password="$(openssl rand -base64 24)"
+            echo "$MACOS_CERTIFICATE" | base64 --decode > "$cert_path"
+            security create-keychain -p "$keychain_password" "$keychain"
+            security set-keychain-settings -lut 21600 "$keychain"
+            security unlock-keychain -p "$keychain_password" "$keychain"
+            security import "$cert_path" -P "$MACOS_CERTIFICATE_PASSWORD" \
+              -t cert -f pkcs12 -k "$keychain" -T /usr/bin/codesign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple: \
+              -k "$keychain_password" "$keychain" >/dev/null
+            security list-keychain -d user -s "$keychain" login.keychain-db
+            rm -f "$cert_path"
 
-          # Notarize the app (submitted as a zip) and staple the ticket so
-          # Gatekeeper accepts it offline. The zip below is only for submission.
-          notarize_zip="$RUNNER_TEMP/tcode-notarize.zip"
-          ditto -c -k --sequesterRsrc --keepParent "$app" "$notarize_zip"
-          xcrun notarytool submit "$notarize_zip" \
-            --apple-id "$MACOS_NOTARY_APPLE_ID" \
-            --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --password "$MACOS_NOTARY_PASSWORD" \
-            --wait
-          xcrun stapler staple "$app"
-          rm -f "$notarize_zip"
-          security delete-keychain "$keychain" || true
-          echo "signed=true" >> "$GITHUB_OUTPUT"
-          echo "::notice::macOS build signed and notarized."
+            # Sign the app with the hardened runtime + entitlements (required for
+            # notarization). One Mach-O, no nested code, so the bundle sign covers it.
+            codesign --force --timestamp --options runtime \
+              --entitlements assets/macos/tcode.entitlements \
+              --sign "$MACOS_SIGN_IDENTITY" "$app"
+            codesign --verify --strict --verbose=2 "$app"
 
-      - name: Package macOS zip and DMG
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          set -euo pipefail
-          app="dist/Tcode.app"
+            # Notarize + staple the app, so the .zip (built next) carries its ticket.
+            notarize_zip="$RUNNER_TEMP/tcode-notarize.zip"
+            ditto -c -k --sequesterRsrc --keepParent "$app" "$notarize_zip"
+            notarize "$notarize_zip"
+            xcrun stapler staple "$app"
+            rm -f "$notarize_zip"
+
+            # Assert the result is actually Gatekeeper-acceptable — the only
+            # end-to-end check available for a workflow that can't be dry-run.
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -q 'flags=.*runtime' \
+              || { echo "::error::hardened runtime flag missing on the app" >&2; exit 1; }
+            spctl -a -vvv -t exec "$app"
+          fi
+
+          # Distribution zip (from the stapled app when signed).
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
+
+          # DMG from the same app.
           mkdir -p dmg-root
-          ditto -c -k --sequesterRsrc --keepParent "$app" \
-            "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
-          cp -R "$app" dmg-root/
+          ditto "$app" "dmg-root/Tcode.app"
           ln -s /Applications dmg-root/Applications
           hdiutil create -volname Tcode -srcfolder "$PWD/dmg-root" -ov \
-            -fs HFS+ -format UDZO \
-            "$PWD/dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
-          # Staple the notarization ticket to the DMG too, when signed.
-          if [[ "${{ steps.macos_sign.outputs.signed }}" == "true" ]]; then
-            xcrun stapler staple "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg" || true
+            -fs HFS+ -format UDZO "$PWD/$dmg"
+
+          if [[ "$signed" == "true" ]]; then
+            # The DMG is its own container: sign (no runtime/entitlements — it
+            # isn't executable code), notarize, and staple it too, or Gatekeeper
+            # rejects it at mount time before the stapled app inside is reached.
+            codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$dmg"
+            notarize "$dmg"
+            xcrun stapler staple "$dmg"
+            spctl -a -vvv -t open --context context:primary-signature "$dmg"
+            echo "::notice::macOS build signed and notarized (app + DMG)."
           fi
-          rm -rf "dist/Tcode.app" dmg-root
+
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
+          rm -rf "$app" dmg-root
 
       - name: Package Windows zip
         if: matrix.platform == 'windows'
