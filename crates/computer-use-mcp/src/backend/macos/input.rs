@@ -152,7 +152,7 @@ fn unicode_chunks(text: &str, maximum_units: usize) -> Vec<Vec<u16>> {
     chunks
 }
 
-fn event_source() -> Result<CGEventSource, BackendError> {
+pub(super) fn event_source() -> Result<CGEventSource, BackendError> {
     CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|()| operation("CoreGraphics could not create an event source"))
 }
