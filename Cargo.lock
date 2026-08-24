@@ -1400,6 +1400,7 @@ dependencies = [
  "core-graphics 0.25.0",
  "log",
  "mcp-host",
+ "png 0.18.1",
  "rmcp",
  "schemars 1.2.2",
  "serde",
@@ -1407,6 +1408,7 @@ dependencies = [
  "tcode-core",
  "tcode-services",
  "tokio",
+ "windows 0.61.3",
 ]
 
 [[package]]

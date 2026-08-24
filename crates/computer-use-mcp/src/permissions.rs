@@ -1,5 +1,5 @@
-//! macOS TCC permission checks and requests, shared by the computer-use
-//! backend and the Settings → Computer Use / Browser pages.
+//! Desktop computer-use permission checks and requests, shared by the backend
+//! and the Settings → Computer Use / Browser pages.
 //!
 //! tcode is itself the signed `.app` the grants attach to, so there is no
 //! helper-app attribution to worry about. Screen Recording grants only take
@@ -128,13 +128,33 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 mod imp {
     use super::{PermissionKind, PermissionStatus};
 
     pub(super) fn check() -> PermissionStatus {
-        // Non-macOS platforms have no TCC; the backend is a stub there and the
-        // settings UI shows the platform as unsupported rather than ungranted.
+        // UIAutomation, SendInput, and same-session GDI capture do not use the
+        // macOS-style application-level grants represented by this API.
+        PermissionStatus {
+            accessibility: true,
+            screen_recording: true,
+        }
+    }
+
+    pub(super) fn request(_kind: PermissionKind) -> bool {
+        true
+    }
+
+    pub(super) fn open_settings_pane(_kind: PermissionKind) {}
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+mod imp {
+    use super::{PermissionKind, PermissionStatus};
+
+    pub(super) fn check() -> PermissionStatus {
+        // Unsupported platforms have no TCC; the settings UI shows the
+        // platform as unsupported rather than ungranted.
         PermissionStatus::default()
     }
 

@@ -34,12 +34,12 @@ Core contract, inherited from pi-computer-use:
 - **Bounded output.** Model-visible text is capped; oversized results return a preview plus a
   continuation ref for `read_text`.
 
-Deliberate deviations from pi-computer-use (documented so later work can close them): no
-Windows/UIAutomation backend, no CDP browser roots (browser automation stays on the
-`tcode_preview` server and the embedded WebView), no separate helper app (see below), and a
-simplified successor-diff heuristic. The earlier no-OCR/`pictureOnly`-node deviation is resolved
-by raw-image pass-through for text-sparse accessibility trees. By maintainer decision this
-fallback does not run OCR or synthesize text nodes; the model reads the attached pixels directly.
+The remaining deliberate tool-surface deviation from pi-computer-use is the absence of CDP
+browser roots: browser automation stays on the `tcode_preview` server and the embedded WebView.
+The earlier Windows/UIAutomation and no-OCR/`pictureOnly`-node deviations are resolved by the
+Windows backend and raw-image pass-through for text-sparse accessibility trees. By maintainer
+decision the image fallback does not run OCR or synthesize text nodes; the model reads the
+attached pixels directly.
 
 ## Architecture
 
@@ -48,9 +48,10 @@ fallback does not run OCR or synthesize text nodes; the model reads the attached
   - `state.rs` — bounded immutable state store, `state_id` allocation, staleness checks.
   - `tools.rs` — rmcp `ToolRouter` (same streamable-HTTP + bearer-token shape as
     `preview-mcp` / `orchestrate-mcp`).
-  - `backend/` — `Backend` trait; `backend/macos/` implements it with the AX C API
-    (`AXUIElement*`), CGEvent input synthesis, and `screencapture -l <windowid>` capture;
-    other platforms get a stub backend whose tools return a clear "unsupported platform" error.
+  - `backend/` — platform dispatch plus shared contracts. `backend/macos/` uses the AX C API
+    (`AXUIElement*`), CGEvent input synthesis, and `screencapture -l <windowid>` capture.
+    `backend/windows/` uses UIAutomation, SendInput, and GDI window capture. Other platforms get
+    a stub backend whose tools return a clear "unsupported platform" error.
   - `permissions.rs` — TCC checks/requests (see below), public API also consumed by the
     settings UI.
 - Registration: `SessionOptions.computer_use_server: Option<McpRegistration>` threaded exactly
@@ -67,8 +68,8 @@ install/signing/attribution handling entirely.
 
 An observed window of at least 20,000 square screen points is considered text-sparse when fewer
 than three accessibility descendants expose a title, value, or description. The root window
-title is excluded. A sparse observation includes `text_sparse: true` so the agent knows the AX
-outline does not adequately describe the window.
+title is excluded. A sparse observation includes `text_sparse: true` so the agent knows the
+accessibility outline does not adequately describe the window.
 
 Image mode controls the raw screenshot attachment through the same capture path as other
 observations:
@@ -81,6 +82,30 @@ observations:
 
 The window is captured at most once per observation. The fallback is intentionally OCR-free and
 does not add `pictureOnly` or other synthesized nodes.
+
+## Windows backend
+
+The Windows backend enumerates visible top-level HWNDs in z-order and opens each through
+UIAutomation. It walks the Control View into the same platform-neutral `UiNode` tree used on
+macOS, including the same role vocabulary, ref assignment, search, sparsity, and diff behavior.
+`bundle_id` has no Windows equivalent: it contains the process executable filename (for example,
+`notepad.exe`) when the process image can be queried, and is empty for protected or inaccessible
+processes. `app_name` is the executable stem, with the UIA class name as a fallback.
+
+Native patterns map onto the shared action contract as follows: Invoke drives `press` and
+ref-targeted `click`; writable Value and numeric RangeValue drive `set_text`; Toggle,
+ExpandCollapse, SelectionItem, and a non-empty LegacyIAccessible default action drive `press`;
+Scroll drives targeted `scroll`. The tree also reports native `toggle`, `expand`, `collapse`,
+`select`, `set_value`, and `scroll_to_visible` capabilities for inspection. Grid, Table, Text,
+Transform, and Window patterns currently contribute their normal properties and children but
+have no additional direct `act_ui` operation. Physical fallback and coordinate actions use
+SendInput, including UTF-16 Unicode keyboard events and Windows virtual-key chords.
+
+Window screenshots use `PrintWindow(PW_RENDERFULLCONTENT)` into a GDI bitmap, fall back to
+`BitBlt` when the provider rejects PrintWindow, and encode the result as PNG. UIAutomation calls
+initialize COM defensively on every calling thread; an existing apartment with a different model
+(`RPC_E_CHANGED_MODE`) is reused. Windows has no macOS-style TCC gate, so the shared permission
+facade reports accessibility and capture as available.
 
 ## macOS permissions
 

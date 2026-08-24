@@ -772,7 +772,16 @@ mod dispatch {
         None
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    fn permission_gate(
+        _permissions: PermissionSnapshot,
+        _needs_accessibility: bool,
+        _needs_screen_recording: bool,
+    ) -> Option<CallToolResult> {
+        None
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn permission_gate(
         _permissions: PermissionSnapshot,
         _needs_accessibility: bool,

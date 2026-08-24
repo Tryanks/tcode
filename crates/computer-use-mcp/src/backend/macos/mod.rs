@@ -18,7 +18,7 @@ use core_graphics::window::{
 
 use super::{
     ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, ObserveRequest,
-    RootFilters, RootInfo, RootObservation,
+    RootFilters, RootInfo, RootObservation, matches_root_filters,
 };
 use crate::outline::{UiNode, is_text_sparse};
 
@@ -83,7 +83,7 @@ impl MacosBackend {
                 frame,
             };
             root.kind = ax::root_kind(&root);
-            if matches_filters(&root, filters) {
+            if matches_root_filters(&root, filters) {
                 roots.push(root);
             }
         }
@@ -277,34 +277,6 @@ fn action_point(root: &RootInfo, request: &ActionRequest) -> Result<(f64, f64), 
         BackendErrorCode::InvalidAction,
         "action requires x/y coordinates or an element with a non-empty frame",
     ))
-}
-
-fn matches_filters(root: &RootInfo, filters: &RootFilters) -> bool {
-    if filters.pid.is_some_and(|pid| root.pid != pid)
-        || filters.kind.is_some_and(|kind| root.kind != kind)
-    {
-        return false;
-    }
-    if filters
-        .app
-        .as_deref()
-        .is_some_and(|app| !contains_case_insensitive(&root.app_name, app))
-        || filters
-            .bundle_id
-            .as_deref()
-            .is_some_and(|bundle| !contains_case_insensitive(&root.bundle_id, bundle))
-    {
-        return false;
-    }
-    filters.text.as_deref().is_none_or(|text| {
-        contains_case_insensitive(&root.app_name, text)
-            || contains_case_insensitive(&root.title, text)
-            || contains_case_insensitive(&root.bundle_id, text)
-    })
-}
-
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 fn dictionary_value(dictionary: CFDictionaryRef, key: CFStringRef) -> Option<*const c_void> {
