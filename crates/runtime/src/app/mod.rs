@@ -17,11 +17,7 @@ use agent::{
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::event::{
-    GitActionRequest, HostEvent, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice,
-    RuntimeOperationId, RuntimeToast,
-};
-use crate::host::{HostCx, HostTask};
+use crate::host::{HostCx, HostEvent, HostTask};
 use crate::terminal::{LocalTerminalRegistry, TerminalContext, TerminalSplit, TerminalWorkspace};
 use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
@@ -46,13 +42,14 @@ use tcode_core::settings::{
 use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
-use tcode_protocol::ThreadExportFormat;
 use tcode_protocol::{
-    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitStatusStatus, IndexSnapshot,
-    MergeWorktreeFailure, PathEntry, ProviderVersionStatus as ProtocolProviderVersionStatus,
-    ProvidersStatus, QueuedMessageStatus, RecentDir, ServerEvent, SessionEventRecord,
-    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    Topic,
+    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitActionRequest, GitStatusStatus,
+    IndexSnapshot, MergeWorktreeFailure, PathEntry,
+    ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
+    RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification as RuntimeEvent,
+    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
