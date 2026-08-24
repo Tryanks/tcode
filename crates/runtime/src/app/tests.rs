@@ -5117,6 +5117,12 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     let cx = &mut TestAppContext::default();
     let root =
         std::env::temp_dir().join(format!("tcode-dispatch-worktree-{}", uuid::Uuid::new_v4()));
+    let isolated_worktrees = root.join("tcode-owned-worktrees");
+    // The services lifecycle honors this process-local override so this test
+    // cannot create or clean entries in the user's real ~/.tcode/worktrees.
+    unsafe {
+        std::env::set_var("TCODE_WORKTREES_DIR", &isolated_worktrees);
+    }
     std::fs::create_dir_all(&root).unwrap();
     run_git(&root, &["init", "-b", "main"]).unwrap();
     run_git(&root, &["config", "user.name", "tcode"]).unwrap();
@@ -5155,7 +5161,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     let response = recv_dispatch_reply(cx, &response).unwrap();
     let child_id = response["thread_id"].as_str().unwrap().to_string();
     let expected_branch = format!("tcode/{child_id}");
-    let expected_path = worktree_path_for(&child_id);
+    let expected_path = isolated_worktrees.join(&child_id);
     assert_eq!(
         response["worktree_path"],
         expected_path.display().to_string(),
@@ -5174,5 +5180,8 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
         );
     });
     remove_git_worktree(&root, &expected_path).unwrap();
+    unsafe {
+        std::env::remove_var("TCODE_WORKTREES_DIR");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
