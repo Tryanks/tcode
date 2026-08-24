@@ -424,7 +424,6 @@ impl ComApartment {
         // has none on the smoke/MCP thread) returns empty child navigation, so
         // the tree would collapse to just the root element.
         let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        eprintln!("cu-diag: CoInitializeEx(MTA) -> {result:?}");
         if result == RPC_E_CHANGED_MODE {
             // The runtime initialized this thread with another apartment model.
             // COM is still usable; do not balance an initialization we did not make.
@@ -523,12 +522,8 @@ fn raw_children(
     if maximum == 0 {
         return Vec::new();
     }
-    let mut child = match unsafe { walker.GetFirstChildElement(element) } {
-        Ok(child) => child,
-        Err(error) => {
-            eprintln!("cu-diag: GetFirstChildElement err: {error:?}");
-            return Vec::new();
-        }
+    let Ok(mut child) = (unsafe { walker.GetFirstChildElement(element) }) else {
+        return Vec::new();
     };
     let mut children = Vec::with_capacity(maximum.min(32));
     loop {
@@ -541,7 +536,6 @@ fn raw_children(
         };
         child = sibling;
     }
-    eprintln!("cu-diag: raw_children found {}", children.len());
     children
 }
 
