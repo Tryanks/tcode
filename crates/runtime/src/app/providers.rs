@@ -788,7 +788,7 @@ pub(super) fn session_options(
         mcp_servers: [
             meta.provider
                 .caps()
-                .preview_mcp
+                .mcp_servers
                 .then_some(mcp_server)
                 .flatten(),
             meta.orchestrate_enabled

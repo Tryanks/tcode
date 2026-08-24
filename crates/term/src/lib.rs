@@ -28,6 +28,7 @@ mod hyperlinks;
 pub mod mappings;
 mod pty;
 mod pty_info;
+mod sync;
 
 pub use hyperlinks::HyperlinkMatch;
 

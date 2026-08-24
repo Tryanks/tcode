@@ -425,7 +425,8 @@ impl OpenCodeActor {
                 let Some(question_ids) = self.pending_questions.get(&request_id) else {
                     return Ok(());
                 };
-                match native_question_response(question_ids, &answers) {
+                match (!answers.is_empty()).then(|| native_question_answers(question_ids, &answers))
+                {
                     None => {
                         self.server
                             .http
@@ -1077,13 +1078,6 @@ fn native_question_answers(
             _ => Vec::new(),
         })
         .collect()
-}
-
-fn native_question_response(
-    question_ids: &[String],
-    answers: &serde_json::Map<String, Value>,
-) -> Option<Vec<Vec<String>>> {
-    (!answers.is_empty()).then(|| native_question_answers(question_ids, answers))
 }
 
 fn native_answers(value: Option<&Value>) -> Vec<Vec<String>> {
@@ -1947,15 +1941,17 @@ mod tests {
             ("unrelated".into(), json!("ignored")),
         ]);
         assert_eq!(
-            native_question_response(&question_ids, &answers),
+            (!answers.is_empty()).then(|| native_question_answers(&question_ids, &answers)),
             Some(vec![
                 vec!["Agent".into(), "Core".into()],
                 Vec::new(),
                 vec!["free text".into()]
             ])
         );
+        let empty_answers = serde_json::Map::new();
         assert_eq!(
-            native_question_response(&question_ids, &serde_json::Map::new()),
+            (!empty_answers.is_empty())
+                .then(|| native_question_answers(&question_ids, &empty_answers)),
             None
         );
     }

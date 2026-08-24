@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -10,15 +10,7 @@ use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
 
-trait MutexExt<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> MutexExt<T> for Mutex<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
+use crate::sync::MutexExt as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessInfo {

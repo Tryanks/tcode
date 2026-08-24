@@ -5,7 +5,7 @@ use std::{
     io::{self, ErrorKind, Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -23,19 +23,12 @@ use rio_vt::{
     },
 };
 
-use crate::{DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, DEFAULT_COLS, DEFAULT_ROWS, pty_info};
+use crate::{
+    DEFAULT_CELL_HEIGHT_PX, DEFAULT_CELL_WIDTH_PX, DEFAULT_COLS, DEFAULT_ROWS, pty_info,
+    sync::MutexExt as _,
+};
 
 const READ_BUFFER_SIZE: usize = 0x10_0000;
-
-trait MutexExt<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> MutexExt<T> for Mutex<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
 
 fn initial_window_size() -> WindowSize {
     WindowSize {
