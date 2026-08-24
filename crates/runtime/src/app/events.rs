@@ -263,6 +263,107 @@ impl AppState {
                     RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
                 );
             }
+            AgentEvent::TurnBlocked {
+                category,
+                model,
+                detail,
+            } => {
+                if self.settings.abort_on_model_fallback {
+                    let active_review = self
+                        .residents
+                        .active
+                        .as_mut()
+                        .filter(|active| active.meta.id == session_id)
+                        .map(|active| {
+                            active.queue.clear();
+                            let refused = active
+                                .timeline
+                                .entries
+                                .iter()
+                                .rev()
+                                .find_map(|entry| match &entry.content {
+                                    EntryContent::Item(ItemContent::UserMessage {
+                                        text,
+                                        context_len,
+                                        ..
+                                    }) => Some(
+                                        context_len
+                                            .and_then(|len| text.get(len..))
+                                            .unwrap_or(text)
+                                            .trim()
+                                            .to_string(),
+                                    ),
+                                    _ => None,
+                                })
+                                .filter(|text| !text.is_empty());
+                            (active.meta.cwd.clone(), refused)
+                        });
+                    if let Some((cwd, refused)) = active_review {
+                        self.emit_domain(
+                            Topic::SessionStatus {
+                                session_id: session_id.to_owned(),
+                            },
+                            ServerEvent::ModelFallbackBlocked {
+                                session_id: session_id.to_owned(),
+                                category: category.clone(),
+                                model: model.clone(),
+                                fallback_model: None,
+                                detail: detail.clone(),
+                            },
+                            cx,
+                        );
+                        if self.settings.fallback_review_advisor {
+                            if let Some(refused) = refused {
+                                self.maybe_run_fallback_review(
+                                    session_id,
+                                    category.as_ref(),
+                                    refused,
+                                    cwd,
+                                    cx,
+                                );
+                            } else {
+                                log::debug!(
+                                    "fallback review skipped for session {session_id}: no user text"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            AgentEvent::ModelFallbackDetected {
+                expected,
+                actual,
+                category,
+                ..
+            } => {
+                if self.settings.abort_on_model_fallback {
+                    let is_active = self
+                        .residents
+                        .active
+                        .as_mut()
+                        .filter(|active| active.meta.id == session_id)
+                        .is_some_and(|active| {
+                            active.queue.clear();
+                            true
+                        });
+                    if is_active {
+                        self.interrupt(cx);
+                        self.emit_domain(
+                            Topic::SessionStatus {
+                                session_id: session_id.to_owned(),
+                            },
+                            ServerEvent::ModelFallbackBlocked {
+                                session_id: session_id.to_owned(),
+                                category: category.clone(),
+                                model: Some(expected.clone()),
+                                fallback_model: Some(actual.clone()),
+                                detail: String::new(),
+                            },
+                            cx,
+                        );
+                    }
+                }
+            }
             AgentEvent::ProviderRelay { .. }
             | AgentEvent::PlanResolved { .. }
             | AgentEvent::ServedModel { .. }
@@ -440,6 +541,65 @@ impl AppState {
         });
     }
 
+    fn maybe_run_fallback_review(
+        &self,
+        session_id: &str,
+        category: Option<&agent::ClassifierCategory>,
+        refused: String,
+        cwd: PathBuf,
+        cx: &mut HostCx,
+    ) {
+        let review_meta = fallback_review_session_meta(&self.settings, cwd);
+        let settings = self.settings.clone();
+        let settings_store = self.settings_store.clone();
+        let prompt = fallback_review_prompt(category, &refused);
+        let provider_launcher = self.provider_launcher.clone();
+        let executor = cx.clone();
+        let session_id = session_id.to_owned();
+
+        let host_cx = cx.clone();
+        HostCx::spawn_detached(cx, async move {
+            let env_meta = review_meta.clone();
+            let env_settings = settings.clone();
+            let launch_env = host_cx
+                .unblock(move || session_launch_env(&env_settings, &settings_store, &env_meta))
+                .await;
+            let options =
+                session_options(&review_meta, &settings, launch_env, None, None, None, None);
+            let review = run_fallback_review(
+                provider_launcher,
+                review_meta.provider,
+                options,
+                prompt,
+                executor,
+            )
+            .await;
+            host_cx.enqueue(move |state, cx| {
+                if let Some((assessment, draft)) = review
+                    .as_deref()
+                    .map(parse_fallback_review)
+                    .filter(|(assessment, _)| !assessment.is_empty())
+                {
+                    state.emit_domain(
+                        Topic::SessionStatus {
+                            session_id: session_id.clone(),
+                        },
+                        ServerEvent::FallbackReviewReady {
+                            session_id,
+                            assessment,
+                            draft,
+                        },
+                        cx,
+                    );
+                } else {
+                    log::debug!(
+                        "fallback review failed or returned no assessment for session {session_id}"
+                    );
+                }
+            });
+        });
+    }
+
     pub(super) fn apply_generated_title(
         &mut self,
         session_id: &str,
@@ -475,6 +635,20 @@ pub(super) fn title_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMe
         id: "reasoningEffort".into(),
         value: serde_json::Value::String(AI_TITLE_REASONING_EFFORT.into()),
     });
+    meta
+}
+
+pub(super) fn fallback_review_session_meta(settings: &Settings, cwd: PathBuf) -> SessionMeta {
+    let review = &settings.fallback_review;
+    let model = (!review.model.trim().is_empty()).then(|| review.model.trim().to_string());
+    let mut meta = SessionMeta::new(review.provider, cwd, model);
+    meta.profile_id = review
+        .profile_id
+        .clone()
+        .filter(|id| settings.resolved_profile(id).is_some());
+    meta.approval_mode = ApprovalMode::Supervised;
+    meta.interaction_mode = InteractionMode::Build;
+    meta.orchestrate_enabled = false;
     meta
 }
 
@@ -613,6 +787,174 @@ pub(super) async fn generate_ai_title_inner(
     )
     .await;
     raw_title
+}
+
+pub(super) async fn run_fallback_review(
+    provider_launcher: ProviderLauncher,
+    provider: ProviderKind,
+    mut options: SessionOptions,
+    prompt: String,
+    executor: HostCx,
+) -> Option<String> {
+    let scratch =
+        std::env::temp_dir().join(format!("tcode-fallback-review-{}", uuid::Uuid::new_v4()));
+    let scratch_for_create = scratch.clone();
+    if let Err(err) = executor
+        .unblock(move || std::fs::create_dir_all(&scratch_for_create))
+        .await
+    {
+        log::debug!("could not create fallback review scratch directory: {err}");
+        return None;
+    }
+    options.cwd = scratch.clone();
+
+    let review = smol::future::or(
+        run_fallback_review_inner(provider_launcher, provider, options, prompt),
+        async {
+            smol::Timer::after(AI_TITLE_TIMEOUT).await;
+            None
+        },
+    )
+    .await;
+    let _ = executor
+        .unblock(move || std::fs::remove_dir_all(scratch))
+        .await;
+    review
+}
+
+pub(super) async fn run_fallback_review_inner(
+    provider_launcher: ProviderLauncher,
+    provider: ProviderKind,
+    options: SessionOptions,
+    prompt: String,
+) -> Option<String> {
+    let handle = provider_launcher.launch(provider, options).await.ok()?;
+    handle
+        .commands
+        .send(SessionCommand::SendTurn {
+            delivery_id: 0,
+            text: prompt,
+            options: Some(TurnOptions {
+                effort: None,
+                interaction_mode: Some(InteractionMode::Build),
+            }),
+            attachments: Vec::new(),
+        })
+        .await
+        .ok()?;
+
+    let mut completed_text = String::new();
+    let mut streamed_text = String::new();
+    let review = loop {
+        let Ok(event) = handle.events.recv().await else {
+            break None;
+        };
+        match event {
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::AssistantMessage { text },
+                ..
+            }) => completed_text.push_str(&text),
+            AgentEvent::Delta {
+                kind: agent::DeltaKind::AssistantText,
+                text,
+                ..
+            } => streamed_text.push_str(&text),
+            AgentEvent::ApprovalRequested(request) => {
+                let decision = request
+                    .options
+                    .iter()
+                    .find(|option| {
+                        matches!(
+                            option.kind,
+                            agent::ApprovalOptionKind::RejectOnce
+                                | agent::ApprovalOptionKind::RejectAlways
+                        )
+                    })
+                    .map(|option| ApprovalDecision::Option(option.id.clone()))
+                    .unwrap_or(ApprovalDecision::Deny);
+                let _ = handle
+                    .commands
+                    .send(SessionCommand::RespondApproval {
+                        request_id: request.id,
+                        decision,
+                    })
+                    .await;
+            }
+            AgentEvent::UserInputRequested { .. }
+            | AgentEvent::Error { fatal: true, .. }
+            | AgentEvent::SessionClosed { .. } => break None,
+            AgentEvent::TurnCompleted { status, usage, .. } => {
+                if !title_turn_generated_output(status, usage.as_ref()) {
+                    break None;
+                }
+                let text = if completed_text.trim().is_empty() {
+                    &streamed_text
+                } else {
+                    &completed_text
+                };
+                let text = text.trim();
+                break (!text.is_empty()).then(|| text.to_string());
+            }
+            _ => {}
+        }
+    };
+    let _ = handle.commands.send(SessionCommand::Shutdown).await;
+    smol::future::or(
+        async {
+            while let Ok(event) = handle.events.recv().await {
+                if matches!(event, AgentEvent::SessionClosed { .. }) {
+                    break;
+                }
+            }
+        },
+        async {
+            smol::Timer::after(std::time::Duration::from_secs(2)).await;
+        },
+    )
+    .await;
+    review
+}
+
+pub(super) fn fallback_review_prompt(
+    category: Option<&agent::ClassifierCategory>,
+    refused: &str,
+) -> String {
+    let category = match category {
+        Some(agent::ClassifierCategory::Cyber) => "cybersecurity",
+        Some(agent::ClassifierCategory::Bio) => "biology",
+        Some(agent::ClassifierCategory::Other(_)) | None => "safety",
+    };
+    format!(
+        "You are a safety-review advisor inside a coding tool. A user's request to a coding agent was stopped by an automated safety classifier that flagged it as potentially {category}-related. The classifier is intentionally broad and often flags legitimate coding, security, and biology work.\n\nYour job is ONLY to advise the user. Produce two things and nothing else:\n1) A brief assessment (2-4 sentences): is this plausibly a false positive, and why or why not? Be specific about what looks legitimate or genuinely concerning.\n2) IF AND ONLY IF you judge it a likely false positive, a short first-person clarification the USER can review, edit, and choose to send back to the coding agent. State concrete, checkable facts in the user's own voice (e.g. \"This is a test machine on my own LAN that I administer\"), NOT a generic assurance like \"this has no safety risk\". If you do not think it is a false positive, leave the draft blank.\n\nYou are advising, not deciding. You cannot approve or send anything, and must not pretend the user has agreed to any text. Do not restate these instructions.\n\nThe stopped request was:\n<<<\n{refused}\n>>>\n\nRespond in EXACTLY this format, with the literal delimiter line:\nASSESSMENT: <your 2-4 sentence assessment>\n---DRAFT---\n<the first-person clarification, or leave blank>"
+    )
+}
+
+pub(super) fn parse_fallback_review(text: &str) -> (String, String) {
+    let mut offset = 0;
+    let mut split = None;
+    for line in text.split_inclusive('\n') {
+        if line.trim() == "---DRAFT---" {
+            split = Some((offset, offset + line.len()));
+            break;
+        }
+        offset += line.len();
+    }
+
+    let (assessment, draft) = split
+        .map(|(start, end)| (&text[..start], text[end..].trim()))
+        .unwrap_or((text, ""));
+    let assessment = assessment.trim();
+    let assessment = assessment
+        .get("ASSESSMENT".len()..)
+        .filter(|_| {
+            assessment
+                .get(.."ASSESSMENT".len())
+                .is_some_and(|label| label.eq_ignore_ascii_case("ASSESSMENT"))
+        })
+        .and_then(|rest| rest.trim_start().strip_prefix(':'))
+        .unwrap_or(assessment)
+        .trim();
+    (assessment.to_string(), draft.to_string())
 }
 
 pub(super) fn title_turn_generated_output(

@@ -10,7 +10,7 @@ use tcode_core::{
     },
     provider_models::{ResolvedModel, picker_models, resolve_models},
     provider_status::ProviderSnapshot,
-    session::{ReviewComment, StoredEvent, Timeline},
+    session::{EntryContent, ReviewComment, StoredEvent, Timeline},
     settings::{
         BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings, SidebarLayout,
     },
@@ -100,7 +100,31 @@ pub struct WorkspaceStore {
     /// One-shot turn navigation requested by a cross-session content search.
     pending_chat_turn: Option<(String, usize)>,
     native_rewind_prefills: HashMap<String, String>,
+    fallback_blocks: HashMap<String, FallbackBlock>,
+    fallback_reviews: HashMap<String, FallbackReview>,
     conversation_ui: HashMap<ConversationDestination, ConversationUiState>,
+}
+
+/// A turn stopped by Claude Code's safety classifier, kept per session so the
+/// composer can offer recovery after the turn already ended.
+#[derive(Debug, Clone)]
+pub struct FallbackBlock {
+    pub category: Option<agent::ClassifierCategory>,
+    /// The model that refused (or was expected, on a silent reroute).
+    pub model: Option<String>,
+    /// The model Claude rerouted to; `None` when the request was blocked.
+    pub fallback_model: Option<String>,
+    pub detail: String,
+}
+
+/// A second model's read on a classifier stop: whether it looks like a false
+/// positive, plus a clarification the user may review, edit and send. Both are
+/// suggestions — nothing here is sent without a click.
+#[derive(Debug, Clone)]
+pub struct FallbackReview {
+    pub assessment: String,
+    /// Empty when the reviewer did not judge the flag a false positive.
+    pub draft: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +180,8 @@ impl WorkspaceStore {
             active_destination: None,
             pending_chat_turn: None,
             native_rewind_prefills: HashMap::new(),
+            fallback_blocks: HashMap::new(),
+            fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
         };
 
@@ -362,6 +388,8 @@ impl WorkspaceStore {
             (Topic::Index, ServerEvent::IndexRemoveSession { session_id }) => {
                 self.index_replica.0.retain(|meta| meta.id != *session_id);
                 self.native_rewind_prefills.remove(session_id);
+                self.fallback_blocks.remove(session_id);
+                self.fallback_reviews.remove(session_id);
                 self.conversation_ui
                     .remove(&ConversationDestination::Thread(session_id.clone()));
             }
@@ -426,6 +454,12 @@ impl WorkspaceStore {
                 self.session_replica = Some((session_id.clone(), timeline));
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                // A new turn means the user moved on; the recovery card for the
+                // stopped one is stale.
+                if matches!(record.event, agent::AgentEvent::TurnStarted { .. }) {
+                    self.fallback_blocks.remove(session_id);
+                    self.fallback_reviews.remove(session_id);
+                }
                 self.apply_conversation_event(session_id, &record.event);
                 if let Some((replica_id, timeline)) = self.session_replica.as_mut()
                     && replica_id == session_id
@@ -449,6 +483,42 @@ impl WorkspaceStore {
                 {
                     status.native_rewind_prefill_available = true;
                 }
+            }
+            (
+                Topic::SessionStatus { session_id },
+                ServerEvent::ModelFallbackBlocked {
+                    session_id: event_session,
+                    category,
+                    model,
+                    fallback_model,
+                    detail,
+                },
+            ) if session_id == event_session => {
+                self.fallback_blocks.insert(
+                    session_id.clone(),
+                    FallbackBlock {
+                        category: category.clone(),
+                        model: model.clone(),
+                        fallback_model: fallback_model.clone(),
+                        detail: detail.clone(),
+                    },
+                );
+            }
+            (
+                Topic::SessionStatus { session_id },
+                ServerEvent::FallbackReviewReady {
+                    session_id: event_session,
+                    assessment,
+                    draft,
+                },
+            ) if session_id == event_session => {
+                self.fallback_reviews.insert(
+                    session_id.clone(),
+                    FallbackReview {
+                        assessment: assessment.clone(),
+                        draft: draft.clone(),
+                    },
+                );
             }
             _ => {}
         }
@@ -1455,6 +1525,50 @@ impl WorkspaceStore {
         Some(prefill)
     }
 
+    /// The classifier stop the active session is currently showing, if any.
+    pub fn active_fallback_block(&self) -> Option<&FallbackBlock> {
+        let status = self.session_status_replica.as_ref()?;
+        self.fallback_blocks.get(&status.session_id)
+    }
+
+    pub fn dismiss_fallback_block(&mut self) {
+        if let Some(status) = self.session_status_replica.as_ref() {
+            self.fallback_blocks.remove(&status.session_id);
+        }
+    }
+
+    /// The advisory review of the active session's classifier stop, if any.
+    pub fn active_fallback_review(&self) -> Option<&FallbackReview> {
+        let status = self.session_status_replica.as_ref()?;
+        self.fallback_reviews.get(&status.session_id)
+    }
+
+    pub fn dismiss_fallback_review(&mut self) {
+        if let Some(status) = self.session_status_replica.as_ref() {
+            self.fallback_reviews.remove(&status.session_id);
+        }
+    }
+
+    /// The active session's last user message: its turn index and the words the
+    /// user actually typed (any injected context prefix stripped).
+    pub fn last_user_message(&self) -> Option<(usize, String)> {
+        self.with_active_timeline(|timeline| {
+            timeline.entries.iter().rev().find_map(|entry| {
+                let EntryContent::Item(agent::ItemContent::UserMessage {
+                    text, context_len, ..
+                }) = &entry.content
+                else {
+                    return None;
+                };
+                let visible = context_len
+                    .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
+                    .map_or(text.as_str(), |len| &text[len..]);
+                Some((entry.turn, visible.to_string()))
+            })
+        })
+        .flatten()
+    }
+
     /// Borrows the live terminal workspace for terminal emulation and PTY I/O.
     ///
     /// Terminal lifecycle and preference mutations still cross [`Command`];
@@ -2216,6 +2330,140 @@ mod tests {
             workspace.update(cx, |store, _cx| store.take_native_rewind_prefill()),
             Some("second parked prefill".into())
         );
+
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn classifier_block_survives_until_the_next_turn_starts(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-fallback-block-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let meta = SessionMeta::new(ProviderKind::ClaudeCode, root.join("worktree"), None);
+        session_store.upsert_meta(&meta).expect("persist session");
+
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: meta.id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "selected session", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == meta.id)
+            })
+        });
+
+        let session_id = meta.id.clone();
+        update_host!(&host, move |_state, cx| {
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                topic: Topic::SessionStatus {
+                    session_id: session_id.clone(),
+                },
+                event: ServerEvent::ModelFallbackBlocked {
+                    session_id,
+                    category: Some(agent::ClassifierCategory::Cyber),
+                    model: Some("claude-sonnet-4-5".into()),
+                    fallback_model: None,
+                    detail: "request blocked by classifier".into(),
+                },
+            }));
+        });
+        wait_until(cx, &workspace, "classifier block", |cx| {
+            workspace.read_with(cx, |store, _| store.active_fallback_block().is_some())
+        });
+
+        let session_id = meta.id.clone();
+        update_host!(&host, move |_state, cx| {
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                topic: Topic::SessionEvents {
+                    session_id: session_id.clone(),
+                },
+                event: ServerEvent::SessionEvent(SessionEventRecord {
+                    ts: None,
+                    event: AgentEvent::TurnStarted {
+                        turn_id: "turn-next".into(),
+                    },
+                }),
+            }));
+        });
+        wait_until(cx, &workspace, "block cleared by the next turn", |cx| {
+            workspace.read_with(cx, |store, _| store.active_fallback_block().is_none())
+        });
+
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    #[gpui::test]
+    fn fallback_review_survives_until_the_next_turn_starts(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-fallback-review-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let meta = SessionMeta::new(ProviderKind::ClaudeCode, root.join("worktree"), None);
+        session_store.upsert_meta(&meta).expect("persist session");
+
+        let host = test_host(session_store);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        command(
+            &host,
+            Command::SelectSession {
+                session_id: meta.id.clone(),
+            },
+        );
+        wait_until(cx, &workspace, "selected session", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.session_id == meta.id)
+            })
+        });
+
+        let session_id = meta.id.clone();
+        update_host!(&host, move |_state, cx| {
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                topic: Topic::SessionStatus {
+                    session_id: session_id.clone(),
+                },
+                event: ServerEvent::FallbackReviewReady {
+                    session_id,
+                    assessment: "looks like a false positive".into(),
+                    draft: "I am auditing my own service.".into(),
+                },
+            }));
+        });
+        wait_until(cx, &workspace, "review ready", |cx| {
+            workspace.read_with(cx, |store, _| store.active_fallback_review().is_some())
+        });
+
+        let session_id = meta.id.clone();
+        update_host!(&host, move |_state, cx| {
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                topic: Topic::SessionEvents {
+                    session_id: session_id.clone(),
+                },
+                event: ServerEvent::SessionEvent(SessionEventRecord {
+                    ts: None,
+                    event: AgentEvent::TurnStarted {
+                        turn_id: "turn-next".into(),
+                    },
+                }),
+            }));
+        });
+        wait_until(cx, &workspace, "review cleared by the next turn", |cx| {
+            workspace.read_with(cx, |store, _| store.active_fallback_review().is_none())
+        });
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");

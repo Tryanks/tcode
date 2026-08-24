@@ -593,6 +593,48 @@ fn title_session_uses_configured_model_with_low_effort() {
 }
 
 #[test]
+fn parse_fallback_review_with_delimiter() {
+    assert_eq!(
+        parse_fallback_review(
+            "ASSESSMENT: This looks legitimate. The scope is specific.\n---DRAFT---\nI own the test system."
+        ),
+        (
+            "This looks legitimate. The scope is specific.".into(),
+            "I own the test system.".into()
+        )
+    );
+}
+
+#[test]
+fn parse_fallback_review_without_delimiter() {
+    assert_eq!(
+        parse_fallback_review("A cautious assessment without the expected separator."),
+        (
+            "A cautious assessment without the expected separator.".into(),
+            String::new()
+        )
+    );
+}
+
+#[test]
+fn parse_fallback_review_with_empty_draft() {
+    assert_eq!(
+        parse_fallback_review("ASSESSMENT: This appears genuinely concerning.\n---DRAFT---\n"),
+        ("This appears genuinely concerning.".into(), String::new())
+    );
+}
+
+#[test]
+fn parse_fallback_review_strips_case_insensitive_label_with_whitespace() {
+    assert_eq!(
+        parse_fallback_review(
+            "  assessment   :   Likely benign.\n  ---DRAFT---  \n  I administer this host.  "
+        ),
+        ("Likely benign.".into(), "I administer this host.".into())
+    );
+}
+
+#[test]
 fn late_ai_title_does_not_overwrite_a_manual_rename() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-ai-title-race-test");
@@ -3581,6 +3623,56 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
         }
     }
     assert_eq!(serialized_prefill.as_deref(), Some("original prompt"));
+}
+
+#[test]
+fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enabled() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-turn-blocked-queue-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+
+    state.host_update(cx, |state, cx| {
+        state.settings.abort_on_model_fallback = true;
+        let mut active = ActiveSession::new(
+            SessionMeta::new(
+                ProviderKind::ClaudeCode,
+                PathBuf::from("/tmp/turn-blocked"),
+                Some("claude-opus-test".into()),
+            ),
+            false,
+            Vec::new(),
+        );
+        let session_id = active.meta.id.clone();
+        active.push_queued("do not auto-send".into(), Vec::new());
+        assert!(!active.queue.is_empty());
+        state.residents.active = Some(active);
+
+        state.on_event(
+            &session_id,
+            AgentEvent::TurnBlocked {
+                category: Some(agent::ClassifierCategory::Cyber),
+                model: Some("claude-opus-test".into()),
+                detail: "request blocked by classifier".into(),
+            },
+            cx,
+        );
+
+        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+    });
+
+    assert!(cx.drain_outgoing().iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionStatus { .. },
+            event: ServerEvent::ModelFallbackBlocked {
+                category: Some(agent::ClassifierCategory::Cyber),
+                model: Some(model),
+                fallback_model: None,
+                detail,
+                ..
+            },
+        }) if model == "claude-opus-test" && detail == "request blocked by classifier"
+    )));
 }
 
 #[test]

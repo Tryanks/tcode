@@ -34,11 +34,11 @@ use smol::process::Stdio;
 use crate::pending::{PendingRequests, drain_resolved};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, DeltaKind, FileChange, FileChangeKind, InteractionMode, ItemContent, ItemStatus,
-    LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep, PlanStepStatus,
-    ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode, SelectOption,
-    SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage, TurnStatus,
-    UserInputOption, UserInputQuestion, selection_bool, selection_str,
+    Attachment, ClassifierCategory, DeltaKind, FileChange, FileChangeKind, InteractionMode,
+    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
+    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
+    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
+    TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// T3's exact message denied to `ExitPlanMode` once the plan is captured.
@@ -109,7 +109,11 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // Resolve model-scoped launch options from the persisted selections
     // (effort/context/fast/thinking are launch-time only; mid-session changes
     // ride the resume-restart machinery).
-    let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
+    let launch = ClaudeLaunchOptions::resolve(
+        opts.model.as_deref(),
+        &opts.option_selections,
+        opts.abort_on_model_fallback,
+    );
     let base_permission_mode = permission_mode_flag(opts.approval_mode);
     let launch_permission_mode = initial_permission_mode(opts.approval_mode, opts.interaction_mode);
     // Launch arguments are deliberately appended last, so the tracker must
@@ -276,6 +280,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         applied_permission_mode,
         opts.approval_mode,
         native_rewind,
+        opts.model.clone(),
         stderr_tail,
         stderr_task,
     ))
@@ -312,8 +317,56 @@ struct ClaudeLaunchOptions {
     ultrathink: bool,
 }
 
+fn fallback_guard_models(model: &str) -> Vec<String> {
+    let base = model.split('[').next().unwrap_or(model);
+    let primary = if base.contains("fable") {
+        "fable"
+    } else {
+        base
+    };
+    let mut allow = vec![primary.to_string()];
+    for extra in ["sonnet", "haiku"] {
+        if !allow.iter().any(|m| m == extra) {
+            allow.push(extra.to_string());
+        }
+    }
+    allow
+}
+
+fn launch_settings_json(
+    model: Option<&str>,
+    abort_on_model_fallback: bool,
+    thinking: Option<bool>,
+    fast_mode: bool,
+    ultracode: bool,
+) -> Option<String> {
+    let mut settings = serde_json::Map::new();
+    if let Some(thinking) = thinking {
+        settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
+    }
+    if fast_mode {
+        settings.insert("fastMode".into(), json!(true));
+    }
+    if ultracode {
+        settings.insert("ultracode".into(), json!(true));
+    }
+    if abort_on_model_fallback && let Some(model) = model {
+        settings.insert(
+            "availableModels".into(),
+            json!(fallback_guard_models(model)),
+        );
+        settings.insert("switchModelsOnFlag".into(), json!(false));
+    }
+    (!settings.is_empty())
+        .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default())
+}
+
 impl ClaudeLaunchOptions {
-    fn resolve(model: Option<&str>, selections: &[OptionSelection]) -> Self {
+    fn resolve(
+        model: Option<&str>,
+        selections: &[OptionSelection],
+        abort_on_model_fallback: bool,
+    ) -> Self {
         let spec = model.and_then(model_spec);
         let raw_effort = selection_str(selections, "reasoningEffort");
         let resolved_effort = resolve_claude_effort(spec.as_ref(), raw_effort.as_deref());
@@ -346,18 +399,13 @@ impl ClaudeLaunchOptions {
             None
         };
 
-        let mut settings = serde_json::Map::new();
-        if let Some(thinking) = thinking {
-            settings.insert("alwaysThinkingEnabled".into(), json!(thinking));
-        }
-        if fast_mode {
-            settings.insert("fastMode".into(), json!(true));
-        }
-        if ultracode {
-            settings.insert("ultracode".into(), json!(true));
-        }
-        let settings_json = (!settings.is_empty())
-            .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default());
+        let settings_json = launch_settings_json(
+            model,
+            abort_on_model_fallback,
+            thinking,
+            fast_mode,
+            ultracode,
+        );
 
         ClaudeLaunchOptions {
             model_id,
@@ -402,6 +450,7 @@ async fn actor_loop(
     applied_permission_mode: String,
     approval_mode: ApprovalMode,
     native_rewind: bool,
+    expected_model: Option<String>,
     stderr_tail: crate::process::StderrTail,
     stderr_task: smol::Task<()>,
 ) {
@@ -412,6 +461,7 @@ async fn actor_loop(
         applied_permission_mode,
         approval_mode,
         native_rewind,
+        expected_model,
     );
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
@@ -1043,8 +1093,12 @@ pub(crate) struct Mapper {
     native_rewind: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
+    /// Model selected for this session, used when Claude reports a synthetic refusal message.
+    expected_model: Option<String>,
     /// Latest structured stop reason for the active turn.
     stop_reason: Option<String>,
+    /// Classifier category captured from the active turn's structured refusal details.
+    pending_refusal_category: Option<ClassifierCategory>,
     /// Warning-bearing stop reason already emitted for this occurrence.
     warned_stop_reason: Option<String>,
 }
@@ -1059,6 +1113,7 @@ impl Mapper {
             "default".to_owned(),
             ApprovalMode::Supervised,
             false,
+            None,
         )
     }
 
@@ -1069,6 +1124,7 @@ impl Mapper {
         applied_permission_mode: String,
         approval_mode: ApprovalMode,
         native_rewind: bool,
+        expected_model: Option<String>,
     ) -> Self {
         Mapper {
             session_started: false,
@@ -1101,7 +1157,9 @@ impl Mapper {
             pending_rewinds: HashMap::new(),
             native_rewind,
             last_served_model: None,
+            expected_model,
             stop_reason: None,
+            pending_refusal_category: None,
             warned_stop_reason: None,
         }
     }
@@ -1123,6 +1181,7 @@ impl Mapper {
         self.awaiting_turn_checkpoint = self.native_rewind;
         self.exit_plan_captured = false;
         self.stop_reason = None;
+        self.pending_refusal_category = None;
         self.warned_stop_reason = None;
         id
     }
@@ -1376,6 +1435,7 @@ impl Mapper {
             Some("task_updated") => return self.on_task_updated(msg),
             Some("task_notification") => return self.on_task_notification(msg),
             Some("background_tasks_changed") => return self.on_background_tasks_changed(msg),
+            Some("model_refusal_fallback") => return self.on_model_refusal_fallback(msg),
             other => {
                 log::debug!("claude: ignoring system/{other:?}");
                 return Vec::new();
@@ -1402,6 +1462,32 @@ impl Mapper {
             events.push(AgentEvent::ProviderCommands { commands });
         }
         events
+    }
+
+    fn on_model_refusal_fallback(&self, msg: &Value) -> Vec<AgentEvent> {
+        let (Some(expected), Some(actual)) = (
+            msg.get("original_model").and_then(Value::as_str),
+            msg.get("fallback_model").and_then(Value::as_str),
+        ) else {
+            log::debug!("claude: ignoring malformed model_refusal_fallback");
+            return Vec::new();
+        };
+        vec![AgentEvent::ModelFallbackDetected {
+            expected: expected.to_owned(),
+            actual: actual.to_owned(),
+            category: msg
+                .get("api_refusal_category")
+                .and_then(Value::as_str)
+                .map(ClassifierCategory::parse),
+            checkpoint_id: msg
+                .get("refused_user_message_uuid")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            parent_tool_use_id: msg
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }]
     }
 
     fn accept_pending_steers(&mut self) -> Vec<AgentEvent> {
@@ -1659,6 +1745,16 @@ impl Mapper {
             None => return Vec::new(),
         };
         let mut out = Vec::new();
+        if message
+            .pointer("/stop_details/type")
+            .and_then(Value::as_str)
+            == Some("refusal")
+        {
+            self.pending_refusal_category = message
+                .pointer("/stop_details/category")
+                .and_then(Value::as_str)
+                .map(ClassifierCategory::parse);
+        }
         if let Some(model) = message.get("model").and_then(Value::as_str)
             && self.last_served_model.as_deref() != Some(model)
         {
@@ -2224,6 +2320,19 @@ impl Mapper {
             events.push(AgentEvent::Error {
                 message: format!("claude turn failed ({subtype}): {detail}"),
                 fatal: false,
+            });
+        }
+        if self.stop_reason.as_deref() == Some("refusal") {
+            let detail = msg
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or("Claude blocked this turn after a safety classifier refusal.")
+                .to_owned();
+            events.push(AgentEvent::TurnBlocked {
+                category: self.pending_refusal_category.take(),
+                model: self.expected_model.clone(),
+                detail,
             });
         }
         // Publish the current background-task liveness with every result, not
@@ -3021,6 +3130,80 @@ mod tests {
     }
 
     #[test]
+    fn model_refusal_fallback_emits_model_fallback_detected() {
+        let mut mapper = Mapper::new();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"system","subtype":"model_refusal_fallback","trigger":"refusal","direction":"retry","scope":"session","original_model":"claude-fable-5","fallback_model":"claude-opus-4-8","request_id":"req_123","api_refusal_category":"cyber","api_refusal_explanation":null,"refused_user_message_uuid":"cf7703ac-420b-4038-9f32-582077b27352","content":"Safeguards flagged this message. Switched models.","session_id":"session-1","uuid":"system-1"}"#,
+        );
+
+        assert_eq!(
+            events,
+            [AgentEvent::ModelFallbackDetected {
+                expected: "claude-fable-5".into(),
+                actual: "claude-opus-4-8".into(),
+                category: Some(ClassifierCategory::Cyber),
+                checkpoint_id: Some("cf7703ac-420b-4038-9f32-582077b27352".into()),
+                parent_tool_use_id: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn classifier_refusal_result_emits_turn_blocked() {
+        let mut mapper = Mapper::new_configured(
+            false,
+            InteractionMode::Build,
+            "default",
+            "default".into(),
+            ApprovalMode::Supervised,
+            false,
+            Some("claude-fable-5".into()),
+        );
+        mapper.start_turn();
+
+        let assistant_events = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-refusal","model":"<synthetic>","stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered cyber content restrictions."},"content":[{"type":"text","text":"API Error: safeguards flagged this message. Details: `[cyber]`"}]},"parent_tool_use_id":null}"#,
+        );
+        assert_eq!(
+            mapper.pending_refusal_category,
+            Some(ClassifierCategory::Cyber)
+        );
+        assert!(
+            assistant_events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Warning { .. }))
+        );
+
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"success","is_error":true,"stop_reason":"refusal","result":"API Error: safeguards flagged this message. Details: `[cyber]`","terminal_reason":"api_error","modelUsage":{"claude-fable-5":{"inputTokens":1,"outputTokens":0}}}"#,
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnBlocked {
+                category: Some(ClassifierCategory::Cyber),
+                model: Some(model),
+                detail,
+            } if model == "claude-fable-5" && detail.contains("[cyber]")
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Error { fatal: false, .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn replayed_user_message_exposes_native_turn_checkpoint() {
         let mut mapper = Mapper::new();
         mapper.native_rewind = true;
@@ -3220,6 +3403,7 @@ mod tests {
                     value: json!(true),
                 },
             ],
+            false,
         );
         assert_eq!(launch.model_id.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(launch.effort.as_deref(), Some("xhigh"));
@@ -3242,6 +3426,7 @@ mod tests {
                     value: json!("1m"),
                 },
             ],
+            false,
         );
         assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5[1m]"));
         assert_eq!(launch.effort, None);
@@ -3255,10 +3440,45 @@ mod tests {
                 id: "thinking".into(),
                 value: json!(true),
             }],
+            false,
         );
         let settings: Value =
             serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
         assert_eq!(settings["alwaysThinkingEnabled"], true);
+    }
+
+    #[test]
+    fn fallback_guard_settings_merge_with_launch_settings() {
+        let parse = |model, thinking, fast_mode, ultracode| -> Value {
+            serde_json::from_str(
+                launch_settings_json(Some(model), true, thinking, fast_mode, ultracode)
+                    .as_deref()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+
+        let fable = parse("claude-fable-5", Some(true), true, true);
+        assert_eq!(
+            fable["availableModels"],
+            json!(["fable", "sonnet", "haiku"])
+        );
+        assert_eq!(fable["switchModelsOnFlag"], false);
+        assert_eq!(fable["alwaysThinkingEnabled"], true);
+        assert_eq!(fable["fastMode"], true);
+        assert_eq!(fable["ultracode"], true);
+
+        let opus = parse("claude-opus-5", None, false, false);
+        assert_eq!(
+            opus["availableModels"],
+            json!(["claude-opus-5", "sonnet", "haiku"])
+        );
+
+        let opus_1m = parse("claude-opus-5[1m]", None, false, false);
+        assert_eq!(
+            opus_1m["availableModels"],
+            json!(["claude-opus-5", "sonnet", "haiku"])
+        );
     }
 
     #[test]
@@ -3331,6 +3551,7 @@ mod tests {
             launch_mode.into(),
             ApprovalMode::Supervised,
             false,
+            None,
         );
 
         assert_eq!(m.applied_permission_mode, "plan");

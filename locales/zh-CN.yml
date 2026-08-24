@@ -231,6 +231,15 @@ settings:
   inactive_frame_throttle:
     title: "后台帧率限制"
     description: "窗口失焦时将刷新率降至约 2 FPS 以节省能耗。重启后生效。"
+  abort_on_model_fallback:
+    title: "模型回退时中止"
+    description: "开启后，Claude Code 会话将锁定可用模型，使被标记的请求中断，而不是静默切换模型；子代理只能使用主模型、Sonnet 或 Haiku。"
+  fallback_review_advisor:
+    title: "回退审查顾问"
+    description: "使用独立模型审查被 Claude Code 回退防护中断的请求。"
+  fallback_review_model:
+    title: "回退审查模型"
+    description: "选择用于回退审查的提供方和模型。"
   title_generation:
     title: "对话命名模型"
     description: "选择负责为新对话命名的提供方和模型。命名请求始终使用 low 推理强度。"
@@ -659,6 +668,20 @@ userinput:
   previous: "上一个"
   next_question: "下一个问题"
   done: "完成"
+fallback:
+  title: "本轮已被安全分类器中止"
+  reason_cyber: "Claude Code 的安全分类器认为本轮可能涉及网络安全内容。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_bio: "Claude Code 的安全分类器认为本轮可能涉及生物学内容。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_generic: "Claude Code 的安全分类器标记了本轮对话。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  blocked: "%{model} 拒绝了该请求。"
+  rerouted: "Claude 已改用 %{model}，tcode 中断了本轮。"
+  retry_on: "换用 %{model} 重试"
+  edit_retry: "修改后重试"
+  dismiss: "关闭"
+  review_title: "另一个模型复核了本次标记"
+  review_hint: "以下是建议的澄清说明——发送前请自行审阅并修改，这些内容由你本人提出。"
+  review_placeholder: "你的澄清说明"
+  review_send: "发送澄清说明"
 terminal:
   title: "终端"
   tabs: "终端标签页"

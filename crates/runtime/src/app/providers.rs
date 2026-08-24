@@ -779,6 +779,7 @@ pub(super) fn session_options(
     SessionOptions {
         cwd: meta.cwd.clone(),
         model: meta.model.clone(),
+        abort_on_model_fallback: settings.abort_on_model_fallback,
         resume: meta.resume_cursor.clone(),
         fork: meta.pending_fork,
         binary_path: provider_settings.binary_path.clone(),

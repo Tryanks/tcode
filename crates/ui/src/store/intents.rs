@@ -41,7 +41,7 @@ impl WorkspaceStore {
     }
 }
 
-// Settings intents (27).
+// Settings intents (32).
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
         self.dispatch(Command::PatchSettings { patch });
@@ -70,6 +70,12 @@ impl WorkspaceStore {
     }
     pub fn set_inactive_frame_throttle_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::InactiveFrameThrottleDisabled(value));
+    }
+    pub fn set_abort_on_model_fallback(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::AbortOnModelFallback(value));
+    }
+    pub fn set_fallback_review_advisor(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::FallbackReviewAdvisor(value));
     }
     pub fn set_auto_archive_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AutoArchiveDisabled(value));
@@ -127,6 +133,15 @@ impl WorkspaceStore {
     }
     pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
+    }
+    pub fn set_fallback_review_provider(&mut self, value: ProviderKind) {
+        self.patch_settings(SettingsPatch::FallbackReviewProvider(value));
+    }
+    pub fn set_fallback_review_model(&mut self, value: String) {
+        self.patch_settings(SettingsPatch::FallbackReviewModel(value));
+    }
+    pub fn set_fallback_review_profile_id(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::FallbackReviewProfileId(value));
     }
     pub fn set_sidebar_layout(&mut self, value: SidebarLayout) {
         self.patch_settings(SettingsPatch::SidebarLayout(value));

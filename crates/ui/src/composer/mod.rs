@@ -101,6 +101,11 @@ pub struct Composer {
     /// Keeping it separate from the turn composer makes the pending question
     /// and the destination of typed text unambiguous.
     user_input_custom: Entity<TextareaState>,
+    /// The editable clarification draft suggested by the fallback reviewer, plus
+    /// the draft last seeded into it — the field is only re-seeded when the
+    /// suggestion itself changes, so the user's edits survive re-renders.
+    fallback_review_input: Entity<TextareaState>,
+    fallback_review_seeded: Option<String>,
     /// Unsent text is isolated by persisted thread or project New thread page.
     text_cache: ComposerTextCache,
     model_search: Entity<InputState>,
@@ -186,6 +191,11 @@ impl Composer {
                 .submit_on_enter(true)
                 .placeholder(crate::tr!("userinput.custom_placeholder"))
         });
+        let fallback_review_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 6)
+                .placeholder(crate::tr!("fallback.review_placeholder"))
+        });
 
         let subscriptions = vec![
             // Re-render when app state changes (e.g. the provider's commands /
@@ -246,6 +256,12 @@ impl Composer {
                     _ => {}
                 },
             ),
+            // Keeps the review card's Send button in step with its draft field.
+            cx.subscribe(&fallback_review_input, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
             // Live-filter the model picker as the user types in its search box.
             cx.subscribe(&model_search, |_, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -258,6 +274,8 @@ impl Composer {
             workspace_store,
             input,
             user_input_custom,
+            fallback_review_input,
+            fallback_review_seeded: None,
             text_cache: ComposerTextCache::default(),
             model_search,
             picker_rail: None,
@@ -322,9 +340,14 @@ impl Composer {
         let Some(prefill) = prefill else {
             return;
         };
-        let cursor = prefill.len();
+        self.set_input_text(prefill, window, cx);
+    }
+
+    /// Replace the composer text with `text`, caret at the end, focused.
+    fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let cursor = text.len();
         self.input.update(cx, |state, cx| {
-            state.set_value(prefill, window, cx);
+            state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
             state.focus(window, cx);
         });
@@ -722,6 +745,7 @@ impl Render for Composer {
         self.sync_images_session(cx);
         self.sync_text_destination(window, cx);
         self.sync_native_rewind_prefill(window, cx);
+        self.sync_fallback_review_draft(window, cx);
         let composer_state = self.workspace_store.read(cx).composer_state();
         let turn_running = composer_state.turn_running;
         let approval = composer_state.pending_approval;
@@ -826,6 +850,16 @@ impl Render for Composer {
         }
 
         let user_input = self.pending_user_input(cx);
+        let fallback_block = self
+            .workspace_store
+            .read(cx)
+            .active_fallback_block()
+            .cloned();
+        let fallback_review = self
+            .workspace_store
+            .read(cx)
+            .active_fallback_review()
+            .cloned();
 
         // Dropping image files onto the card attaches them (T3 drag-drop).
         let composer = cx.entity();
@@ -1010,6 +1044,12 @@ impl Render for Composer {
                     })
                     .when_some(user_input, |this, (request_id, questions)| {
                         this.child(self.render_user_input_panel(request_id, questions, cx))
+                    })
+                    .when_some(fallback_block, |this, block| {
+                        this.child(self.render_fallback_panel(&block, cx))
+                    })
+                    .when_some(fallback_review, |this, review| {
+                        this.child(self.render_fallback_review_panel(&review, cx))
                     })
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_queue_strip(cx))
