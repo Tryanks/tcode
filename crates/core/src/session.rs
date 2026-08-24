@@ -456,10 +456,6 @@ pub struct Timeline {
     /// diff payloads. Updates use [`Arc::make_mut`], preserving the value
     /// semantics of a cloned [`Timeline`] while keeping read snapshots cheap.
     pub entries: Vec<Arc<TimelineEntry>>,
-    /// Child activity grouped by the top-level subagent spawn item id.
-    pub children: HashMap<String, Vec<Arc<TimelineEntry>>>,
-    /// Parent ids whose child activity exceeded the in-memory progress cap.
-    truncated_children: HashSet<String>,
     /// One entry per turn ("Work Log" section), in order.
     pub turns: Vec<TurnMeta>,
     pub turn_running: bool,
@@ -498,14 +494,6 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    pub fn children(&self, parent_id: &str) -> &[Arc<TimelineEntry>] {
-        self.children.get(parent_id).map_or(&[], Vec::as_slice)
-    }
-
-    pub fn children_truncated(&self, parent_id: &str) -> bool {
-        self.truncated_children.contains(parent_id)
-    }
-
     /// Fold a whole event sequence (replay path). Accepts either bare
     /// [`AgentEvent`]s (ts unknown) or timestamped [`StoredEvent`]s.
     pub fn fold_events(events: impl IntoIterator<Item = impl Into<StoredEvent>>) -> Self {
@@ -947,12 +935,6 @@ impl Timeline {
         };
 
         self.entries.retain(|entry| entry.turn < target_turn);
-        self.children.retain(|_, entries| {
-            entries.retain(|entry| entry.turn < target_turn);
-            !entries.is_empty()
-        });
-        self.truncated_children
-            .retain(|parent_id| self.children.contains_key(parent_id));
         self.turns.truncate(target_turn);
         self.current_turn = self.turns.len().checked_sub(1);
         self.tool_clock = ToolClock::default();
@@ -969,12 +951,8 @@ impl Timeline {
         self.plan_explanation = None;
         self.usage = None;
         self.last_turn_status = self.turns.last().and_then(|turn| turn.status);
-        self.committed_file_change_items.retain(|item_id| {
-            self.entries
-                .iter()
-                .chain(self.children.values().flatten())
-                .any(|entry| entry.id == *item_id)
-        });
+        self.committed_file_change_items
+            .retain(|item_id| self.entries.iter().any(|entry| entry.id == *item_id));
     }
 
     /// The current open turn, creating one if none exists.
@@ -1012,8 +990,7 @@ impl Timeline {
         {
             return;
         }
-        let entries = self.entries.iter().chain(self.children.values().flatten());
-        let fragments = entries.filter_map(|entry| {
+        let fragments = self.entries.iter().filter_map(|entry| {
             if entry.turn != turn || !self.committed_file_change_items.contains(&entry.id) {
                 return None;
             }
@@ -1034,36 +1011,17 @@ impl Timeline {
     fn item_turn(&self, item_id: &str) -> Option<usize> {
         self.entries
             .iter()
-            .chain(self.children.values().flatten())
             .find(|entry| entry.id == item_id)
             .map(|entry| entry.turn)
     }
 
     fn upsert_item(&mut self, ts: Option<u64>, item: &ThreadItem) {
-        let mut incoming = EntryContent::Item(item.content.clone());
-        if let Some(parent_id) = &item.parent_item_id {
-            let turn = self.ensure_turn(ts);
-            let children = self.children.entry(parent_id.clone()).or_default();
-            if let Some(entry) = children.iter_mut().find(|entry| entry.id == item.id) {
-                let entry = Arc::make_mut(entry);
-                entry.content = merge_content(
-                    std::mem::replace(&mut entry.content, incoming.clone()),
-                    incoming,
-                );
-            } else {
-                children.push(Arc::new(TimelineEntry {
-                    id: item.id.clone(),
-                    content: incoming,
-                    ts,
-                    turn,
-                }));
-                if children.len() > 200 {
-                    children.remove(0);
-                    self.truncated_children.insert(parent_id.clone());
-                }
-            }
+        // Runtime reroutes native-subagent child items into mirror sessions;
+        // legacy logs still contain them inline — drop, never render.
+        if item.parent_item_id.is_some() {
             return;
         }
+        let mut incoming = EntryContent::Item(item.content.clone());
         if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item.id) {
             let entry = Arc::make_mut(entry);
             entry.content = merge_content(
@@ -1598,9 +1556,8 @@ mod tests {
 
         let change_set = timeline.turns[0].changes.as_ref().unwrap();
         assert_eq!(change_set.completeness, ChangeCompleteness::Partial);
-        assert_eq!(change_set.changes.len(), 2);
+        assert_eq!(change_set.changes.len(), 1);
         assert_eq!(change_set.changes[0].path, "src/lib.rs");
-        assert_eq!(change_set.changes[1].path, "src/child.rs");
     }
 
     #[test]
@@ -2653,7 +2610,7 @@ mod tests {
     }
 
     #[test]
-    fn subagent_children_fold_below_spawn_only() {
+    fn parented_items_are_dropped_while_subagent_spawn_status_merges() {
         let spawn = ThreadItem {
             id: "spawn".into(),
             parent_item_id: None,
@@ -2694,31 +2651,12 @@ mod tests {
             EntryContent::Item(ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. })
                 if summary == "pong"
         ));
-        assert_eq!(timeline.children("spawn").len(), 1);
-        assert!(matches!(
-            &timeline.children("spawn")[0].content,
-            EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "ping"
-        ));
-    }
-
-    #[test]
-    fn subagent_child_cap_records_actual_truncation() {
-        let mut timeline = Timeline::default();
-        for index in 0..=200 {
-            timeline.apply_at(
-                None,
-                &AgentEvent::ItemCompleted(ThreadItem {
-                    id: format!("spawn:child-{index}"),
-                    parent_item_id: Some("spawn".into()),
-                    content: ItemContent::AssistantMessage {
-                        text: index.to_string(),
-                    },
-                }),
-            );
-        }
-        assert_eq!(timeline.children("spawn").len(), 200);
-        assert!(timeline.children_truncated("spawn"));
-        assert_eq!(timeline.children("spawn")[0].id, "spawn:child-1");
+        assert!(
+            timeline
+                .entries
+                .iter()
+                .all(|entry| entry.id != "spawn:user-1")
+        );
     }
 
     #[test]

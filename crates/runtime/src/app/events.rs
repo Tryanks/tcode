@@ -8,6 +8,10 @@ impl AppState {
             serde_json::to_string(&event).unwrap_or_else(|_| "<unserializable>".into())
         );
 
+        if self.reroute_native_subagent_event(session_id, &event, cx) {
+            return;
+        }
+
         match &event {
             AgentEvent::RewindFailed { error, .. } => {
                 self.pending_native_rewinds.remove(session_id);
@@ -39,6 +43,7 @@ impl AppState {
             AgentEvent::SessionClosed { reason } => {
                 self.pending_native_rewinds.remove(session_id);
                 self.clear_approvals(session_id);
+                self.clear_native_subagent_work(session_id, cx);
                 self.close_orchestrator_children(session_id, cx);
                 let is_active = self.active_session_id() == Some(session_id);
                 if !is_active {

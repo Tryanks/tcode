@@ -7,6 +7,132 @@ use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage};
 
 #[test]
+fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-native-subagent-mirror-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+
+    state.update(cx, |state, cx| {
+        let mut parent_meta = SessionMeta::new(
+            ProviderKind::Codex,
+            PathBuf::from("/tmp/native-subagent-parent"),
+            Some("gpt-test".into()),
+        );
+        parent_meta.id = "parent".into();
+        parent_meta.project_id = Some("project".into());
+        state.sessions.push(parent_meta.clone());
+        state.residents.active = Some(ActiveSession::new(parent_meta, false, Vec::new()));
+
+        state.on_event(
+            "parent",
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "spawn-1".into(),
+                parent_item_id: None,
+                content: ItemContent::Subagent {
+                    agent_type: "explorer".into(),
+                    description: "Inspect event routing\nand report".into(),
+                    status: ItemStatus::InProgress,
+                    summary: None,
+                },
+            }),
+            cx,
+        );
+
+        let mirror = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("spawn-1"))
+            .cloned()
+            .expect("native subagent mirror metadata");
+        assert_eq!(mirror.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(mirror.title, "explorer: Inspect event routing");
+        assert!(state.resident(&mirror.id).unwrap().has_work());
+
+        state.on_event(
+            "parent",
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "child-answer".into(),
+                parent_item_id: Some("spawn-1".into()),
+                content: ItemContent::AssistantMessage {
+                    text: "routed transcript".into(),
+                },
+            }),
+            cx,
+        );
+        let mirror_timeline = &state.resident(&mirror.id).unwrap().timeline;
+        assert!(mirror_timeline.entries.iter().any(|entry| {
+            matches!(
+                &entry.content,
+                EntryContent::Item(ItemContent::AssistantMessage { text })
+                    if entry.id == "child-answer" && text == "routed transcript"
+            )
+        }));
+        assert_eq!(state.resident("parent").unwrap().timeline.entries.len(), 1);
+
+        state.on_event(
+            "parent",
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "spawn-1".into(),
+                parent_item_id: None,
+                content: ItemContent::Subagent {
+                    agent_type: "explorer".into(),
+                    description: "Inspect event routing\nand report".into(),
+                    status: ItemStatus::Completed,
+                    summary: Some("routing verified".into()),
+                },
+            }),
+            cx,
+        );
+        assert!(!state.resident(&mirror.id).unwrap().has_work());
+        assert!(matches!(
+            &state.resident("parent").unwrap().timeline.entries[0].content,
+            EntryContent::Item(ItemContent::Subagent {
+                status: ItemStatus::Completed,
+                summary: Some(summary),
+                ..
+            }) if summary == "routing verified"
+        ));
+
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_status("parent".into(), None, reply, cx);
+        assert_eq!(response.try_recv().unwrap().unwrap(), serde_json::json!([]));
+    });
+    cx.run_until_parked();
+
+    state.update(cx, |state, _| {
+        let mirror = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("spawn-1"))
+            .unwrap();
+        let mirror_events = state.store.read_events(&mirror.id);
+        assert!(mirror_events.iter().any(|stored| matches!(
+            &stored.event,
+            AgentEvent::ItemCompleted(ThreadItem {
+                id,
+                parent_item_id: None,
+                ..
+            }) if id == "child-answer"
+        )));
+        let parent_events = state.store.read_events("parent");
+        assert!(parent_events.iter().any(|stored| matches!(
+            &stored.event,
+            AgentEvent::ItemCompleted(ThreadItem {
+                id,
+                parent_item_id: None,
+                content: ItemContent::Subagent { .. },
+            }) if id == "spawn-1"
+        )));
+        assert!(parent_events.iter().all(|stored| match &stored.event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
+            _ => true,
+        }));
+    });
+}
+
+#[test]
 fn settings_patch_preserves_concurrently_changed_other_field() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-settings-seam-test");

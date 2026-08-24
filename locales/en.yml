@@ -23,7 +23,7 @@ chat:
   hide_previous_logs: "Hide %{count} previous log entries"
   subagent_count: "%{count} subagents"
   subagent_row: "%{agent}: %{description}"
-  earlier_steps_truncated: "+earlier steps truncated"
+  subagent_readonly: "Read-only subagent thread"
   working: "Working"
   turn_ai: "AI thinking & response %{duration}"
   turn_tools: "Tool calls %{duration}"

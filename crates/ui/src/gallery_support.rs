@@ -82,24 +82,7 @@ pub fn work_log(
 }
 
 pub fn subagent(entry: &TimelineEntry, cx: &App) -> AnyElement {
-    subagent::subagent_row(
-        entry,
-        subagent::SubagentState {
-            expanded: false,
-            truncated: false,
-            duration: (!matches!(
-                entry.content,
-                tcode_core::session::EntryContent::Item(agent::ItemContent::Subagent {
-                    status: agent::ItemStatus::InProgress,
-                    ..
-                })
-            ))
-            .then(|| "12.4s".to_string()),
-        },
-        Vec::new(),
-        |_, _, _| {},
-        cx,
-    )
+    subagent::subagent_row(entry, None, cx)
 }
 
 pub fn changed_files(index: usize, cwd: &Path, changes: &[FileChange], cx: &App) -> AnyElement {
