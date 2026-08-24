@@ -684,6 +684,10 @@ fallback:
   retry_on: "Retry on %{model}"
   edit_retry: "Edit & retry"
   dismiss: "Dismiss"
+  review_title: "A second model reviewed the flag"
+  review_hint: "Suggested clarification — review and edit it before sending; you are the one asserting this."
+  review_placeholder: "Your clarification"
+  review_send: "Send clarification"
 terminal:
   title: "Terminal"
   tabs: "Terminal tabs"

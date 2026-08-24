@@ -678,6 +678,10 @@ fallback:
   retry_on: "换用 %{model} 重试"
   edit_retry: "修改后重试"
   dismiss: "关闭"
+  review_title: "另一个模型复核了本次标记"
+  review_hint: "以下是建议的澄清说明——发送前请自行审阅并修改，这些内容由你本人提出。"
+  review_placeholder: "你的澄清说明"
+  review_send: "发送澄清说明"
 terminal:
   title: "终端"
   tabs: "终端标签页"
