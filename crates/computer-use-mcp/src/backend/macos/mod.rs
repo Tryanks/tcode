@@ -1,5 +1,6 @@
 mod ax;
 mod capture;
+mod focus;
 mod input;
 
 use std::collections::HashMap;
@@ -21,6 +22,8 @@ use super::{
     RootFilters, RootInfo, RootObservation, matches_root_filters,
 };
 use crate::outline::{UiNode, is_text_sparse};
+
+use self::focus::{CursorGuard, FocusGuard};
 
 pub(super) struct MacosBackend;
 
@@ -143,12 +146,16 @@ impl MacosBackend {
                         return Ok(ActionResult::worked("AXPress completed for click target"));
                     }
                     let (x, y) = target.frame().center();
+                    let _cursor_guard = CursorGuard::acquire();
+                    let _focus_guard = FocusGuard::acquire(root);
                     input::click(x, y, request.button, request.click_count)?;
                     return Ok(ActionResult::unknown(
                         "AXPress was rejected; physical click events were posted",
                     ));
                 }
                 let (x, y) = action_point(root, request)?;
+                let _cursor_guard = CursorGuard::acquire();
+                let _focus_guard = FocusGuard::acquire(root);
                 input::click(x, y, request.button, request.click_count)?;
                 Ok(ActionResult::unknown("physical click events were posted"))
             }
@@ -160,14 +167,20 @@ impl MacosBackend {
                 match target.set_text(text) {
                     Ok(()) => Ok(ActionResult::worked("AXValue was set")),
                     Err(ax_error) => {
-                        if target.focus().is_err() {
+                        let click_point = if target.focus().is_err() {
                             let frame = target.frame();
                             if !frame.has_area() {
                                 return Ok(ActionResult::didnt(format!(
                                     "{ax_error}; the target also rejected focus and has no clickable frame"
                                 )));
                             }
-                            let (x, y) = frame.center();
+                            Some(frame.center())
+                        } else {
+                            None
+                        };
+                        let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
+                        let _focus_guard = FocusGuard::acquire(root);
+                        if let Some((x, y)) = click_point {
                             input::click(x, y, super::MouseButton::Left, 1)?;
                         }
                         input::keypress(&["cmd+a".into()])?;
@@ -182,7 +195,7 @@ impl MacosBackend {
                 let text = request.text.as_deref().ok_or_else(|| {
                     BackendError::new(BackendErrorCode::InvalidAction, "type_text requires text")
                 })?;
-                if request.target_path.is_some() {
+                let click_point = if request.target_path.is_some() {
                     let target = target(root, request)?;
                     if target.focus().is_err() {
                         let frame = target.frame();
@@ -191,15 +204,26 @@ impl MacosBackend {
                                 "target rejected focus and has no clickable frame",
                             ));
                         }
-                        let (x, y) = frame.center();
-                        input::click(x, y, super::MouseButton::Left, 1)?;
+                        Some(frame.center())
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
+                let _focus_guard = FocusGuard::acquire(root);
+                if let Some((x, y)) = click_point {
+                    input::click(x, y, super::MouseButton::Left, 1)?;
                 }
                 input::type_text(text)?;
                 Ok(ActionResult::unknown("Unicode keyboard events were posted"))
             }
             ActionKind::Keypress => {
-                if request.target_path.is_some() {
+                let keys = request.keys.as_deref().ok_or_else(|| {
+                    BackendError::new(BackendErrorCode::InvalidAction, "keypress requires keys")
+                })?;
+                let click_point = if request.target_path.is_some() {
                     let target = target(root, request)?;
                     if target.focus().is_err() {
                         let frame = target.frame();
@@ -208,19 +232,32 @@ impl MacosBackend {
                                 "keypress target rejected focus and has no clickable frame",
                             ));
                         }
-                        let (x, y) = frame.center();
-                        input::click(x, y, super::MouseButton::Left, 1)?;
+                        Some(frame.center())
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
+                let _focus_guard = FocusGuard::acquire(root);
+                if let Some((x, y)) = click_point {
+                    input::click(x, y, super::MouseButton::Left, 1)?;
                 }
-                let keys = request.keys.as_deref().ok_or_else(|| {
-                    BackendError::new(BackendErrorCode::InvalidAction, "keypress requires keys")
-                })?;
                 input::keypress(keys)?;
                 Ok(ActionResult::unknown("keyboard events were posted"))
             }
             ActionKind::Scroll => {
-                if request.target_path.is_some() || (request.x.is_some() && request.y.is_some()) {
-                    let (x, y) = action_point(root, request)?;
+                let action_point = if request.target_path.is_some()
+                    || (request.x.is_some() && request.y.is_some())
+                {
+                    Some(action_point(root, request)?)
+                } else {
+                    None
+                };
+                let _cursor_guard = CursorGuard::acquire();
+                let _focus_guard = FocusGuard::acquire(root);
+                if let Some((x, y)) = action_point {
                     input::move_mouse(x, y)?;
                 }
                 input::scroll(
@@ -233,11 +270,14 @@ impl MacosBackend {
                 let path = request.path.as_deref().ok_or_else(|| {
                     BackendError::new(BackendErrorCode::InvalidAction, "drag requires a path")
                 })?;
+                let _cursor_guard = CursorGuard::acquire();
+                let _focus_guard = FocusGuard::acquire(root);
                 input::drag(path, request.button)?;
                 Ok(ActionResult::unknown("drag events were posted"))
             }
             ActionKind::MoveMouse => {
                 let (x, y) = action_point(root, request)?;
+                let _focus_guard = FocusGuard::acquire(root);
                 input::move_mouse(x, y)?;
                 Ok(ActionResult::unknown("mouse-move event was posted"))
             }
