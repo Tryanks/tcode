@@ -133,7 +133,7 @@ mod imp {
     use super::{PermissionKind, PermissionStatus};
 
     pub(super) fn check() -> PermissionStatus {
-        // UIAutomation, SendInput, and same-session GDI capture do not use the
+        // The Windows uiautomation/input/screenshot APIs do not use the
         // macOS-style application-level grants represented by this API.
         PermissionStatus {
             accessibility: true,

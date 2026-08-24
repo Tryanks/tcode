@@ -383,7 +383,7 @@ mod dispatch {
             Err(error) => return backend_error(error),
         };
         let roots = roots().lock().unwrap().refresh(discovered);
-        let mut lines = vec![format!("roots: {} (frontmost first)", roots.len())];
+        let mut lines = vec![format!("roots: {} (platform-native order)", roots.len())];
         for root in roots {
             lines.push(format!(
                 "{} {} app=\"{}\" bundle_id=\"{}\" pid={} title=\"{}\" window_id={} frame=({:.0},{:.0},{:.0},{:.0})",

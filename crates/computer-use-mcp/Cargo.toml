@@ -28,13 +28,14 @@ core-foundation = "0.10"
 core-graphics = { version = "0.25", features = ["highsierra"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-png = "=0.18.1"
-windows = { version = "=0.61.3", features = [
+uiautomation = { version = "0.25", default-features = false, features = [
+    "control",
+    "input",
+    "pattern",
+    "screenshot",
+    "png",
+] }
+windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_System_Com",
     "Win32_System_Threading",
-    "Win32_UI_Accessibility",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
 ] }

@@ -3,8 +3,8 @@
 //! refs, transactional actions). See `docs/computer-use.md` for the design.
 //!
 //! Served over the shared loopback streamable-HTTP host with a distinct bearer
-//! token. macOS uses AX/CGEvent and Windows uses UIAutomation/SendInput; other
-//! platforms report that computer use is unsupported.
+//! token. macOS uses AX/CGEvent and Windows adapts the `uiautomation` crate;
+//! other platforms report that computer use is unsupported.
 
 pub mod backend;
 pub mod config;

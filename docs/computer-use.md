@@ -34,12 +34,11 @@ Core contract, inherited from pi-computer-use:
 - **Bounded output.** Model-visible text is capped; oversized results return a preview plus a
   continuation ref for `read_text`.
 
-The remaining deliberate tool-surface deviation from pi-computer-use is the absence of CDP
-browser roots: browser automation stays on the `tcode_preview` server and the embedded WebView.
-The earlier Windows/UIAutomation and no-OCR/`pictureOnly`-node deviations are resolved by the
-Windows backend and raw-image pass-through for text-sparse accessibility trees. By maintainer
-decision the image fallback does not run OCR or synthesize text nodes; the model reads the
-attached pixels directly.
+The sole remaining tool-surface deviation from pi-computer-use is the absence of CDP browser
+roots: browser automation stays on the `tcode_preview` server and the embedded WebView. The
+earlier Windows/UIAutomation gap is resolved by the Windows backend, and text-sparse
+accessibility trees use raw-image pass-through. By maintainer decision the image fallback does
+not run OCR or synthesize `pictureOnly` nodes; the model reads the attached pixels directly.
 
 ## Architecture
 
@@ -50,8 +49,9 @@ attached pixels directly.
     `preview-mcp` / `orchestrate-mcp`).
   - `backend/` — platform dispatch plus shared contracts. `backend/macos/` uses the AX C API
     (`AXUIElement*`), CGEvent input synthesis, and `screencapture -l <windowid>` capture.
-    `backend/windows/` uses UIAutomation, SendInput, and GDI window capture. Other platforms get
-    a stub backend whose tools return a clear "unsupported platform" error.
+    `backend/windows/` is a thin adapter over the `uiautomation` crate for COM setup, Control View
+    traversal, patterns, input, and GDI-backed screenshot capture. Other platforms get a stub
+    backend whose tools return a clear "unsupported platform" error.
   - `permissions.rs` — TCC checks/requests (see below), public API also consumed by the
     settings UI.
 - Registration: `SessionOptions.computer_use_server: Option<McpRegistration>` threaded exactly
@@ -85,9 +85,12 @@ does not add `pictureOnly` or other synthesized nodes.
 
 ## Windows backend
 
-The Windows backend enumerates visible top-level HWNDs in z-order and opens each through
-UIAutomation. It walks the Control View into the same platform-neutral `UiNode` tree used on
-macOS, including the same role vocabulary, ref assignment, search, sparsity, and diff behavior.
+The Windows backend uses `uiautomation` 0.25 rather than the earlier hand-rolled UIAutomation COM
+attempt. The crate initializes COM in a multithreaded apartment and owns the UIA client, Control
+View walker, pattern wrappers, and input/screenshot plumbing. The backend enumerates visible
+top-level elements in the stable sibling order returned by the crate (the crate does not expose
+Win32 z-order). It walks each root into the same platform-neutral `UiNode` tree used on macOS,
+including the same role vocabulary, ref assignment, search, sparsity, and diff behavior.
 `bundle_id` has no Windows equivalent: it contains the process executable filename (for example,
 `notepad.exe`) when the process image can be queried, and is empty for protected or inaccessible
 processes. `app_name` is the executable stem, with the UIA class name as a fallback.
@@ -98,14 +101,14 @@ ExpandCollapse, SelectionItem, and a non-empty LegacyIAccessible default action 
 Scroll drives targeted `scroll`. The tree also reports native `toggle`, `expand`, `collapse`,
 `select`, `set_value`, and `scroll_to_visible` capabilities for inspection. Grid, Table, Text,
 Transform, and Window patterns currently contribute their normal properties and children but
-have no additional direct `act_ui` operation. Physical fallback and coordinate actions use
-SendInput, including UTF-16 Unicode keyboard events and Windows virtual-key chords.
+have no additional direct `act_ui` operation. Physical fallback and coordinate actions use the
+crate's `Mouse` and `Keyboard` wrappers, including Unicode text entry and Windows virtual-key
+chords.
 
-Window screenshots use `PrintWindow(PW_RENDERFULLCONTENT)` into a GDI bitmap, fall back to
-`BitBlt` when the provider rejects PrintWindow, and encode the result as PNG. UIAutomation calls
-initialize COM defensively on every calling thread; an existing apartment with a different model
-(`RPC_E_CHANGED_MODE`) is reused. Windows has no macOS-style TCC gate, so the shared permission
-facade reports accessibility and capture as available.
+Window screenshots use the crate's element screenshot API, which captures the element's bounding
+rectangle through its GDI path and encodes it with the crate's PNG feature. Windows has no
+macOS-style TCC gate, so the shared permission facade reports accessibility and capture as
+available.
 
 ## macOS permissions
 

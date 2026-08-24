@@ -12,8 +12,8 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(all(test, not(target_os = "windows")))]
-#[path = "backend/windows/pure.rs"]
-mod windows_pure_tests;
+#[path = "backend/windows/map.rs"]
+mod windows_map_tests;
 
 const UNSUPPORTED_MESSAGE: &str = "computer use is unsupported on this platform";
 

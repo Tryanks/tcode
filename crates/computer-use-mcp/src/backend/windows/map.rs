@@ -1,4 +1,4 @@
-use crate::backend::RootKind;
+use crate::backend::{KeyChord, RootKind};
 use crate::outline::Frame;
 
 pub(super) const UIA_BUTTON: i32 = 50_000;
@@ -133,7 +133,12 @@ pub(super) struct PatternSupport {
 
 pub(super) fn actions_for_patterns(support: PatternSupport) -> Vec<String> {
     let mut actions = Vec::new();
-    if support.invoke || support.toggle || support.expand_collapse || support.selection_item {
+    if support.invoke
+        || support.toggle
+        || support.expand_collapse
+        || support.selection_item
+        || support.legacy_default
+    {
         actions.push("press");
     }
     if support.value_writable {
@@ -157,17 +162,116 @@ pub(super) fn actions_for_patterns(support: PatternSupport) -> Vec<String> {
     if support.selection_item {
         actions.push("select");
     }
-    if support.legacy_default {
-        actions.push("press");
-    }
     actions.sort_unstable();
     actions.dedup();
     actions.into_iter().map(str::to_string).collect()
 }
 
+/// Converts the shared Windows virtual-key representation into the expression
+/// accepted by `uiautomation::inputs::Keyboard::send_keys`.
+pub(super) fn key_expression_for_chord(chord: KeyChord) -> Result<String, String> {
+    if chord.modifiers.function {
+        return Err("the fn modifier has no Windows virtual-key equivalent".into());
+    }
+
+    let mut expression = String::new();
+    if chord.modifiers.command {
+        expression.push_str("{win}");
+    }
+    if chord.modifiers.control {
+        expression.push_str("{ctrl}");
+    }
+    if chord.modifiers.option {
+        expression.push_str("{alt}");
+    }
+    if chord.modifiers.shift {
+        expression.push_str("{shift}");
+    }
+
+    match library_key_for_virtual_key(chord.keycode)? {
+        LibraryKey::Character(character) if expression.is_empty() => expression.push(character),
+        LibraryKey::Character(character) => {
+            expression.push('(');
+            expression.push(character);
+            expression.push(')');
+        }
+        LibraryKey::Special(name) => {
+            expression.push('{');
+            expression.push_str(name);
+            expression.push('}');
+        }
+    }
+    Ok(expression)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryKey {
+    Character(char),
+    Special(&'static str),
+}
+
+fn library_key_for_virtual_key(keycode: u16) -> Result<LibraryKey, String> {
+    if let Ok(letter) = u8::try_from(keycode)
+        && letter.is_ascii_uppercase()
+    {
+        return Ok(LibraryKey::Character(char::from(
+            letter.to_ascii_lowercase(),
+        )));
+    }
+    if let Ok(digit) = u8::try_from(keycode)
+        && digit.is_ascii_digit()
+    {
+        return Ok(LibraryKey::Character(char::from(digit)));
+    }
+    if (0x70..=0x83).contains(&keycode) {
+        const FUNCTION_KEYS: [&str; 20] = [
+            "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13",
+            "f14", "f15", "f16", "f17", "f18", "f19", "f20",
+        ];
+        return Ok(LibraryKey::Special(
+            FUNCTION_KEYS[usize::from(keycode - 0x70)],
+        ));
+    }
+
+    Ok(match keycode {
+        0x08 => LibraryKey::Special("backspace"),
+        0x09 => LibraryKey::Special("tab"),
+        0x0D => LibraryKey::Special("enter"),
+        0x1B => LibraryKey::Special("escape"),
+        0x20 => LibraryKey::Special("space"),
+        0x21 => LibraryKey::Special("page_up"),
+        0x22 => LibraryKey::Special("page_down"),
+        0x23 => LibraryKey::Special("end"),
+        0x24 => LibraryKey::Special("home"),
+        0x25 => LibraryKey::Special("left"),
+        0x26 => LibraryKey::Special("up"),
+        0x27 => LibraryKey::Special("right"),
+        0x28 => LibraryKey::Special("down"),
+        0x2D => LibraryKey::Special("insert"),
+        0x2E => LibraryKey::Special("delete"),
+        0xBA => LibraryKey::Character(';'),
+        0xBB => LibraryKey::Character('='),
+        0xBC => LibraryKey::Character(','),
+        0xBD => LibraryKey::Character('-'),
+        0xBE => LibraryKey::Character('.'),
+        0xBF => LibraryKey::Character('/'),
+        0xC0 => LibraryKey::Character('`'),
+        0xDB => LibraryKey::Character('['),
+        0xDC => LibraryKey::Character('\\'),
+        0xDD => LibraryKey::Character(']'),
+        0xDE => LibraryKey::Character('\''),
+        _ => {
+            return Err(format!(
+                "unsupported Windows virtual-key code: 0x{keycode:02X}"
+            ));
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::KeyModifiers;
 
     #[test]
     fn control_types_map_to_macos_role_vocabulary() {
@@ -245,6 +349,45 @@ mod tests {
                 "set_value",
                 "toggle"
             ]
+        );
+    }
+
+    #[test]
+    fn virtual_key_chords_map_to_uiautomation_keyboard_expressions() {
+        assert_eq!(
+            key_expression_for_chord(KeyChord {
+                keycode: 0x53,
+                modifiers: KeyModifiers {
+                    control: true,
+                    shift: true,
+                    ..KeyModifiers::default()
+                },
+            }),
+            Ok("{ctrl}{shift}(s)".into())
+        );
+        assert_eq!(
+            key_expression_for_chord(KeyChord {
+                keycode: 0x7B,
+                modifiers: KeyModifiers::default(),
+            }),
+            Ok("{f12}".into())
+        );
+        assert_eq!(
+            key_expression_for_chord(KeyChord {
+                keycode: 0x2E,
+                modifiers: KeyModifiers::default(),
+            }),
+            Ok("{delete}".into())
+        );
+        assert_eq!(
+            key_expression_for_chord(KeyChord {
+                keycode: 0xBA,
+                modifiers: KeyModifiers {
+                    option: true,
+                    ..KeyModifiers::default()
+                },
+            }),
+            Ok("{alt}(;)".into())
         );
     }
 }
