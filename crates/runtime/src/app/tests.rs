@@ -5080,18 +5080,28 @@ fn plan_workspace_save_completes_after_background_executor_runs() {
     state.host_update(cx, |state, cx| {
         state.start_draft("plan-project".into(), cwd.clone(), cx);
         state.save_plan_to_workspace("# Saved plan".into(), cx);
+        // Race-free observation point: the blocking pool cannot have run yet
+        // inside this update, so a synchronous write would be visible here.
+        // Checking after host_update returns raced the real thread (flaked
+        // on fast Windows runners).
+        assert!(
+            !cwd.join("PLAN-1.md").exists(),
+            "the GPUI update must not perform the write synchronously"
+        );
     });
-    assert!(
-        !cwd.join("PLAN-1.md").exists(),
-        "the GPUI update must not perform the write synchronously"
-    );
 
-    cx.run_until_parked();
-
-    assert_eq!(
-        std::fs::read_to_string(cwd.join("PLAN-1.md")).unwrap(),
-        "# Saved plan"
-    );
+    // The write lands on a real blocking thread that run_until_parked does
+    // not wait for; poll with a bounded budget.
+    let mut contents = None;
+    for _ in 0..500 {
+        cx.run_until_parked();
+        if let Ok(text) = std::fs::read_to_string(cwd.join("PLAN-1.md")) {
+            contents = Some(text);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(contents.as_deref(), Some("# Saved plan"));
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
