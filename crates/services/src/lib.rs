@@ -16,3 +16,4 @@ pub mod store;
 pub mod user_files;
 pub mod version_check;
 pub mod workspace;
+pub mod worktree;

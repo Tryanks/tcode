@@ -56,11 +56,11 @@ use tcode_services::acp_registry::{
     visible_agents,
 };
 use tcode_services::export;
+#[cfg(test)]
+use tcode_services::git::run_git;
 use tcode_services::git::{
-    CheckoutError, MergeWorktreeError, MergeWorktreeOutcome, checkout_if_clean,
-    cleanup_orphaned_worktrees, commit_diff_context, create_git_worktree, list_git_branches,
-    merge_worktree_back, perform_action, read_git_branch, read_status, remove_git_worktree,
-    run_claude_headless, run_git, worktree_path_for,
+    CheckoutError, checkout_if_clean, commit_diff_context, list_git_branches, perform_action,
+    read_git_branch, read_status, run_claude_headless,
 };
 use tcode_services::import::{
     ExternalImportUpdate, ExternalRoots, ImportOutcome, existing_external_ids, import_thread,
@@ -79,6 +79,10 @@ use tcode_services::version_check::provider_updates::{
     npm_package, update_command, update_command_string,
 };
 use tcode_services::workspace::list_workspace;
+use tcode_services::worktree::{
+    MergeBackError, MergeBackOutcome, ProvisionError, cleanup_orphans, merge_back, provision,
+    remove as remove_git_worktree,
+};
 
 const TITLE_MAX_CHARS: usize = 40;
 const TITLE_SOURCE_MAX_CHARS: usize = 4_000;
