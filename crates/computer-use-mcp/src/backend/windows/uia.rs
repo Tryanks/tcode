@@ -4,8 +4,7 @@ use std::fmt;
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, RECT, RPC_E_CHANGED_MODE};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoUninitialize,
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -420,7 +419,11 @@ struct ComApartment {
 
 impl ComApartment {
     fn initialize(code: BackendErrorCode, operation: &str) -> Result<Self, BackendError> {
-        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        // UIA client calls are cross-process; Microsoft's guidance is to run the
+        // client in an MTA. An STA thread without a message pump (this process
+        // has none on the smoke/MCP thread) returns empty child navigation, so
+        // the tree would collapse to just the root element.
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if result == RPC_E_CHANGED_MODE {
             // The runtime initialized this thread with another apartment model.
             // COM is still usable; do not balance an initialization we did not make.
