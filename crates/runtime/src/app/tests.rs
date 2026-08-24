@@ -593,6 +593,48 @@ fn title_session_uses_configured_model_with_low_effort() {
 }
 
 #[test]
+fn parse_fallback_review_with_delimiter() {
+    assert_eq!(
+        parse_fallback_review(
+            "ASSESSMENT: This looks legitimate. The scope is specific.\n---DRAFT---\nI own the test system."
+        ),
+        (
+            "This looks legitimate. The scope is specific.".into(),
+            "I own the test system.".into()
+        )
+    );
+}
+
+#[test]
+fn parse_fallback_review_without_delimiter() {
+    assert_eq!(
+        parse_fallback_review("A cautious assessment without the expected separator."),
+        (
+            "A cautious assessment without the expected separator.".into(),
+            String::new()
+        )
+    );
+}
+
+#[test]
+fn parse_fallback_review_with_empty_draft() {
+    assert_eq!(
+        parse_fallback_review("ASSESSMENT: This appears genuinely concerning.\n---DRAFT---\n"),
+        ("This appears genuinely concerning.".into(), String::new())
+    );
+}
+
+#[test]
+fn parse_fallback_review_strips_case_insensitive_label_with_whitespace() {
+    assert_eq!(
+        parse_fallback_review(
+            "  assessment   :   Likely benign.\n  ---DRAFT---  \n  I administer this host.  "
+        ),
+        ("Likely benign.".into(), "I administer this host.".into())
+    );
+}
+
+#[test]
 fn late_ai_title_does_not_overwrite_a_manual_rename() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-ai-title-race-test");

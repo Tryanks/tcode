@@ -85,6 +85,16 @@ pub enum ServerEvent {
         /// Claude's own explanation text when available (empty otherwise).
         detail: String,
     },
+    /// A secondary model's review of a classifier-blocked turn: a user-facing
+    /// assessment plus a DRAFT clarification the user reviews and sends. Advisory
+    /// only; never auto-sent. Transient.
+    FallbackReviewReady {
+        session_id: String,
+        assessment: String,
+        /// Suggested first-person clarification, prefilled but editable. Empty when
+        /// the reviewer judged the flag not a false positive.
+        draft: String,
+    },
     SessionSnapshot(Vec<StoredEvent>),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
