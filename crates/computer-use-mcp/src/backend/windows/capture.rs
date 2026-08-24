@@ -64,7 +64,7 @@ unsafe fn capture_window_inner(hwnd: HWND) -> Result<Vec<u8>, BackendError> {
     // normalize the BGRA pixels to opaque RGBA for a portable PNG.
     let bgra = unsafe { std::slice::from_raw_parts(surface.bits.cast::<u8>(), byte_len) };
     let mut rgba = Vec::with_capacity(byte_len);
-    for pixel in bgra.chunks_exact(4) {
+    for pixel in bgra.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], u8::MAX]);
     }
     let mut png = Vec::new();
