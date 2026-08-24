@@ -18,7 +18,7 @@ use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
-use agent::{ItemContent, RewindMode};
+use agent::{ItemContent, ItemStatus, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
     FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
