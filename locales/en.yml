@@ -231,6 +231,15 @@ settings:
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
+  abort_on_model_fallback:
+    title: "Abort on model fallback"
+    description: "When on, Claude Code sessions are pinned so a flagged request is interrupted instead of silently switching models; subagents may only use the main model, Sonnet, or Haiku."
+  fallback_review_advisor:
+    title: "Fallback review advisor"
+    description: "Use a separate model to review requests interrupted by Claude Code's fallback guard."
+  fallback_review_model:
+    title: "Fallback review model"
+    description: "Choose the provider and model used for fallback reviews."
   title_generation:
     title: "Thread title model"
     description: "Choose the provider and model used to name new threads. Title requests always use low reasoning effort."
@@ -665,6 +674,20 @@ userinput:
   previous: "Previous"
   next_question: "Next question"
   done: "Done"
+fallback:
+  title: "Turn stopped by the safety classifier"
+  reason_cyber: "Claude Code's safety classifier flagged this turn as potentially cyber-related. tcode stopped it instead of letting Claude silently switch models."
+  reason_bio: "Claude Code's safety classifier flagged this turn as potentially biology-related. tcode stopped it instead of letting Claude silently switch models."
+  reason_generic: "Claude Code's safety classifier flagged this turn. tcode stopped it instead of letting Claude silently switch models."
+  blocked: "%{model} refused the request."
+  rerouted: "Claude rerouted to %{model}; tcode interrupted the turn."
+  retry_on: "Retry on %{model}"
+  edit_retry: "Edit & retry"
+  dismiss: "Dismiss"
+  review_title: "A second model reviewed the flag"
+  review_hint: "Suggested clarification — review and edit it before sending; you are the one asserting this."
+  review_placeholder: "Your clarification"
+  review_send: "Send clarification"
 terminal:
   title: "Terminal"
   tabs: "Terminal tabs"

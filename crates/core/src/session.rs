@@ -622,7 +622,10 @@ impl Timeline {
                 self.turn_running = true;
                 self.last_turn_status = None;
             }
-            AgentEvent::TurnAccepted { .. } | AgentEvent::BackgroundTasksChanged { .. } => {}
+            AgentEvent::TurnAccepted { .. }
+            | AgentEvent::BackgroundTasksChanged { .. }
+            | AgentEvent::ModelFallbackDetected { .. }
+            | AgentEvent::TurnBlocked { .. } => {}
             AgentEvent::TurnChangesUpdated {
                 turn_id,
                 changes,

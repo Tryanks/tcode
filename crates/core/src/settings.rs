@@ -513,6 +513,32 @@ impl TitleGenerationSettings {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FallbackReviewSettings {
+    #[serde(default = "default_title_provider")]
+    pub provider: ProviderKind,
+    #[serde(default = "default_title_model")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+}
+
+impl Default for FallbackReviewSettings {
+    fn default() -> Self {
+        Self {
+            provider: default_title_provider(),
+            model: default_title_model(),
+            profile_id: None,
+        }
+    }
+}
+
+impl FallbackReviewSettings {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// When a computer-use observation carries a screenshot alongside the folded
 /// accessibility outline. Mirrors `computer_use_mcp::config::ImageMode`; kept in
 /// core so settings stay GPUI/backend-free and the app maps one to the other.
@@ -585,6 +611,8 @@ pub enum SettingsPatch {
     LiveCommandPanelDisabled(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
+    AbortOnModelFallback(bool),
+    FallbackReviewAdvisor(bool),
     AutoArchiveDisabled(bool),
     AutoArchiveMaxIdleDays(u32),
     AutoArchiveKeepCount(usize),
@@ -604,6 +632,9 @@ pub enum SettingsPatch {
     TitleGenerationProvider(ProviderKind),
     TitleGenerationModel(String),
     TitleGenerationProfileId(Option<String>),
+    FallbackReviewProvider(ProviderKind),
+    FallbackReviewModel(String),
+    FallbackReviewProfileId(Option<String>),
     SidebarLayout(SidebarLayout),
 }
 
@@ -679,6 +710,10 @@ pub struct Settings {
     /// the throttle defaults to on even for legacy settings files that lack the field.
     #[serde(default)]
     pub inactive_frame_throttle_disabled: bool,
+    #[serde(default = "default_true")]
+    pub abort_on_model_fallback: bool,
+    #[serde(default)]
+    pub fallback_review_advisor: bool,
     /// Whether automatic archiving is DISABLED. Stored inverted so the feature
     /// defaults to on even for legacy settings files that lack the field.
     #[serde(default)]
@@ -706,6 +741,8 @@ pub struct Settings {
     /// Provider/model used to generate a concise title for new threads.
     #[serde(default, skip_serializing_if = "TitleGenerationSettings::is_default")]
     pub title_generation: TitleGenerationSettings,
+    #[serde(default, skip_serializing_if = "FallbackReviewSettings::is_default")]
+    pub fallback_review: FallbackReviewSettings,
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
@@ -763,6 +800,8 @@ impl Default for Settings {
             live_command_panel_disabled: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
+            abort_on_model_fallback: true,
+            fallback_review_advisor: false,
             auto_archive_disabled: false,
             auto_archive_max_idle_days: default_auto_archive_max_idle_days(),
             auto_archive_keep_count: default_auto_archive_keep_count(),
@@ -771,6 +810,7 @@ impl Default for Settings {
             computer_use: ComputerUseSettings::default(),
             browser: BrowserSettings::default(),
             title_generation: TitleGenerationSettings::default(),
+            fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
@@ -801,6 +841,12 @@ impl Settings {
             }
             SettingsPatch::InactiveFrameThrottleDisabled(value) => {
                 self.inactive_frame_throttle_disabled = value;
+            }
+            SettingsPatch::AbortOnModelFallback(value) => {
+                self.abort_on_model_fallback = value;
+            }
+            SettingsPatch::FallbackReviewAdvisor(value) => {
+                self.fallback_review_advisor = value;
             }
             SettingsPatch::AutoArchiveDisabled(value) => self.auto_archive_disabled = value,
             SettingsPatch::AutoArchiveMaxIdleDays(value) => {
@@ -842,6 +888,13 @@ impl Settings {
             SettingsPatch::TitleGenerationModel(value) => self.title_generation.model = value,
             SettingsPatch::TitleGenerationProfileId(value) => {
                 self.title_generation.profile_id = value;
+            }
+            SettingsPatch::FallbackReviewProvider(value) => {
+                self.fallback_review.provider = value;
+            }
+            SettingsPatch::FallbackReviewModel(value) => self.fallback_review.model = value,
+            SettingsPatch::FallbackReviewProfileId(value) => {
+                self.fallback_review.profile_id = value;
             }
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
         }

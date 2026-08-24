@@ -92,6 +92,8 @@ pub struct SettingsPage {
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
+    /// Shared provider/model picker configured for fallback reviews.
+    fallback_review_model_picker: Entity<ProviderModelPicker>,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
@@ -143,10 +145,34 @@ impl SettingsPage {
                 cx,
             )
         });
+        let fallback_review = store.read(cx).settings().fallback_review;
+        let fallback_review_model_picker = cx.new(|cx| {
+            ProviderModelPicker::selection(
+                store.clone(),
+                "fallback-review-model-popover",
+                "fallback-review-model-dropdown",
+                fallback_review.provider,
+                fallback_review.model,
+                fallback_review.profile_id,
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.observe(&store, |this, _, cx| {
                 let selection = this.store.read(cx).settings().title_generation;
                 this.title_model_picker.update(cx, |picker, cx| {
+                    picker.set_selected(
+                        selection.provider,
+                        selection.model,
+                        selection.profile_id,
+                        cx,
+                    );
+                });
+                cx.notify();
+            }),
+            cx.observe(&store, |this, _, cx| {
+                let selection = this.store.read(cx).settings().fallback_review;
+                this.fallback_review_model_picker.update(cx, |picker, cx| {
                     picker.set_selected(
                         selection.provider,
                         selection.model,
@@ -170,6 +196,17 @@ impl SettingsPage {
                         store.set_title_generation_provider(selected.provider);
                         store.set_title_generation_model(selected.id);
                         store.set_title_generation_profile_id(selected.profile_id);
+                    },
+                    cx,
+                );
+            }),
+            cx.subscribe(&fallback_review_model_picker, |this, _, event, cx| {
+                let selected = event.0.clone();
+                this.dispatch_settings(
+                    move |store| {
+                        store.set_fallback_review_provider(selected.provider);
+                        store.set_fallback_review_model(selected.id);
+                        store.set_fallback_review_profile_id(selected.profile_id);
                     },
                     cx,
                 );
@@ -208,6 +245,7 @@ impl SettingsPage {
             acp_panel,
             orchestrate_panel,
             title_model_picker,
+            fallback_review_model_picker,
             acp_cards: Vec::new(),
             section,
             home_url_input: home_url_input.clone(),
@@ -666,7 +704,7 @@ impl SettingsPage {
             self.language_row(settings.language.as_deref(), cx),
             self.theme_row(settings.theme_mode, cx),
         ];
-        let conversation = vec![
+        let mut conversation = vec![
             self.title_generation_row(cx),
             self.toggle_row(
                 "delete-confirm",
@@ -692,7 +730,26 @@ impl SettingsPage {
                 cx,
                 |store, checked| store.set_live_command_panel_disabled(!checked),
             ),
+            self.toggle_row(
+                "abort-on-model-fallback",
+                crate::tr!("settings.abort_on_model_fallback.title"),
+                crate::tr!("settings.abort_on_model_fallback.description"),
+                settings.abort_on_model_fallback,
+                cx,
+                WorkspaceStore::set_abort_on_model_fallback,
+            ),
         ];
+        if settings.abort_on_model_fallback {
+            conversation.push(self.toggle_row(
+                "fallback-review-advisor",
+                crate::tr!("settings.fallback_review_advisor.title"),
+                crate::tr!("settings.fallback_review_advisor.description"),
+                settings.fallback_review_advisor,
+                cx,
+                WorkspaceStore::set_fallback_review_advisor,
+            ));
+            conversation.push(self.fallback_review_model_row(cx));
+        }
         let workspace = vec![
             self.toggle_row(
                 "word-wrap",
@@ -748,6 +805,17 @@ impl SettingsPage {
                 cx,
             ))
             .child(self.title_model_picker.clone())
+            .into_any_element()
+    }
+
+    fn fallback_review_model_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.row_frame(cx)
+            .child(self.row_labels(
+                crate::tr!("settings.fallback_review_model.title"),
+                crate::tr!("settings.fallback_review_model.description"),
+                cx,
+            ))
+            .child(self.fallback_review_model_picker.clone())
             .into_any_element()
     }
 
