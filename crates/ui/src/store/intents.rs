@@ -6,7 +6,10 @@ use tcode_core::{
     acp::AcpAgentPatch,
     git::GitAction,
     session::ReviewComment,
-    settings::{ProfileSettingsPatch, Settings, SidebarLayout, ThemeMode},
+    settings::{
+        ChildApprovalMode, ImageMode, OrchestrateChildModel, OrchestratorIdentity,
+        ProfileSettingsPatch, SidebarLayout, ThemeMode,
+    },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 use tcode_protocol::{Command, CommandResponse, ProtocolError, SettingsPatch};
@@ -38,72 +41,10 @@ impl WorkspaceStore {
     }
 }
 
-// Settings intents (15).
+// Settings intents (26).
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
         self.dispatch(Command::PatchSettings { patch });
-    }
-
-    /// Convert a view-level edit into only the changed field patches.
-    pub fn update_settings(&mut self, mutate: impl FnOnce(&mut Settings)) {
-        let before = self.settings_replica.clone();
-        let mut after = before.clone();
-        mutate(&mut after);
-        if before.language != after.language {
-            self.set_language(after.language);
-        }
-        if before.theme_mode != after.theme_mode {
-            self.set_theme_mode(after.theme_mode);
-        }
-        if before.word_wrap_diffs != after.word_wrap_diffs {
-            self.set_word_wrap_diffs(after.word_wrap_diffs);
-        }
-        if before.skip_delete_confirmation != after.skip_delete_confirmation {
-            self.set_skip_delete_confirmation(after.skip_delete_confirmation);
-        }
-        if before.auto_open_task_panel != after.auto_open_task_panel {
-            self.set_auto_open_task_panel(after.auto_open_task_panel);
-        }
-        if before.provider_update_checks_disabled != after.provider_update_checks_disabled {
-            self.set_provider_update_checks_disabled(after.provider_update_checks_disabled);
-        }
-        if before.auto_archive_disabled != after.auto_archive_disabled {
-            self.set_auto_archive_disabled(after.auto_archive_disabled);
-        }
-        if before.auto_archive_max_idle_days != after.auto_archive_max_idle_days {
-            self.set_auto_archive_max_idle_days(after.auto_archive_max_idle_days);
-        }
-        if before.auto_archive_keep_count != after.auto_archive_keep_count {
-            self.set_auto_archive_keep_count(after.auto_archive_keep_count);
-        }
-        if before.auto_archive_notice_shown != after.auto_archive_notice_shown {
-            self.set_auto_archive_notice_shown(after.auto_archive_notice_shown);
-        }
-        if before.orchestrate != after.orchestrate {
-            let mut before_without_child_worktrees = before.orchestrate.clone();
-            let mut after_without_child_worktrees = after.orchestrate.clone();
-            before_without_child_worktrees.child_worktrees = false;
-            after_without_child_worktrees.child_worktrees = false;
-            if before_without_child_worktrees == after_without_child_worktrees {
-                self.patch_settings(SettingsPatch::OrchestrateChildWorktrees(
-                    after.orchestrate.child_worktrees,
-                ));
-            } else {
-                self.patch_settings(SettingsPatch::Orchestrate(after.orchestrate));
-            }
-        }
-        if before.computer_use != after.computer_use {
-            self.patch_settings(SettingsPatch::ComputerUse(after.computer_use));
-        }
-        if before.browser != after.browser {
-            self.patch_settings(SettingsPatch::Browser(after.browser));
-        }
-        if before.title_generation != after.title_generation {
-            self.patch_settings(SettingsPatch::TitleGeneration(after.title_generation));
-        }
-        if before.sidebar_layout != after.sidebar_layout {
-            self.set_sidebar_layout(after.sidebar_layout);
-        }
     }
 
     pub fn set_language(&mut self, value: Option<String>) {
@@ -135,6 +76,51 @@ impl WorkspaceStore {
     }
     pub fn set_auto_archive_notice_shown(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AutoArchiveNoticeShown(value));
+    }
+    pub fn set_orchestrate_generic_identity(&mut self, value: String) {
+        self.patch_settings(SettingsPatch::OrchestrateGenericIdentity(value));
+    }
+    pub fn set_orchestrate_model_identities(&mut self, value: Vec<OrchestratorIdentity>) {
+        self.patch_settings(SettingsPatch::OrchestrateModelIdentities(value));
+    }
+    pub fn set_orchestrate_child_models(&mut self, value: Vec<OrchestrateChildModel>) {
+        self.patch_settings(SettingsPatch::OrchestrateChildModels(value));
+    }
+    pub fn set_orchestrate_child_approval(&mut self, value: ChildApprovalMode) {
+        self.patch_settings(SettingsPatch::OrchestrateChildApproval(value));
+    }
+    pub fn set_orchestrate_child_worktrees(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::OrchestrateChildWorktrees(value));
+    }
+    pub fn set_orchestrate_archive_on_complete(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::OrchestrateArchiveOnComplete(value));
+    }
+    pub fn set_computer_use_enabled(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ComputerUseEnabled(value));
+    }
+    pub fn set_computer_use_image_mode(&mut self, value: ImageMode) {
+        self.patch_settings(SettingsPatch::ComputerUseImageMode(value));
+    }
+    pub fn set_computer_use_allow_input(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ComputerUseAllowInput(value));
+    }
+    pub fn set_browser_enabled(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::BrowserEnabled(value));
+    }
+    pub fn set_browser_home_url(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::BrowserHomeUrl(value));
+    }
+    pub fn set_browser_allow_evaluate(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::BrowserAllowEvaluate(value));
+    }
+    pub fn set_title_generation_provider(&mut self, value: ProviderKind) {
+        self.patch_settings(SettingsPatch::TitleGenerationProvider(value));
+    }
+    pub fn set_title_generation_model(&mut self, value: String) {
+        self.patch_settings(SettingsPatch::TitleGenerationModel(value));
+    }
+    pub fn set_title_generation_profile_id(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::TitleGenerationProfileId(value));
     }
     pub fn set_sidebar_layout(&mut self, value: SidebarLayout) {
         self.patch_settings(SettingsPatch::SidebarLayout(value));

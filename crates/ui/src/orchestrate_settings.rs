@@ -21,7 +21,7 @@ use agent::ProviderKind;
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{
-    ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity, Settings,
+    ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity,
     provider_label,
 };
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
@@ -118,17 +118,34 @@ impl OrchestrateSettingsPanel {
         panel
     }
 
-    fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+    fn update_model_identities(
+        &self,
+        mutate: impl FnOnce(&mut Vec<OrchestratorIdentity>),
+        cx: &mut Context<Self>,
+    ) {
+        let mut identities = self.store.read(cx).settings().orchestrate.model_identities;
+        mutate(&mut identities);
+        self.store.update(cx, |store, _cx| {
+            store.set_orchestrate_model_identities(identities)
+        });
+    }
+
+    fn update_child_models(
+        &self,
+        mutate: impl FnOnce(&mut Vec<OrchestrateChildModel>),
+        cx: &mut Context<Self>,
+    ) {
+        let mut models = self.store.read(cx).settings().orchestrate.child_models;
+        mutate(&mut models);
         self.store
-            .update(cx, |store, _cx| store.update_settings(mutate));
+            .update(cx, |store, _cx| store.set_orchestrate_child_models(models));
     }
 
     fn commit_generic_identity(&self, cx: &mut Context<Self>) {
         let identity = self.generic_identity.read(cx).value().to_string();
-        self.update_settings(
-            move |settings| settings.orchestrate.generic_identity = identity,
-            cx,
-        );
+        self.store.update(cx, |store, _cx| {
+            store.set_orchestrate_generic_identity(identity)
+        });
     }
 
     fn rebuild_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -215,11 +232,9 @@ impl OrchestrateSettingsPanel {
         };
         let value = row.identity.read(cx).value().to_string();
         let model = model.to_string();
-        self.update_settings(
-            move |settings| {
-                if let Some(entry) = settings
-                    .orchestrate
-                    .model_identities
+        self.update_model_identities(
+            move |identities| {
+                if let Some(entry) = identities
                     .iter_mut()
                     .find(|entry| entry.provider == provider && entry.model == model)
                 {
@@ -237,9 +252,9 @@ impl OrchestrateSettingsPanel {
         let description = row.description.read(cx).value().to_string();
         let provider = row.provider;
         let model = row.model.clone();
-        self.update_settings(
-            move |settings| {
-                if let Some(entry) = settings.orchestrate.child_models.get_mut(index)
+        self.update_child_models(
+            move |models| {
+                if let Some(entry) = models.get_mut(index)
                     && entry.provider == provider
                     && entry.model == model
                 {
@@ -258,9 +273,9 @@ impl OrchestrateSettingsPanel {
         let effort = (!effort.is_empty()).then_some(effort);
         let provider = row.provider;
         let model = row.model.clone();
-        self.update_settings(
-            move |settings| {
-                if let Some(entry) = settings.orchestrate.child_models.get_mut(index)
+        self.update_child_models(
+            move |models| {
+                if let Some(entry) = models.get_mut(index)
                     && entry.provider == provider
                     && entry.model == model
                 {
@@ -281,22 +296,17 @@ impl OrchestrateSettingsPanel {
             .orchestrate
             .generic_identity
             .clone();
-        self.update_settings(
-            move |settings| {
-                if !settings
-                    .orchestrate
-                    .model_identities
+        self.update_model_identities(
+            move |identities| {
+                if !identities
                     .iter()
                     .any(|entry| entry.provider == provider && entry.model == model)
                 {
-                    settings
-                        .orchestrate
-                        .model_identities
-                        .push(OrchestratorIdentity {
-                            provider,
-                            model,
-                            identity,
-                        });
+                    identities.push(OrchestratorIdentity {
+                        provider,
+                        model,
+                        identity,
+                    });
                 }
             },
             cx,
@@ -313,12 +323,9 @@ impl OrchestrateSettingsPanel {
         cx: &mut Context<Self>,
     ) {
         let model = model.to_string();
-        self.update_settings(
-            move |settings| {
-                settings
-                    .orchestrate
-                    .model_identities
-                    .retain(|entry| !(entry.provider == provider && entry.model == model));
+        self.update_model_identities(
+            move |identities| {
+                identities.retain(|entry| !(entry.provider == provider && entry.model == model));
             },
             cx,
         );
@@ -341,15 +348,15 @@ impl OrchestrateSettingsPanel {
             .unwrap_or_default()
             .to_string(),
         };
-        self.update_settings(
-            move |settings| {
-                if !settings.orchestrate.child_models.iter().any(|entry| {
+        self.update_child_models(
+            move |models| {
+                if !models.iter().any(|entry| {
                     entry.provider == profile.provider
                         && entry.model == profile.model
                         && entry.effort == profile.effort
                         && entry.profile_id == profile.profile_id
                 }) {
-                    settings.orchestrate.child_models.push(profile);
+                    models.push(profile);
                 }
             },
             cx,
@@ -359,10 +366,10 @@ impl OrchestrateSettingsPanel {
     }
 
     fn remove_child(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.update_settings(
-            move |settings| {
-                if index < settings.orchestrate.child_models.len() {
-                    settings.orchestrate.child_models.remove(index);
+        self.update_child_models(
+            move |models| {
+                if index < models.len() {
+                    models.remove(index);
                 }
             },
             cx,
@@ -372,9 +379,9 @@ impl OrchestrateSettingsPanel {
     }
 
     fn set_child_enabled(&self, index: usize, enabled: bool, cx: &mut Context<Self>) {
-        self.update_settings(
-            move |settings| {
-                if let Some(entry) = settings.orchestrate.child_models.get_mut(index) {
+        self.update_child_models(
+            move |models| {
+                if let Some(entry) = models.get_mut(index) {
                     entry.enabled = enabled;
                 }
             },
@@ -385,10 +392,9 @@ impl OrchestrateSettingsPanel {
     fn reset_generic_identity(&self, window: &mut Window, cx: &mut Context<Self>) {
         let value = OrchestrateSettings::builtin_generic_identity().to_string();
         let persisted = value.clone();
-        self.update_settings(
-            move |settings| settings.orchestrate.generic_identity = persisted,
-            cx,
-        );
+        self.store.update(cx, |store, _cx| {
+            store.set_orchestrate_generic_identity(persisted)
+        });
         self.generic_identity
             .update(cx, |input, cx| input.set_value(value, window, cx));
     }
@@ -403,11 +409,9 @@ impl OrchestrateSettingsPanel {
         let value = OrchestrateSettings::builtin_identity_for(provider, model).to_string();
         let persisted = value.clone();
         let model_key = model.to_string();
-        self.update_settings(
-            move |settings| {
-                if let Some(entry) = settings
-                    .orchestrate
-                    .model_identities
+        self.update_model_identities(
+            move |identities| {
+                if let Some(entry) = identities
                     .iter_mut()
                     .find(|entry| entry.provider == provider && entry.model == model_key)
                 {
@@ -441,9 +445,9 @@ impl OrchestrateSettingsPanel {
         .unwrap_or_default()
         .to_string();
         let persisted = value.clone();
-        self.update_settings(
-            move |settings| {
-                if let Some(entry) = settings.orchestrate.child_models.get_mut(index)
+        self.update_child_models(
+            move |models| {
+                if let Some(entry) = models.get_mut(index)
                     && entry.provider == provider
                     && entry.model == model
                 {
@@ -588,10 +592,9 @@ impl OrchestrateSettingsPanel {
                         })
                         .on_click(move |_, window, cx| {
                             panel.update(cx, |panel, cx| {
-                                panel.update_settings(
-                                    |settings| settings.orchestrate.child_approval = mode,
-                                    cx,
-                                );
+                                panel.store.update(cx, |store, _cx| {
+                                    store.set_orchestrate_child_approval(mode)
+                                });
                             });
                             popover.update(cx, |state, cx| state.dismiss(window, cx));
                         })
@@ -698,12 +701,9 @@ impl OrchestrateSettingsPanel {
                             .checked(checked)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 let checked = *checked;
-                                this.update_settings(
-                                    move |settings| {
-                                        settings.orchestrate.archive_on_complete = checked
-                                    },
-                                    cx,
-                                );
+                                this.store.update(cx, |store, _cx| {
+                                    store.set_orchestrate_archive_on_complete(checked)
+                                });
                             })),
                     ),
             )
@@ -744,10 +744,9 @@ impl OrchestrateSettingsPanel {
                             .checked(checked)
                             .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                 let checked = *checked;
-                                this.update_settings(
-                                    move |settings| settings.orchestrate.child_worktrees = checked,
-                                    cx,
-                                );
+                                this.store.update(cx, |store, _cx| {
+                                    store.set_orchestrate_child_worktrees(checked)
+                                });
                             })),
                     ),
             )

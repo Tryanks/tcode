@@ -570,6 +570,41 @@ pub struct BrowserSettings {
     pub allow_evaluate: bool,
 }
 
+/// A field-scoped mutation of persisted application settings.
+///
+/// Keeping nested settings mutations field-scoped prevents a writer holding a
+/// stale snapshot from replacing unrelated fields changed by another writer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum SettingsPatch {
+    Language(Option<String>),
+    ThemeMode(ThemeMode),
+    WordWrapDiffs(bool),
+    SkipDeleteConfirmation(bool),
+    AutoOpenTaskPanel(bool),
+    ProviderUpdateChecksDisabled(bool),
+    AutoArchiveDisabled(bool),
+    AutoArchiveMaxIdleDays(u32),
+    AutoArchiveKeepCount(usize),
+    AutoArchiveNoticeShown(bool),
+    OrchestrateGenericIdentity(String),
+    OrchestrateModelIdentities(Vec<OrchestratorIdentity>),
+    OrchestrateChildModels(Vec<OrchestrateChildModel>),
+    OrchestrateChildApproval(ChildApprovalMode),
+    OrchestrateChildWorktrees(bool),
+    OrchestrateArchiveOnComplete(bool),
+    ComputerUseEnabled(bool),
+    ComputerUseImageMode(ImageMode),
+    ComputerUseAllowInput(bool),
+    BrowserEnabled(bool),
+    BrowserHomeUrl(Option<String>),
+    BrowserAllowEvaluate(bool),
+    TitleGenerationProvider(ProviderKind),
+    TitleGenerationModel(String),
+    TitleGenerationProfileId(Option<String>),
+    SidebarLayout(SidebarLayout),
+}
+
 impl Default for BrowserSettings {
     fn default() -> Self {
         Self {
@@ -731,6 +766,66 @@ impl Default for Settings {
             last_visited: HashMap::new(),
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),
+        }
+    }
+}
+
+impl Settings {
+    /// Apply one field-scoped mutation without replacing sibling fields.
+    pub fn apply(&mut self, patch: SettingsPatch) {
+        match patch {
+            SettingsPatch::Language(value) => self.language = value,
+            SettingsPatch::ThemeMode(value) => self.theme_mode = value,
+            SettingsPatch::WordWrapDiffs(value) => self.word_wrap_diffs = value,
+            SettingsPatch::SkipDeleteConfirmation(value) => {
+                self.skip_delete_confirmation = value;
+            }
+            SettingsPatch::AutoOpenTaskPanel(value) => self.auto_open_task_panel = value,
+            SettingsPatch::ProviderUpdateChecksDisabled(value) => {
+                self.provider_update_checks_disabled = value;
+            }
+            SettingsPatch::AutoArchiveDisabled(value) => self.auto_archive_disabled = value,
+            SettingsPatch::AutoArchiveMaxIdleDays(value) => {
+                self.auto_archive_max_idle_days = value;
+            }
+            SettingsPatch::AutoArchiveKeepCount(value) => {
+                self.auto_archive_keep_count = value;
+            }
+            SettingsPatch::AutoArchiveNoticeShown(value) => {
+                self.auto_archive_notice_shown = value;
+            }
+            SettingsPatch::OrchestrateGenericIdentity(value) => {
+                self.orchestrate.generic_identity = value;
+            }
+            SettingsPatch::OrchestrateModelIdentities(value) => {
+                self.orchestrate.model_identities = value;
+            }
+            SettingsPatch::OrchestrateChildModels(value) => {
+                self.orchestrate.child_models = value;
+            }
+            SettingsPatch::OrchestrateChildApproval(value) => {
+                self.orchestrate.child_approval = value;
+            }
+            SettingsPatch::OrchestrateChildWorktrees(value) => {
+                self.orchestrate.child_worktrees = value;
+            }
+            SettingsPatch::OrchestrateArchiveOnComplete(value) => {
+                self.orchestrate.archive_on_complete = value;
+            }
+            SettingsPatch::ComputerUseEnabled(value) => self.computer_use.enabled = value,
+            SettingsPatch::ComputerUseImageMode(value) => self.computer_use.image_mode = value,
+            SettingsPatch::ComputerUseAllowInput(value) => self.computer_use.allow_input = value,
+            SettingsPatch::BrowserEnabled(value) => self.browser.enabled = value,
+            SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
+            SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,
+            SettingsPatch::TitleGenerationProvider(value) => {
+                self.title_generation.provider = value;
+            }
+            SettingsPatch::TitleGenerationModel(value) => self.title_generation.model = value,
+            SettingsPatch::TitleGenerationProfileId(value) => {
+                self.title_generation.profile_id = value;
+            }
+            SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
         }
     }
 }

@@ -8,7 +8,9 @@ use tcode_core::{
     acp::AcpAgentPatch,
     project::Project,
     session::{ReviewComment, ReviewSide},
-    settings::{ProfileSettingsPatch, Settings},
+    settings::{
+        ChildApprovalMode, ImageMode, ProfileSettingsPatch, Settings, SidebarLayout, ThemeMode,
+    },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
 
@@ -228,8 +230,39 @@ fn round_trips_top_level_wire_types() {
 }
 
 #[test]
-fn orchestrate_child_worktrees_patch_round_trips() {
-    round_trip(&SettingsPatch::OrchestrateChildWorktrees(true));
+fn settings_patches_round_trip() {
+    let patches = vec![
+        SettingsPatch::Language(Some("zh-CN".into())),
+        SettingsPatch::ThemeMode(ThemeMode::Dark),
+        SettingsPatch::WordWrapDiffs(true),
+        SettingsPatch::SkipDeleteConfirmation(true),
+        SettingsPatch::AutoOpenTaskPanel(true),
+        SettingsPatch::ProviderUpdateChecksDisabled(true),
+        SettingsPatch::AutoArchiveDisabled(true),
+        SettingsPatch::AutoArchiveMaxIdleDays(14),
+        SettingsPatch::AutoArchiveKeepCount(42),
+        SettingsPatch::AutoArchiveNoticeShown(true),
+        SettingsPatch::OrchestrateGenericIdentity("lead".into()),
+        SettingsPatch::OrchestrateModelIdentities(Vec::new()),
+        SettingsPatch::OrchestrateChildModels(Vec::new()),
+        SettingsPatch::OrchestrateChildApproval(ChildApprovalMode::AlwaysAllow),
+        SettingsPatch::OrchestrateChildWorktrees(true),
+        SettingsPatch::OrchestrateArchiveOnComplete(false),
+        SettingsPatch::ComputerUseEnabled(true),
+        SettingsPatch::ComputerUseImageMode(ImageMode::Always),
+        SettingsPatch::ComputerUseAllowInput(false),
+        SettingsPatch::BrowserEnabled(false),
+        SettingsPatch::BrowserHomeUrl(Some("https://example.com".into())),
+        SettingsPatch::BrowserAllowEvaluate(false),
+        SettingsPatch::TitleGenerationProvider(ProviderKind::ClaudeCode),
+        SettingsPatch::TitleGenerationModel("claude-sonnet".into()),
+        SettingsPatch::TitleGenerationProfileId(Some("work".into())),
+        SettingsPatch::SidebarLayout(SidebarLayout::Grouped),
+    ];
+
+    for patch in patches {
+        round_trip(&patch);
+    }
 }
 
 fn assert_command_crosses_ndjson(id: u64, command: Command) {

@@ -31,9 +31,7 @@ use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::provider_card::ProviderCard;
 use crate::provider_model_picker::ProviderModelPicker;
-use crate::settings::{
-    ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, Settings, ThemeMode,
-};
+use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
 use crate::shell::Quit;
 use crate::store::WorkspaceStore;
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
@@ -167,11 +165,11 @@ impl SettingsPage {
             }),
             cx.subscribe(&title_model_picker, |this, _, event, cx| {
                 let selected = event.0.clone();
-                this.update_settings(
-                    move |settings| {
-                        settings.title_generation.provider = selected.provider;
-                        settings.title_generation.model = selected.id;
-                        settings.title_generation.profile_id = selected.profile_id;
+                this.dispatch_settings(
+                    move |store| {
+                        store.set_title_generation_provider(selected.provider);
+                        store.set_title_generation_model(selected.id);
+                        store.set_title_generation_profile_id(selected.profile_id);
                     },
                     cx,
                 );
@@ -248,7 +246,7 @@ impl SettingsPage {
     fn commit_home_url(&self, cx: &mut Context<Self>) {
         let value = self.home_url_input.read(cx).value().trim().to_string();
         let home_url = (!value.is_empty()).then_some(value);
-        self.update_settings(move |settings| settings.browser.home_url = home_url, cx);
+        self.dispatch_settings(move |store| store.set_browser_home_url(home_url), cx);
     }
 
     fn commit_auto_archive_idle_days(&self, cx: &mut Context<Self>) {
@@ -262,8 +260,8 @@ impl SettingsPage {
         else {
             return;
         };
-        self.update_settings(
-            move |settings| settings.auto_archive_max_idle_days = days.max(1),
+        self.dispatch_settings(
+            move |store| store.set_auto_archive_max_idle_days(days.max(1)),
             cx,
         );
     }
@@ -279,8 +277,8 @@ impl SettingsPage {
         else {
             return;
         };
-        self.update_settings(
-            move |settings| settings.auto_archive_keep_count = keep.max(1),
+        self.dispatch_settings(
+            move |store| store.set_auto_archive_keep_count(keep.max(1)),
             cx,
         );
     }
@@ -339,9 +337,8 @@ impl SettingsPage {
         });
     }
 
-    fn update_settings(&self, mutate: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
-        self.store
-            .update(cx, |store, _cx| store.update_settings(mutate));
+    fn dispatch_settings(&self, intent: impl FnOnce(&mut WorkspaceStore), cx: &mut Context<Self>) {
+        self.store.update(cx, |store, _cx| intent(store));
     }
 
     // -- left nav -----------------------------------------------------------
@@ -677,7 +674,7 @@ impl SettingsPage {
                 crate::tr!("settings.delete_confirmation.description"),
                 !settings.skip_delete_confirmation,
                 cx,
-                |s, checked| s.skip_delete_confirmation = !checked,
+                |store, checked| store.set_skip_delete_confirmation(!checked),
             ),
             self.toggle_row(
                 "auto-open-task-panel",
@@ -685,7 +682,7 @@ impl SettingsPage {
                 crate::tr!("settings.auto_open_task_panel.description"),
                 settings.auto_open_task_panel,
                 cx,
-                |s, checked| s.auto_open_task_panel = checked,
+                WorkspaceStore::set_auto_open_task_panel,
             ),
         ];
         let workspace = vec![
@@ -695,7 +692,7 @@ impl SettingsPage {
                 crate::tr!("settings.word_wrap.description"),
                 settings.word_wrap_diffs,
                 cx,
-                |s, checked| s.word_wrap_diffs = checked,
+                WorkspaceStore::set_word_wrap_diffs,
             ),
             self.toggle_row(
                 "provider-update-checks",
@@ -704,7 +701,7 @@ impl SettingsPage {
                 // Stored inverted: checked = enabled.
                 !settings.provider_update_checks_disabled,
                 cx,
-                |s, checked| s.provider_update_checks_disabled = !checked,
+                |store, checked| store.set_provider_update_checks_disabled(!checked),
             ),
         ];
         v_flex()
@@ -897,7 +894,7 @@ impl SettingsPage {
                         ),
                         !settings.auto_archive_disabled,
                         cx,
-                        |settings, checked| settings.auto_archive_disabled = !checked,
+                        |store, checked| store.set_auto_archive_disabled(!checked),
                     ),
                     self.row_frame(cx)
                         .child(self.row_labels(
@@ -1062,7 +1059,7 @@ impl SettingsPage {
                 crate::tr!("computer_use.enable.description"),
                 settings.computer_use.enabled,
                 cx,
-                |s, checked| s.computer_use.enabled = checked,
+                WorkspaceStore::set_computer_use_enabled,
             ),
             self.image_mode_row(settings.computer_use.image_mode, cx),
             self.toggle_row(
@@ -1071,7 +1068,7 @@ impl SettingsPage {
                 crate::tr!("computer_use.allow_input.description"),
                 settings.computer_use.allow_input,
                 cx,
-                |s, checked| s.computer_use.allow_input = checked,
+                WorkspaceStore::set_computer_use_allow_input,
             ),
         ];
         v_flex()
@@ -1099,7 +1096,7 @@ impl SettingsPage {
                 crate::tr!("browser.enable.description"),
                 settings.browser.enabled,
                 cx,
-                |s, checked| s.browser.enabled = checked,
+                WorkspaceStore::set_browser_enabled,
             ),
             self.home_url_row(cx),
             self.toggle_row(
@@ -1108,7 +1105,7 @@ impl SettingsPage {
                 crate::tr!("browser.allow_evaluate.description"),
                 settings.browser.allow_evaluate,
                 cx,
-                |s, checked| s.browser.allow_evaluate = checked,
+                WorkspaceStore::set_browser_allow_evaluate,
             ),
         ];
         v_flex().gap(px(24.)).child(
@@ -1179,7 +1176,7 @@ impl SettingsPage {
             ],
             |mode, page, _, cx| {
                 page.update(cx, |page, cx| {
-                    page.update_settings(|settings| settings.computer_use.image_mode = mode, cx)
+                    page.dispatch_settings(|store| store.set_computer_use_image_mode(mode), cx)
                 })
             },
             cx,
@@ -1425,7 +1422,7 @@ impl SettingsPage {
         desc: impl Into<SharedString>,
         checked: bool,
         cx: &mut Context<Self>,
-        mutate: fn(&mut Settings, bool),
+        intent: fn(&mut WorkspaceStore, bool),
     ) -> AnyElement {
         let title = title.into();
         let desc = desc.into();
@@ -1453,12 +1450,12 @@ impl SettingsPage {
                 {
                     window.prevent_default();
                     cx.stop_propagation();
-                    this.update_settings(|settings| mutate(settings, !checked), cx);
+                    this.dispatch_settings(|store| intent(store, !checked), cx);
                 }
             }),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.update_settings(|settings| mutate(settings, !checked), cx);
+            this.dispatch_settings(|store| intent(store, !checked), cx);
         }))
         .child(self.row_labels(title, desc, cx))
         // The Switch is intentionally visual here; the semantic row above
@@ -1611,7 +1608,7 @@ impl SettingsPage {
             ],
             |mode, page, window, cx| {
                 page.update(cx, |page, cx| {
-                    page.update_settings(|settings| settings.theme_mode = mode, cx)
+                    page.dispatch_settings(|store| store.set_theme_mode(mode), cx)
                 });
                 apply_theme(mode, window, cx);
             },
@@ -1653,8 +1650,8 @@ impl SettingsPage {
             ],
             |language, page, _, cx| {
                 page.update(cx, |page, cx| {
-                    page.update_settings(
-                        |settings| settings.language = language.map(str::to_owned),
+                    page.dispatch_settings(
+                        |store| store.set_language(language.map(str::to_owned)),
                         cx,
                     )
                 })
