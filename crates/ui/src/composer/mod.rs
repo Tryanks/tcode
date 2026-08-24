@@ -322,9 +322,14 @@ impl Composer {
         let Some(prefill) = prefill else {
             return;
         };
-        let cursor = prefill.len();
+        self.set_input_text(prefill, window, cx);
+    }
+
+    /// Replace the composer text with `text`, caret at the end, focused.
+    fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let cursor = text.len();
         self.input.update(cx, |state, cx| {
-            state.set_value(prefill, window, cx);
+            state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
             state.focus(window, cx);
         });
@@ -826,6 +831,11 @@ impl Render for Composer {
         }
 
         let user_input = self.pending_user_input(cx);
+        let fallback_block = self
+            .workspace_store
+            .read(cx)
+            .active_fallback_block()
+            .cloned();
 
         // Dropping image files onto the card attaches them (T3 drag-drop).
         let composer = cx.entity();
@@ -1010,6 +1020,9 @@ impl Render for Composer {
                     })
                     .when_some(user_input, |this, (request_id, questions)| {
                         this.child(self.render_user_input_panel(request_id, questions, cx))
+                    })
+                    .when_some(fallback_block, |this, block| {
+                        this.child(self.render_fallback_panel(&block, cx))
                     })
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_queue_strip(cx))

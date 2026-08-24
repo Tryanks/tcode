@@ -668,6 +668,16 @@ userinput:
   previous: "上一个"
   next_question: "下一个问题"
   done: "完成"
+fallback:
+  title: "本轮已被安全分类器中止"
+  reason_cyber: "Claude Code 的安全分类器认为本轮可能涉及网络安全内容。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_bio: "Claude Code 的安全分类器认为本轮可能涉及生物学内容。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_generic: "Claude Code 的安全分类器标记了本轮对话。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  blocked: "%{model} 拒绝了该请求。"
+  rerouted: "Claude 已改用 %{model}，tcode 中断了本轮。"
+  retry_on: "换用 %{model} 重试"
+  edit_retry: "修改后重试"
+  dismiss: "关闭"
 terminal:
   title: "终端"
   tabs: "终端标签页"

@@ -674,6 +674,16 @@ userinput:
   previous: "Previous"
   next_question: "Next question"
   done: "Done"
+fallback:
+  title: "Turn stopped by the safety classifier"
+  reason_cyber: "Claude Code's safety classifier flagged this turn as potentially cyber-related. tcode stopped it instead of letting Claude silently switch models."
+  reason_bio: "Claude Code's safety classifier flagged this turn as potentially biology-related. tcode stopped it instead of letting Claude silently switch models."
+  reason_generic: "Claude Code's safety classifier flagged this turn. tcode stopped it instead of letting Claude silently switch models."
+  blocked: "%{model} refused the request."
+  rerouted: "Claude rerouted to %{model}; tcode interrupted the turn."
+  retry_on: "Retry on %{model}"
+  edit_retry: "Edit & retry"
+  dismiss: "Dismiss"
 terminal:
   title: "Terminal"
   tabs: "Terminal tabs"
