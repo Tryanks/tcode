@@ -232,7 +232,7 @@ impl ChildReportTools {
     }
 
     #[tool(
-        description = "Deliver the full text of your final report (RESULT) to the orchestrator that dispatched this thread. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). The text reaches the orchestrator verbatim and in full when this turn ends. If you never call this, only your final assistant message is sent back — truncated when long."
+        description = "Deliver the full text of your final report (RESULT) to the orchestrator that dispatched this thread. The orchestrator receives ONLY this text — it cannot see your transcript — so make it self-contained and complete: what you did, files changed, every command you ran with its outcome, and your findings or conclusions in full. One or two summary sentences is not an acceptable report. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). If you never call this, only your final assistant message is sent back — truncated when long."
     )]
     async fn report_result(
         &self,

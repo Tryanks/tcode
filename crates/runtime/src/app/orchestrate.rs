@@ -1,5 +1,9 @@
 use super::*;
 
+/// Appended to every dispatched brief so the report contract reaches the child
+/// regardless of what the orchestrator wrote.
+pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nWhen your work is complete, call the tcode_report report_result tool with your full final report, then end your turn. The orchestrator that dispatched you receives ONLY that text — it cannot see your transcript — so make the report self-contained: what you did, files changed, every command you ran with its outcome, and your findings or conclusions in full. One or two summary sentences is not an acceptable report.";
+
 #[derive(Default)]
 pub(super) struct McpWiring {
     pub(super) preview_url: Option<String>,
@@ -261,6 +265,15 @@ impl AppState {
         brief: String,
         cx: &mut HostCx,
     ) -> Result<String, String> {
+        // The report contract rides with every brief: the child sees nothing
+        // of the orchestration, and the tool description alone yields missing
+        // or one-line reports. Skipped for providers without MCP attachment
+        // (pi), where the tool does not exist.
+        let brief = if meta.provider.caps().mcp_servers {
+            format!("{brief}{CHILD_REPORT_FOOTER}")
+        } else {
+            brief
+        };
         self.enqueue_store_write(
             StoreWrite::UpsertMeta {
                 meta: Box::new(meta.clone()),
@@ -936,6 +949,22 @@ impl AppState {
         else {
             return;
         };
+        // tcode's own reporting channel is never a permission question, in any
+        // access mode: providers that gate MCP tools (Claude Code prompts for
+        // them outside bypassPermissions) would otherwise stall or fail every
+        // report_result call from a read_only or workspace_write child.
+        if let agent::ApprovalKind::ToolUse { name, .. } = &request.kind
+            && name.contains(agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT)
+        {
+            if let Err(err) = self.respond_session_approval(
+                child_id,
+                request.id.clone(),
+                ApprovalDecision::ApproveForSession,
+            ) {
+                log::warn!("failed to auto-approve report_result for child {child_id}: {err}");
+            }
+            return;
+        }
         if self.settings.orchestrate.child_approval == ChildApprovalMode::AlwaysAllow {
             if let Err(err) = self.respond_session_approval(
                 child_id,
@@ -1417,13 +1446,10 @@ pub(super) fn assemble_callback_text(
     } else {
         format!(" tokens: {}.", token_parts.join(", "))
     };
-    let body = if let Some(report) = reported.filter(|report| !report.trim().is_empty()) {
-        // The child chose this text deliberately via report_result, so it is
-        // delivered verbatim and never truncated.
-        format!("Result (reported via report_result):\n{report}")
-    } else if final_message.is_empty() {
-        "(no assistant output)".to_string()
-    } else {
+    let digest = || {
+        if final_message.is_empty() {
+            return "(no assistant output)".to_string();
+        }
         let count = final_message.chars().count();
         let cap = max_chars.unwrap_or(1200) as usize;
         if cap == 0 || count <= cap {
@@ -1434,6 +1460,21 @@ pub(super) fn assemble_callback_text(
                 tail_chars(final_message, 600.min(cap))
             )
         }
+    };
+    let body = if let Some(report) = reported.filter(|report| !report.trim().is_empty()) {
+        // The child chose this text deliberately via report_result, so it is
+        // delivered verbatim and never truncated.
+        let mut body = format!("Result (reported via report_result):\n{report}");
+        // ponytail: fixed 200-char floor; a one-line "done" report would
+        // otherwise hide a substantive final message and force the
+        // orchestrator back to status/result.
+        if report.chars().count() < 200 && final_message.chars().count() > report.chars().count() {
+            body.push_str("\n\nThe report is brief; the final assistant message follows:\n");
+            body.push_str(&digest());
+        }
+        body
+    } else {
+        digest()
     };
     format!("[orchestrate] thread {child_id} (\"{title}\") {state}.{token_segment}\n{body}")
 }
