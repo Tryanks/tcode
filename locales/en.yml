@@ -225,6 +225,9 @@ settings:
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer tcode and provider CLI versions on launch."
+  inactive_frame_throttle:
+    title: "Background frame throttle"
+    description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
   title_generation:
     title: "Thread title model"
     description: "Choose the provider and model used to name new threads. Title requests always use low reasoning effort."
