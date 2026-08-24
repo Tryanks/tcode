@@ -263,11 +263,75 @@ impl AppState {
                     RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(message.clone())),
                 );
             }
+            AgentEvent::TurnBlocked {
+                category,
+                model,
+                detail,
+            } => {
+                if self.settings.abort_on_model_fallback {
+                    let is_active = self
+                        .residents
+                        .active
+                        .as_mut()
+                        .filter(|active| active.meta.id == session_id)
+                        .is_some_and(|active| {
+                            active.queue.clear();
+                            true
+                        });
+                    if is_active {
+                        self.emit_domain(
+                            Topic::SessionStatus {
+                                session_id: session_id.to_owned(),
+                            },
+                            ServerEvent::ModelFallbackBlocked {
+                                session_id: session_id.to_owned(),
+                                category: category.clone(),
+                                model: model.clone(),
+                                fallback_model: None,
+                                detail: detail.clone(),
+                            },
+                            cx,
+                        );
+                    }
+                }
+            }
+            AgentEvent::ModelFallbackDetected {
+                expected,
+                actual,
+                category,
+                ..
+            } => {
+                if self.settings.abort_on_model_fallback {
+                    let is_active = self
+                        .residents
+                        .active
+                        .as_mut()
+                        .filter(|active| active.meta.id == session_id)
+                        .is_some_and(|active| {
+                            active.queue.clear();
+                            true
+                        });
+                    if is_active {
+                        self.interrupt(cx);
+                        self.emit_domain(
+                            Topic::SessionStatus {
+                                session_id: session_id.to_owned(),
+                            },
+                            ServerEvent::ModelFallbackBlocked {
+                                session_id: session_id.to_owned(),
+                                category: category.clone(),
+                                model: Some(expected.clone()),
+                                fallback_model: Some(actual.clone()),
+                                detail: String::new(),
+                            },
+                            cx,
+                        );
+                    }
+                }
+            }
             AgentEvent::ProviderRelay { .. }
             | AgentEvent::PlanResolved { .. }
             | AgentEvent::ServedModel { .. }
-            | AgentEvent::ModelFallbackDetected { .. }
-            | AgentEvent::TurnBlocked { .. }
             | AgentEvent::TurnChangesUpdated { .. }
             | AgentEvent::TurnCheckpoint { .. }
             | AgentEvent::ItemStarted(_)

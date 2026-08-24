@@ -3584,6 +3584,56 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
 }
 
 #[test]
+fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enabled() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-turn-blocked-queue-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+
+    state.host_update(cx, |state, cx| {
+        state.settings.abort_on_model_fallback = true;
+        let mut active = ActiveSession::new(
+            SessionMeta::new(
+                ProviderKind::ClaudeCode,
+                PathBuf::from("/tmp/turn-blocked"),
+                Some("claude-opus-test".into()),
+            ),
+            false,
+            Vec::new(),
+        );
+        let session_id = active.meta.id.clone();
+        active.push_queued("do not auto-send".into(), Vec::new());
+        assert!(!active.queue.is_empty());
+        state.residents.active = Some(active);
+
+        state.on_event(
+            &session_id,
+            AgentEvent::TurnBlocked {
+                category: Some(agent::ClassifierCategory::Cyber),
+                model: Some("claude-opus-test".into()),
+                detail: "request blocked by classifier".into(),
+            },
+            cx,
+        );
+
+        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+    });
+
+    assert!(cx.drain_outgoing().iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionStatus { .. },
+            event: ServerEvent::ModelFallbackBlocked {
+                category: Some(agent::ClassifierCategory::Cyber),
+                model: Some(model),
+                fallback_model: None,
+                detail,
+                ..
+            },
+        }) if model == "claude-opus-test" && detail == "request blocked by classifier"
+    )));
+}
+
+#[test]
 fn shutdown_all_notifies_active_and_parked_live_providers() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-app-test");

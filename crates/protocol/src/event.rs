@@ -71,6 +71,20 @@ pub enum ServerEvent {
         session_id: String,
         text: String,
     },
+    /// A turn was stopped because Claude Code's safety classifier fired: the request
+    /// was blocked (fallback prevented) or the model silently fell back and tcode
+    /// interrupted it. Drives the recovery card. Transient; never persisted.
+    ModelFallbackBlocked {
+        session_id: String,
+        category: Option<agent::ClassifierCategory>,
+        /// The selected model that refused / was expected.
+        model: Option<String>,
+        /// The model Claude rerouted to, when a silent fallback actually occurred
+        /// (tcode interrupted it). None when the request was blocked outright.
+        fallback_model: Option<String>,
+        /// Claude's own explanation text when available (empty otherwise).
+        detail: String,
+    },
     SessionSnapshot(Vec<StoredEvent>),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
