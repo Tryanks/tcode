@@ -3,7 +3,7 @@ use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
 use tcode_core::project::group_sessions;
-use tcode_core::settings::ThemeMode;
+use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage};
 
 #[test]
@@ -44,6 +44,48 @@ fn settings_patch_preserves_concurrently_changed_other_field() {
             event: ServerEvent::SettingsReplaced(replaced),
             ..
         }) if replaced.sidebar_collapsed && replaced.theme_mode == ThemeMode::Dark
+    )));
+}
+
+#[test]
+fn settings_patches_from_stale_snapshot_preserve_nested_sibling_fields() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-dispatch-nested-settings-seam-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let stale = Settings::default().browser;
+    let mut home_url_writer = stale.clone();
+    home_url_writer.home_url = Some("https://example.com".into());
+    let mut allow_evaluate_writer = stale;
+    allow_evaluate_writer.allow_evaluate = false;
+    let home_url_patch = SettingsPatch::BrowserHomeUrl(home_url_writer.home_url);
+    let allow_evaluate_patch =
+        SettingsPatch::BrowserAllowEvaluate(allow_evaluate_writer.allow_evaluate);
+
+    state.dispatch_command(
+        cx,
+        42,
+        Command::PatchSettings {
+            patch: home_url_patch,
+        },
+    );
+    state.dispatch_command(
+        cx,
+        43,
+        Command::PatchSettings {
+            patch: allow_evaluate_patch,
+        },
+    );
+    cx.run_until_parked();
+
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::Settings,
+            event: ServerEvent::SettingsReplaced(replaced),
+            ..
+        }) if replaced.browser.home_url.as_deref() == Some("https://example.com")
+            && !replaced.browser.allow_evaluate
     )));
 }
 

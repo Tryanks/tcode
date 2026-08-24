@@ -6,12 +6,11 @@ use tcode_core::{
     acp::AcpAgentPatch,
     git::GitAction,
     session::ReviewComment,
-    settings::{
-        BrowserSettings, ComputerUseSettings, OrchestrateSettings, ProfileSettingsPatch,
-        SidebarLayout, ThemeMode, TitleGenerationSettings,
-    },
+    settings::ProfileSettingsPatch,
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
+
+pub use tcode_core::settings::SettingsPatch;
 
 use crate::ExternalThread;
 
@@ -23,28 +22,6 @@ pub enum ThreadExportFormat {
     Jsonl,
     /// A readable, deterministic rendering of the folded conversation timeline.
     Markdown,
-}
-
-/// A field-scoped settings mutation applied to the host's current settings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "content", rename_all = "snake_case")]
-pub enum SettingsPatch {
-    Language(Option<String>),
-    ThemeMode(ThemeMode),
-    WordWrapDiffs(bool),
-    SkipDeleteConfirmation(bool),
-    AutoOpenTaskPanel(bool),
-    ProviderUpdateChecksDisabled(bool),
-    AutoArchiveDisabled(bool),
-    AutoArchiveMaxIdleDays(u32),
-    AutoArchiveKeepCount(usize),
-    AutoArchiveNoticeShown(bool),
-    Orchestrate(OrchestrateSettings),
-    OrchestrateChildWorktrees(bool),
-    ComputerUse(ComputerUseSettings),
-    Browser(BrowserSettings),
-    TitleGeneration(TitleGenerationSettings),
-    SidebarLayout(SidebarLayout),
 }
 
 /// A backend mutation requested by a client.
