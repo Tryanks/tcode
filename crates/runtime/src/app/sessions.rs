@@ -261,32 +261,30 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
-                .unblock(move || merge_worktree_back(&destination, &worktree_path, &branch))
+                .unblock(move || merge_back(&destination, &worktree_path, &branch))
                 .await;
             host_cx.enqueue(move |_state, cx| {
                 let notice = match result {
-                    Ok(MergeWorktreeOutcome::FastForward) => {
-                        RuntimeNotice::WorktreeMergedFastForward
-                    }
-                    Ok(MergeWorktreeOutcome::MergeCommit) => RuntimeNotice::WorktreeMergedCommit,
+                    Ok(MergeBackOutcome::FastForward) => RuntimeNotice::WorktreeMergedFastForward,
+                    Ok(MergeBackOutcome::MergeCommit) => RuntimeNotice::WorktreeMergedCommit,
                     Err(error) => {
                         let (reason, detail) = match error {
-                            MergeWorktreeError::WorktreeMissing => {
+                            MergeBackError::WorktreeMissing => {
                                 (MergeWorktreeFailure::Missing, None)
                             }
-                            MergeWorktreeError::DirtyWorktree => {
+                            MergeBackError::DirtyWorktree => {
                                 (MergeWorktreeFailure::DirtyWorktree, None)
                             }
-                            MergeWorktreeError::DestinationDetached => {
+                            MergeBackError::DestinationDetached => {
                                 (MergeWorktreeFailure::DestinationDetached, None)
                             }
-                            MergeWorktreeError::DirtyDestination => {
+                            MergeBackError::DirtyDestination => {
                                 (MergeWorktreeFailure::DirtyDestination, None)
                             }
-                            MergeWorktreeError::DivergedConflict => {
+                            MergeBackError::DivergedConflict => {
                                 (MergeWorktreeFailure::DivergedConflict, None)
                             }
-                            MergeWorktreeError::Git(detail) => {
+                            MergeBackError::Git(detail) => {
                                 (MergeWorktreeFailure::Git, Some(detail))
                             }
                         };
@@ -838,9 +836,7 @@ impl AppState {
             .collect();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let summary = host_cx
-                .unblock(move || cleanup_orphaned_worktrees(&known_ids))
-                .await;
+            let summary = host_cx.unblock(move || cleanup_orphans(&known_ids)).await;
             if !summary.removed.is_empty() || !summary.skipped.is_empty() {
                 log::info!(
                     "worktree orphan recovery removed {}, left {}",
@@ -865,7 +861,7 @@ impl AppState {
         &mut self,
         text: String,
         attachments: Vec<Attachment>,
-        base: String,
+        _base: String,
         cx: &mut HostCx,
     ) {
         let Some(active) = self.residents.active.as_mut() else {
@@ -873,29 +869,14 @@ impl AppState {
         };
         active.preparing_worktree = true;
         let session_id = active.meta.id.clone();
+        let session_id_for_task = session_id.clone();
         let root = active.meta.cwd.clone();
 
-        let path = worktree_path_for(&session_id);
-        let branch = format!("tcode/{session_id}");
-        let base_for_task = base.clone();
         let root_for_task = root.clone();
-        let path_for_task = path.clone();
-        let branch_for_task = branch.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
-                .unblock(move || {
-                    create_git_worktree(
-                        &root_for_task,
-                        &path_for_task,
-                        &branch_for_task,
-                        &base_for_task,
-                    )
-                    .map(|created| {
-                        let git_branch = read_git_branch(&created.path);
-                        (created, git_branch)
-                    })
-                })
+                .unblock(move || provision(&root_for_task, &session_id_for_task))
                 .await;
             host_cx.enqueue(move |state, cx| {
                 let Some(active) = state
@@ -908,22 +889,22 @@ impl AppState {
                 };
                 active.preparing_worktree = false;
                 match result {
-                    Ok((created, git_branch)) => {
+                    Ok(created) => {
                         active.meta.cwd = created.path.clone();
                         active.meta.worktree = Some(WorktreeInfo {
                             root_project_path: root,
-                            base,
-                            branch: created.branch,
+                            base: created.base,
+                            branch: created.branch.clone(),
                         });
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
-                        active.git_branch = git_branch;
-                        if created.seed.manifest_found {
+                        active.git_branch = Some(created.branch);
+                        if created.seed_summary.manifest_found {
                             emit_runtime(
                                 cx,
                                 RuntimeEvent::Notice(RuntimeNotice::WorktreeSeeded {
-                                    copied_files: created.seed.copied_files,
-                                    skipped: created.seed.skipped,
-                                    limit_reached: created.seed.limit_reached,
+                                    copied_files: created.seed_summary.copied_files,
+                                    skipped: created.seed_summary.skipped,
+                                    limit_reached: created.seed_summary.limit_reached,
                                 }),
                             );
                         }
