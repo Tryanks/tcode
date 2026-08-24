@@ -355,11 +355,6 @@ pub(crate) fn tool_brief(input: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) fn output_tail(output: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-    lines[lines.len().saturating_sub(max_lines)..].join("\n")
-}
-
 /// Wall-clock duration formatted as "XmYYs" / "YYs".
 pub(crate) fn format_duration(secs: u64) -> String {
     if secs >= 60 {

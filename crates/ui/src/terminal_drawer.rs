@@ -44,7 +44,9 @@ use crate::{
 };
 use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
 
-const FONT_SIZE: f32 = 13.;
+pub(crate) const TERMINAL_FONT_SIZE: f32 = 13.;
+pub(crate) const TERMINAL_CELL_WIDTH: f32 = 7.83;
+pub(crate) const TERMINAL_CELL_HEIGHT: f32 = 17.;
 #[cfg(target_os = "macos")]
 const TERMINAL_FONT_FAMILY: &str = "Menlo";
 #[cfg(target_os = "windows")]
@@ -231,9 +233,9 @@ struct MarkedText {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct GridTextStyle {
-    fg: AnsiColor,
-    bg: AnsiColor,
+pub(crate) struct GridTextStyle {
+    pub(crate) fg: AnsiColor,
+    pub(crate) bg: AnsiColor,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -243,20 +245,20 @@ struct GridTextStyle {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct BatchedTextRun {
-    row: usize,
-    start_col: usize,
-    text: String,
+pub(crate) struct BatchedTextRun {
+    pub(crate) row: usize,
+    pub(crate) start_col: usize,
+    pub(crate) text: String,
     /// The number of non-spacer grid cells, matching Zed's batching model.
     cell_count: usize,
-    style: GridTextStyle,
+    pub(crate) style: GridTextStyle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct TerminalPalette {
-    foreground: Hsla,
-    background: Hsla,
-    selection: Hsla,
+pub(crate) struct TerminalPalette {
+    pub(crate) foreground: Hsla,
+    pub(crate) background: Hsla,
+    pub(crate) selection: Hsla,
 }
 
 #[derive(Clone, Copy)]
@@ -279,8 +281,8 @@ struct CursorPaint {
 }
 
 #[derive(Clone)]
-struct GridPaintData {
-    text_runs: Vec<BatchedTextRun>,
+pub(crate) struct GridPaintData {
+    pub(crate) text_runs: Vec<BatchedTextRun>,
     backgrounds: Vec<BackgroundRect>,
     selections: Vec<BackgroundRect>,
     cursor: Option<CursorPaint>,
@@ -448,8 +450,8 @@ impl TerminalDrawer {
             split_sizes: Rc::new(RefCell::new(Vec::new())),
             row_layout_cache: RefCell::new(HashMap::new()),
             image_registry: RefCell::new(HashMap::new()),
-            cell_width: 7.83,
-            cell_height: 17.,
+            cell_width: TERMINAL_CELL_WIDTH,
+            cell_height: TERMINAL_CELL_HEIGHT,
             scroll_remainder: HashMap::new(),
             selection_drag: SelectionDrag::default(),
             _focus_subscriptions: vec![focus_in, focus_out],
@@ -921,16 +923,7 @@ impl TerminalDrawer {
             move |bounds, (), window, cx| {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     let scale_factor = window.scale_factor();
-                    let snap_down = |value: Pixels| {
-                        px((f32::from(value) * scale_factor).floor() / scale_factor)
-                    };
-                    let snap_up = |value: Pixels| {
-                        px((f32::from(value) * scale_factor).ceil() / scale_factor)
-                    };
-                    let origin = point(
-                        snap_down(bounds.origin.x),
-                        snap_down(bounds.origin.y),
-                    );
+                    let origin = snapped_grid_origin(bounds, scale_factor);
                     grid_bounds.borrow_mut().insert(
                         terminal_id,
                         GridGeometry {
@@ -942,139 +935,54 @@ impl TerminalDrawer {
                         },
                     );
 
-                    for background in paint_data
-                        .backgrounds
-                        .iter()
-                        .chain(&paint_data.selections)
-                    {
-                        let left = origin.x + px(background.start_col as f32 * cell_width);
-                        let right = origin.x
-                            + px(
-                                (background.start_col + background.cell_count) as f32 * cell_width,
-                            );
-                        let left = snap_down(left);
-                        let background_bounds = Bounds::new(
-                            point(
-                                left,
-                                origin.y + px(background.row as f32 * cell_height),
-                            ),
-                            size(snap_up(right) - left, px(cell_height)),
-                        );
-                        window.paint_quad(fill(background_bounds, background.color));
-                    }
-
-                    let physical_cell_width = cell_width * scale_factor;
-                    let physical_cell_height = cell_height * scale_factor;
-                    let physical_origin_x = f32::from(origin.x) * scale_factor;
-                    let physical_origin_y = f32::from(origin.y) * scale_factor;
-                    let viewport = OverlayViewport {
-                        cell_width: physical_cell_width,
-                        cell_height: physical_cell_height,
-                        origin_x: physical_origin_x,
-                        origin_y: physical_origin_y,
-                        history_size,
-                        display_offset,
-                        screen_lines: rows.min(i64::MAX as usize) as i64,
-                    };
-                    let clip = (
-                        physical_origin_x,
-                        physical_origin_y,
-                        physical_origin_x + cols as f32 * physical_cell_width,
-                        physical_origin_y + rows as f32 * physical_cell_height,
-                    );
-                    let graphic_overlays = layout_graphic_overlays(
-                        &atlas_placements,
-                        &kitty_placements,
-                        &kitty_virtual_placements,
-                        &virtual_placeholder_paints,
-                        &graphic_images,
-                        &viewport,
-                        clip,
-                    );
-                    paint_graphic_overlays(
+                    let (cursor_bounds, graphic_overlays) = paint_terminal_grid(
+                        bounds,
                         window,
-                        &graphic_overlays,
-                        &graphic_images,
-                        scale_factor,
-                        false,
+                        cx,
+                        &paint_data,
+                        palette,
+                        cell_width,
+                        cell_height,
+                        marked_text.is_none(),
+                        |origin, scale_factor, window| {
+                            let physical_cell_width = cell_width * scale_factor;
+                            let physical_cell_height = cell_height * scale_factor;
+                            let physical_origin_x = f32::from(origin.x) * scale_factor;
+                            let physical_origin_y = f32::from(origin.y) * scale_factor;
+                            let viewport = OverlayViewport {
+                                cell_width: physical_cell_width,
+                                cell_height: physical_cell_height,
+                                origin_x: physical_origin_x,
+                                origin_y: physical_origin_y,
+                                history_size,
+                                display_offset,
+                                screen_lines: rows.min(i64::MAX as usize) as i64,
+                            };
+                            let clip = (
+                                physical_origin_x,
+                                physical_origin_y,
+                                physical_origin_x + cols as f32 * physical_cell_width,
+                                physical_origin_y + rows as f32 * physical_cell_height,
+                            );
+                            let overlays = layout_graphic_overlays(
+                                &atlas_placements,
+                                &kitty_placements,
+                                &kitty_virtual_placements,
+                                &virtual_placeholder_paints,
+                                &graphic_images,
+                                &viewport,
+                                clip,
+                            );
+                            paint_graphic_overlays(
+                                window,
+                                &overlays,
+                                &graphic_images,
+                                scale_factor,
+                                false,
+                            );
+                            overlays
+                        },
                     );
-
-                    let cursor_bounds = paint_data.cursor.map(|cursor| {
-                        Bounds::new(
-                            point(
-                                origin.x + px(cursor.start_col as f32 * cell_width),
-                                origin.y + px(cursor.row as f32 * cell_height),
-                            ),
-                            size(px(cursor.cell_count as f32 * cell_width), px(cell_height)),
-                        )
-                    });
-                    if marked_text.is_none()
-                        && let Some(cursor) = paint_data.cursor.filter(|cursor| cursor.visible)
-                        && let Some(cursor_bounds) = cursor_bounds
-                    {
-                        match (cursor.focused, cursor.shape) {
-                            (false, _) => {
-                                let t = px(1.);
-                                window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(cursor_bounds.size.width, t)), cursor.color));
-                                window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - t), size(cursor_bounds.size.width, t)), cursor.color));
-                                window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(t, cursor_bounds.size.height)), cursor.color));
-                                window.paint_quad(fill(Bounds::new(point(cursor_bounds.right() - t, cursor_bounds.top()), size(t, cursor_bounds.size.height)), cursor.color));
-                            }
-                            (_, CursorShape::Beam) => window.paint_quad(fill(Bounds::new(cursor_bounds.origin, size(px(2.), cursor_bounds.size.height)), cursor.color)),
-                            (_, CursorShape::Underline) => window.paint_quad(fill(Bounds::new(point(cursor_bounds.left(), cursor_bounds.bottom() - px(2.)), size(cursor_bounds.size.width, px(2.))), cursor.color)),
-                            (_, CursorShape::Block) => window.paint_quad(fill(cursor_bounds, cursor.color)),
-                            (_, CursorShape::Hidden) => {}
-                        }
-                    }
-
-                    for run in &paint_data.text_runs {
-                        let mut run_font = terminal_font();
-                        run_font.weight = if run.style.bold {
-                            FontWeight::BOLD
-                        } else {
-                            FontWeight::NORMAL
-                        };
-                        run_font.style = if run.style.italic {
-                            FontStyle::Italic
-                        } else {
-                            FontStyle::Normal
-                        };
-                        let foreground = if run.style.cursor {
-                            terminal_color(run.style.bg, palette)
-                        } else {
-                            terminal_color(run.style.fg, palette)
-                        };
-                        let text_run = TextRun {
-                            len: run.text.len(),
-                            font: run_font,
-                            color: foreground,
-                            background_color: None,
-                            strikethrough: None,
-                            underline: run.style.underline.then_some(UnderlineStyle {
-                                thickness: px(1.),
-                                color: Some(foreground),
-                                wavy: run.style.underline_wavy,
-                            }),
-                        };
-                        let shaped = window.text_system().shape_line(
-                            run.text.clone().into(),
-                            px(FONT_SIZE),
-                            &[text_run],
-                            Some(px(cell_width)),
-                        );
-                        let position = point(
-                            origin.x + px(run.start_col as f32 * cell_width),
-                            origin.y + px(run.row as f32 * cell_height),
-                        );
-                        let _ = shaped.paint(
-                            position,
-                            px(cell_height),
-                            TextAlign::Left,
-                            None,
-                            window,
-                            cx,
-                        );
-                    }
 
                     if let Some(marked_text) = marked_text.as_ref().filter(|text| !text.is_empty())
                         && let Some(cursor_bounds) = cursor_bounds
@@ -1093,7 +1001,7 @@ impl TerminalDrawer {
                         };
                         let shaped = window.text_system().shape_line(
                             marked_text.clone().into(),
-                            px(FONT_SIZE),
+                            px(TERMINAL_FONT_SIZE),
                             &[ime_run],
                             None,
                         );
@@ -1621,7 +1529,7 @@ impl Render for TerminalDrawer {
         // vertical metrics of the same resolved face used by StyledText.
         let shaped_cell = window.text_system().shape_line(
             "MMMMMMMMMM".into(),
-            px(FONT_SIZE),
+            px(TERMINAL_FONT_SIZE),
             &[TextRun {
                 len: 10,
                 font: terminal_font(),
@@ -1635,7 +1543,7 @@ impl Render for TerminalDrawer {
         self.cell_width = f32::from(shaped_cell.width) / 10.;
         self.cell_height = f32::from(shaped_cell.ascent + shaped_cell.descent)
             .ceil()
-            .max(FONT_SIZE + 2.);
+            .max(TERMINAL_FONT_SIZE + 2.);
         let (tabs, active_id, active_split) = self
             .workspace_store
             .read(cx)
@@ -1916,7 +1824,7 @@ impl Render for TerminalDrawer {
             .size_full()
             .min_h_0()
             .font_family(TERMINAL_FONT_FAMILY)
-            .text_size(px(FONT_SIZE))
+            .text_size(px(TERMINAL_FONT_SIZE))
             .on_action(cx.listener(Self::on_terminal_copy))
             .on_action(cx.listener(Self::on_terminal_paste))
             .on_action(cx.listener(Self::on_terminal_select_all))
@@ -2016,8 +1924,145 @@ impl Render for TerminalDrawer {
     }
 }
 
-#[cfg(test)]
-fn layout_grid(
+fn snapped_grid_origin(bounds: Bounds<Pixels>, scale_factor: f32) -> Point<Pixels> {
+    let snap_down = |value: Pixels| px((f32::from(value) * scale_factor).floor() / scale_factor);
+    point(snap_down(bounds.origin.x), snap_down(bounds.origin.y))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_terminal_grid<T>(
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+    paint_data: &GridPaintData,
+    palette: TerminalPalette,
+    cell_width: f32,
+    cell_height: f32,
+    show_cursor: bool,
+    paint_underlay: impl FnOnce(Point<Pixels>, f32, &mut Window) -> T,
+) -> (Option<Bounds<Pixels>>, T) {
+    let scale_factor = window.scale_factor();
+    let snap_down = |value: Pixels| px((f32::from(value) * scale_factor).floor() / scale_factor);
+    let snap_up = |value: Pixels| px((f32::from(value) * scale_factor).ceil() / scale_factor);
+    let origin = snapped_grid_origin(bounds, scale_factor);
+
+    for background in paint_data.backgrounds.iter().chain(&paint_data.selections) {
+        let left = origin.x + px(background.start_col as f32 * cell_width);
+        let right =
+            origin.x + px((background.start_col + background.cell_count) as f32 * cell_width);
+        let left = snap_down(left);
+        let background_bounds = Bounds::new(
+            point(left, origin.y + px(background.row as f32 * cell_height)),
+            size(snap_up(right) - left, px(cell_height)),
+        );
+        window.paint_quad(fill(background_bounds, background.color));
+    }
+
+    let underlay = paint_underlay(origin, scale_factor, window);
+    let cursor_bounds = paint_data.cursor.map(|cursor| {
+        Bounds::new(
+            point(
+                origin.x + px(cursor.start_col as f32 * cell_width),
+                origin.y + px(cursor.row as f32 * cell_height),
+            ),
+            size(px(cursor.cell_count as f32 * cell_width), px(cell_height)),
+        )
+    });
+    if show_cursor
+        && let Some(cursor) = paint_data.cursor.filter(|cursor| cursor.visible)
+        && let Some(cursor_bounds) = cursor_bounds
+    {
+        match (cursor.focused, cursor.shape) {
+            (false, _) => {
+                let t = px(1.);
+                window.paint_quad(fill(
+                    Bounds::new(cursor_bounds.origin, size(cursor_bounds.size.width, t)),
+                    cursor.color,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(cursor_bounds.left(), cursor_bounds.bottom() - t),
+                        size(cursor_bounds.size.width, t),
+                    ),
+                    cursor.color,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(cursor_bounds.origin, size(t, cursor_bounds.size.height)),
+                    cursor.color,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(cursor_bounds.right() - t, cursor_bounds.top()),
+                        size(t, cursor_bounds.size.height),
+                    ),
+                    cursor.color,
+                ));
+            }
+            (_, CursorShape::Beam) => window.paint_quad(fill(
+                Bounds::new(
+                    cursor_bounds.origin,
+                    size(px(2.), cursor_bounds.size.height),
+                ),
+                cursor.color,
+            )),
+            (_, CursorShape::Underline) => window.paint_quad(fill(
+                Bounds::new(
+                    point(cursor_bounds.left(), cursor_bounds.bottom() - px(2.)),
+                    size(cursor_bounds.size.width, px(2.)),
+                ),
+                cursor.color,
+            )),
+            (_, CursorShape::Block) => window.paint_quad(fill(cursor_bounds, cursor.color)),
+            (_, CursorShape::Hidden) => {}
+        }
+    }
+
+    for run in &paint_data.text_runs {
+        let mut run_font = terminal_font();
+        run_font.weight = if run.style.bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        };
+        run_font.style = if run.style.italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        };
+        let foreground = if run.style.cursor {
+            terminal_color(run.style.bg, palette)
+        } else {
+            terminal_color(run.style.fg, palette)
+        };
+        let text_run = TextRun {
+            len: run.text.len(),
+            font: run_font,
+            color: foreground,
+            background_color: None,
+            strikethrough: None,
+            underline: run.style.underline.then_some(UnderlineStyle {
+                thickness: px(1.),
+                color: Some(foreground),
+                wavy: run.style.underline_wavy,
+            }),
+        };
+        let shaped = window.text_system().shape_line(
+            run.text.clone().into(),
+            px(TERMINAL_FONT_SIZE),
+            &[text_run],
+            Some(px(cell_width)),
+        );
+        let position = point(
+            origin.x + px(run.start_col as f32 * cell_width),
+            origin.y + px(run.row as f32 * cell_height),
+        );
+        let _ = shaped.paint(position, px(cell_height), TextAlign::Left, None, window, cx);
+    }
+
+    (cursor_bounds, underlay)
+}
+
+pub(crate) fn layout_grid(
     state: &TermSnapshot,
     palette: TerminalPalette,
     composing: bool,
@@ -2876,13 +2921,13 @@ fn paint_graphic_overlay(
     );
 }
 
-fn terminal_font() -> gpui::Font {
+pub(crate) fn terminal_font() -> gpui::Font {
     let mut terminal_font = font(TERMINAL_FONT_FAMILY);
     terminal_font.features = FontFeatures::disable_ligatures();
     terminal_font
 }
 
-fn terminal_color(color: AnsiColor, palette: TerminalPalette) -> Hsla {
+pub(crate) fn terminal_color(color: AnsiColor, palette: TerminalPalette) -> Hsla {
     match color {
         AnsiColor::Named(
             NamedColor::Foreground | NamedColor::LightForeground | NamedColor::DimForeground,

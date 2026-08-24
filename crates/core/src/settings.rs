@@ -582,6 +582,7 @@ pub enum SettingsPatch {
     WordWrapDiffs(bool),
     SkipDeleteConfirmation(bool),
     AutoOpenTaskPanel(bool),
+    LiveCommandPanelDisabled(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     AutoArchiveDisabled(bool),
@@ -665,6 +666,10 @@ pub struct Settings {
     /// Absent in legacy files (defaults to off).
     #[serde(default)]
     pub auto_open_task_panel: bool,
+    /// Whether the live command panel is DISABLED. Stored inverted so absent
+    /// legacy settings keep the feature enabled.
+    #[serde(default)]
+    pub live_command_panel_disabled: bool,
     /// Whether the on-launch provider version check is DISABLED. Stored inverted
     /// so the feature defaults to on (s3 §6: "Provider update checks", default
     /// on) even for legacy settings files that lack the field.
@@ -755,6 +760,7 @@ impl Default for Settings {
             word_wrap_diffs: false,
             skip_delete_confirmation: false,
             auto_open_task_panel: false,
+            live_command_panel_disabled: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             auto_archive_disabled: false,
@@ -787,6 +793,9 @@ impl Settings {
                 self.skip_delete_confirmation = value;
             }
             SettingsPatch::AutoOpenTaskPanel(value) => self.auto_open_task_panel = value,
+            SettingsPatch::LiveCommandPanelDisabled(value) => {
+                self.live_command_panel_disabled = value;
+            }
             SettingsPatch::ProviderUpdateChecksDisabled(value) => {
                 self.provider_update_checks_disabled = value;
             }
