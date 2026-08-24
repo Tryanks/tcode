@@ -40,7 +40,7 @@ pub fn smoke() -> String {
         let observed = backend::observe(
             root,
             backend::ObserveRequest {
-                semantic: false,
+                semantic: true,
                 capture: backend::CapturePolicy::Never,
             },
         );
