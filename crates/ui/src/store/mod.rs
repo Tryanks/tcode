@@ -16,13 +16,12 @@ use tcode_core::{
     },
     ui::{ConversationDestination, RightTab},
 };
-use tcode_protocol::{AcpMarketplaceItem, ExternalThread};
+use tcode_protocol::{AcpMarketplaceItem, ExternalThread, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
     EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
     ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent,
     SessionStatus, Subscription, Topic,
 };
-use tcode_runtime::event::RuntimeEvent;
 use tcode_runtime::pipe::HostHandle;
 use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalWorkspace};
 use tcode_services::import::ExternalImportUpdate;
@@ -1635,7 +1634,7 @@ mod tests {
         session::{ReviewComment, ReviewSide},
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
-    use tcode_runtime::event::HostEvent;
+    use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostHandle, HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 

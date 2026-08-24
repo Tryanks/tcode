@@ -12,10 +12,10 @@ mod wire;
 pub use command::{Command, CommandResponse, SettingsPatch, ThreadExportFormat};
 pub use event::{
     AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    MergeWorktreeFailure, ProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
-    RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification, RuntimeOperationId,
-    RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus, TcodeUpdateStatus,
-    TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus, ProvidersStatus,
+    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
+    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
+    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,

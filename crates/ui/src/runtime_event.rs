@@ -1,9 +1,8 @@
 use agent::RewindMode;
 use tcode_core::git::GitAction;
-use tcode_protocol::MergeWorktreeFailure;
-use tcode_runtime::event::{
-    GitActionRequest, RuntimeEffect, RuntimeError, RuntimeEvent, RuntimeNotice, RuntimeOperationId,
-    RuntimeToast,
+use tcode_protocol::{
+    GitActionRequest, MergeWorktreeFailure, NoticeSeverity, RuntimeEffect, RuntimeError,
+    RuntimeNotice, RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast,
 };
 
 use crate::toast::ToastKind;
@@ -103,13 +102,9 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
             (RuntimeEventSeverity::Error, message)
         }
         RuntimeEvent::Notice(notice) => {
-            let severity = if matches!(
-                notice,
-                RuntimeNotice::WorktreeMergeFailed { .. } | RuntimeNotice::ProviderMessage(_)
-            ) {
-                RuntimeEventSeverity::Warning
-            } else {
-                RuntimeEventSeverity::Success
+            let severity = match notice.severity() {
+                NoticeSeverity::Success => RuntimeEventSeverity::Success,
+                NoticeSeverity::Warning => RuntimeEventSeverity::Warning,
             };
             let message = match notice {
                 RuntimeNotice::ProviderMessage(message) => message.clone(),
@@ -509,17 +504,10 @@ mod tests {
             }
             for notice in &notices {
                 let presented = present_runtime_event(&RuntimeEvent::Notice(notice.clone()));
-                let expected = if matches!(notice, RuntimeNotice::ProviderMessage(_)) {
-                    RuntimeEventSeverity::Warning
-                } else {
-                    RuntimeEventSeverity::Success
-                };
-                assert_eq!(presented.severity, expected);
                 assert!(!presented.message.is_empty());
             }
             for warning in &warnings {
                 let presented = present_runtime_event(&RuntimeEvent::Notice(warning.clone()));
-                assert_eq!(presented.severity, RuntimeEventSeverity::Warning);
                 assert!(!presented.message.is_empty());
             }
             for toast in &toasts {
@@ -673,11 +661,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_warning_notice_is_presented_as_warning() {
-        let presented = present_runtime_event(&RuntimeEvent::Notice(
-            RuntimeNotice::ProviderMessage("pi MCP tools unavailable".into()),
-        ));
+    fn representative_notice_severities_are_presented() {
+        let warning = present_runtime_event(&RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(
+            "pi MCP tools unavailable".into(),
+        )));
+        let success = present_runtime_event(&RuntimeEvent::Notice(RuntimeNotice::UpdateDone {
+            provider: ProviderKind::Codex,
+        }));
 
-        assert_eq!(presented.severity, RuntimeEventSeverity::Warning);
+        assert_eq!(warning.severity, RuntimeEventSeverity::Warning);
+        assert_eq!(success.severity, RuntimeEventSeverity::Success);
     }
 }

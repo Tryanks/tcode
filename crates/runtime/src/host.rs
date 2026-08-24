@@ -8,10 +8,18 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-use tcode_protocol::{EventEnvelope, HostMessage, ServerEvent, Topic, encode_line};
+use tcode_protocol::{
+    EventEnvelope, HostMessage, RuntimeNotification, ServerEvent, Topic, encode_line,
+};
 
 use crate::app::AppState;
-use crate::event::HostEvent;
+
+#[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // The internal host queue stays directly typed.
+pub enum HostEvent {
+    Runtime(RuntimeNotification),
+    Domain(EventEnvelope),
+}
 
 pub(crate) type HostFn = Box<dyn FnOnce(&mut AppState, &mut HostCx) + Send + 'static>;
 
