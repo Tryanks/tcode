@@ -122,7 +122,7 @@ jobs:
           elapsed=$((SECONDS - start))
           echo "### ${{ matrix.label }} build: ${elapsed}s" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Package macOS app, zip, and DMG
+      - name: Assemble macOS app bundle
         if: matrix.platform == 'macos'
         shell: bash
         run: |
@@ -130,8 +130,7 @@ jobs:
           app="dist/Tcode.app"
           mkdir -p \
             "$app/Contents/MacOS" \
-            "$app/Contents/Resources" \
-            dmg-root
+            "$app/Contents/Resources"
           cp "target/${{ matrix.target }}/release/tcode" "$app/Contents/MacOS/tcode"
           cp assets/icons/app/tcode.icns "$app/Contents/Resources/tcode.icns"
           chmod +x "$app/Contents/MacOS/tcode"
@@ -156,6 +155,76 @@ jobs:
           </dict></plist>
           PLIST
           plutil -lint "$app/Contents/Info.plist"
+
+      # Signs and notarizes the app when the Developer ID secrets are configured
+      # (see docs/release-signing.md). Absent secrets → the step no-ops and the
+      # release ships unsigned, exactly as before, so tags never fail to publish.
+      - name: Sign and notarize macOS app
+        id: macos_sign
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          app="dist/Tcode.app"
+          if [[ -z "${MACOS_CERTIFICATE:-}" || -z "${MACOS_SIGN_IDENTITY:-}" ]]; then
+            echo "::notice::macOS signing secrets not configured — shipping an unsigned build."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Import the Developer ID Application cert into an ephemeral keychain.
+          keychain="$RUNNER_TEMP/tcode-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 24)"
+          cert_path="$RUNNER_TEMP/developer_id.p12"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$cert_path"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$cert_path" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychain -d user -s "$keychain" login.keychain-db
+          rm -f "$cert_path"
+
+          # Hardened runtime + entitlements, required for notarization.
+          codesign --force --timestamp --options runtime \
+            --entitlements assets/macos/tcode.entitlements \
+            --sign "$MACOS_SIGN_IDENTITY" "$app/Contents/MacOS/tcode"
+          codesign --force --timestamp --options runtime \
+            --entitlements assets/macos/tcode.entitlements \
+            --sign "$MACOS_SIGN_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # Notarize the app (submitted as a zip) and staple the ticket so
+          # Gatekeeper accepts it offline. The zip below is only for submission.
+          notarize_zip="$RUNNER_TEMP/tcode-notarize.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$notarize_zip"
+          xcrun notarytool submit "$notarize_zip" \
+            --apple-id "$MACOS_NOTARY_APPLE_ID" \
+            --team-id "$MACOS_NOTARY_TEAM_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" \
+            --wait
+          xcrun stapler staple "$app"
+          rm -f "$notarize_zip"
+          security delete-keychain "$keychain" || true
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::macOS build signed and notarized."
+
+      - name: Package macOS zip and DMG
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="dist/Tcode.app"
+          mkdir -p dmg-root
           ditto -c -k --sequesterRsrc --keepParent "$app" \
             "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
           cp -R "$app" dmg-root/
@@ -163,6 +232,10 @@ jobs:
           hdiutil create -volname Tcode -srcfolder "$PWD/dmg-root" -ov \
             -fs HFS+ -format UDZO \
             "$PWD/dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
+          # Staple the notarization ticket to the DMG too, when signed.
+          if [[ "${{ steps.macos_sign.outputs.signed }}" == "true" ]]; then
+            xcrun stapler staple "dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg" || true
+          fi
           rm -rf "dist/Tcode.app" dmg-root
 
       - name: Package Windows zip
@@ -233,7 +306,7 @@ jobs:
           cat > "$notes_file" <<'NOTES'
           ## Platform notes
 
-          - **macOS 12+**: these test builds are not signed or notarized. After moving the app to Applications, clear Gatekeeper quarantine with:
+          - **macOS 12+**: release builds are Developer ID signed and notarized when the maintainer has configured signing credentials. If you downloaded an unsigned build, clear Gatekeeper quarantine after moving the app to Applications with:
 
             `xattr -dr com.apple.quarantine /Applications/Tcode.app`
 
