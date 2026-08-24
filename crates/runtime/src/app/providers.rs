@@ -424,20 +424,39 @@ impl AppState {
                         launch_env_for_profile(&settings, &profile_id, secrets).pairs(provider)
                     })
                     .await;
-                let source = host_cx
-                    .unblock(move || {
-                        binary
-                            .as_deref()
-                            .map(detect_install_source)
-                            .unwrap_or_default()
-                    })
-                    .await;
                 let installed = run_capture_env(&program, &["--version"], &env).await;
                 let latest = run_capture("npm", &["view", package, "version"]).await;
+                let assessment = host_cx
+                    .unblock(move || {
+                        provider_updates::check(ProviderCheckInput {
+                            binary_path: binary.as_deref(),
+                            installed_output: installed.as_deref(),
+                            latest_output: latest.as_deref(),
+                        })
+                    })
+                    .await;
                 host_cx.enqueue(move |state, cx| {
-                    let update_available = match (&installed, &latest) {
-                        (Some(i), Some(l)) => is_update_available(i, l),
-                        _ => false,
+                    let (installed, latest, source, update_available) = match assessment {
+                        ProviderUpdateAssessment::UpToDate {
+                            current,
+                            latest,
+                            install_source,
+                        } => (Some(current), Some(latest), install_source, false),
+                        ProviderUpdateAssessment::UpdateAvailable {
+                            current,
+                            latest,
+                            install_source,
+                        } => (Some(current), Some(latest), install_source, true),
+                        ProviderUpdateAssessment::Unknown {
+                            current,
+                            latest,
+                            install_source,
+                            ..
+                        } => {
+                            // Unknown is deliberately silent, but it is not
+                            // treated as evidence that the provider is current.
+                            (current, latest, install_source, false)
+                        }
                     };
                     let already = state
                         .providers
@@ -445,17 +464,6 @@ impl AppState {
                         .get(&provider)
                         .map(|s| s.update_available)
                         .unwrap_or(false);
-                    // Normalize both to `a.b.c` for display (raw `--version`
-                    // output can carry a program name / suffix).
-                    let pretty = |raw: &Option<String>| {
-                        raw.as_ref().map(|r| {
-                            parse_version(r)
-                                .map(|(a, b, c)| format!("{a}.{b}.{c}"))
-                                .unwrap_or_else(|| r.clone())
-                        })
-                    };
-                    let installed_pretty = pretty(&installed);
-                    let latest_pretty = pretty(&latest);
                     let status = state
                         .providers
                         .provider_versions
@@ -463,13 +471,13 @@ impl AppState {
                         .or_default();
                     status.checking = false;
                     status.install_source = source;
-                    status.installed = installed_pretty;
-                    status.latest = latest_pretty.clone();
+                    status.installed = installed;
+                    status.latest = latest.clone();
                     status.update_available = update_available;
                     // Toast once when an update becomes newly available.
                     if update_available
                         && !already
-                        && let Some(version) = &latest_pretty
+                        && let Some(version) = &latest
                     {
                         emit_runtime(
                             cx,
@@ -490,19 +498,39 @@ impl AppState {
         let current = self.providers.tcode_update.current.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let release = host_cx.unblock(fetch_latest_tcode_release).await;
+            let fetched = host_cx.unblock(fetch_latest_tcode_release_json).await;
+            let fetched = match &fetched {
+                Ok(bytes) => Ok(bytes.as_slice()),
+                Err(error) => Err(*error),
+            };
+            let assessment = app_releases::check(&current, fetched);
             host_cx.enqueue(move |state, cx| {
                 let already = state.providers.tcode_update.update_available;
-                let update_available = release.as_ref().is_some_and(|release| {
-                    (!release.prerelease || current.contains('-'))
-                        && tcode_update_available(&current, &release.tag_name).unwrap_or(false)
-                });
+                let (latest, release_url, update_available) = match assessment {
+                    AppReleaseAssessment::UpToDate {
+                        latest,
+                        release_url,
+                        ..
+                    } => (Some(latest), Some(release_url), false),
+                    AppReleaseAssessment::UpdateAvailable {
+                        latest,
+                        release_url,
+                        ..
+                    } => (Some(latest), Some(release_url), true),
+                    AppReleaseAssessment::Unknown {
+                        latest,
+                        release_url,
+                        ..
+                    } => {
+                        // Network, policy-input, and response failures remain
+                        // silent by an explicit runtime choice.
+                        (latest, release_url, false)
+                    }
+                };
                 let status = &mut state.providers.tcode_update;
                 status.checking = false;
-                status.latest = release
-                    .as_ref()
-                    .map(|release| release.tag_name.trim_start_matches('v').to_string());
-                status.release_url = release.as_ref().map(|release| release.html_url.clone());
+                status.latest = latest;
+                status.release_url = release_url;
                 status.update_available = update_available;
                 if update_available
                     && !already
