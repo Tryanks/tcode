@@ -22,10 +22,11 @@ pub struct ComputerUseMcpServer {
 }
 
 /// Diagnostic entry for `tcode --cu-smoke`: exercises the platform backend
-/// (root enumeration + observing the first root) against the live desktop and
+/// (root enumeration + observing every root) against the live desktop and
 /// returns a human-readable summary. Used to validate a backend on real
-/// hardware without wiring an MCP client. Never panics — every failure becomes
-/// a line in the summary.
+/// hardware without wiring an MCP client. Read-only: it never performs an
+/// action, so it cannot disturb the live session. Never panics — every failure
+/// becomes a line in the summary.
 pub fn smoke() -> String {
     use std::fmt::Write as _;
 
@@ -35,10 +36,25 @@ pub fn smoke() -> String {
         Err(error) => return format!("cu-smoke: list_roots failed: {error}\n"),
     };
     let _ = writeln!(out, "cu-smoke: {} root(s)", roots.len());
-    for root in roots.iter().take(10) {
+    for root in roots.iter().take(20) {
+        let observed = backend::observe(
+            root,
+            backend::ObserveRequest {
+                semantic: false,
+                capture: backend::CapturePolicy::Never,
+            },
+        );
+        let detail = match observed {
+            Ok(observation) => format!(
+                "{} node(s), text_sparse={}",
+                observation.tree.node_count(),
+                observation.text_sparse
+            ),
+            Err(error) => format!("observe failed: {error}"),
+        };
         let _ = writeln!(
             out,
-            "  [{}] {} pid={} kind={} frame={}x{} title={:?}",
+            "  [{}] {} pid={} kind={} frame={}x{} title={:?} -> {detail}",
             root.ref_id,
             root.app_name,
             root.pid,
@@ -47,25 +63,6 @@ pub fn smoke() -> String {
             root.frame.h as i64,
             root.title,
         );
-    }
-    if let Some(first) = roots.first() {
-        let request = backend::ObserveRequest {
-            semantic: false,
-            capture: backend::CapturePolicy::Never,
-        };
-        match backend::observe(first, request) {
-            Ok(observation) => {
-                let count = observation.tree.node_count();
-                let _ = writeln!(
-                    out,
-                    "cu-smoke: observed {:?} -> {} node(s), text_sparse={}",
-                    first.title, count, observation.text_sparse
-                );
-            }
-            Err(error) => {
-                let _ = writeln!(out, "cu-smoke: observe failed: {error}");
-            }
-        }
     }
     let _ = writeln!(out, "cu-smoke: PASS");
     out
