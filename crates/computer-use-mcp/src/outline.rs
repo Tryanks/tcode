@@ -62,6 +62,11 @@ impl UiNode {
         is_interactive_role(&self.role) || !self.actions.is_empty()
     }
 
+    /// Total nodes in this subtree, including self. For diagnostics.
+    pub fn node_count(&self) -> usize {
+        1 + descendant_count(self)
+    }
+
     pub fn text(&self) -> String {
         let mut parts = Vec::new();
         for value in [&self.value, &self.title, &self.description] {
