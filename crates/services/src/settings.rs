@@ -181,6 +181,7 @@ mod tests {
             word_wrap_diffs: true,
             skip_delete_confirmation: true,
             auto_open_task_panel: true,
+            live_command_panel_disabled: true,
             provider_update_checks_disabled: true,
             inactive_frame_throttle_disabled: true,
             auto_archive_disabled: false,

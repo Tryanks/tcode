@@ -47,7 +47,8 @@ pub mod graphics {
     };
 }
 
-use grid_emulator::{GridEmulator, GridEvent};
+pub use grid_emulator::GridEmulator;
+use grid_emulator::GridEvent;
 use pty::{PtyEvent, PtyHandle};
 
 const DEFAULT_COLS: usize = 80;
