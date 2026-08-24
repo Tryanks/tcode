@@ -468,6 +468,7 @@ pub fn windows_keycode_for_name(name: &str) -> Option<u16> {
     })
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bool {
     if filters.pid.is_some_and(|pid| root.pid != pid)
         || filters.kind.is_some_and(|kind| root.kind != kind)
@@ -492,6 +493,7 @@ pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bo
     })
 }
 
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
