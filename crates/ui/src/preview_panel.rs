@@ -75,6 +75,9 @@ fn preview_key_for_session(
 type ReplyTx = smol::channel::Sender<Result<PreviewReply, String>>;
 
 #[cfg(not(target_os = "linux"))]
+pub(crate) mod lifecycle;
+
+#[cfg(not(target_os = "linux"))]
 pub use native::PreviewPanel;
 
 #[cfg(target_os = "linux")]
@@ -82,10 +85,6 @@ pub use placeholder::PreviewPanel;
 
 #[cfg(not(target_os = "linux"))]
 mod native {
-    use std::collections::{HashMap, HashSet};
-    #[cfg(target_os = "windows")]
-    use std::future::Future as _;
-    #[cfg(target_os = "windows")]
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -98,10 +97,9 @@ mod native {
         Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
     };
     use gpui_base::{h_flex, v_flex};
-    use gpui_wry::WebView;
     use preview_mcp::{PreviewOp, PreviewReply, js, ports};
-    use raw_window_handle::HasWindowHandle as _;
 
+    use super::lifecycle::{Availability, BrowserLifecycle};
     use super::{
         ReplyTx, normalize_url, preview_key_for_session, unavailable_message, visible_preview_key,
     };
@@ -110,97 +108,6 @@ mod native {
     use crate::window_state::WindowState;
 
     const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
-    #[cfg(target_os = "windows")]
-    const SMOKE_CREATION_QUEUED: &str = "preview creation is queued";
-    #[cfg(target_os = "windows")]
-    const SMOKE_CREATION_IN_FLIGHT: &str = "preview creation is in flight";
-    #[cfg(target_os = "windows")]
-    const SMOKE_CREATION_PAUSE: Duration = Duration::from_millis(50);
-
-    enum WebViewSlot {
-        #[cfg(target_os = "windows")]
-        Creating {
-            id: u64,
-            phase: CreationPhase,
-            pending_url: Option<String>,
-        },
-        Ready(Entity<WebView>),
-    }
-
-    impl WebViewSlot {
-        fn ready(&self) -> Option<&Entity<WebView>> {
-            match self {
-                #[cfg(target_os = "windows")]
-                Self::Creating { .. } => None,
-                Self::Ready(view) => Some(view),
-            }
-        }
-
-        fn is_ready(&self) -> bool {
-            self.ready().is_some()
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum CreationPhase {
-        Queued,
-        InFlight,
-    }
-
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    enum WebViewAvailability {
-        Starting,
-        Ready(Entity<WebView>),
-        Unavailable,
-    }
-
-    fn set_webview_visible(view: &mut WebView, visible: bool) {
-        // gpui-wry keeps its own visibility bit but does not expose the native
-        // result. Repeat the idempotent native operation once so teardown races
-        // are observable instead of silently discarded.
-        if visible {
-            view.show();
-            if let Err(error) = view.raw().set_visible(true) {
-                log::debug!("preview: failed to show native webview: {error}");
-            }
-        } else {
-            view.hide();
-            if let Err(error) = view.raw().focus_parent() {
-                log::debug!("preview: failed to focus parent while hiding webview: {error}");
-            }
-            if let Err(error) = view.raw().set_visible(false) {
-                log::debug!("preview: failed to hide native webview: {error}");
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    fn windows_web_context() -> Result<Rc<smol::lock::Mutex<wry::WebContext>>, String> {
-        let store = tcode_services::store::SessionStore::open_default()
-            .map_err(|error| format!("failed to resolve tcode data directory: {error}"))?;
-        let user_data_dir = store.root().join("WebView2");
-        std::fs::create_dir_all(&user_data_dir).map_err(|error| {
-            format!(
-                "failed to create WebView2 user-data directory {}: {error}",
-                user_data_dir.display()
-            )
-        })?;
-        log::debug!(
-            "preview: using WebView2 user-data directory {}",
-            user_data_dir.display()
-        );
-        Ok(Rc::new(smol::lock::Mutex::new(wry::WebContext::new(Some(
-            user_data_dir,
-        )))))
-    }
-
-    #[cfg(target_os = "windows")]
-    fn drop_raw_webview(raw: wry::WebView, key: &str, reason: &str) {
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(raw))).is_err() {
-            log::error!("preview: raw webview drop panicked for {key} after {reason}");
-        }
-    }
 
     fn wait_timeout_message(pending: &[String]) -> String {
         format!(
@@ -212,43 +119,18 @@ mod native {
     pub struct PreviewPanel {
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
-        /// One native WebView slot per session id, created on first use.
-        webviews: HashMap<String, WebViewSlot>,
-        /// All Windows previews share one explicit app-local WebView2 profile.
-        /// The async mutex keeps wry's `&mut WebContext` borrow exclusive across
-        /// concurrent child creations without blocking the UI thread.
-        #[cfg(target_os = "windows")]
-        web_context: Option<Rc<smol::lock::Mutex<wry::WebContext>>>,
-        /// Monotonic identity that prevents a cancelled completion from filling
-        /// a replacement slot at the same conversation key.
-        #[cfg(target_os = "windows")]
-        next_creation_id: u64,
-        /// Sessions whose WebView has begun a navigation. lb-wry queues (and drops
-        /// the callback of) `evaluate_script_with_callback` until the first
-        /// navigation starts flushing its pending-scripts buffer, so value-returning
-        /// ops must wait until a session is "warm".
-        warm: HashSet<String>,
+        lifecycle: Entity<BrowserLifecycle>,
+        /// The lifecycle holds this only weakly so an async Windows completion
+        /// cannot install after its owning panel has been dropped.
+        _lifecycle_owner: Rc<()>,
         /// The shared address-bar input (reflects the active session's URL).
         url_input: Entity<InputState>,
         /// Session id whose URL is currently mirrored into `url_input`.
         mirrored: Option<String>,
-        /// Last physical session id + stable conversation key. When an unsent
-        /// draft is committed its physical id stays the same but its key moves
-        /// from `draft:<project>` to the stored session id; this lets the live
-        /// WebView move with it instead of being replaced by a blank one.
-        active_identity: Option<(String, String)>,
         /// Discovered localhost dev-server ports (populated by the "Ports" button).
         dev_ports: Vec<u16>,
         /// Discards a completed scan when a newer click has superseded it.
         port_scan_generation: u64,
-        /// Why the platform webview could not be created (Windows without the
-        /// WebView2 runtime). Set once; the tab then explains itself instead of
-        /// retrying on every frame.
-        webview_error: Option<String>,
-        /// Harness-only routing override. Normal runs leave this unset and use
-        /// the active conversation identity from `WorkspaceStore`.
-        smoke_active_key: Option<String>,
-        smoke_visible: bool,
         _subscriptions: Vec<Subscription>,
     }
 
@@ -262,16 +144,8 @@ mod native {
             let url_input = cx.new(|cx| {
                 InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
             });
-            #[cfg(target_os = "windows")]
-            let (web_context, webview_error) = match windows_web_context() {
-                Ok(context) => (Some(context), None),
-                Err(error) => {
-                    log::warn!("preview: no webview ({error})");
-                    (None, Some(error))
-                }
-            };
-            #[cfg(not(target_os = "windows"))]
-            let webview_error = None;
+            let lifecycle_owner = Rc::new(());
+            let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&lifecycle_owner)));
             let subscriptions = vec![
                 cx.observe(&store, |this, _, cx| {
                     // Native child views outlive GPUI layout nodes. Visibility
@@ -281,25 +155,21 @@ mod native {
                     this.sync_visibility(cx);
                     cx.notify();
                 }),
+                cx.observe(&lifecycle, |this, _, cx| {
+                    this.sync_visibility(cx);
+                    cx.notify();
+                }),
                 cx.subscribe_in(&url_input, window, Self::on_url_event),
             ];
             Self {
                 store,
                 window_state,
-                webviews: HashMap::new(),
-                #[cfg(target_os = "windows")]
-                web_context,
-                #[cfg(target_os = "windows")]
-                next_creation_id: 0,
-                warm: HashSet::new(),
+                lifecycle,
+                _lifecycle_owner: lifecycle_owner,
                 url_input,
                 mirrored: None,
-                active_identity: None,
                 dev_ports: Vec::new(),
                 port_scan_generation: 0,
-                webview_error,
-                smoke_active_key: None,
-                smoke_visible: false,
                 _subscriptions: subscriptions,
             }
         }
@@ -307,37 +177,20 @@ mod native {
         /// Reconcile the stable conversation key with the physical session id.
         /// Draft -> stored-thread commits retain the same session id, so move
         /// all cached browser state across that one key transition.
-        fn active_key(&mut self, cx: &Context<Self>) -> Option<String> {
-            if let Some(key) = &self.smoke_active_key {
-                return Some(key.clone());
-            }
+        fn active_key(&mut self, cx: &mut Context<Self>) -> Option<String> {
             let current = self.store.read(cx).preview_active_identity();
-
-            if let (Some((old_session, old_key)), Some((session, key))) =
-                (self.active_identity.as_ref(), current.as_ref())
-                && old_session == session
-                && old_key != key
+            let reconciliation = self
+                .lifecycle
+                .update(cx, |lifecycle, _| lifecycle.reconcile_key(current));
+            if let Some(old_key) = reconciliation.migrated_from.as_deref()
+                && self.mirrored.as_deref() == Some(old_key)
             {
-                if let Some(view) = self.webviews.remove(old_key) {
-                    if self.webviews.contains_key(key) {
-                        drop(view);
-                    } else {
-                        self.webviews.insert(key.clone(), view);
-                    }
-                }
-                if self.warm.remove(old_key) {
-                    self.warm.insert(key.clone());
-                }
-                if self.mirrored.as_deref() == Some(old_key) {
-                    self.mirrored = Some(key.clone());
-                }
+                self.mirrored = reconciliation.key.clone();
             }
-
-            self.active_identity = current.clone();
-            current.map(|(_, key)| key)
+            reconciliation.key
         }
 
-        fn routed_key(&mut self, session_id: &str, cx: &Context<Self>) -> String {
+        fn routed_key(&mut self, session_id: &str, cx: &mut Context<Self>) -> String {
             let active_key = self.active_key(cx);
             let active_session_id = self.store.read(cx).active_session_id();
             preview_key_for_session(
@@ -363,448 +216,75 @@ mod native {
 
         fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
             let active = self.active_key(cx);
-            let visible = if self.smoke_active_key.is_some() {
-                self.smoke_visible.then_some(active).flatten()
-            } else {
-                let window_state = self.window_state.read(cx);
-                visible_preview_key(
-                    active.as_deref(),
-                    window_state.route,
-                    window_state.palette_open,
-                    self.store.read(cx).preview_panel_showing(),
-                )
-                .map(str::to_string)
-            };
-            for (key, slot) in &self.webviews {
-                let Some(view) = slot.ready() else {
-                    continue;
-                };
-                let should_show = Some(key) == visible.as_ref();
-                view.update(cx, |view, _| {
-                    if should_show && allow_show {
-                        set_webview_visible(view, true);
-                    } else if !should_show {
-                        set_webview_visible(view, false);
-                    }
-                });
-            }
+            let window_state = self.window_state.read(cx);
+            let visible = visible_preview_key(
+                active.as_deref(),
+                window_state.route,
+                window_state.palette_open,
+                self.store.read(cx).preview_panel_showing(),
+            )
+            .map(str::to_string);
+            self.lifecycle.update(cx, |lifecycle, cx| {
+                if allow_show {
+                    lifecycle.set_visible(visible.as_deref(), cx);
+                } else {
+                    lifecycle.hide_except(visible.as_deref(), cx);
+                }
+            });
         }
 
-        /// Get or lazily create the WebView for `session_id`.
-        ///
-        /// `Unavailable` when the platform webview cannot be created — on
-        /// Windows that usually means the WebView2 runtime is absent. Only the
-        /// preview browser needs it, so this is a missing feature, not a dead
-        /// app: the tab explains itself and every other surface keeps working.
+        pub(crate) fn lifecycle(&self) -> Entity<BrowserLifecycle> {
+            self.lifecycle.clone()
+        }
+
+        /// Get or lazily create the browser for one stable conversation key.
         fn ensure_webview(
             &mut self,
-            session_id: &str,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) -> WebViewAvailability {
-            if let Some(slot) = self.webviews.get(session_id) {
-                return match slot {
-                    #[cfg(target_os = "windows")]
-                    WebViewSlot::Creating { .. } => WebViewAvailability::Starting,
-                    WebViewSlot::Ready(view) => WebViewAvailability::Ready(view.clone()),
-                };
-            }
-            if self.webview_error.is_some() {
-                return WebViewAvailability::Unavailable;
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                self.start_webview_creation(session_id, window, cx)
-            }
-
-            #[cfg(not(target_os = "windows"))]
-            {
-                self.create_webview_sync(session_id, window, cx)
-            }
-        }
-
-        fn record_webview_error(&mut self, error: String, cx: &mut Context<Self>) {
-            log::warn!("preview: no webview ({error})");
-            self.webview_error = Some(error);
-            // An unavailable platform component invalidates every queued build.
-            // Already-ready children remain usable until their normal teardown.
-            self.webviews.retain(|_, slot| slot.is_ready());
-            cx.notify();
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        fn create_webview_sync(
-            &mut self,
-            session_id: &str,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) -> WebViewAvailability {
-            // Start on about:blank so lb-wry begins a navigation and flushes its
-            // pending-scripts buffer, making later `evaluate_script` callbacks
-            // fire (see the `warm` field docs).
-            let builder = wry::WebViewBuilder::new()
-                .with_devtools(true)
-                .with_url("about:blank");
-            let built = window
-                .window_handle()
-                .map_err(|err| err.to_string())
-                .and_then(|handle| {
-                    builder
-                        .build_as_child(&handle)
-                        .map_err(|err| err.to_string())
-                });
-            let raw = match built {
-                Ok(raw) => raw,
-                Err(error) => {
-                    self.record_webview_error(error, cx);
-                    return WebViewAvailability::Unavailable;
-                }
-            };
-            let webview = cx.new(|cx| {
-                let mut view = WebView::new(raw, window, cx);
-                set_webview_visible(&mut view, false);
-                view
-            });
-            self.webviews
-                .insert(session_id.to_string(), WebViewSlot::Ready(webview.clone()));
-            WebViewAvailability::Ready(webview)
-        }
-
-        #[cfg(target_os = "windows")]
-        fn start_webview_creation(
-            &mut self,
-            session_id: &str,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) -> WebViewAvailability {
-            let Some(web_context) = self.web_context.clone() else {
-                return WebViewAvailability::Unavailable;
-            };
-            let parent = match window.window_handle() {
-                Ok(handle) => handle.as_raw(),
-                Err(error) => {
-                    self.record_webview_error(error.to_string(), cx);
-                    return WebViewAvailability::Unavailable;
-                }
-            };
-
-            self.next_creation_id = self.next_creation_id.wrapping_add(1).max(1);
-            let creation_id = self.next_creation_id;
-            let creation_key = session_id.to_string();
-            let pending_url = self.store.read(cx).preview_url(session_id);
-            let smoke_creation = self.smoke_active_key.is_some();
-            self.webviews.insert(
-                creation_key.clone(),
-                WebViewSlot::Creating {
-                    id: creation_id,
-                    phase: CreationPhase::Queued,
-                    pending_url,
-                },
-            );
-
-            cx.spawn_in(window, async move |panel, cx| {
-                // WebViewBuilder borrows WebContext mutably for the lifetime of
-                // its future. Serialize that borrow without blocking GPUI; a
-                // cancelled queued slot is discarded before wry is ever polled.
-                let mut web_context = web_context.lock().await;
-                let slot_is_live = panel
-                    .read_with(cx, |panel, _| panel.has_creation(creation_id))
-                    .unwrap_or(false);
-                if !slot_is_live {
-                    return;
-                }
-                if cx.update(|_, _| ()).is_err() {
-                    let _ = panel.update(cx, |panel, cx| {
-                        panel.remove_creation(creation_id);
-                        cx.notify();
-                    });
-                    return;
-                }
-
-                // SAFETY: this task is confined to GPUI's UI thread and just
-                // revalidated the owning GPUI window without yielding. wry reads
-                // the handle synchronously on the first poll, before awaiting
-                // WebView2's environment/controller callbacks. The HWND may be
-                // destroyed after that await by design; the async wry path then
-                // completes with either an error or a raw child we immediately
-                // discard unless the same window/panel/slot are still live.
-                let parent = unsafe { raw_window_handle::WindowHandle::borrow_raw(parent) };
-                let built = {
-                    let builder = wry::WebViewBuilder::new_with_web_context(&mut web_context)
-                        .with_devtools(true)
-                        .with_url("about:blank");
-                    let mut build = Box::pin(builder.build_as_child_async(&parent));
-                    let first_poll = std::future::poll_fn(|task_cx| {
-                        std::task::Poll::Ready(match build.as_mut().poll(task_cx) {
-                            std::task::Poll::Ready(result) => Some(result),
-                            std::task::Poll::Pending => None,
-                        })
-                    })
-                    .await;
-                    match first_poll {
-                        Some(result) => result,
-                        None => {
-                            let _ = panel.update(cx, |panel, cx| {
-                                if panel.mark_creation_in_flight(creation_id) {
-                                    cx.notify();
-                                }
-                            });
-                            // Give the lifecycle harness a deterministic window
-                            // in which to remove an actually-polled creation.
-                            if smoke_creation {
-                                cx.background_executor().timer(SMOKE_CREATION_PAUSE).await;
-                            }
-                            build.as_mut().await
-                        }
-                    }
-                };
-                drop(web_context);
-
-                match built {
-                    Ok(raw) => {
-                        let mut raw = Some(raw);
-                        let installed = matches!(
-                            cx.update(|window, app| {
-                                panel.update(app, |panel, cx| {
-                                    let Some((key, pending_url)) =
-                                        panel.remove_creation(creation_id)
-                                    else {
-                                        return false;
-                                    };
-                                    panel.install_created_webview(
-                                        key,
-                                        pending_url,
-                                        raw.take().expect("raw webview already consumed"),
-                                        window,
-                                        cx,
-                                    );
-                                    true
-                                })
-                            }),
-                            Ok(Ok(true))
-                        );
-                        if let Some(raw) = raw {
-                            drop_raw_webview(raw, &creation_key, "creation cancellation");
-                        }
-                        if !installed {
-                            log::debug!(
-                                "preview: discarded stale creation {creation_id} for {creation_key}"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let error = error.to_string();
-                        let recorded = matches!(
-                            cx.update(|_, app| {
-                                panel.update(app, |panel, cx| {
-                                    if !panel.has_creation(creation_id) {
-                                        return false;
-                                    }
-                                    panel.record_webview_error(error.clone(), cx);
-                                    true
-                                })
-                            }),
-                            Ok(Ok(true))
-                        );
-                        if !recorded {
-                            log::debug!(
-                                "preview: creation {creation_id} for {creation_key} failed after teardown: {error}"
-                            );
-                        }
-                    }
-                }
-            })
-            .detach();
-
-            WebViewAvailability::Starting
-        }
-
-        #[cfg(target_os = "windows")]
-        fn has_creation(&self, creation_id: u64) -> bool {
-            self.webviews.values().any(|slot| {
-                matches!(
-                    slot,
-                    WebViewSlot::Creating { id, .. } if *id == creation_id
-                )
-            })
-        }
-
-        #[cfg(target_os = "windows")]
-        fn mark_creation_in_flight(&mut self, creation_id: u64) -> bool {
-            for slot in self.webviews.values_mut() {
-                if let WebViewSlot::Creating { id, phase, .. } = slot
-                    && *id == creation_id
-                {
-                    *phase = CreationPhase::InFlight;
-                    return true;
-                }
-            }
-            false
-        }
-
-        #[cfg(target_os = "windows")]
-        fn remove_creation(&mut self, creation_id: u64) -> Option<(String, Option<String>)> {
-            let key = self.webviews.iter().find_map(|(key, slot)| {
-                matches!(
-                    slot,
-                    WebViewSlot::Creating { id, .. } if *id == creation_id
-                )
-                .then(|| key.clone())
-            })?;
-            let WebViewSlot::Creating { pending_url, .. } = self.webviews.remove(&key)? else {
-                unreachable!("creation key stopped referring to a creating slot");
-            };
-            Some((key, pending_url))
-        }
-
-        #[cfg(target_os = "windows")]
-        fn install_created_webview(
-            &mut self,
-            key: String,
-            pending_url: Option<String>,
-            raw: wry::WebView,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            let url = self.store.read(cx).preview_url(&key).or(pending_url);
-            let warm = if let Some(url) = &url {
-                match raw.load_url(url) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        log::warn!("preview: failed to replay URL for {key}: {error}");
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            if let Err(error) = raw.set_bounds(wry::Rect::default()) {
-                log::debug!("preview: failed to reset created webview bounds for {key}: {error}");
-            }
-            if let Err(error) = raw.set_visible(false) {
-                log::debug!("preview: failed to hide created webview for {key}: {error}");
-            }
-            let webview = cx.new(|cx| {
-                let mut view = WebView::new(raw, window, cx);
-                set_webview_visible(&mut view, false);
-                view
-            });
-            self.webviews
-                .insert(key.clone(), WebViewSlot::Ready(webview));
-            if warm {
-                self.warm.insert(key);
-            }
-            self.sync_visibility(cx);
-            cx.notify();
-        }
-
-        pub(crate) fn smoke_create(
-            &mut self,
             key: &str,
-            url: &str,
             window: &mut Window,
             cx: &mut Context<Self>,
-        ) -> Result<(), String> {
-            self.smoke_active_key = Some(key.to_string());
-            self.smoke_visible = true;
-            match self.navigate(key, url, window, cx) {
-                WebViewAvailability::Ready(_) => Ok(()),
-                WebViewAvailability::Unavailable => Err(self
-                    .webview_error
-                    .clone()
-                    .unwrap_or_else(|| unavailable_message("unknown creation failure"))),
-                WebViewAvailability::Starting => {
-                    #[cfg(target_os = "windows")]
-                    if let Some(WebViewSlot::Creating { phase, .. }) = self.webviews.get(key) {
-                        return Err(match phase {
-                            CreationPhase::Queued => SMOKE_CREATION_QUEUED,
-                            CreationPhase::InFlight => SMOKE_CREATION_IN_FLIGHT,
-                        }
-                        .into());
-                    }
-                    Err(STARTING_MESSAGE.into())
-                }
-            }
+        ) -> Availability {
+            let initial_url = self.store.read(cx).preview_url(key);
+            self.lifecycle.update(cx, |lifecycle, cx| {
+                lifecycle.ensure(key, initial_url.as_deref(), window, cx)
+            })
         }
 
-        pub(crate) fn smoke_set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
-            if let Some(key) = key {
-                self.smoke_active_key = Some(key.to_string());
-                self.smoke_visible = true;
-            } else {
-                self.smoke_visible = false;
-            }
-            self.update_visibility(true, cx);
-            cx.notify();
-        }
-
-        pub(crate) fn smoke_drop(&mut self, key: &str, cx: &mut Context<Self>) {
-            self.drop_webview(key);
-            cx.notify();
-        }
-
-        fn drop_webview(&mut self, key: &str) {
-            self.webviews.remove(key);
-            self.warm.remove(key);
+        fn drop_webview(&mut self, key: &str, cx: &mut Context<Self>) {
+            self.lifecycle
+                .update(cx, |lifecycle, _| lifecycle.drop_view(key));
             if self.mirrored.as_deref() == Some(key) {
                 self.mirrored = None;
             }
         }
 
-        fn prune_deleted_webviews(&mut self, cx: &Context<Self>) {
-            if self.smoke_active_key.is_some() {
-                return;
-            }
+        fn prune_deleted_webviews(&mut self, cx: &mut Context<Self>) {
             let live = self.store.read(cx).preview_live_keys();
-            let deleted = self
-                .webviews
-                .keys()
-                .filter(|key| !live.contains(*key))
-                .cloned()
-                .collect::<Vec<_>>();
-            for key in deleted {
-                self.drop_webview(&key);
+            if self
+                .mirrored
+                .as_ref()
+                .is_some_and(|key| !live.contains(key))
+            {
+                self.mirrored = None;
             }
+            self.lifecycle
+                .update(cx, |lifecycle, _| lifecycle.prune(&live));
         }
 
-        /// Navigate one conversation's WebView to `url`, remembering it.
+        /// Mirror a URL into the store, then navigate through the lifecycle.
         fn navigate(
             &mut self,
             key: &str,
             url: &str,
             window: &mut Window,
             cx: &mut Context<Self>,
-        ) -> WebViewAvailability {
+        ) -> Availability {
             let url = normalize_url(url);
             self.store
                 .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
-            let availability = self.ensure_webview(key, window, cx);
-            match &availability {
-                WebViewAvailability::Ready(webview) => {
-                    match webview.read(cx).raw().load_url(&url) {
-                        Ok(()) => {
-                            // A navigation flushes lb-wry's pending-scripts buffer,
-                            // so subsequent evaluate callbacks will fire.
-                            self.warm.insert(key.to_string());
-                        }
-                        Err(error) => {
-                            log::warn!("preview: failed to navigate {key}: {error}");
-                        }
-                    }
-                }
-                #[cfg(target_os = "windows")]
-                WebViewAvailability::Starting => {
-                    if let Some(WebViewSlot::Creating { pending_url, .. }) =
-                        self.webviews.get_mut(key)
-                    {
-                        *pending_url = Some(url);
-                    }
-                }
-                #[cfg(not(target_os = "windows"))]
-                WebViewAvailability::Starting => {}
-                WebViewAvailability::Unavailable => {}
-            }
+            let availability = self.lifecycle.update(cx, |lifecycle, cx| {
+                lifecycle.navigate(key, &url, window, cx)
+            });
             self.sync_visibility(cx);
             cx.notify();
             availability
@@ -828,17 +308,16 @@ mod native {
         }
 
         /// Run raw JS on the active WebView via history/reload (fire-and-forget).
-        fn eval_fire(&self, session_id: &str, script: &str, cx: &Context<Self>) {
-            if let Some(view) = self.webviews.get(session_id).and_then(WebViewSlot::ready) {
-                let _ = view.read(cx).raw().evaluate_script(script);
-            }
+        fn eval_fire(&mut self, key: &str, script: &str, cx: &mut Context<Self>) {
+            self.lifecycle
+                .update(cx, |lifecycle, cx| lifecycle.eval_fire(key, script, cx));
         }
 
         // ---- chrome actions -------------------------------------------------
 
         fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             if let Some(id) = self.active_key(cx)
-                && let WebViewAvailability::Ready(view) = self.ensure_webview(&id, window, cx)
+                && let Availability::Ready(view) = self.ensure_webview(&id, window, cx)
             {
                 view.update(cx, |view, _| {
                     if let Err(error) = view.back() {
@@ -848,13 +327,13 @@ mod native {
             }
         }
 
-        fn go_forward(&mut self, cx: &Context<Self>) {
+        fn go_forward(&mut self, cx: &mut Context<Self>) {
             if let Some(id) = self.active_key(cx) {
                 self.eval_fire(&id, "history.forward();", cx);
             }
         }
 
-        fn reload(&mut self, cx: &Context<Self>) {
+        fn reload(&mut self, cx: &mut Context<Self>) {
             if let Some(id) = self.active_key(cx) {
                 self.eval_fire(&id, "location.reload();", cx);
             }
@@ -862,7 +341,7 @@ mod native {
 
         /// Hand the current URL to the OS browser. `cx.open_url` is gpui's
         /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`).
-        fn open_in_system_browser(&mut self, cx: &Context<Self>) {
+        fn open_in_system_browser(&mut self, cx: &mut Context<Self>) {
             if let Some(id) = self.active_key(cx)
                 && let Some(url) = self.store.read(cx).preview_url(&id)
             {
@@ -876,7 +355,7 @@ mod native {
         /// recreates a fresh webview on demand.
         fn close_panel(&mut self, cx: &mut Context<Self>) {
             if let Some(key) = self.active_key(cx) {
-                self.drop_webview(&key);
+                self.drop_webview(&key, cx);
                 self.store
                     .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
             }
@@ -955,8 +434,13 @@ mod native {
                         self.ensure_webview(&key, window, cx);
                         self.sync_visibility(cx);
                     }
-                    if let Some(err) = &self.webview_error {
-                        let _ = reply.try_send(Err(unavailable_message(err)));
+                    if let Some(error) = self
+                        .lifecycle
+                        .read(cx)
+                        .unavailable_error()
+                        .map(str::to_string)
+                    {
+                        let _ = reply.try_send(Err(unavailable_message(&error)));
                         return;
                     }
                     let payload = serde_json::json!({
@@ -971,8 +455,13 @@ mod native {
                         store.open_preview_panel_for(&session_id, cx);
                     });
                     self.navigate(&key, &url, window, cx);
-                    if let Some(err) = &self.webview_error {
-                        let _ = reply.try_send(Err(unavailable_message(err)));
+                    if let Some(error) = self
+                        .lifecycle
+                        .read(cx)
+                        .unavailable_error()
+                        .map(str::to_string)
+                    {
+                        let _ = reply.try_send(Err(unavailable_message(&error)));
                         return;
                     }
                     let payload = serde_json::json!({
@@ -1118,18 +607,23 @@ mod native {
             cx: &mut Context<Self>,
         ) {
             match self.ensure_webview(key, window, cx) {
-                WebViewAvailability::Ready(_) => {}
-                WebViewAvailability::Starting => {
+                Availability::Ready(_) => {}
+                Availability::Starting(_) => {
                     let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
                     return;
                 }
-                WebViewAvailability::Unavailable => {
-                    let error = self.webview_error.clone().unwrap_or_default();
+                Availability::Unavailable => {
+                    let error = self
+                        .lifecycle
+                        .read(cx)
+                        .unavailable_error()
+                        .unwrap_or_default()
+                        .to_string();
                     let _ = reply.try_send(Err(unavailable_message(&error)));
                     return;
                 }
             }
-            let cold = !self.warm.contains(key);
+            let cold = !self.lifecycle.read(cx).is_warm(key);
             let key = key.to_string();
             let probe = js::wait_for_probe(
                 selector.as_deref(),
@@ -1153,8 +647,10 @@ mod native {
                         .timer(Duration::from_millis(700))
                         .await;
                     if this
-                        .update(cx, |panel, _| {
-                            panel.warm.insert(key.clone());
+                        .update(cx, |panel, cx| {
+                            panel.lifecycle.update(cx, |lifecycle, _| {
+                                lifecycle.mark_warm(&key);
+                            });
                         })
                         .is_err()
                     {
@@ -1173,7 +669,9 @@ mod native {
                     let (probe_reply, probe_result) = smol::channel::bounded(1);
                     if this
                         .update(cx, |panel, cx| {
-                            panel.eval_now(&key, &probe, probe_reply.clone(), cx);
+                            panel.lifecycle.update(cx, |lifecycle, cx| {
+                                lifecycle.evaluate_ready(&key, &probe, probe_reply.clone(), cx);
+                            });
                         })
                         .is_err()
                     {
@@ -1240,68 +738,20 @@ mod native {
             .detach();
         }
 
-        /// Evaluate `script` and answer `reply` with the parsed JSON result.
-        ///
-        /// If the session's WebView isn't warm yet (no navigation has started, so
-        /// lb-wry would silently drop the callback), create it, let `about:blank`
-        /// begin loading, then re-dispatch the evaluation after a short delay.
+        /// Delegate value-returning evaluation to the lifecycle, which owns the
+        /// ready/warm ordering and native callback.
         fn eval_json(
             &mut self,
-            session_id: &str,
+            key: &str,
             script: &str,
             reply: ReplyTx,
             window: &mut Window,
             cx: &mut Context<Self>,
         ) {
-            // Ensure the WebView exists (and has begun loading about:blank).
-            match self.ensure_webview(session_id, window, cx) {
-                WebViewAvailability::Ready(_) => {}
-                WebViewAvailability::Starting => {
-                    let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
-                    return;
-                }
-                WebViewAvailability::Unavailable => {
-                    let error = self.webview_error.clone().unwrap_or_default();
-                    let _ = reply.try_send(Err(unavailable_message(&error)));
-                    return;
-                }
-            }
-            if self.warm.contains(session_id) {
-                self.eval_now(session_id, script, reply, cx);
-                return;
-            }
-            // Cold start: wait for the initial navigation to flush pending scripts,
-            // then evaluate.
-            let session_id = session_id.to_string();
-            let script = script.to_string();
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(Duration::from_millis(700))
-                    .await;
-                let _ = this.update(cx, |panel, cx| {
-                    panel.warm.insert(session_id.clone());
-                    panel.eval_now(&session_id, &script, reply, cx);
-                });
-            })
-            .detach();
-        }
-
-        /// Run `script` on the (already-warm) WebView, answering from the callback.
-        fn eval_now(&self, session_id: &str, script: &str, reply: ReplyTx, cx: &Context<Self>) {
-            let Some(view) = self.webviews.get(session_id).and_then(WebViewSlot::ready) else {
-                let _ = reply.try_send(Err("preview browser is not open".into()));
-                return;
-            };
-            let result = view.read(cx).raw().evaluate_script_with_callback(script, {
-                let reply = reply.clone();
-                move |raw: String| {
-                    let value = js::parse_result(&raw);
-                    let _ = reply.try_send(Ok(PreviewReply::Json(value)));
-                }
+            let initial_url = self.store.read(cx).preview_url(key);
+            self.lifecycle.update(cx, |lifecycle, cx| {
+                lifecycle.evaluate_json(key, initial_url.as_deref(), script, reply, window, cx);
             });
-            if result.is_err() {
-                let _ = reply.try_send(Err("failed to evaluate script in preview".into()));
-            }
         }
 
         /// Snapshot the native WKWebView in-process and answer with a base64 PNG.
@@ -1347,7 +797,7 @@ mod native {
                 return;
             }
 
-            let Some(view) = self.webviews.get(key).and_then(WebViewSlot::ready) else {
+            let Some(view) = self.lifecycle.read(cx).ready_view(key) else {
                 let _ = reply.try_send(Err("preview browser is not open".into()));
                 return;
             };
@@ -1424,7 +874,7 @@ mod native {
 
             let body: AnyElement = match &active {
                 Some(id) => match self.ensure_webview(id, window, cx) {
-                    WebViewAvailability::Ready(view) => {
+                    Availability::Ready(view) => {
                         if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
                             div()
                                 .flex()
@@ -1446,7 +896,7 @@ mod native {
                             div().flex_1().min_h_0().child(view).into_any_element()
                         }
                     }
-                    WebViewAvailability::Starting => v_flex()
+                    Availability::Starting(_) => v_flex()
                         .flex_1()
                         .items_center()
                         .justify_center()
@@ -1455,7 +905,7 @@ mod native {
                         .text_color(cx.theme().muted_foreground)
                         .child("Preview is starting…")
                         .into_any_element(),
-                    WebViewAvailability::Unavailable => v_flex()
+                    Availability::Unavailable => v_flex()
                         .flex_1()
                         .gap_2()
                         .items_center()

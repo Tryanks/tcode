@@ -19,6 +19,8 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
+#[cfg(not(target_os = "linux"))]
+use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastDisposition, apply_runtime_effect, present_runtime_event,
     present_runtime_toast,
@@ -124,9 +126,6 @@ pub struct AppShell {
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
-    /// Forces the production preview entity into the right-panel layout while
-    /// the lifecycle smoke driver uses synthetic conversation keys.
-    preview_smoke_active: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -242,39 +241,15 @@ impl AppShell {
             last_viewport_width: None,
             sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
-            preview_smoke_active: false,
             _subscriptions: vec![subscription, event_subscription, window_subscription],
         }
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub fn preview_smoke_create(
-        &mut self,
-        key: &str,
-        url: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        self.preview_smoke_active = true;
-        let result = self
-            .preview
-            .update(cx, |preview, cx| preview.smoke_create(key, url, window, cx));
-        cx.notify();
-        result
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub fn preview_smoke_set_visible(&mut self, key: Option<&str>, cx: &mut Context<Self>) {
-        self.preview
-            .update(cx, |preview, cx| preview.smoke_set_visible(key, cx));
-        cx.notify();
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub fn preview_smoke_drop(&mut self, key: &str, cx: &mut Context<Self>) {
-        self.preview
-            .update(cx, |preview, cx| preview.smoke_drop(key, cx));
-        cx.notify();
+    #[allow(private_interfaces)]
+    #[doc(hidden)]
+    pub fn preview_lifecycle(&self, cx: &App) -> Entity<BrowserLifecycle> {
+        self.preview.read(cx).lifecycle()
     }
 
     fn present_app_event(
@@ -413,12 +388,8 @@ impl Render for AppShell {
             self.sidebar_overlay_visible = false;
         }
         let panel = self.store.read(cx).shell_panel_state();
-        let diff_open = panel.right_panel_open || self.preview_smoke_active;
-        let right_tab = if self.preview_smoke_active {
-            RightTab::Preview
-        } else {
-            panel.right_tab
-        };
+        let diff_open = panel.right_panel_open;
+        let right_tab = panel.right_tab;
         let diff_expanded = panel.right_panel_expanded;
         // "Expanded" (full-width) is a diff-only affordance; the preview tab
         // always shares the split so the webview keeps a stable size.
