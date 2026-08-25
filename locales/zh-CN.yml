@@ -122,6 +122,7 @@ sidebar:
     got_it: "知道了"
     open_settings: "打开设置"
   working: "工作中"
+  background_tasks: "后台中"
   child_threads: "%{count} 个子对话"
   waiting_approval: "待审批"
   waiting_approval_tooltip: "正在等待审批"
