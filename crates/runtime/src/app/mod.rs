@@ -304,7 +304,9 @@ pub struct TcodeUpdateState {
 impl Default for TcodeUpdateState {
     fn default() -> Self {
         Self {
-            current: env!("CARGO_PKG_VERSION").to_string(),
+            current: option_env!("TCODE_BUILD_VERSION")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .to_string(),
             latest: None,
             release_url: None,
             update_available: false,

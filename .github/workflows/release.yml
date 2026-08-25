@@ -82,6 +82,7 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: thin
       CARGO_PROFILE_RELEASE_STRIP: symbols
       VERSION: ${{ needs.setup.outputs.version }}
+      TCODE_BUILD_VERSION: ${{ needs.setup.outputs.version }}
       RELEASE_TAG: ${{ needs.setup.outputs.tag }}
       PRERELEASE: ${{ needs.setup.outputs.prerelease }}
 
