@@ -3678,6 +3678,61 @@ fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enab
 }
 
 #[test]
+fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-model-fallback-stop-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let (commands, receiver) = smol::channel::unbounded();
+
+    state.host_update(cx, |state, cx| {
+        state.settings.abort_on_model_fallback = true;
+        let mut active = live_session(ProviderKind::ClaudeCode, commands);
+        active.meta.model = Some("claude-fable-5".into());
+        active.turn_in_flight = true;
+        active.timeline.apply_at(
+            None,
+            &AgentEvent::TurnStarted {
+                turn_id: "turn-fallback".into(),
+            },
+        );
+        let session_id = active.meta.id.clone();
+        active.push_queued("do not auto-send".into(), Vec::new());
+        state.residents.active = Some(active);
+
+        state.on_event(
+            &session_id,
+            AgentEvent::ModelFallbackDetected {
+                expected: "claude-fable-5".into(),
+                actual: "claude-opus-4-8".into(),
+                category: None,
+                checkpoint_id: None,
+                parent_tool_use_id: None,
+            },
+            cx,
+        );
+
+        let active = state.residents.active.as_ref().unwrap();
+        assert!(active.queue.is_empty());
+        assert!(matches!(active.runtime, Runtime::Idle));
+        assert!(!active.turn_in_flight);
+        assert!(!active.timeline.turn_running);
+    });
+
+    assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
+    assert!(cx.drain_outgoing().iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionStatus { .. },
+            event: ServerEvent::ModelFallbackBlocked {
+                model: Some(model),
+                fallback_model: Some(fallback_model),
+                ..
+            },
+        }) if model == "claude-fable-5" && fallback_model == "claude-opus-4-8"
+    )));
+}
+
+#[test]
 fn shutdown_all_notifies_active_and_parked_live_providers() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-app-test");
