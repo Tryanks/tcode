@@ -187,7 +187,13 @@ impl AppState {
             .map(|meta| (meta.id.clone(), meta.native_subagent.clone().unwrap()))
             .collect();
         for (mirror_id, subagent_item_id) in mirror_ids {
-            self.sync_mirror_turn(&mirror_id, false, &subagent_item_id, TurnStatus::Completed, cx);
+            self.sync_mirror_turn(
+                &mirror_id,
+                false,
+                &subagent_item_id,
+                TurnStatus::Completed,
+                cx,
+            );
             let meta = self.resident_mut(&mirror_id).and_then(|mirror| {
                 if !mirror.turn_in_flight {
                     return None;
