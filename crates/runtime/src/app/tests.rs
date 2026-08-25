@@ -47,6 +47,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         assert_eq!(mirror.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(mirror.title, "explorer: Inspect event routing");
         assert!(state.resident(&mirror.id).unwrap().has_work());
+        assert!(state.resident(&mirror.id).unwrap().timeline.turn_running);
 
         state.on_event(
             "parent",
@@ -84,6 +85,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             cx,
         );
         assert!(!state.resident(&mirror.id).unwrap().has_work());
+        assert!(!state.resident(&mirror.id).unwrap().timeline.turn_running);
         assert!(matches!(
             &state.resident("parent").unwrap().timeline.entries[0].content,
             EntryContent::Item(ItemContent::Subagent {
