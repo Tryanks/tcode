@@ -119,6 +119,8 @@ struct ThreadFlags {
     waiting_for_approval: bool,
     waiting_for_input: bool,
     working: bool,
+    /// Working only because background tasks remain; the turn has finished.
+    background: bool,
 }
 
 struct ThreadRowState {
@@ -126,6 +128,7 @@ struct ThreadRowState {
     row_key: String,
     waiting_for_approval: bool,
     waiting_for_input: bool,
+    background: bool,
     is_worktree: bool,
     is_child: bool,
     show_unread: bool,
@@ -1461,6 +1464,7 @@ impl SessionsSidebar {
             row_key,
             waiting_for_approval: own_flags.waiting_for_approval,
             waiting_for_input: own_flags.waiting_for_input,
+            background: own_flags.background,
             is_worktree: meta.worktree.is_some(),
             is_child: render_state.is_child,
             show_unread: render_state.show_unread,
@@ -1564,6 +1568,11 @@ impl SessionsSidebar {
             (cx.theme().warning, crate::tr!("sidebar.waiting_approval"))
         } else if state.waiting_for_input {
             (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
+        } else if working && state.background {
+            (
+                cx.theme().muted_foreground,
+                crate::tr!("sidebar.background_tasks"),
+            )
         } else if working {
             (cx.theme().primary, crate::tr!("sidebar.working"))
         } else {
@@ -2125,6 +2134,7 @@ impl Render for SessionsSidebar {
                             waiting_for_approval: store.pending_approval_for(&meta.id),
                             waiting_for_input: store.pending_user_input_for(&meta.id),
                             working: store.turn_running_for(&meta.id),
+                            background: store.background_only_for(&meta.id),
                         },
                     )
                 })

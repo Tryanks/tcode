@@ -95,7 +95,9 @@ pub struct WorkspaceStore {
     session_status_replica: Option<SessionStatus>,
     providers_replica: ProvidersStatus,
     git_status_replica: GitStatusStatus,
-    background_session_flags: HashMap<String, (bool, bool, bool)>,
+    /// (working, pending_approval, pending_user_input, background_only) for
+    /// parked sessions.
+    background_session_flags: HashMap<String, (bool, bool, bool, bool)>,
     active_destination: Option<ConversationDestination>,
     /// One-shot turn navigation requested by a cross-session content search.
     pending_chat_turn: Option<(String, usize)>,
@@ -325,6 +327,7 @@ impl WorkspaceStore {
                             previous_status.working,
                             previous_status.pending_approval,
                             previous_status.pending_user_input,
+                            Self::status_background_only(previous_status),
                         ),
                     );
                 }
@@ -433,6 +436,7 @@ impl WorkspaceStore {
                             status.working,
                             status.pending_approval,
                             status.pending_user_input,
+                            Self::status_background_only(status),
                         ),
                     );
                 }
@@ -614,7 +618,7 @@ impl WorkspaceStore {
             + self
                 .background_session_flags
                 .values()
-                .filter(|(working, _, _)| *working)
+                .filter(|(working, ..)| *working)
                 .count()
     }
 
@@ -935,6 +939,28 @@ impl WorkspaceStore {
                 self.background_session_flags
                     .get(session_id)
                     .map(|flags| flags.0)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Working only because provider background tasks are still running: the
+    /// turn itself has finished and nothing is queued or in delivery.
+    fn status_background_only(status: &SessionStatus) -> bool {
+        status.working
+            && !status.turn_running
+            && status.delivery_in_flight.is_none()
+            && status.queued_messages.is_empty()
+    }
+
+    pub fn background_only_for(&self, session_id: &str) -> bool {
+        self.session_status_replica
+            .as_ref()
+            .filter(|status| status.session_id == session_id)
+            .map(Self::status_background_only)
+            .or_else(|| {
+                self.background_session_flags
+                    .get(session_id)
+                    .map(|flags| flags.3)
             })
             .unwrap_or(false)
     }
