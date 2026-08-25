@@ -233,7 +233,7 @@ settings:
     description: "窗口失焦时将刷新率降至约 2 FPS 以节省能耗。重启后生效。"
   abort_on_model_fallback:
     title: "模型回退时中止"
-    description: "开启后，Claude Code 会话将锁定可用模型，使被标记的请求中断，而不是静默切换模型；子代理只能使用主模型、Sonnet 或 Haiku。"
+    description: "开启后，tcode 会监控 Claude Code 的流，在检测到安全分类器回退或标记时从对话层面停止当前轮次，并将控制权交还给你。子代理不受影响。"
   fallback_review_advisor:
     title: "回退审查顾问"
     description: "使用独立模型审查被 Claude Code 回退防护中断的请求。"

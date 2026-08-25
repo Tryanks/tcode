@@ -393,7 +393,6 @@ pub struct SessionOptions {
     pub cwd: PathBuf,
     /// Provider-native model id; `None` = provider default.
     pub model: Option<String>,
-    pub abort_on_model_fallback: bool,
     pub resume: Option<ResumeCursor>,
     /// Fork the resumed provider session instead of continuing it in place.
     /// This is meaningful only when `resume` is present.
