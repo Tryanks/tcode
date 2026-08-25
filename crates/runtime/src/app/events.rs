@@ -344,10 +344,11 @@ impl AppState {
                         .filter(|active| active.meta.id == session_id)
                         .is_some_and(|active| {
                             active.queue.clear();
+                            active.timeline.mark_idle();
+                            active.shutdown_to_idle();
                             true
                         });
                     if is_active {
-                        self.interrupt(cx);
                         self.emit_domain(
                             Topic::SessionStatus {
                                 session_id: session_id.to_owned(),

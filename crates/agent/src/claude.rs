@@ -109,11 +109,7 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     // Resolve model-scoped launch options from the persisted selections
     // (effort/context/fast/thinking are launch-time only; mid-session changes
     // ride the resume-restart machinery).
-    let launch = ClaudeLaunchOptions::resolve(
-        opts.model.as_deref(),
-        &opts.option_selections,
-        opts.abort_on_model_fallback,
-    );
+    let launch = ClaudeLaunchOptions::resolve(opts.model.as_deref(), &opts.option_selections);
     let base_permission_mode = permission_mode_flag(opts.approval_mode);
     let launch_permission_mode = initial_permission_mode(opts.approval_mode, opts.interaction_mode);
     // Launch arguments are deliberately appended last, so the tracker must
@@ -317,25 +313,7 @@ struct ClaudeLaunchOptions {
     ultrathink: bool,
 }
 
-fn fallback_guard_models(model: &str) -> Vec<String> {
-    let base = model.split('[').next().unwrap_or(model);
-    let primary = if base.contains("fable") {
-        "fable"
-    } else {
-        base
-    };
-    let mut allow = vec![primary.to_string()];
-    for extra in ["sonnet", "haiku"] {
-        if !allow.iter().any(|m| m == extra) {
-            allow.push(extra.to_string());
-        }
-    }
-    allow
-}
-
 fn launch_settings_json(
-    model: Option<&str>,
-    abort_on_model_fallback: bool,
     thinking: Option<bool>,
     fast_mode: bool,
     ultracode: bool,
@@ -350,23 +328,12 @@ fn launch_settings_json(
     if ultracode {
         settings.insert("ultracode".into(), json!(true));
     }
-    if abort_on_model_fallback && let Some(model) = model {
-        settings.insert(
-            "availableModels".into(),
-            json!(fallback_guard_models(model)),
-        );
-        settings.insert("switchModelsOnFlag".into(), json!(false));
-    }
     (!settings.is_empty())
         .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default())
 }
 
 impl ClaudeLaunchOptions {
-    fn resolve(
-        model: Option<&str>,
-        selections: &[OptionSelection],
-        abort_on_model_fallback: bool,
-    ) -> Self {
+    fn resolve(model: Option<&str>, selections: &[OptionSelection]) -> Self {
         let spec = model.and_then(model_spec);
         let raw_effort = selection_str(selections, "reasoningEffort");
         let resolved_effort = resolve_claude_effort(spec.as_ref(), raw_effort.as_deref());
@@ -399,13 +366,7 @@ impl ClaudeLaunchOptions {
             None
         };
 
-        let settings_json = launch_settings_json(
-            model,
-            abort_on_model_fallback,
-            thinking,
-            fast_mode,
-            ultracode,
-        );
+        let settings_json = launch_settings_json(thinking, fast_mode, ultracode);
 
         ClaudeLaunchOptions {
             model_id,
@@ -1025,6 +986,13 @@ struct PendingRewind {
     conversation: bool,
 }
 
+fn served_model_is_fallback(expected: &str, served: &str) -> bool {
+    (expected.contains("fable") && served.contains("opus"))
+        || (served.contains("opus-4-8")
+            && expected.contains("opus")
+            && !expected.contains("opus-4-8"))
+}
+
 pub(crate) struct Mapper {
     session_started: bool,
     current_message_id: Option<String>,
@@ -1095,6 +1063,8 @@ pub(crate) struct Mapper {
     last_served_model: Option<String>,
     /// Model selected for this session, used when Claude reports a synthetic refusal message.
     expected_model: Option<String>,
+    /// Whether a served-model mismatch was already reported for the active turn.
+    fallback_detected: bool,
     /// Latest structured stop reason for the active turn.
     stop_reason: Option<String>,
     /// Classifier category captured from the active turn's structured refusal details.
@@ -1158,6 +1128,7 @@ impl Mapper {
             native_rewind,
             last_served_model: None,
             expected_model,
+            fallback_detected: false,
             stop_reason: None,
             pending_refusal_category: None,
             warned_stop_reason: None,
@@ -1180,6 +1151,7 @@ impl Mapper {
         self.current_turn_id = Some(id.clone());
         self.awaiting_turn_checkpoint = self.native_rewind;
         self.exit_plan_captured = false;
+        self.fallback_detected = false;
         self.stop_reason = None;
         self.pending_refusal_category = None;
         self.warned_stop_reason = None;
@@ -1464,7 +1436,7 @@ impl Mapper {
         events
     }
 
-    fn on_model_refusal_fallback(&self, msg: &Value) -> Vec<AgentEvent> {
+    fn on_model_refusal_fallback(&mut self, msg: &Value) -> Vec<AgentEvent> {
         let (Some(expected), Some(actual)) = (
             msg.get("original_model").and_then(Value::as_str),
             msg.get("fallback_model").and_then(Value::as_str),
@@ -1472,6 +1444,7 @@ impl Mapper {
             log::debug!("claude: ignoring malformed model_refusal_fallback");
             return Vec::new();
         };
+        self.fallback_detected = true;
         vec![AgentEvent::ModelFallbackDetected {
             expected: expected.to_owned(),
             actual: actual.to_owned(),
@@ -1755,14 +1728,41 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .map(ClassifierCategory::parse);
         }
-        if let Some(model) = message.get("model").and_then(Value::as_str)
-            && self.last_served_model.as_deref() != Some(model)
-        {
-            self.last_served_model = Some(model.to_owned());
-            out.push(AgentEvent::ServedModel {
-                model: model.to_owned(),
-                reason: None,
-            });
+        if let Some(model) = message.get("model").and_then(Value::as_str) {
+            if !self.fallback_detected
+                && let Some(expected) = self.expected_model.as_deref()
+            {
+                let normalized_expected = expected
+                    .split('[')
+                    .next()
+                    .unwrap_or(expected)
+                    .to_ascii_lowercase();
+                let normalized_served = model
+                    .split('[')
+                    .next()
+                    .unwrap_or(model)
+                    .to_ascii_lowercase();
+                if served_model_is_fallback(&normalized_expected, &normalized_served) {
+                    self.fallback_detected = true;
+                    out.push(AgentEvent::ModelFallbackDetected {
+                        expected: expected.to_owned(),
+                        actual: model.to_owned(),
+                        category: None,
+                        checkpoint_id: None,
+                        parent_tool_use_id: msg
+                            .get("parent_tool_use_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    });
+                }
+            }
+            if self.last_served_model.as_deref() != Some(model) {
+                self.last_served_model = Some(model.to_owned());
+                out.push(AgentEvent::ServedModel {
+                    model: model.to_owned(),
+                    reason: None,
+                });
+            }
         }
         out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
         let msg_id = message
@@ -3150,6 +3150,81 @@ mod tests {
     }
 
     #[test]
+    fn served_model_fallback_family_rule() {
+        let cases = [
+            ("claude-fable-5", "claude-opus-4-8", true),
+            ("claude-fable-5", "claude-opus-5", true),
+            ("claude-opus-5", "claude-opus-4-8", true),
+            ("claude-opus-4-8", "claude-opus-4-8", false),
+            ("claude-fable-5", "claude-fable-5", false),
+            ("claude-fable-5", "claude-sonnet-4-5", false),
+            ("claude-fable-5", "claude-haiku-4-5", false),
+            ("anything", "<synthetic>", false),
+        ];
+        for (expected, served, is_fallback) in cases {
+            assert_eq!(
+                served_model_is_fallback(expected, served),
+                is_fallback,
+                "expected={expected}, served={served}"
+            );
+        }
+
+        let expected = "claude-opus-5[1m]";
+        let normalized_expected = expected.split('[').next().unwrap_or(expected);
+        assert!(served_model_is_fallback(
+            normalized_expected,
+            "claude-opus-4-8"
+        ));
+    }
+
+    #[test]
+    fn assistant_model_mismatch_emits_one_fallback_per_turn() {
+        let mut mapper = Mapper::new_configured(
+            false,
+            InteractionMode::Build,
+            "default",
+            "default".into(),
+            ApprovalMode::Supervised,
+            false,
+            Some("claude-fable-5".into()),
+        );
+        mapper.start_turn();
+
+        let first = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-fallback-1","model":"claude-opus-4-8","content":[]},"parent_tool_use_id":null}"#,
+        );
+        assert_eq!(
+            first
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
+                .count(),
+            1
+        );
+        assert!(first.iter().any(|event| matches!(
+            event,
+            AgentEvent::ModelFallbackDetected {
+                expected,
+                actual,
+                category: None,
+                checkpoint_id: None,
+                parent_tool_use_id: None,
+            } if expected == "claude-fable-5"
+                && actual == "claude-opus-4-8"
+        )));
+
+        let second = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-fallback-2","model":"claude-opus-4-8","content":[]},"parent_tool_use_id":null}"#,
+        );
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
+        );
+    }
+
+    #[test]
     fn classifier_refusal_result_emits_turn_blocked() {
         let mut mapper = Mapper::new_configured(
             false,
@@ -3403,7 +3478,6 @@ mod tests {
                     value: json!(true),
                 },
             ],
-            false,
         );
         assert_eq!(launch.model_id.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(launch.effort.as_deref(), Some("xhigh"));
@@ -3426,7 +3500,6 @@ mod tests {
                     value: json!("1m"),
                 },
             ],
-            false,
         );
         assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5[1m]"));
         assert_eq!(launch.effort, None);
@@ -3440,45 +3513,10 @@ mod tests {
                 id: "thinking".into(),
                 value: json!(true),
             }],
-            false,
         );
         let settings: Value =
             serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
         assert_eq!(settings["alwaysThinkingEnabled"], true);
-    }
-
-    #[test]
-    fn fallback_guard_settings_merge_with_launch_settings() {
-        let parse = |model, thinking, fast_mode, ultracode| -> Value {
-            serde_json::from_str(
-                launch_settings_json(Some(model), true, thinking, fast_mode, ultracode)
-                    .as_deref()
-                    .unwrap(),
-            )
-            .unwrap()
-        };
-
-        let fable = parse("claude-fable-5", Some(true), true, true);
-        assert_eq!(
-            fable["availableModels"],
-            json!(["fable", "sonnet", "haiku"])
-        );
-        assert_eq!(fable["switchModelsOnFlag"], false);
-        assert_eq!(fable["alwaysThinkingEnabled"], true);
-        assert_eq!(fable["fastMode"], true);
-        assert_eq!(fable["ultracode"], true);
-
-        let opus = parse("claude-opus-5", None, false, false);
-        assert_eq!(
-            opus["availableModels"],
-            json!(["claude-opus-5", "sonnet", "haiku"])
-        );
-
-        let opus_1m = parse("claude-opus-5[1m]", None, false, false);
-        assert_eq!(
-            opus_1m["availableModels"],
-            json!(["claude-opus-5", "sonnet", "haiku"])
-        );
     }
 
     #[test]

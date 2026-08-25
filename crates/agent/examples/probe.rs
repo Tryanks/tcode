@@ -245,7 +245,6 @@ async fn run_probe(
     let opts = SessionOptions {
         cwd,
         model,
-        abort_on_model_fallback: true,
         resume: None,
         fork: false,
         binary_path: None,

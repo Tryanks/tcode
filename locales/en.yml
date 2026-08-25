@@ -233,7 +233,7 @@ settings:
     description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
   abort_on_model_fallback:
     title: "Abort on model fallback"
-    description: "When on, Claude Code sessions are pinned so a flagged request is interrupted instead of silently switching models; subagents may only use the main model, Sonnet, or Haiku."
+    description: "When on, tcode watches Claude Code's stream for safety-classifier fallbacks or flags and stops the turn at the conversation level, handing control back to you. Subagents are unaffected."
   fallback_review_advisor:
     title: "Fallback review advisor"
     description: "Use a separate model to review requests interrupted by Claude Code's fallback guard."
