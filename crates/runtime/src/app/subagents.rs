@@ -27,6 +27,7 @@ impl AppState {
                 );
                 return true;
             };
+            self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
             return true;
         }
@@ -62,8 +63,49 @@ impl AppState {
             if let Some(meta) = meta.flatten() {
                 self.persist_meta(&meta, cx);
             }
+            let turn_status = match status {
+                ItemStatus::Failed | ItemStatus::Declined => TurnStatus::Failed,
+                _ => TurnStatus::Completed,
+            };
+            self.sync_mirror_turn(&mirror_id, in_progress, &item.id, turn_status, cx);
         }
         false
+    }
+
+    /// Mirrors never receive provider Turn events, but the chat view derives
+    /// its working indicator, live timer, and live work-log expansion from
+    /// timeline turn state — so synthesize the boundaries from the parent
+    /// Subagent item's lifecycle.
+    fn sync_mirror_turn(
+        &mut self,
+        mirror_id: &str,
+        running: bool,
+        subagent_item_id: &str,
+        status: TurnStatus,
+        cx: &mut HostCx,
+    ) {
+        let open = self
+            .resident(mirror_id)
+            .is_some_and(|mirror| mirror.timeline.turn_running);
+        if running && !open {
+            self.record_event(
+                mirror_id,
+                &AgentEvent::TurnStarted {
+                    turn_id: subagent_item_id.to_string(),
+                },
+                cx,
+            );
+        } else if !running && open {
+            self.record_event(
+                mirror_id,
+                &AgentEvent::TurnCompleted {
+                    turn_id: subagent_item_id.to_string(),
+                    status,
+                    usage: None,
+                },
+                cx,
+            );
+        }
     }
 
     fn ensure_native_subagent_mirror(
@@ -142,9 +184,10 @@ impl AppState {
                 meta.parent_session_id.as_deref() == Some(parent_session_id)
                     && meta.native_subagent.is_some()
             })
-            .map(|meta| meta.id.clone())
+            .map(|meta| (meta.id.clone(), meta.native_subagent.clone().unwrap()))
             .collect();
-        for mirror_id in mirror_ids {
+        for (mirror_id, subagent_item_id) in mirror_ids {
+            self.sync_mirror_turn(&mirror_id, false, &subagent_item_id, TurnStatus::Completed, cx);
             let meta = self.resident_mut(&mirror_id).and_then(|mirror| {
                 if !mirror.turn_in_flight {
                     return None;
