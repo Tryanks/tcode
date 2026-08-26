@@ -291,18 +291,6 @@ pub(crate) fn work_log_outcome(
     }
 }
 
-pub(crate) fn manual_override_key(key: &str) -> String {
-    format!("manual-{key}")
-}
-
-pub(crate) fn auto_expanded(expanded: &HashSet<String>, key: &str, automatic: bool) -> bool {
-    if expanded.contains(&manual_override_key(key)) {
-        expanded.contains(key)
-    } else {
-        automatic
-    }
-}
-
 /// `text` collapsed to a single spaced line: every whitespace run (newlines
 /// included) becomes one space, so a multi-line command shows its full content
 /// in a one-line preview instead of just its first line. Clipped to more
@@ -569,33 +557,21 @@ pub(crate) fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEdit
         .collect()
 }
 
-/// Whether a Work Log segment opens on its own, before any user toggle.
-///
-/// Only the final segment of a running turn is live. As soon as later prose
-/// starts, an earlier segment settles and folds; file evidence remains visible
-/// in the separate changed-file chip row. Manual overrides still win via
-/// [`auto_expanded`].
-pub(crate) fn work_log_auto_expands(
-    _activities: &[&TimelineEntry],
-    turn_running: bool,
-    is_last: bool,
-) -> bool {
-    turn_running && is_last
-}
+/// Maximum number of entries kept directly visible at the tail of a live
+/// activity run. Older entries move into a separate collapsed Work Log; once
+/// prose ends the run, the full run becomes that settled Work Log instead.
+pub(crate) const LIVE_ACTIVITY_WINDOW: usize = 5;
 
-/// The activity entries a Work Log segment renders as rows.
-///
-/// An automatically expanded live run is a two-row ticker. Manual expansion
-/// returns every activity in the segment, including file changes.
-pub(crate) fn work_log_row_entries<'a>(
-    activities: &[&'a TimelineEntry],
-    automatic_expansion: bool,
-) -> Vec<&'a TimelineEntry> {
-    if automatic_expansion {
-        activities[activities.len().saturating_sub(2)..].to_vec()
+pub(crate) fn partition_activity_run<'a>(
+    activities: &'a [&'a TimelineEntry],
+    live: bool,
+) -> (&'a [&'a TimelineEntry], &'a [&'a TimelineEntry]) {
+    let visible = if live {
+        activities.len().min(LIVE_ACTIVITY_WINDOW)
     } else {
-        activities.to_vec()
-    }
+        0
+    };
+    activities.split_at(activities.len() - visible)
 }
 
 /// Format a unix-ms timestamp as a local 12-hour clock, e.g. "2:39 AM".
@@ -1904,30 +1880,44 @@ mod tests {
     }
 
     #[test]
-    fn work_log_rows_use_a_ticker_only_for_automatic_expansion() {
+    fn live_activity_run_keeps_five_entries_outside_the_folded_prefix() {
         let entries = [
             command("cargo check"),
             file_change("edit", &["src/foo.rs"]),
             command("cargo test"),
             command("cargo clippy"),
+            command("cargo fmt"),
+            command("cargo nextest"),
         ];
         let activities = refs(&entries);
-        let ids = |rows: Vec<&TimelineEntry>| {
+        let ids = |rows: &[&TimelineEntry]| {
             rows.iter()
                 .map(|entry| entry.id.clone())
                 .collect::<Vec<String>>()
         };
 
+        let (folded, visible) = partition_activity_run(&activities, true);
+        assert_eq!(ids(folded), ["cargo check"]);
         assert_eq!(
-            ids(work_log_row_entries(&activities, true)),
-            ["cargo test", "cargo clippy"]
+            ids(visible),
+            [
+                "edit",
+                "cargo test",
+                "cargo clippy",
+                "cargo fmt",
+                "cargo nextest"
+            ]
         );
-        assert_eq!(
-            ids(work_log_row_entries(&activities, false)),
-            ["cargo check", "edit", "cargo test", "cargo clippy"]
-        );
-        // Row selection never touches the summary counts.
-        assert_eq!(work_log_counts(&activities).files, 1);
+
+        let (folded, visible) = partition_activity_run(&activities[..5], true);
+        assert!(folded.is_empty());
+        assert_eq!(ids(visible), ids(&activities[..5]));
+
+        // Assistant prose settles the run: the same six entries are now all
+        // represented by one collapsed Work Log and none remain loose.
+        let (folded, visible) = partition_activity_run(&activities, false);
+        assert_eq!(ids(folded), ids(&activities));
+        assert!(visible.is_empty());
     }
 
     #[test]
@@ -2019,27 +2009,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn earlier_file_change_segments_settle_after_prose_starts() {
-        let file_edits = [command("cargo check"), file_change("edit", &["src/a.rs"])];
-        let ordinary = [command("cargo check"), command("cargo test")];
-        let file_edits = refs(&file_edits);
-        let ordinary = refs(&ordinary);
-
-        // Live, no longer the final segment: every run settles.
-        assert!(!work_log_auto_expands(&file_edits, true, false));
-        assert!(!work_log_auto_expands(&ordinary, true, false));
-
-        // The final live segment keeps opening on its own, as it always did.
-        assert!(work_log_auto_expands(&file_edits, true, true));
-        assert!(work_log_auto_expands(&ordinary, true, true));
-
-        // Finished turns force nothing open; CHANGED FILES takes over.
-        assert!(!work_log_auto_expands(&file_edits, false, true));
-        assert!(!work_log_auto_expands(&file_edits, false, false));
-        assert!(!work_log_auto_expands(&ordinary, false, true));
     }
 
     #[test]

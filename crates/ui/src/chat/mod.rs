@@ -48,11 +48,10 @@ use self::components::assistant::MdState;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
     ListSync, Segment, TurnIndexCache, TurnListItem, TurnRenderArgs, activity_run_duration_ms,
-    auto_expanded, displayed_error_text, divergent_served_model, format_span, latest_message_ids,
-    live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
+    displayed_error_text, divergent_served_model, format_span, latest_message_ids,
+    live_activity_segment, live_edit_rows, partition_activity_run, plain_text_as_markdown,
     segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
-    work_log_auto_expands, work_log_capsule_label, work_log_counts, work_log_outcome,
-    work_log_row_entries,
+    work_log_capsule_label, work_log_counts, work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_turn_window, viewport_turn_window,
@@ -615,33 +614,6 @@ impl ChatView {
         cx.notify();
     }
 
-    fn toggle_auto_expanded(
-        &mut self,
-        turn: usize,
-        key: &str,
-        automatic: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let was_expanded = auto_expanded(&self.expanded, key, automatic);
-        self.expanded.insert(manual_override_key(key));
-        if was_expanded {
-            self.expanded.remove(key);
-        } else {
-            self.expanded.insert(key.to_string());
-        }
-        self.sync_markdown_states(cx);
-        self.list_state.remeasure_items(turn..turn + 1);
-        cx.notify();
-    }
-
-    fn promote_auto_expanded(&mut self, turn: usize, key: &str, cx: &mut Context<Self>) {
-        self.expanded.insert(manual_override_key(key));
-        self.expanded.insert(key.to_string());
-        self.sync_markdown_states(cx);
-        self.list_state.remeasure_items(turn..turn + 1);
-        cx.notify();
-    }
-
     // -- turn rendering -----------------------------------------------------
 
     /// Render one turn as chronological messages, errors, and Work Log runs.
@@ -1055,69 +1027,95 @@ impl ChatView {
         let (index, segment_id, turn, cwd, activities, is_last) = args;
         let section_key = format!("worklog-{index}-{segment_id}");
         let running = is_last && turn.running;
-        let automatic = work_log_auto_expands(activities, turn.running, is_last);
-        let expanded = auto_expanded(&self.expanded, &section_key, automatic);
-        let manually_expanded =
-            expanded && (self.expanded.contains(&manual_override_key(&section_key)) || !automatic);
-        let segment_counts = work_log_counts(activities);
-        let mut capsule_label = work_log_capsule_label(&segment_counts, activities.len());
-        if capsule_label.is_empty() {
-            capsule_label = crate::tr!("chat.work_log").into_owned();
+        let (folded, visible) = partition_activity_run(activities, running);
+        let expanded = self.expanded.contains(&section_key);
+        let live_reasoning_id = running
+            .then(|| activities.last().copied())
+            .flatten()
+            .filter(|entry| {
+                matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::Reasoning { .. })
+                )
+            })
+            .map(|entry| entry.id.as_str());
+
+        let mut flow = v_flex().w_full().gap_1();
+        if !folded.is_empty() {
+            let segment_counts = work_log_counts(folded);
+            let mut capsule_label = work_log_capsule_label(&segment_counts, folded.len());
+            if capsule_label.is_empty() {
+                capsule_label = crate::tr!("chat.work_log").into_owned();
+            }
+            let duration =
+                format_span((activity_run_duration_ms(folded, turn, is_last) + 500) / 1000);
+            let outcome = work_log_outcome(turn, folded, is_last);
+            let rows = if expanded {
+                self.compose_work_log_rows(folded, cwd, live_reasoning_id, cx)
+            } else {
+                Vec::new()
+            };
+
+            let toggle_section_key = section_key;
+            flow = flow.child(components::work_log::work_log(
+                components::work_log::WorkLogData {
+                    index,
+                    segment_id: segment_id.to_string(),
+                    capsule_label,
+                    duration,
+                    outcome,
+                    expanded,
+                    running,
+                    rows,
+                },
+                cx.listener(move |this, _, _, cx| {
+                    this.toggle_expanded(index, &toggle_section_key, cx);
+                }),
+                cx,
+            ));
         }
-        let duration =
-            format_span((activity_run_duration_ms(activities, turn, is_last) + 500) / 1000);
-        let outcome = work_log_outcome(turn, activities, is_last);
 
+        if !visible.is_empty() {
+            flow = flow.child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .children(self.compose_work_log_rows(visible, cwd, live_reasoning_id, cx)),
+            );
+        }
+
+        flow.into_any_element()
+    }
+
+    fn compose_work_log_rows(
+        &mut self,
+        activities: &[&TimelineEntry],
+        cwd: &Path,
+        live_reasoning_id: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
-        if expanded {
-            let visible = work_log_row_entries(activities, !manually_expanded);
-
-            for entry in &visible {
-                if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content
-                {
-                    for row in live_edit_rows(changes, cwd) {
-                        rows.push(
-                            components::changed_files::file_edit_row(
-                                &row,
-                                &components::changed_files::FileEditRowStyle::from_theme(cx),
-                            )
-                            .into_any_element(),
-                        );
-                    }
-                } else {
-                    let live_reasoning = running
-                        && activities.last().is_some_and(|last| last.id == entry.id)
-                        && matches!(
-                            entry.content,
-                            EntryContent::Item(ItemContent::Reasoning { .. })
-                        );
-                    rows.push(self.compose_activity_row(entry, false, live_reasoning, cx));
+        for entry in activities {
+            if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content {
+                for row in live_edit_rows(changes, cwd) {
+                    rows.push(
+                        components::changed_files::file_edit_row(
+                            &row,
+                            &components::changed_files::FileEditRowStyle::from_theme(cx),
+                        )
+                        .into_any_element(),
+                    );
                 }
+            } else {
+                rows.push(self.compose_activity_row(
+                    entry,
+                    false,
+                    live_reasoning_id == Some(entry.id.as_str()),
+                    cx,
+                ));
             }
         }
-
-        let toggle_section_key = section_key;
-        let ticker_expanded = expanded && !manually_expanded;
-        components::work_log::work_log(
-            components::work_log::WorkLogData {
-                index,
-                segment_id: segment_id.to_string(),
-                capsule_label,
-                duration,
-                outcome,
-                expanded,
-                running,
-                rows,
-            },
-            cx.listener(move |this, _, _, cx| {
-                if ticker_expanded {
-                    this.promote_auto_expanded(index, &toggle_section_key, cx);
-                } else {
-                    this.toggle_auto_expanded(index, &toggle_section_key, automatic, cx);
-                }
-            }),
-            cx,
-        )
+        rows
     }
 
     /// Prepare one stateless Work Log activity component.
