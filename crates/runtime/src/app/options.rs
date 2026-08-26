@@ -18,6 +18,7 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
+        let remembered_effort = self.remembered_effort(provider, model.as_deref());
         let store = self.store.clone();
         let Some(active) = self.residents.active.as_mut() else {
             return;
@@ -37,8 +38,9 @@ impl AppState {
             active.meta.profile_id = profile_id;
             active.meta.model = model;
             // A different model has different option descriptors: drop stale
-            // selections so each resolves to the new model's defaults.
+            // selections, then restore the effort last used with this model.
             active.meta.option_selections.clear();
+            active.meta.option_selections.extend(remembered_effort);
             active.provider_commands = store.load_commands(active.meta.provider, None);
             active.pending_ultrathink = false;
             return;
@@ -68,6 +70,7 @@ impl AppState {
             active.meta.profile_id = profile_id;
             active.meta.model = model;
             active.meta.option_selections.clear();
+            active.meta.option_selections.extend(remembered_effort);
             active.provider_commands = store.load_commands(provider, None);
             active.provider_options.clear();
             active.pending_ultrathink = false;
@@ -82,6 +85,7 @@ impl AppState {
         }
         active.meta.model = model;
         active.meta.option_selections.clear();
+        active.meta.option_selections.extend(remembered_effort);
         active.pending_ultrathink = false;
         if active.pending_relay.is_some() {
             return;
