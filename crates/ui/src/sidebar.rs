@@ -15,9 +15,10 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    Action, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ListAlignment,
-    ListState, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, list, prelude::FluentBuilder as _, px,
+    Action, AnimationExt as _, AppContext as _, Context, Entity, InteractiveElement as _,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SpringAnimation,
+    SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -43,6 +44,15 @@ const TRAFFIC_LIGHT_INSET: f32 = 8.;
 
 /// Max threads shown per project group before the "Show more" row.
 const THREADS_COLLAPSED_LIMIT: usize = 6;
+
+/// Flat-list row geometry, including the 2px gap reserved below every row.
+const FLAT_ROOT_ROW_HEIGHT: f32 = 50.;
+const FLAT_CHILD_ROW_HEIGHT: f32 = 32.;
+
+/// A critically damped spring keeps reordering legible without bouncing rows
+/// past their destinations. GPUI also makes this snap to the target when the
+/// operating system's reduced-motion preference is enabled.
+const FLAT_REORDER_SPRING: SpringConfig = SpringConfig::new(420., 41., 1.);
 
 /// Localized thread-list toggle, when the project has enough threads to need
 /// one. Keeping the toggle present in both states is what lets an expanded list
@@ -270,6 +280,48 @@ fn flat_visible_threads<'a>(
         .flat_map(|block| block.sessions)
         .filter(|meta| thread_visible(meta, collapsed_parents))
         .collect()
+}
+
+/// The target top edge for each visible flat-list row. These positions mirror
+/// `render_flat_thread`: parent rows are 48px tall and child rows are 30px,
+/// with another 2px of bottom spacing supplied by the list item wrapper.
+fn flat_thread_top_offsets(visible: &[&SessionMeta], sessions: &[SessionMeta]) -> Vec<f32> {
+    let ids = sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut top = 0.;
+
+    visible
+        .iter()
+        .map(|meta| {
+            let offset = top;
+            let is_child = meta
+                .parent_session_id
+                .as_deref()
+                .is_some_and(|parent_id| ids.contains(parent_id));
+            top += if is_child {
+                FLAT_CHILD_ROW_HEIGHT
+            } else {
+                FLAT_ROOT_ROW_HEIGHT
+            };
+            offset
+        })
+        .collect()
+}
+
+fn animate_flat_thread_position(
+    row: gpui::Div,
+    session_id: &str,
+    target_top: f32,
+) -> impl IntoElement + use<> {
+    row.with_spring(
+        gpui::SharedString::from(format!("flat-thread-position-{session_id}")),
+        SpringAnimation::new(FLAT_REORDER_SPRING)
+            .to(px(target_top))
+            .with_epsilon(0.25),
+        move |row, animated_top| row.relative().top(animated_top - px(target_top)),
+    )
 }
 
 /// Startup fold state: every thread with visible direct children begins
@@ -2224,7 +2276,12 @@ impl Render for SessionsSidebar {
                         .into_any_element();
                     (self.render_flat_header(cx).into_any_element(), thread_list)
                 } else {
-                    let visible = visible.into_iter().cloned().collect::<Vec<_>>();
+                    let top_offsets = flat_thread_top_offsets(&visible, &flat_sessions);
+                    let visible = visible
+                        .into_iter()
+                        .cloned()
+                        .zip(top_offsets)
+                        .collect::<Vec<_>>();
                     if self.flat_list_state.item_count() != visible.len() {
                         self.flat_list_state.reset(visible.len());
                     }
@@ -2233,36 +2290,40 @@ impl Render for SessionsSidebar {
                         .map(|project| (project.id, project.name))
                         .collect::<HashMap<_, _>>();
                     let active_id = active_id.clone();
-                    let thread_list = list(
-                        self.flat_list_state.clone(),
-                        cx.processor(move |this, index: usize, _window, cx| {
-                            let Some(meta) = visible.get(index) else {
-                                return div().into_any_element();
-                            };
-                            let project_name = meta
-                                .project_id
-                                .as_ref()
-                                .and_then(|project_id| project_names.get(project_id))
-                                .cloned();
-                            let is_active = active_id.as_deref() == Some(meta.id.as_str());
-                            div()
-                                .w_full()
-                                .px_2()
-                                .pb(px(2.))
-                                .child(this.render_flat_thread(
-                                    meta,
-                                    &flat_sessions,
-                                    &flags,
-                                    project_name,
-                                    is_active,
-                                    cx,
-                                ))
+                    let thread_list =
+                        list(
+                            self.flat_list_state.clone(),
+                            cx.processor(move |this, index: usize, _window, cx| {
+                                let Some((meta, target_top)) = visible.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                let target_top = *target_top;
+                                let project_name = meta
+                                    .project_id
+                                    .as_ref()
+                                    .and_then(|project_id| project_names.get(project_id))
+                                    .cloned();
+                                let is_active = active_id.as_deref() == Some(meta.id.as_str());
+                                animate_flat_thread_position(
+                                    div().w_full().px_2().pb(px(2.)).child(
+                                        this.render_flat_thread(
+                                            meta,
+                                            &flat_sessions,
+                                            &flags,
+                                            project_name,
+                                            is_active,
+                                            cx,
+                                        ),
+                                    ),
+                                    &meta.id,
+                                    target_top,
+                                )
                                 .into_any_element()
-                        }),
-                    )
-                    .flex_1()
-                    .min_h_0()
-                    .into_any_element();
+                            }),
+                        )
+                        .flex_1()
+                        .min_h_0()
+                        .into_any_element();
                     (self.render_flat_header(cx).into_any_element(), thread_list)
                 }
             }
@@ -2305,13 +2366,44 @@ impl Render for SessionsSidebar {
 mod tests {
     use super::*;
     use agent::ProviderKind;
-    use gpui::{TestAppContext, VisualTestContext, size};
-    use std::path::PathBuf;
+    use gpui::{Pixels, TestAppContext, VisualTestContext, size};
+    use std::{cell::RefCell, path::PathBuf, rc::Rc};
     use tcode_core::project::Project;
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 
     struct WorkingThreadRowProbe;
+
+    struct FlatReorderAnimationProbe {
+        reversed: bool,
+        positions: Rc<RefCell<HashMap<&'static str, Pixels>>>,
+    }
+
+    impl Render for FlatReorderAnimationProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let order = if self.reversed {
+                ["second", "first"]
+            } else {
+                ["first", "second"]
+            };
+            let positions = self.positions.clone();
+
+            v_flex().children(order.into_iter().enumerate().map(|(index, id)| {
+                let positions = positions.clone();
+                let target_top = index as f32 * FLAT_ROOT_ROW_HEIGHT;
+                div().h(px(FLAT_ROOT_ROW_HEIGHT)).with_spring(
+                    gpui::SharedString::from(format!("flat-thread-position-{id}")),
+                    SpringAnimation::new(FLAT_REORDER_SPRING)
+                        .to(px(target_top))
+                        .with_epsilon(0.25),
+                    move |row, animated_top| {
+                        positions.borrow_mut().insert(id, animated_top);
+                        row.relative().top(animated_top - px(target_top))
+                    },
+                )
+            }))
+        }
+    }
 
     impl Render for WorkingThreadRowProbe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -2387,6 +2479,36 @@ mod tests {
                 "title escaped the row horizontally at {width}px: row={row:?}, title={title:?}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn flat_rows_start_reordering_from_their_previous_positions(cx: &mut TestAppContext) {
+        let positions = Rc::new(RefCell::new(HashMap::new()));
+        let window = cx.open_window(size(px(200.), px(200.)), {
+            let positions = positions.clone();
+            move |_, _| FlatReorderAnimationProbe {
+                reversed: false,
+                positions,
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(positions.borrow()["first"], px(0.));
+        assert_eq!(positions.borrow()["second"], px(FLAT_ROOT_ROW_HEIGHT));
+
+        window
+            .update(cx, |probe, _, cx| {
+                probe.reversed = true;
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(positions.borrow()["first"], px(0.));
+        assert_eq!(positions.borrow()["second"], px(FLAT_ROOT_ROW_HEIGHT));
+
+        let callbacks = window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
+        assert!(callbacks > 0, "spring did not request an animation frame");
     }
 
     #[gpui::test]
@@ -2735,6 +2857,37 @@ mod tests {
                 "idle-new",
                 "idle-old"
             ]
+        );
+    }
+
+    #[test]
+    fn flat_row_offsets_follow_the_rendered_root_and_child_heights() {
+        let root_a = session("root-a", None);
+        let child_a = session("child-a", Some("root-a"));
+        let root_b = session("root-b", None);
+        let sessions = vec![root_a, child_a, root_b];
+        let visible = sessions.iter().collect::<Vec<_>>();
+
+        assert_eq!(
+            flat_thread_top_offsets(&visible, &sessions),
+            vec![
+                0.,
+                FLAT_ROOT_ROW_HEIGHT,
+                FLAT_ROOT_ROW_HEIGHT + FLAT_CHILD_ROW_HEIGHT
+            ]
+        );
+    }
+
+    #[test]
+    fn flat_row_offsets_treat_orphaned_children_as_root_rows() {
+        let orphan = session("orphan", Some("missing-parent"));
+        let root = session("root", None);
+        let sessions = vec![orphan, root];
+        let visible = sessions.iter().collect::<Vec<_>>();
+
+        assert_eq!(
+            flat_thread_top_offsets(&visible, &sessions),
+            vec![0., FLAT_ROOT_ROW_HEIGHT]
         );
     }
 
