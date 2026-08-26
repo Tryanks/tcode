@@ -776,12 +776,18 @@ pub struct Settings {
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Factory value for [`Settings::auto_archive_max_idle_days`]. Public so the
+/// settings page can tell an overridden field from an untouched one.
+pub const DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS: u32 = 7;
+/// Factory value for [`Settings::auto_archive_keep_count`].
+pub const DEFAULT_AUTO_ARCHIVE_KEEP_COUNT: usize = 30;
+
 const fn default_auto_archive_max_idle_days() -> u32 {
-    7
+    DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS
 }
 
 const fn default_auto_archive_keep_count() -> usize {
-    30
+    DEFAULT_AUTO_ARCHIVE_KEEP_COUNT
 }
 
 impl Default for Settings {

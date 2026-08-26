@@ -218,6 +218,106 @@ fn settings_patches_from_stale_snapshot_preserve_nested_sibling_fields() {
 }
 
 #[test]
+fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_keys() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-reset-settings-scope-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+
+    // Preferences the reset must clear.
+    let mut settings = Settings {
+        theme_mode: ThemeMode::Dark,
+        language: Some("zh-CN".into()),
+        word_wrap_diffs: true,
+        auto_archive_max_idle_days: 99,
+        ..Settings::default()
+    };
+    settings.browser.home_url = Some("https://example.com".into());
+    // Everything below cost the user a login, a download, or a newer build.
+    settings
+        .provider_mut(ProviderKind::Codex)
+        .env
+        .push(tcode_core::settings::EnvVar {
+            name: "OPENAI_API_KEY".into(),
+            value: "secret".into(),
+            sensitive: true,
+        });
+    settings.profiles.insert(
+        "work-claude".into(),
+        ProviderProfile {
+            kind: ProviderKind::ClaudeCode,
+            settings: ProviderSettings::default(),
+        },
+    );
+    settings.codex_binary = Some(PathBuf::from("/custom/codex"));
+    settings.claude_binary = Some(PathBuf::from("/custom/claude"));
+    settings.acp_agents.insert(
+        "first".into(),
+        InstalledAgent {
+            id: "first".into(),
+            name: "First".into(),
+            version: "1.2.3".into(),
+            icon: None,
+            launch: agent::AcpLaunch::Npx {
+                package: "first-agent".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+            enabled: true,
+            env: Vec::new(),
+            launch_args: None,
+        },
+    );
+    settings.collapsed_projects.push("project".into());
+    settings.favorite_models.push("gpt-5.6-sol".into());
+    settings.sidebar_collapsed = true;
+    settings.project_sort = tcode_core::settings::ProjectSort::NameAsc;
+    settings.sidebar_layout = tcode_core::settings::SidebarLayout::Grouped;
+    settings.last_visited.insert("session".into(), 42);
+    settings
+        .unknown
+        .insert("future_key".into(), serde_json::json!({"kept": true}));
+
+    state.update(cx, |state, cx| {
+        state.update_settings(settings, cx);
+        state.reset_settings(cx);
+
+        let reset = &state.settings;
+        assert_eq!(reset.theme_mode, ThemeMode::System);
+        assert_eq!(reset.language, None);
+        assert!(!reset.word_wrap_diffs);
+        assert_eq!(reset.auto_archive_max_idle_days, 7);
+        assert_eq!(reset.browser.home_url, None);
+
+        assert_eq!(
+            reset.provider(ProviderKind::Codex).env[0].value,
+            "secret",
+            "provider credentials must survive a restore"
+        );
+        assert!(reset.profiles.contains_key("work-claude"));
+        assert_eq!(reset.codex_binary, Some(PathBuf::from("/custom/codex")));
+        assert_eq!(reset.claude_binary, Some(PathBuf::from("/custom/claude")));
+        assert!(reset.acp_agents.contains_key("first"));
+        assert_eq!(reset.collapsed_projects, vec!["project".to_string()]);
+        assert_eq!(reset.favorite_models, vec!["gpt-5.6-sol".to_string()]);
+        assert!(reset.sidebar_collapsed);
+        assert_eq!(
+            reset.project_sort,
+            tcode_core::settings::ProjectSort::NameAsc
+        );
+        assert_eq!(
+            reset.sidebar_layout,
+            tcode_core::settings::SidebarLayout::Grouped
+        );
+        assert_eq!(reset.last_visited.get("session"), Some(&42));
+        assert_eq!(
+            reset.unknown.get("future_key"),
+            Some(&serde_json::json!({"kept": true})),
+            "forward-compat keys must not be destroyed by a restore"
+        );
+    });
+}
+
+#[test]
 fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-provider-diff-test");

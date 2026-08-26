@@ -73,6 +73,9 @@ pub struct Button {
     loading: bool,
     size: Size,
     tooltip: Option<SharedString>,
+    /// Accessible name for icon-only buttons, which have no visible label to
+    /// derive one from.
+    aria_label: Option<SharedString>,
     on_click: Option<ClickHandler>,
     on_hover: Option<super::ToggleHandler>,
 }
@@ -95,6 +98,7 @@ impl Button {
             loading: false,
             size: Size::Medium,
             tooltip: None,
+            aria_label: None,
             on_click: None,
             on_hover: None,
         }
@@ -117,6 +121,12 @@ impl Button {
     }
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip = Some(tooltip.into());
+        self
+    }
+    /// Name an icon-only button for assistive technology. Buttons with a
+    /// visible label already announce it and need no override.
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
         self
     }
     pub fn compact(mut self) -> Self {
@@ -252,7 +262,7 @@ impl RenderOnce for Button {
             Size::Size(v) => Size::Size(v * 0.75),
             size => size,
         };
-        let accessibility_label = self.label.clone();
+        let accessibility_label = self.aria_label.clone().or_else(|| self.label.clone());
         let content = gpui_base::h_flex()
             .size_full()
             .items_center()

@@ -10,9 +10,9 @@ use crate::{
     sizing::Sizable as _,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -431,36 +431,73 @@ impl OrchestrateSettingsPanel {
         }
     }
 
+    /// Restore both halves of a child row's routing preset — effort and
+    /// definition — from the bundled fleet entry it maps to. `enabled` is
+    /// list-level state and deliberately untouched.
     fn reset_child_definition(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let settings = self.store.read(cx).settings();
-        let Some(entry) = settings.orchestrate.child_models.get(index) else {
+        let Some(target) = builtin_child_target(&settings.orchestrate.child_models, index) else {
             return;
         };
-        let provider = entry.provider;
-        let model = entry.model.clone();
-        let value = OrchestrateSettings::builtin_child_definition(
-            provider,
-            &model,
-            entry.effort.as_deref(),
-        )
-        .unwrap_or_default()
-        .to_string();
-        let persisted = value.clone();
+        let provider = target.provider;
+        let model = target.model.clone();
+        let effort = target.effort;
+        let description = target.description;
+        let persisted_description = description.clone();
         self.update_child_models(
             move |models| {
                 if let Some(entry) = models.get_mut(index)
                     && entry.provider == provider
                     && entry.model == model
                 {
-                    entry.description = persisted;
+                    entry.effort = effort;
+                    entry.description = persisted_description;
                 }
             },
             cx,
         );
+        // The effort dropdown reads straight from settings; only the
+        // description textarea holds its own copy.
         if let Some(row) = self.child_rows.get(index) {
             row.description
-                .update(cx, |input, cx| input.set_value(value, window, cx));
+                .update(cx, |input, cx| input.set_value(description, window, cx));
         }
+    }
+
+    /// The per-item "restore default" affordance, mirroring the General page:
+    /// icon-only, ghost, and inline immediately after the row's title.
+    fn reset_button(
+        &self,
+        id: impl Into<ElementId>,
+        cx: &mut Context<Self>,
+        on_reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
+        let label = crate::tr!("settings.reset_item").into_owned();
+        Button::new(id)
+            .ghost()
+            .xsmall()
+            .icon(IconName::Undo)
+            .tooltip(label.clone())
+            .aria_label(label)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                on_reset(this, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// A 13px row title carrying its optional inline reset affordance.
+    fn row_title(
+        &self,
+        title: impl Into<gpui::SharedString>,
+        reset: Option<AnyElement>,
+    ) -> AnyElement {
+        h_flex()
+            .items_center()
+            .gap_1()
+            .child(div().text_size(px(13.)).font_medium().child(title.into()))
+            .children(reset)
+            .into_any_element()
     }
 
     fn model_name(
@@ -537,6 +574,13 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_approval(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.store.read(cx).settings().orchestrate.child_approval;
+        let reset = (selected != ChildApprovalMode::Orchestrator).then(|| {
+            self.reset_button("reset-orchestrate-child-approval", cx, |this, _, cx| {
+                this.store.update(cx, |store, _cx| {
+                    store.set_orchestrate_child_approval(ChildApprovalMode::Orchestrator)
+                });
+            })
+        });
         let selected_label = match selected {
             ChildApprovalMode::Orchestrator => {
                 crate::tr!("orchestrate.child_approval.orchestrator")
@@ -646,12 +690,10 @@ impl OrchestrateSettingsPanel {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_medium()
-                                    .child(crate::tr!("orchestrate.child_approval.title")),
-                            )
+                            .child(self.row_title(
+                                crate::tr!("orchestrate.child_approval.title").into_owned(),
+                                reset,
+                            ))
                             .child(
                                 div()
                                     .text_size(px(11.))
@@ -671,6 +713,13 @@ impl OrchestrateSettingsPanel {
             .settings()
             .orchestrate
             .archive_on_complete;
+        let reset = (!checked).then(|| {
+            self.reset_button("reset-orchestrate-auto-archive", cx, |this, _, cx| {
+                this.store.update(cx, |store, _cx| {
+                    store.set_orchestrate_archive_on_complete(true)
+                });
+            })
+        });
         crate::material::group(cx)
             .child(
                 h_flex()
@@ -685,12 +734,10 @@ impl OrchestrateSettingsPanel {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_medium()
-                                    .child(crate::tr!("orchestrate.auto_archive.title")),
-                            )
+                            .child(self.row_title(
+                                crate::tr!("orchestrate.auto_archive.title").into_owned(),
+                                reset,
+                            ))
                             .child(
                                 div()
                                     .text_size(px(11.))
@@ -714,6 +761,13 @@ impl OrchestrateSettingsPanel {
 
     fn render_child_worktrees(&self, cx: &mut Context<Self>) -> AnyElement {
         let checked = self.store.read(cx).settings().orchestrate.child_worktrees;
+        let reset = checked.then(|| {
+            self.reset_button("reset-orchestrate-child-worktrees", cx, |this, _, cx| {
+                this.store.update(cx, |store, _cx| {
+                    store.set_orchestrate_child_worktrees(false)
+                });
+            })
+        });
         crate::material::group(cx)
             .child(
                 h_flex()
@@ -728,12 +782,10 @@ impl OrchestrateSettingsPanel {
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_medium()
-                                    .child(crate::tr!("orchestrate.child_worktrees.title")),
-                            )
+                            .child(self.row_title(
+                                crate::tr!("orchestrate.child_worktrees.title").into_owned(),
+                                reset,
+                            ))
                             .child(
                                 div()
                                     .text_size(px(11.))
@@ -784,63 +836,56 @@ impl OrchestrateSettingsPanel {
     }
 
     fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
-        let section =
-            v_flex()
-                .w_full()
-                .gap_3()
-                .child(self.section_heading(
-                    crate::tr!("orchestrate.identity.title"),
-                    crate::tr!("orchestrate.identity.description"),
-                    None,
-                    cx,
-                ))
-                // Generic identity: a single-row group holding the header, help and
-                // its text area — no slab fill.
-                .child(
-                    crate::material::group(cx).child(
-                        v_flex()
-                            .w_full()
-                            .gap_1p5()
-                            .px_3()
-                            .py_3()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .child(
-                                        div().flex_1().text_size(px(13.)).font_medium().child(
-                                            crate::tr!("orchestrate.generic_identity.title"),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new("reset-generic-orchestrator-identity")
-                                            .ghost()
-                                            .xsmall()
-                                            .icon(IconName::Undo)
-                                            .label(crate::tr!("orchestrate.restore_default"))
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.reset_generic_identity(window, cx);
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!("orchestrate.generic_identity.description")),
-                            )
-                            .child(
-                                Textarea::new(&self.generic_identity)
-                                    .rounded(crate::material::radius_input()),
-                            ),
-                    ),
-                )
-                .child(self.section_heading(
-                    crate::tr!("orchestrate.model_identity.title"),
-                    crate::tr!("orchestrate.model_identity.description"),
-                    Some(self.identity_model_picker.clone().into_any_element()),
-                    cx,
-                ));
+        let identities = self.store.read(cx).settings().orchestrate.model_identities;
+        let generic_reset = (self.store.read(cx).settings().orchestrate.generic_identity
+            != OrchestrateSettings::builtin_generic_identity())
+        .then(|| {
+            self.reset_button(
+                "reset-generic-orchestrator-identity",
+                cx,
+                |this, window, cx| this.reset_generic_identity(window, cx),
+            )
+        });
+        let section = v_flex()
+            .w_full()
+            .gap_3()
+            .child(self.section_heading(
+                crate::tr!("orchestrate.identity.title"),
+                crate::tr!("orchestrate.identity.description"),
+                None,
+                cx,
+            ))
+            // Generic identity: a single-row group holding the header, help and
+            // its text area — no slab fill.
+            .child(
+                crate::material::group(cx).child(
+                    v_flex()
+                        .w_full()
+                        .gap_1p5()
+                        .px_3()
+                        .py_3()
+                        .child(self.row_title(
+                            crate::tr!("orchestrate.generic_identity.title").into_owned(),
+                            generic_reset,
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(crate::tr!("orchestrate.generic_identity.description")),
+                        )
+                        .child(
+                            Textarea::new(&self.generic_identity)
+                                .rounded(crate::material::radius_input()),
+                        ),
+                ),
+            )
+            .child(self.section_heading(
+                crate::tr!("orchestrate.model_identity.title"),
+                crate::tr!("orchestrate.model_identity.description"),
+                Some(self.identity_model_picker.clone().into_any_element()),
+                cx,
+            ));
 
         if self.identity_rows.is_empty() {
             return section
@@ -865,6 +910,20 @@ impl OrchestrateSettingsPanel {
             let provider = row.provider;
             let model = row.model.clone();
             let reset_model = row.model.clone();
+            // Models without a bundled specialization fall back to the factory
+            // generic text — that *is* their default.
+            let overridden = identities.get(index).is_some_and(|entry| {
+                entry.identity != OrchestrateSettings::builtin_identity_for(provider, &entry.model)
+            });
+            let reset = overridden.then(|| {
+                self.reset_button(
+                    ("reset-orchestrator-identity", index),
+                    cx,
+                    move |this, window, cx| {
+                        this.reset_model_identity(provider, &reset_model, window, cx);
+                    },
+                )
+            });
             rows.push(
                 v_flex()
                     .w_full()
@@ -881,7 +940,7 @@ impl OrchestrateSettingsPanel {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().text_size(px(13.)).font_medium().child(name))
+                                    .child(self.row_title(name, reset))
                                     .child(
                                         div()
                                             .font_family("monospace")
@@ -893,21 +952,6 @@ impl OrchestrateSettingsPanel {
                                                 row.model
                                             )),
                                     ),
-                            )
-                            .child(
-                                Button::new(("reset-orchestrator-identity", index))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Undo)
-                                    .label(crate::tr!("orchestrate.restore_default"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.reset_model_identity(
-                                            provider,
-                                            &reset_model,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
                             )
                             .child(
                                 Button::new(("remove-orchestrator-identity", index))
@@ -985,6 +1029,17 @@ impl OrchestrateSettingsPanel {
             } else {
                 format!("{} · {} · {}", provider_label(provider), row.model, effort)
             };
+            let reset = builtin_child_target(&settings.child_models, index)
+                .filter(|target| {
+                    target.effort != profile.effort || target.description != profile.description
+                })
+                .map(|_| {
+                    self.reset_button(
+                        ("reset-orchestrate-child", index),
+                        cx,
+                        move |this, window, cx| this.reset_child_definition(index, window, cx),
+                    )
+                });
             rows.push(
                 v_flex()
                     .w_full()
@@ -1001,7 +1056,7 @@ impl OrchestrateSettingsPanel {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().text_size(px(13.)).font_medium().child(name))
+                                    .child(self.row_title(name, reset))
                                     .child(
                                         div()
                                             .font_family("monospace")
@@ -1036,16 +1091,6 @@ impl OrchestrateSettingsPanel {
                                     })
                                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                                         this.set_child_enabled(index, *checked, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(("reset-orchestrate-child", index))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Undo)
-                                    .label(crate::tr!("orchestrate.restore_default"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.reset_child_definition(index, window, cx);
                                     })),
                             )
                             .child(
@@ -1188,6 +1233,58 @@ impl OrchestrateSettingsPanel {
             .child(crate::material::grouped(rows, cx))
             .into_any_element()
     }
+}
+
+/// Whether two efforts name the same tier. Stored efforts are free text, so a
+/// hand-typed "Medium" must still match the bundled "medium".
+fn same_effort(left: &Option<String>, right: &Option<String>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        _ => false,
+    }
+}
+
+/// The bundled fleet entry a child row resets to, if it has one. Rows the user
+/// pointed at a custom provider profile were never bundled, and neither were
+/// models missing from [`OrchestrateSettings::default`].
+fn builtin_child_target(
+    rows: &[OrchestrateChildModel],
+    index: usize,
+) -> Option<OrchestrateChildModel> {
+    let row = rows.get(index)?;
+    if row.profile_id.is_some() {
+        return None;
+    }
+    let builtins: Vec<OrchestrateChildModel> = OrchestrateSettings::default()
+        .child_models
+        .into_iter()
+        .filter(|entry| entry.provider == row.provider && entry.model == row.model)
+        .collect();
+    if let Some(entry) = builtins
+        .iter()
+        .find(|entry| same_effort(&entry.effort, &row.effort))
+    {
+        return Some(entry.clone());
+    }
+    if builtins.len() == 1 {
+        return builtins.into_iter().next();
+    }
+    // A model bundled at several efforts whose row matches none of them (say
+    // gpt-5.6-sol retuned to "high"): claim the first tier no sibling row
+    // already occupies, so two rows never restore onto the same entry.
+    builtins
+        .iter()
+        .find(|entry| {
+            !rows.iter().enumerate().any(|(other, candidate)| {
+                other != index
+                    && candidate.provider == row.provider
+                    && candidate.model == row.model
+                    && same_effort(&entry.effort, &candidate.effort)
+            })
+        })
+        .or_else(|| builtins.first())
+        .cloned()
 }
 
 impl Render for OrchestrateSettingsPanel {

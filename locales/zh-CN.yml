@@ -193,7 +193,9 @@ settings:
   back: "返回"
   restore: "恢复默认设置"
   restore_title: "恢复默认设置？"
-  restore_description: "将语言、主题、对话命名模型、diff、提供商和 Orchestrate 设置恢复为默认值。项目和对话不会受到影响。"
+  restore_description: "将语言、主题、对话命名模型、diff 和 Orchestrate 设置恢复为默认值。提供商配置、已安装的智能体、项目和对话都会保留。"
+  reset_item: "恢复默认"
+  reset_all: "恢复全部默认设置"
   cancel: "取消"
   save: "保存"
   general_section: "通用"
@@ -202,6 +204,7 @@ settings:
   workspace_section: "工作区"
   providers_section: "提供商"
   orchestrate_section: "ORCHESTRATE"
+  reset_section: "重置"
   language:
     title: "语言"
     description: "选择 tcode 的界面语言。"
@@ -295,7 +298,6 @@ permissions:
     name: "屏幕录制"
     why: "为计算机使用观察结果截取窗口截图。"
 orchestrate:
-  restore_default: "恢复默认"
   child_approval:
     title: "子线程审批"
     description: "派发的子线程遇到权限门槛时由谁来审批。决策层审批会将请求转交主线程模型,由其通过 approve 工具决定;永久允许会在会话内自动批准;手动审批则等待你在子线程中亲自处理。"
