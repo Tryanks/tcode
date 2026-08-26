@@ -1817,16 +1817,24 @@ impl ChatView {
             .flex()
             .justify_center()
             .child(
-                Button::new("scroll-to-end")
-                    .outline()
-                    .small()
-                    .icon(IconName::ChevronDown)
-                    .label(crate::tr!("chat.scroll_end"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.list_state.set_follow_mode(FollowMode::Tail);
-                        this.list_state.scroll_to_end();
-                        cx.notify();
-                    })),
+                // The outline button's bg is ~transparent; an opaque popover
+                // backing keeps the pill readable over the chat text below.
+                div()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().popover)
+                    .shadow_md()
+                    .child(
+                        Button::new("scroll-to-end")
+                            .outline()
+                            .small()
+                            .icon(IconName::ChevronDown)
+                            .label(crate::tr!("chat.scroll_end"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.list_state.set_follow_mode(FollowMode::Tail);
+                                this.list_state.scroll_to_end();
+                                cx.notify();
+                            })),
+                    ),
             )
             .into_any_element()
     }
