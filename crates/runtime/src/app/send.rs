@@ -419,7 +419,14 @@ impl AppState {
             cx,
         );
         if is_active {
-            self.maybe_generate_title(&message.text, &message.attachments, cx);
+            // `/orchestrate` stores its provider-only guidance as a prefix and
+            // records the byte boundary in `context_len`. Titles should describe
+            // the user's request, not that hidden orchestration configuration.
+            let title_source = message
+                .context_len
+                .and_then(|len| message.text.get(len..))
+                .unwrap_or(&message.text);
+            self.maybe_generate_title(title_source, &message.attachments, cx);
         }
     }
 
