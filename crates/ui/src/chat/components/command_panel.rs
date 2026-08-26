@@ -1,24 +1,23 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 use gpui::{
-    AnyElement, App, ContentMask, IntoElement as _, ParentElement as _, Styled as _, StyledText,
+    AnyElement, App, ContentMask, Hsla, IntoElement as _, ParentElement as _, Rgba, Styled as _,
     Window, canvas, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{ElementExt as _, h_flex};
+use gpui_base::ElementExt as _;
 use term::{GridEmulator, TermSnapshot};
 
 use crate::highlight;
 use crate::terminal_drawer::{
     TERMINAL_CELL_HEIGHT, TERMINAL_CELL_WIDTH, TerminalPalette, layout_grid, paint_terminal_grid,
 };
-use crate::theme::ActiveTheme as _;
+use crate::theme::{ActiveTheme as _, HighlightTheme};
 
 const DEFAULT_COLS: usize = 80;
 const MIN_COLS: usize = 20;
 const MAX_COLS: usize = 400;
 const MAX_ROWS: usize = 16;
 const MAX_COMMAND_ROWS: usize = 4;
-const PROMPT_COLS: usize = 2;
 const OUTPUT_TAIL_BYTES: usize = 32 * 1024;
 
 pub(crate) type ColsChangeHandler = Box<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
@@ -61,10 +60,26 @@ impl CommandPanelCache {
     }
 }
 
+#[derive(Clone)]
+struct CommandTheme {
+    foreground: Hsla,
+    background: Hsla,
+    highlight_theme: Arc<HighlightTheme>,
+}
+
+impl CommandTheme {
+    fn matches(&self, other: &Self) -> bool {
+        self.foreground == other.foreground
+            && self.background == other.background
+            && Arc::ptr_eq(&self.highlight_theme, &other.highlight_theme)
+    }
+}
+
 struct CachedPanel {
     command: String,
-    displayed_command: String,
+    command_snapshot: TermSnapshot,
     command_rows: usize,
+    command_theme: Option<CommandTheme>,
     cols: usize,
     output_emulator: GridEmulator,
     output: Vec<u8>,
@@ -80,13 +95,14 @@ impl CachedPanel {
     }
 
     fn with_cols(command: &str, output: &str, cols: usize) -> Self {
-        let (displayed_command, command_rows) = clamp_command(command, cols);
+        let (command_snapshot, command_rows) = command_snapshot(command, cols, None);
         let output_emulator = GridEmulator::with_size(cols, MAX_ROWS - command_rows);
         let output_snapshot = output_emulator.snapshot();
         let mut panel = Self {
             command: command.to_string(),
-            displayed_command,
+            command_snapshot,
             command_rows,
+            command_theme: None,
             cols,
             output_emulator,
             output: Vec::new(),
@@ -102,7 +118,8 @@ impl CachedPanel {
     fn update(&mut self, command: &str, output: &str) {
         if self.command != command {
             self.command = command.to_string();
-            (self.displayed_command, self.command_rows) = clamp_command(command, self.cols);
+            (self.command_snapshot, self.command_rows) =
+                command_snapshot(command, self.cols, self.command_theme.as_ref());
             self.rebuild_output(output.as_bytes());
             return;
         }
@@ -127,7 +144,8 @@ impl CachedPanel {
             return false;
         }
         self.cols = cols;
-        (self.displayed_command, self.command_rows) = clamp_command(&self.command, cols);
+        (self.command_snapshot, self.command_rows) =
+            command_snapshot(&self.command, cols, self.command_theme.as_ref());
         let output = self.output.clone();
         self.rebuild_output(&output);
         true
@@ -164,30 +182,37 @@ impl CachedPanel {
         );
     }
 
-    fn render(&self, on_cols_change: Option<ColsChangeHandler>, cx: &App) -> AnyElement {
+    fn update_command_theme(&mut self, command_theme: CommandTheme) {
+        if self
+            .command_theme
+            .as_ref()
+            .is_some_and(|cached| cached.matches(&command_theme))
+        {
+            return;
+        }
+        (self.command_snapshot, self.command_rows) =
+            command_snapshot(&self.command, self.cols, Some(&command_theme));
+        self.command_theme = Some(command_theme);
+    }
+
+    fn render(&mut self, on_cols_change: Option<ColsChangeHandler>, cx: &App) -> AnyElement {
+        let command_theme = CommandTheme {
+            foreground: cx.theme().foreground,
+            background: cx.theme().background,
+            highlight_theme: cx.theme().highlight_theme.clone(),
+        };
+        self.update_command_theme(command_theme);
         let palette = TerminalPalette {
             foreground: cx.theme().foreground,
             background: cx.theme().background,
             selection: cx.theme().primary.opacity(0.28),
         };
-        let highlights = highlight::highlight_source(
-            &self.displayed_command,
-            "bash",
-            &cx.theme().highlight_theme,
+        let command = grid_element(
+            &self.command_snapshot,
+            self.command_rows,
+            self.cols,
+            palette,
         );
-        let command = h_flex()
-            .w_full()
-            .min_w_0()
-            .items_start()
-            .px_1()
-            .py_1()
-            .bg(cx.theme().tokens.colors.muted)
-            .font_family(cx.theme().mono_font_family.clone())
-            .text_size(px(13.))
-            .child(div().flex_none().text_color(cx.theme().primary).child("❯ "))
-            .child(div().flex_1().min_w_0().whitespace_normal().child(
-                StyledText::new(self.displayed_command.clone()).with_highlights(highlights),
-            ));
         let output = (self.output_rows > 0)
             .then(|| grid_element(&self.output_snapshot, self.output_rows, self.cols, palette));
         let rendered_cols = self.cols;
@@ -242,41 +267,93 @@ fn grid_element(
     .into_any_element()
 }
 
-fn clamp_command(command: &str, cols: usize) -> (String, usize) {
-    let line_cols = cols.saturating_sub(PROMPT_COLS).max(1);
-    let mut lines = vec![String::new()];
-    let mut truncated = false;
+fn command_snapshot(
+    command: &str,
+    cols: usize,
+    command_theme: Option<&CommandTheme>,
+) -> (TermSnapshot, usize) {
+    let emulator = GridEmulator::with_size(cols, MAX_COMMAND_ROWS);
+    let command = clamp_command(command, cols);
+    if let Some(command_theme) = command_theme {
+        emulator.feed(highlighted_command(&command, command_theme).as_bytes());
+    } else {
+        emulator.feed(command.as_bytes());
+    }
+    let mut snapshot = emulator.snapshot();
+    let rows = trim_snapshot(&mut snapshot, MAX_COMMAND_ROWS, 1);
+    (snapshot, rows)
+}
+
+fn highlighted_command(command: &str, theme: &CommandTheme) -> String {
+    let highlights = highlight::highlight_source(command, "bash", &theme.highlight_theme);
+    let mut highlighted = String::new();
+    let mut cursor = 0;
+    for (range, style) in highlights {
+        if range.start > cursor {
+            push_command_color(&mut highlighted, theme.foreground, theme.background);
+            highlighted.push_str(&command[cursor..range.start]);
+        }
+        push_command_color(
+            &mut highlighted,
+            style.color.unwrap_or(theme.foreground),
+            theme.background,
+        );
+        highlighted.push_str(&command[range.clone()]);
+        cursor = range.end;
+    }
+    if cursor < command.len() {
+        push_command_color(&mut highlighted, theme.foreground, theme.background);
+        highlighted.push_str(&command[cursor..]);
+    }
+    highlighted
+}
+
+fn push_command_color(command: &mut String, foreground: Hsla, background: Hsla) {
+    let (r, g, b) = faded_command_rgb(foreground, background);
+    let _ = write!(command, "\x1b[38;2;{r};{g};{b}m");
+}
+
+fn faded_command_rgb(foreground: Hsla, background: Hsla) -> (u8, u8, u8) {
+    let faded = Rgba::from(background).blend(Rgba::from(foreground).opacity(0.7));
+    (
+        (faded.r * 255.) as u8,
+        (faded.g * 255.) as u8,
+        (faded.b * 255.) as u8,
+    )
+}
+
+fn clamp_command(command: &str, cols: usize) -> String {
+    let mut result = String::new();
+    let mut row = 0;
+    let mut col = 0;
     let mut chars = command.chars().filter(|ch| *ch != '\r').peekable();
     while let Some(ch) = chars.next() {
         if ch == '\n' {
-            if lines.len() == MAX_COMMAND_ROWS {
-                truncated = chars.peek().is_some();
+            if row + 1 == MAX_COMMAND_ROWS && chars.peek().is_some() {
+                result.push('…');
                 break;
             }
-            lines.push(String::new());
+            result.push_str("\r\n");
+            row += 1;
+            col = 0;
             continue;
         }
-        if lines
-            .last()
-            .is_some_and(|line| line.chars().count() == line_cols)
-        {
-            if lines.len() == MAX_COMMAND_ROWS {
-                truncated = true;
-                break;
-            }
-            lines.push(String::new());
+        if col == cols {
+            row += 1;
+            col = 0;
         }
-        lines.last_mut().expect("command has one line").push(ch);
-    }
-    if truncated {
-        let last = lines.last_mut().expect("command has one line");
-        if last.chars().count() == line_cols {
-            last.pop();
+        if row == MAX_COMMAND_ROWS {
+            result.push('…');
+            break;
         }
-        last.push('…');
+        if row + 1 == MAX_COMMAND_ROWS && col + 1 == cols && chars.peek().is_some() {
+            result.push('…');
+            break;
+        }
+        result.push(ch);
+        col += 1;
     }
-    let rows = lines.len();
-    (lines.join("\n"), rows)
+    result
 }
 
 fn trim_snapshot(snapshot: &mut TermSnapshot, max_rows: usize, minimum: usize) -> usize {
@@ -313,6 +390,14 @@ mod tests {
         }
     }
 
+    fn dark_command_theme() -> CommandTheme {
+        CommandTheme {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            highlight_theme: HighlightTheme::default_dark(),
+        }
+    }
+
     #[test]
     fn ansi_output_uses_terminal_green() {
         let panel = CachedPanel::new("echo green", "\x1b[32mgreen\x1b[0m");
@@ -330,13 +415,53 @@ mod tests {
 
     #[test]
     fn command_is_clamped_to_four_rows() {
-        let panel = CachedPanel::new(
-            &"x".repeat((DEFAULT_COLS - PROMPT_COLS) * MAX_COMMAND_ROWS + 1),
-            "",
-        );
+        let mut panel = CachedPanel::new(&"x".repeat(DEFAULT_COLS * MAX_COMMAND_ROWS + 1), "");
+        panel.update_command_theme(dark_command_theme());
         assert_eq!(panel.command_rows, MAX_COMMAND_ROWS);
-        assert!(panel.displayed_command.ends_with('…'));
-        assert_eq!(panel.displayed_command.lines().count(), MAX_COMMAND_ROWS);
+        assert!(
+            panel
+                .command_snapshot
+                .cell_text(MAX_COMMAND_ROWS - 1, DEFAULT_COLS - 1)
+                .is_some_and(|text| text == "…")
+        );
+    }
+
+    #[test]
+    fn command_highlight_is_faded_truecolor_in_terminal_cells() {
+        let command = "if true; then echo yes; fi";
+        let command_theme = dark_command_theme();
+        let clamped = clamp_command(command, DEFAULT_COLS);
+        let raw_keyword_color =
+            highlight::highlight_source(&clamped, "bash", &command_theme.highlight_theme)
+                .into_iter()
+                .find_map(|(range, style)| {
+                    clamped[range]
+                        .contains("if")
+                        .then_some(style.color)
+                        .flatten()
+                })
+                .expect("bash keyword highlight color");
+        let expected = faded_command_rgb(raw_keyword_color, command_theme.background);
+
+        let mut panel = CachedPanel::new(command, "");
+        panel.update_command_theme(command_theme);
+        let paint = layout_grid(
+            &panel.command_snapshot,
+            palette(),
+            false,
+            None,
+            false,
+            false,
+        );
+        let command = paint
+            .text_runs
+            .iter()
+            .find(|run| run.text.contains("if"))
+            .expect("highlighted command run");
+        let AnsiColor::Spec(color) = command.style.fg else {
+            panic!("command keyword should use truecolor foreground");
+        };
+        assert_eq!((color.r, color.g, color.b), expected);
     }
 
     #[test]

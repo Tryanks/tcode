@@ -1070,11 +1070,17 @@ impl ChatView {
                     command, output, ..
                 }) => {
                     let panel_id = entry.id.clone();
-                    let on_cols_change = cx.listener(move |this, cols: &usize, _window, cx| {
-                        if this.command_panels.borrow_mut().resize(&panel_id, *cols) {
-                            this.list_state.remeasure_items(turn..turn + 1);
-                            cx.notify();
-                        }
+                    let on_cols_change = cx.listener(move |_this, cols: &usize, window, cx| {
+                        // Fires from `on_prepaint`, i.e. while `List` holds its state
+                        // borrowed; remeasuring inline would panic. Defer past the frame.
+                        let cols = *cols;
+                        let panel_id = panel_id.clone();
+                        cx.defer_in(window, move |this, _window, cx| {
+                            if this.command_panels.borrow_mut().resize(&panel_id, cols) {
+                                this.list_state.remeasure_items(turn..turn + 1);
+                                cx.notify();
+                            }
+                        });
                     });
                     Some(self.command_panels.borrow_mut().render(
                         &entry.id,
