@@ -139,7 +139,7 @@ impl RenderOnce for Popover {
                     .id("tcode-popover-content")
                     .occlude()
                     .when(appearance, |el| {
-                        el.p_3()
+                        el.p_1()
                             .rounded(crate::material::radius_overlay())
                             .bg(cx.theme().popover)
                             .border_1()

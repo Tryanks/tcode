@@ -192,24 +192,27 @@ impl ProviderModelPicker {
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
                 let glyph = tinted_glyph(&self.store, provider, profile_id, cx);
-                // Ghost, not outline: a quiet resting trigger (glyph + value +
-                // muted chevron) that only tints on hover, matching the
-                // composer's model picker. The "Add" variant stays an outlined
-                // action button.
-                Button::new(self.trigger_id).ghost().compact().child(
-                    h_flex()
-                        .w(px(230.))
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(13.))
-                        .child(glyph.small())
-                        .child(div().flex_1().min_w_0().child(display))
-                        .child(
-                            Icon::new(IconName::ChevronDown)
-                                .xsmall()
-                                .text_color(cx.theme().muted_foreground),
-                        ),
-                )
+                // A quiet resting trigger (glyph + value + muted chevron) that
+                // only tints on hover, matching the composer's model picker; the
+                // hairline marks it as a dropdown.
+                Button::new(self.trigger_id)
+                    .ghost()
+                    .outline()
+                    .compact()
+                    .child(
+                        h_flex()
+                            .w(px(230.))
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(13.))
+                            .child(glyph.small())
+                            .child(div().flex_1().min_w_0().child(display))
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .xsmall()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
+                    )
             }
         }
     }

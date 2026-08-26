@@ -828,15 +828,19 @@ impl DiffPanel {
         let panel = cx.entity();
         let session_selector = session.clone();
 
-        let trigger = Button::new("diff-turn-select").ghost().compact().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_size(px(13.))
-                .font_medium()
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-        );
+        let trigger = Button::new("diff-turn-select")
+            .ghost()
+            .outline()
+            .compact()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .font_medium()
+                    .child(label)
+                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+            );
 
         let selector = Popover::new("diff-turn-popover")
             .trigger(trigger)
@@ -1087,6 +1091,7 @@ impl DiffPanel {
             let session_base = session.clone();
             let trigger = Button::new("diff-base-select")
                 .ghost()
+                .outline()
                 .compact()
                 .label(current.clone())
                 .icon(IconName::ChevronDown);
