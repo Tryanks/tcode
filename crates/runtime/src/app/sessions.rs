@@ -966,6 +966,28 @@ impl AppState {
         }
     }
 
+    /// The reasoning effort last used with exactly this (provider, model),
+    /// from the most recently updated session that ran it (archived included:
+    /// memory outlives the thread). Model switches restore this instead of
+    /// resetting to the model's default. Keyed per model, so the remembered
+    /// value is always one the model accepts.
+    pub(super) fn remembered_effort(
+        &self,
+        provider: ProviderKind,
+        model: Option<&str>,
+    ) -> Option<OptionSelection> {
+        self.sessions
+            .iter()
+            .filter(|meta| meta.provider == provider && meta.model.as_deref() == model)
+            .max_by_key(|meta| meta.updated_at)
+            .and_then(|meta| {
+                meta.option_selections
+                    .iter()
+                    .find(|selection| selection.id == "reasoningEffort")
+                    .cloned()
+            })
+    }
+
     /// Switch the main area into a draft for `project_id` (rooted at `cwd`): an
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).

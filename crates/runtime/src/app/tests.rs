@@ -1266,6 +1266,50 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
 }
 
 #[test]
+fn model_switch_restores_last_effort_used_with_that_model() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-model-switch-effort-memory-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(|_| AppState::new(store));
+
+    state.host_update(cx, |state, cx| {
+        let mut sol = SessionMeta::new(
+            ProviderKind::Codex,
+            PathBuf::from("/tmp/sol"),
+            Some("gpt-5.6-sol".into()),
+        );
+        sol.project_id = Some("project-target".into());
+        sol.updated_at = 10;
+        sol.option_selections.push(OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("max"),
+        });
+        let mut fable = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/tmp/fable"),
+            Some("claude-fable-5".into()),
+        );
+        fable.project_id = Some("project-target".into());
+        fable.updated_at = 20;
+        state.sessions = vec![sol, fable];
+        state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
+
+        // Switching the draft to a model brings back the effort it last ran at,
+        // not the model's default.
+        state.set_active_model(ProviderKind::Codex, Some("gpt-5.6-sol".into()), None, cx);
+
+        let draft = state.residents.active.as_ref().unwrap();
+        assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(draft.meta.option_selections.len(), 1);
+        assert_eq!(draft.meta.option_selections[0].id, "reasoningEffort");
+        assert_eq!(
+            draft.meta.option_selections[0].value,
+            serde_json::json!("max")
+        );
+    });
+}
+
+#[test]
 fn draft_inherits_acp_agent_id_from_project_history() {
     let test_store = TestStore::new("tcode-draft-acp-defaults-test");
     let store = (*test_store).clone();
