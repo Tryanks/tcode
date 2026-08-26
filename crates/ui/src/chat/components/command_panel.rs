@@ -221,7 +221,7 @@ impl CachedPanel {
             .overflow_hidden()
             .bg(palette.background)
             .child(command)
-            .children(output.map(|output| div().mt_1().child(output)))
+            .children(output)
             .when_some(on_cols_change, |panel, on_cols_change| {
                 panel.on_prepaint(move |bounds, window, cx| {
                     let cols = (f32::from(bounds.size.width) / TERMINAL_CELL_WIDTH)
