@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use crate::icon::{Icon, IconName};
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::widgets::spinner::Spinner;
 use agent::TurnStatus;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ParentElement as _,
@@ -72,6 +74,9 @@ pub(crate) fn work_log(
     .on_click(on_toggle)
     .child(Icon::new(chevron(expanded)).size(px(12.)).text_color(muted))
     .child(capsule_label)
+    .when(running, |row| {
+        row.child(Spinner::new().xsmall().color(cx.theme().primary))
+    })
     .when(!running, |row| {
         // A settled run needs no badge; only a bad ending is called out.
         let failure = match outcome {

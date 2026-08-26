@@ -142,15 +142,17 @@ platform pays that inset.
   typographic step down from the 15px bubble to the muted activity summary.
 - Turn activity = collapsible "Work Log" sections: an expanded section starts
   with an 11px uppercase muted label, followed by activity rows (muted ✓ +
-  one-line summary; command/tool/subagent/reasoning); >2 rows → last 2 +
-  "+N previous log entries" expander. Once expanded, that row becomes "Hide N
-  previous log entries" with an upward chevron so the rows can be collapsed
-  again. A completed section's toggle summarizes only its real, nonzero events
+  one-line summary; command/tool/subagent/reasoning). While a turn is running,
+  the latest five activities remain directly visible. Once a sixth arrives,
+  only the older prefix is summarized by a collapsed Work Log row (with a
+  working spinner on its right); those five visible activities are excluded
+  from that row's counts. Assistant prose settles the run, folding every
+  activity in it under one summary row. A completed section's toggle summarizes
+  only its real, nonzero events
   (commands, unique edited files, tool calls, subagents, and compactions); an
   earlier section uses its own counts and the final section uses turn-wide
   counts, prefixed once with Chinese “共” to make the aggregate scope explicit.
-  A zero-event summary is omitted. The active section stays expanded with "•••
-  Working for Ns" ticking.
+  A zero-event summary is omitted.
 - Assistant markdown 15px, relaxed line-height, inline code chips (mono 13,
   muted bg, 4px radius). Streaming appends via push_str with
   follow-when-near-bottom.
