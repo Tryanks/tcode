@@ -31,6 +31,46 @@ pub(super) struct ResidencyInput<'a> {
     pub selection_drag_active: bool,
 }
 
+/// Turn-only superset of entries that can affect [`decide`].
+pub(super) struct ResidencyScope {
+    build_turns: Range<usize>,
+    keep_turns: Range<usize>,
+    tail_start: usize,
+    last_turn: Option<usize>,
+    stream_running: bool,
+}
+
+impl ResidencyScope {
+    pub(super) fn new(
+        turn_count: usize,
+        visible_turns: Range<usize>,
+        one_shot_turn_target: Option<usize>,
+        stream_running: bool,
+    ) -> Self {
+        let visible_turns = one_shot_turn_target
+            .filter(|turn| *turn < turn_count)
+            .map(|turn| turn..(turn + VIEWPORT_TURN_HINT).min(turn_count))
+            .unwrap_or(visible_turns);
+        Self {
+            build_turns: expand_turn_window(visible_turns.clone(), BUILD_MARGIN_TURNS, turn_count),
+            keep_turns: expand_turn_window(visible_turns, EVICT_MARGIN_TURNS, turn_count),
+            tail_start: turn_count.saturating_sub(TAIL_PIN_TURNS),
+            last_turn: turn_count.checked_sub(1),
+            stream_running,
+        }
+    }
+
+    pub(super) fn includes(&self, turn: usize, turn_running: bool) -> bool {
+        self.keep_turns.contains(&turn) || self.pinned(turn, turn_running)
+    }
+
+    fn pinned(&self, turn: usize, turn_running: bool) -> bool {
+        self.last_turn.is_some() && turn >= self.tail_start
+            || turn_running
+            || self.stream_running && self.last_turn == Some(turn)
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct ResidencyDecisions {
     pub build: HashSet<String>,
@@ -38,26 +78,19 @@ pub(super) struct ResidencyDecisions {
 }
 
 pub(super) fn decide(input: ResidencyInput<'_>) -> ResidencyDecisions {
-    let visible_turns = input
-        .one_shot_turn_target
-        .filter(|turn| *turn < input.turn_count)
-        .map(|turn| turn..(turn + VIEWPORT_TURN_HINT).min(input.turn_count))
-        .unwrap_or(input.visible_turns);
-    let build_turns =
-        expand_turn_window(visible_turns.clone(), BUILD_MARGIN_TURNS, input.turn_count);
-    let keep_turns = expand_turn_window(visible_turns, EVICT_MARGIN_TURNS, input.turn_count);
-    let tail_start = input.turn_count.saturating_sub(TAIL_PIN_TURNS);
-    let last_turn = input.turn_count.checked_sub(1);
-    let pinned = |entry: &MarkdownEntry| {
-        (input.turn_count > 0 && entry.turn >= tail_start)
-            || entry.turn_running
-            || (input.stream_running && last_turn == Some(entry.turn))
-    };
+    let scope = ResidencyScope::new(
+        input.turn_count,
+        input.visible_turns,
+        input.one_shot_turn_target,
+        input.stream_running,
+    );
 
     let build = input
         .entries
         .iter()
-        .filter(|entry| build_turns.contains(&entry.turn) || pinned(entry))
+        .filter(|entry| {
+            scope.build_turns.contains(&entry.turn) || scope.pinned(entry.turn, entry.turn_running)
+        })
         .map(|entry| entry.id.clone())
         .collect();
     let evict = if input.selection_drag_active {
@@ -66,7 +99,7 @@ pub(super) fn decide(input: ResidencyInput<'_>) -> ResidencyDecisions {
         let keep = input
             .entries
             .iter()
-            .filter(|entry| keep_turns.contains(&entry.turn) || pinned(entry))
+            .filter(|entry| scope.includes(entry.turn, entry.turn_running))
             .map(|entry| entry.id.as_str())
             .collect::<HashSet<_>>();
         input
@@ -99,7 +132,9 @@ fn expand_turn_window(window: Range<usize>, margin: usize, turn_count: usize) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{MarkdownEntry, ResidencyDecisions, ResidencyInput, decide, tail_turn_window};
+    use super::{
+        MarkdownEntry, ResidencyDecisions, ResidencyInput, ResidencyScope, decide, tail_turn_window,
+    };
     use std::collections::HashSet;
 
     #[test]
@@ -163,6 +198,45 @@ mod tests {
         assert!(decisions.build.contains("assistant-239"));
         assert!(!decisions.evict.contains("assistant-7"));
         assert!(decisions.evict.contains("assistant-100"));
+    }
+
+    #[test]
+    fn candidate_filter_preserves_decisions_with_distant_running_and_selection() {
+        let mut all_entries = entries(200);
+        for entry in &mut all_entries {
+            entry.turn_running = entry.turn == 5;
+        }
+        let residents = [
+            "assistant-5".to_string(),
+            "assistant-40".to_string(),
+            "assistant-100".to_string(),
+            "assistant-199".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let selection_participants = ["assistant-100".to_string()].into_iter().collect();
+        let scope = ResidencyScope::new(200, 40..48, None, true);
+        let filtered_entries = all_entries
+            .iter()
+            .filter(|entry| scope.includes(entry.turn, entry.turn_running))
+            .cloned()
+            .collect::<Vec<_>>();
+        let run = |entries: &[MarkdownEntry]| {
+            decide(ResidencyInput {
+                turn_count: 200,
+                visible_turns: 40..48,
+                one_shot_turn_target: None,
+                entries,
+                stream_running: true,
+                resident_ids: &residents,
+                selection_participants: &selection_participants,
+                selection_drag_active: false,
+            })
+        };
+
+        assert_eq!(run(&filtered_entries), run(&all_entries));
+        assert!(run(&filtered_entries).build.contains("assistant-5"));
+        assert!(!run(&filtered_entries).evict.contains("assistant-100"));
     }
 
     fn entries(turn_count: usize) -> Vec<MarkdownEntry> {

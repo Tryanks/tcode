@@ -18,6 +18,7 @@ mod view;
 use gpui::{App, KeyBinding};
 use gpui_base::input::{Copy, SelectAll};
 
+#[cfg(test)]
 pub(crate) use parse::parse;
 pub use state::MarkdownState;
 pub use view::MarkdownView;

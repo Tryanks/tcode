@@ -743,6 +743,165 @@ pub(crate) struct TurnListItem {
     pub(crate) content: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnIndexMeta {
+    start_ts: Option<u64>,
+    end_ts: Option<u64>,
+    running: bool,
+    timing: Option<tcode_core::session::TurnTiming>,
+    served_model: Option<String>,
+    cost_usd: Option<u64>,
+    status: Option<TurnStatus>,
+}
+
+impl From<&TurnMeta> for TurnIndexMeta {
+    fn from(turn: &TurnMeta) -> Self {
+        Self {
+            start_ts: turn.start_ts,
+            end_ts: turn.end_ts,
+            running: turn.running,
+            timing: turn.timing,
+            served_model: turn.served_model.clone(),
+            cost_usd: turn.cost_usd.map(f64::to_bits),
+            status: turn.status,
+        }
+    }
+}
+
+impl TurnIndexMeta {
+    fn matches(&self, turn: &TurnMeta) -> bool {
+        self.start_ts == turn.start_ts
+            && self.end_ts == turn.end_ts
+            && self.running == turn.running
+            && self.timing == turn.timing
+            && self.served_model.as_deref() == turn.served_model.as_deref()
+            && self.cost_usd == turn.cost_usd.map(f64::to_bits)
+            && self.status == turn.status
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProposedPlanIndex {
+    turn: usize,
+    item_id: String,
+    markdown: String,
+}
+
+/// Stateful input snapshot for reusing indexed turns across store notifications.
+#[derive(Debug, Default)]
+pub(crate) struct TurnIndexCache {
+    entries: Vec<Arc<TimelineEntry>>,
+    turns: Vec<TurnIndexMeta>,
+    proposed_plan: Option<ProposedPlanIndex>,
+    expanded: HashSet<String>,
+    #[cfg(test)]
+    reindexed_turns: usize,
+}
+
+impl TurnIndexCache {
+    pub(crate) fn sync(
+        &mut self,
+        items: &mut Vec<TurnListItem>,
+        turns: &[TurnMeta],
+        entries: &[Arc<TimelineEntry>],
+        proposed_plan: Option<(usize, &str, &str)>,
+        expanded: &HashSet<String>,
+        reset: bool,
+    ) -> ListSync {
+        let item_count = turns
+            .len()
+            .max(entries.last().map_or(0, |entry| entry.turn + 1));
+        let entry_divergence = self
+            .entries
+            .iter()
+            .zip(entries)
+            .position(|(old, new)| !Arc::ptr_eq(old, new))
+            .unwrap_or(self.entries.len().min(entries.len()));
+        let tail_replace = entries.len() == self.entries.len()
+            && entry_divergence.checked_add(1) == Some(entries.len());
+        let append = entry_divergence == self.entries.len() && entries.len() >= self.entries.len();
+        let proposed_plan_changed = match (&self.proposed_plan, proposed_plan) {
+            (None, None) => false,
+            (Some(old), Some((turn, item_id, markdown))) => {
+                old.turn != turn || old.item_id != item_id || old.markdown != markdown
+            }
+            _ => true,
+        };
+        let settings_changed = proposed_plan_changed || self.expanded != *expanded;
+        let must_reset = reset
+            || settings_changed
+            || entries.len() < self.entries.len()
+            || (!append && !tail_replace)
+            || turns.len() < self.turns.len();
+
+        let turn_divergence = self
+            .turns
+            .iter()
+            .zip(turns)
+            .position(|(old, new)| !old.matches(new))
+            .unwrap_or(self.turns.len().min(turns.len()));
+        let mut reindex_from = if must_reset { 0 } else { item_count };
+        if !must_reset {
+            if entry_divergence < entries.len() {
+                reindex_from = reindex_from.min(entries[entry_divergence].turn);
+            }
+            if entry_divergence < self.entries.len() {
+                reindex_from = reindex_from.min(self.entries[entry_divergence].turn);
+            }
+            if turn_divergence < turns.len() {
+                reindex_from = reindex_from.min(turn_divergence);
+            }
+        }
+
+        let suffix = if reindex_from == 0 {
+            index_turns(turns, entries, proposed_plan, expanded)
+        } else {
+            if reindex_from < item_count {
+                index_turns_from(turns, entries, proposed_plan, expanded, reindex_from)
+            } else {
+                Vec::new()
+            }
+        };
+        let sync = list_sync_with(items, item_count, reset, |index| {
+            if index < reindex_from {
+                &items[index]
+            } else {
+                &suffix[index - reindex_from]
+            }
+        });
+        items.truncate(reindex_from);
+        items.extend(suffix);
+        items.truncate(item_count);
+
+        #[cfg(test)]
+        {
+            self.reindexed_turns = item_count.saturating_sub(reindex_from);
+        }
+        self.entries.truncate(entry_divergence);
+        self.entries
+            .extend(entries[entry_divergence..].iter().cloned());
+        self.turns.truncate(turn_divergence);
+        self.turns
+            .extend(turns[turn_divergence..].iter().map(TurnIndexMeta::from));
+        if proposed_plan_changed {
+            self.proposed_plan = proposed_plan.map(|(turn, item_id, markdown)| ProposedPlanIndex {
+                turn,
+                item_id: item_id.to_owned(),
+                markdown: markdown.to_owned(),
+            });
+        }
+        if self.expanded != *expanded {
+            self.expanded.clone_from(expanded);
+        }
+        sync
+    }
+
+    #[cfg(test)]
+    fn reindexed_turns(&self) -> usize {
+        self.reindexed_turns
+    }
+}
+
 /// Mutation to apply to the persistent [`ListState`] after a timeline sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ListSync {
@@ -767,14 +926,25 @@ pub(crate) fn index_turns(
     proposed_plan: Option<(usize, &str, &str)>,
     expanded: &HashSet<String>,
 ) -> Vec<TurnListItem> {
+    index_turns_from(turns, entries, proposed_plan, expanded, 0)
+}
+
+fn index_turns_from(
+    turns: &[TurnMeta],
+    entries: &[Arc<TimelineEntry>],
+    proposed_plan: Option<(usize, &str, &str)>,
+    expanded: &HashSet<String>,
+    first_turn: usize,
+) -> Vec<TurnListItem> {
     debug_assert!(entries.windows(2).all(|pair| pair[0].turn <= pair[1].turn));
 
     let item_count = turns
         .len()
         .max(entries.last().map_or(0, |entry| entry.turn + 1));
-    let mut ranges = vec![entries.len()..entries.len(); item_count];
-    for (index, entry) in entries.iter().enumerate() {
-        let range = &mut ranges[entry.turn];
+    let first_entry = entries.partition_point(|entry| entry.turn < first_turn);
+    let mut ranges = vec![entries.len()..entries.len(); item_count.saturating_sub(first_turn)];
+    for (index, entry) in entries.iter().enumerate().skip(first_entry) {
+        let range = &mut ranges[entry.turn - first_turn];
         if range.start == entries.len() {
             range.start = index;
         }
@@ -784,7 +954,8 @@ pub(crate) fn index_turns(
     ranges
         .into_iter()
         .enumerate()
-        .map(|(index, entry_range)| {
+        .map(|(offset, entry_range)| {
+            let index = first_turn + offset;
             let mut identity = DefaultHasher::new();
             let mut content = DefaultHasher::new();
             for entry in &entries[entry_range.clone()] {
@@ -955,27 +1126,37 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn list_sync(
     old: &[TurnListItem],
     new: &[TurnListItem],
     session_changed: bool,
 ) -> ListSync {
-    let common = old.len().min(new.len());
+    list_sync_with(old, new.len(), session_changed, |index| &new[index])
+}
+
+fn list_sync_with<'a>(
+    old: &[TurnListItem],
+    new_len: usize,
+    session_changed: bool,
+    new_at: impl Fn(usize) -> &'a TurnListItem,
+) -> ListSync {
+    let common = old.len().min(new_len);
     let replaced = (0..common).any(|index| {
         let old = &old[index];
-        let new = &new[index];
+        let new = new_at(index);
         new.entry_count < old.entry_count
             || (new.entry_count == old.entry_count && new.identity != old.identity)
     });
-    if session_changed || new.len() < old.len() || replaced {
-        return ListSync::Reset { count: new.len() };
+    if session_changed || new_len < old.len() || replaced {
+        return ListSync::Reset { count: new_len };
     }
 
-    let append = (new.len() > old.len()).then_some(old.len()..new.len());
+    let append = (new_len > old.len()).then_some(old.len()..new_len);
     let mut remeasure = (0..common)
         .filter(|&index| {
-            old[index].entry_count != new[index].entry_count
-                || old[index].content != new[index].content
+            old[index].entry_count != new_at(index).entry_count
+                || old[index].content != new_at(index).content
         })
         .collect::<Vec<_>>();
     // The former last item gains an inter-turn gap when a new turn appears.
@@ -1213,6 +1394,105 @@ mod tests {
         assert_eq!(
             list_sync(&initial, &initial, true),
             ListSync::Reset { count: 1 }
+        );
+    }
+
+    #[test]
+    fn incremental_turn_index_matches_full_index_across_tail_and_reset_scenarios() {
+        let mut cache = TurnIndexCache::default();
+        let mut turns = vec![TurnMeta::default()];
+        let mut entries = vec![entry("user-0", user_item("go"))];
+        let mut expanded = HashSet::new();
+        let mut indexed = Vec::new();
+
+        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
+
+        // (a) Append an entry to the last turn.
+        entries.push(entry("assistant-0", assistant("working")));
+        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
+
+        // (b) Append a new turn.
+        turns.push(TurnMeta::default());
+        entries.push(at_turn(entry("user-1", user_item("next")), 1));
+        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
+
+        // (c) Replace the streaming tail Arc with updated content.
+        entries[2] = at_turn(entry("user-1", user_item("next, updated")), 1);
+        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
+
+        // (d) Toggle a disclosure expansion key.
+        entries[2] = at_turn(
+            entry(
+                "user-1",
+                EntryContent::Item(ItemContent::UserMessage {
+                    text: "context\nquestion".into(),
+                    context_len: Some(8),
+                    attachments: Vec::new(),
+                }),
+            ),
+            1,
+        );
+        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        expanded.insert("orchestrate-context-user-1".into());
+        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
+
+        // (e) A session switch resets unrelated cached inputs.
+        let switched_turns = vec![TurnMeta::default()];
+        let switched_entries = vec![entry("new-session", assistant("fresh"))];
+        let no_expanded = HashSet::new();
+        cache.sync(
+            &mut indexed,
+            &switched_turns,
+            &switched_entries,
+            None,
+            &no_expanded,
+            true,
+        );
+        assert_eq!(
+            indexed,
+            index_turns(&switched_turns, &switched_entries, None, &no_expanded)
+        );
+
+        // (f) Rewind/removal takes the full path and remains equivalent.
+        let empty_entries = Vec::new();
+        cache.sync(
+            &mut indexed,
+            &switched_turns,
+            &empty_entries,
+            None,
+            &no_expanded,
+            false,
+        );
+        assert_eq!(
+            indexed,
+            index_turns(&switched_turns, &empty_entries, None, &no_expanded)
+        );
+    }
+
+    #[test]
+    fn replacing_the_tail_of_a_200_turn_timeline_reindexes_one_turn() {
+        let turns = vec![TurnMeta::default(); 200];
+        let mut entries = (0..200)
+            .map(|turn| at_turn(entry(&format!("assistant-{turn}"), assistant("x")), turn))
+            .collect::<Vec<_>>();
+        let expanded = HashSet::new();
+        let mut cache = TurnIndexCache::default();
+        let mut incremental = Vec::new();
+        cache.sync(&mut incremental, &turns, &entries, None, &expanded, false);
+
+        entries[199] = at_turn(entry("assistant-199", assistant("streamed")), 199);
+        cache.sync(&mut incremental, &turns, &entries, None, &expanded, false);
+
+        assert_eq!(incremental, index_turns(&turns, &entries, None, &expanded));
+        assert!(
+            cache.reindexed_turns() <= 1,
+            "tail replacement reindexed {} turns",
+            cache.reindexed_turns()
         );
     }
 
