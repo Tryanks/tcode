@@ -200,7 +200,6 @@ impl Composer {
 
         let trigger = Button::new("model-picker")
             .ghost()
-            .outline()
             .compact()
             .h(px(28.))
             .rounded(crate::material::radius_input())
@@ -287,7 +286,6 @@ impl Composer {
 
         let trigger = Button::new("traits-chip")
             .ghost()
-            .outline()
             .compact()
             .h(px(28.))
             .rounded(crate::material::radius_chip())
@@ -408,7 +406,6 @@ impl Composer {
 
         let trigger = Button::new("permission-chip")
             .ghost()
-            .outline()
             .compact()
             .h(px(28.))
             .rounded(crate::material::radius_input())
