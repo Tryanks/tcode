@@ -372,8 +372,8 @@ impl Element for Inline {
                     }
                     MouseButton::Right => {
                         let pending =
-                            Self::link_and_range_for_position(&layout, &links, event.position)
-                                .map(|(range, link)| {
+                            Self::link_and_range_for_position(&layout, &links, event.position).map(
+                                |(range, link)| {
                                     let target = view.read(cx).resolve_link(&link.url);
                                     let text =
                                         text.get(range).map(SharedString::from).unwrap_or_default();
@@ -382,7 +382,8 @@ impl Element for Inline {
                                         text,
                                         raw_url: link.url,
                                     }
-                                });
+                                },
+                            );
                         view.update(cx, |state, cx| state.set_pending_context_link(pending, cx));
                     }
                     _ => {}

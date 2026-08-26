@@ -918,7 +918,12 @@ mod tests {
         });
 
         let link_pos = view.read_with(cx, |root, cx| {
-            let link = root.markdown.read(cx).list_state.bounds_for_item(1).unwrap();
+            let link = root
+                .markdown
+                .read(cx)
+                .list_state
+                .bounds_for_item(1)
+                .unwrap();
             point(px(5.), link.center().y)
         });
 
@@ -950,7 +955,12 @@ mod tests {
         });
 
         let link_pos = view.read_with(cx, |root, cx| {
-            let link = root.markdown.read(cx).list_state.bounds_for_item(1).unwrap();
+            let link = root
+                .markdown
+                .read(cx)
+                .list_state
+                .bounds_for_item(1)
+                .unwrap();
             point(px(5.), link.center().y)
         });
         cx.simulate_mouse_down(link_pos, MouseButton::Right, Modifiers::default());
