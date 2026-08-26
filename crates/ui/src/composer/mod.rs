@@ -1024,8 +1024,8 @@ impl Render for Composer {
             .w_full()
             .items_center()
             .px(px(crate::chat::CONTENT_MIN_PADDING))
-            .pt_2()
-            .pb_3()
+            .pt_1()
+            .pb_2()
             // Shift+Tab toggles Build ↔ Plan (S1 §4).
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
