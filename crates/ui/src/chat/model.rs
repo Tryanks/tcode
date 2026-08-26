@@ -530,7 +530,9 @@ pub(crate) fn diff_stats(diff: Option<&str>) -> (u32, u32) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveEditRow {
     pub(crate) path: String,
+    pub(crate) kind: agent::FileChangeKind,
     pub(crate) counts: Option<(u32, u32)>,
+    pub(crate) diff: Option<String>,
 }
 
 /// The `+N` / `-N` a live edit row should display, if any.
@@ -552,7 +554,9 @@ pub(crate) fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEdit
         .iter()
         .map(|change| LiveEditRow {
             path: tcode_services::user_files::relativize_to_workspace(&change.path, cwd),
+            kind: change.kind,
             counts: live_edit_counts(change.diff.as_deref()),
+            diff: change.diff.clone(),
         })
         .collect()
 }
@@ -1044,12 +1048,13 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             exit_code.hash(hash);
             std::mem::discriminant(status).hash(hash);
         }
-        EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
+        EntryContent::Item(ItemContent::FileChange { changes, status }) => {
             changes.len().hash(hash);
             for change in changes {
                 change.path.len().hash(hash);
                 change.diff.as_ref().map(String::len).hash(hash);
             }
+            std::mem::discriminant(status).hash(hash);
         }
         EntryContent::Item(ItemContent::ToolCall {
             name,
@@ -1505,6 +1510,38 @@ mod tests {
             *summary = Some("Found the event envelope".into());
         }
         let completed = index_turns(&turns, &completed_entries, None, &HashSet::new());
+        assert_eq!(
+            list_sync(&running, &completed, false),
+            ListSync::Incremental {
+                append: None,
+                remeasure: vec![0],
+            }
+        );
+    }
+
+    #[test]
+    fn file_change_status_change_remeasures_the_turn() {
+        let turns = vec![TurnMeta::default()];
+        let entries = vec![entry(
+            "edit",
+            EntryContent::Item(ItemContent::FileChange {
+                changes: vec![FileChange {
+                    path: "src/lib.rs".into(),
+                    kind: FileChangeKind::Modify,
+                    diff: Some(REAL_DIFF.into()),
+                }],
+                status: ItemStatus::InProgress,
+            }),
+        )];
+        let running = index_turns(&turns, &entries, None, &HashSet::new());
+        let mut completed_entries = entries;
+        if let EntryContent::Item(ItemContent::FileChange { status, .. }) =
+            &mut Arc::make_mut(&mut completed_entries[0]).content
+        {
+            *status = ItemStatus::Completed;
+        }
+        let completed = index_turns(&turns, &completed_entries, None, &HashSet::new());
+
         assert_eq!(
             list_sync(&running, &completed, false),
             ListSync::Incremental {
@@ -2001,11 +2038,15 @@ mod tests {
             vec![
                 LiveEditRow {
                     path: "src/foo.rs".into(),
+                    kind: FileChangeKind::Modify,
                     counts: Some((2, 1)),
+                    diff: Some(REAL_DIFF.into()),
                 },
                 LiveEditRow {
                     path: "src/bar.rs".into(),
+                    kind: FileChangeKind::Create,
                     counts: None,
+                    diff: Some(String::new()),
                 },
             ]
         );

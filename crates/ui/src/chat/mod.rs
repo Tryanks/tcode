@@ -68,65 +68,66 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 const TURN_GAP: f32 = 32.;
 /// Large documents are parsed away from the UI executor before becoming resident.
 const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
-/// Keep a just-finished live command visible long enough for its final output
-/// to register before the automatically expanded panel folds away.
-const AUTO_COMMAND_COLLAPSE_DELAY: Duration = Duration::from_millis(500);
+/// Keep a just-settled live activity visible long enough for its final output
+/// or rendered diff to register before the automatically expanded detail folds.
+const AUTO_ACTIVITY_COLLAPSE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AutoCommandExpansion {
-    Running,
+enum AutoActivityExpansion {
+    Expanded,
     CollapsePending(u64),
+    Collapsed,
 }
 
 #[derive(Debug, Default)]
-struct AutoCommandExpansions {
-    entries: HashMap<String, AutoCommandExpansion>,
+struct AutoActivityExpansions {
+    entries: HashMap<String, AutoActivityExpansion>,
     next_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AutoCommandObservation {
+struct AutoActivityObservation {
     expanded: bool,
     collapse_generation: Option<u64>,
 }
 
-impl AutoCommandExpansions {
-    fn observe(&mut self, key: &str, enabled: bool, running: bool) -> AutoCommandObservation {
+impl AutoActivityExpansions {
+    fn observe(&mut self, key: &str, enabled: bool, active: bool) -> AutoActivityObservation {
         if !enabled {
             self.entries.remove(key);
-            return AutoCommandObservation {
+            return AutoActivityObservation {
                 expanded: false,
                 collapse_generation: None,
             };
         }
 
-        if running {
+        if active {
             self.entries
-                .insert(key.to_string(), AutoCommandExpansion::Running);
-            return AutoCommandObservation {
+                .insert(key.to_string(), AutoActivityExpansion::Expanded);
+            return AutoActivityObservation {
                 expanded: true,
                 collapse_generation: None,
             };
         }
 
         match self.entries.get(key).copied() {
-            Some(AutoCommandExpansion::Running) => {
+            Some(AutoActivityExpansion::Expanded) | None => {
                 self.next_generation = self.next_generation.wrapping_add(1);
                 let generation = self.next_generation;
                 self.entries.insert(
                     key.to_string(),
-                    AutoCommandExpansion::CollapsePending(generation),
+                    AutoActivityExpansion::CollapsePending(generation),
                 );
-                AutoCommandObservation {
+                AutoActivityObservation {
                     expanded: true,
                     collapse_generation: Some(generation),
                 }
             }
-            Some(AutoCommandExpansion::CollapsePending(_)) => AutoCommandObservation {
+            Some(AutoActivityExpansion::CollapsePending(_)) => AutoActivityObservation {
                 expanded: true,
                 collapse_generation: None,
             },
-            None => AutoCommandObservation {
+            Some(AutoActivityExpansion::Collapsed) => AutoActivityObservation {
                 expanded: false,
                 collapse_generation: None,
             },
@@ -134,8 +135,9 @@ impl AutoCommandExpansions {
     }
 
     fn finish_collapse(&mut self, key: &str, generation: u64) -> bool {
-        if self.entries.get(key) == Some(&AutoCommandExpansion::CollapsePending(generation)) {
-            self.entries.remove(key);
+        if self.entries.get(key) == Some(&AutoActivityExpansion::CollapsePending(generation)) {
+            self.entries
+                .insert(key.to_string(), AutoActivityExpansion::Collapsed);
             true
         } else {
             false
@@ -169,7 +171,7 @@ pub struct ChatView {
     markdown_scroll_top: Option<usize>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
     expanded: HashSet<String>,
-    auto_command_expansions: AutoCommandExpansions,
+    auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
     session_key: Option<String>,
     /// Turn selected from a command-palette content hit.
@@ -238,7 +240,7 @@ impl ChatView {
             markdown_visible_turns: 0..0,
             markdown_scroll_top: None,
             expanded: HashSet::new(),
-            auto_command_expansions: AutoCommandExpansions::default(),
+            auto_activity_expansions: AutoActivityExpansions::default(),
             command_panels: RefCell::new(CommandPanelCache::new()),
             session_key: None,
             highlighted_turn: None,
@@ -260,7 +262,7 @@ impl ChatView {
         let session_changed = session_key != self.session_key;
         if session_changed {
             self.expanded.clear();
-            self.auto_command_expansions.clear();
+            self.auto_activity_expansions.clear();
         }
         let (running, list_sync) = self
             .workspace_store
@@ -612,6 +614,35 @@ impl ChatView {
         self.sync_markdown_states(cx);
         self.list_state.remeasure_items(turn..turn + 1);
         cx.notify();
+    }
+
+    fn auto_activity_expanded(
+        &mut self,
+        turn: usize,
+        key: &str,
+        enabled: bool,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let auto = self.auto_activity_expansions.observe(key, enabled, active);
+        if let Some(generation) = auto.collapse_generation {
+            let collapse_key = key.to_string();
+            let timer = cx.background_executor().timer(AUTO_ACTIVITY_COLLAPSE_DELAY);
+            cx.spawn(async move |this, cx| {
+                timer.await;
+                let _ = this.update(cx, |this, cx| {
+                    if this
+                        .auto_activity_expansions
+                        .finish_collapse(&collapse_key, generation)
+                    {
+                        this.list_state.remeasure_items(turn..turn + 1);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        auto.expanded
     }
 
     // -- turn rendering -----------------------------------------------------
@@ -1051,7 +1082,7 @@ impl ChatView {
                 format_span((activity_run_duration_ms(folded, turn, is_last) + 500) / 1000);
             let outcome = work_log_outcome(turn, folded, is_last);
             let rows = if expanded {
-                self.compose_work_log_rows(folded, cwd, live_reasoning_id, cx)
+                self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, cx)
             } else {
                 Vec::new()
             };
@@ -1080,7 +1111,13 @@ impl ChatView {
                 v_flex()
                     .w_full()
                     .gap_1()
-                    .children(self.compose_work_log_rows(visible, cwd, live_reasoning_id, cx)),
+                    .children(self.compose_work_log_rows(
+                        visible,
+                        cwd,
+                        live_reasoning_id,
+                        running,
+                        cx,
+                    )),
             );
         }
 
@@ -1092,25 +1129,39 @@ impl ChatView {
         activities: &[&TimelineEntry],
         cwd: &Path,
         live_reasoning_id: Option<&str>,
+        auto_expand: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
-        for entry in activities {
-            if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content {
-                for row in live_edit_rows(changes, cwd) {
-                    rows.push(
-                        components::changed_files::file_edit_row(
-                            &row,
-                            &components::changed_files::FileEditRowStyle::from_theme(cx),
-                        )
-                        .into_any_element(),
-                    );
+        for (activity_index, entry) in activities.iter().enumerate() {
+            let latest = activity_index + 1 == activities.len();
+            if let EntryContent::Item(ItemContent::FileChange { changes, status }) = &entry.content
+            {
+                let turn = entry.turn;
+                for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
+                    let key = format!("activity-{}-file-{file_index}", entry.id);
+                    let enabled = auto_expand && row.counts.is_some();
+                    let active = latest && *status == ItemStatus::InProgress;
+                    let expanded = self.auto_activity_expanded(turn, &key, enabled, active, cx)
+                        || self.expanded.contains(&key);
+                    let toggle_key = key.clone();
+                    rows.push(components::changed_files::file_edit_row(
+                        &key,
+                        row,
+                        expanded,
+                        cx.listener(move |this, _, _, cx| {
+                            this.toggle_expanded(turn, &toggle_key, cx);
+                        }),
+                        cx,
+                    ));
                 }
             } else {
                 rows.push(self.compose_activity_row(
                     entry,
                     false,
                     live_reasoning_id == Some(entry.id.as_str()),
+                    auto_expand,
+                    latest,
                     cx,
                 ));
             }
@@ -1124,6 +1175,8 @@ impl ChatView {
         entry: &TimelineEntry,
         compact: bool,
         live_reasoning: bool,
+        auto_expand: bool,
+        latest: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if matches!(
@@ -1140,28 +1193,11 @@ impl ChatView {
             }
             _ => (false, false),
         };
-        let auto_enabled = is_command && self.workspace_store.read(cx).live_command_panel();
-        let auto = self
-            .auto_command_expansions
-            .observe(&key, auto_enabled, running);
-        if let Some(generation) = auto.collapse_generation {
-            let collapse_key = key.clone();
-            let timer = cx.background_executor().timer(AUTO_COMMAND_COLLAPSE_DELAY);
-            cx.spawn(async move |this, cx| {
-                timer.await;
-                let _ = this.update(cx, |this, cx| {
-                    if this
-                        .auto_command_expansions
-                        .finish_collapse(&collapse_key, generation)
-                    {
-                        this.list_state.remeasure_items(turn..turn + 1);
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
-        let expanded = auto.expanded || self.expanded.contains(&key);
+        let auto_enabled =
+            auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
+        let auto_expanded =
+            self.auto_activity_expanded(turn, &key, auto_enabled, latest && running, cx);
+        let expanded = auto_expanded || self.expanded.contains(&key);
         let command_detail = if expanded {
             match &entry.content {
                 EntryContent::Item(ItemContent::CommandExecution {
@@ -2216,7 +2252,7 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_COMMAND_COLLAPSE_DELAY, AutoCommandExpansions,
+        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_COLLAPSE_DELAY, AutoActivityExpansions,
         ChatView, ResidencyScope, markdown_entries_for_residency,
     };
     use crate::store::WorkspaceStore;
@@ -2232,8 +2268,8 @@ mod tests {
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn completed_live_command_stays_expanded_until_delayed_collapse() {
-        let mut expansions = AutoCommandExpansions::default();
+    fn settled_live_activity_stays_expanded_until_delayed_collapse() {
+        let mut expansions = AutoActivityExpansions::default();
 
         let running = expansions.observe("activity-command", true, true);
         assert!(running.expanded);
@@ -2251,14 +2287,27 @@ mod tests {
         assert!(expansions.finish_collapse("activity-command", generation));
         assert!(!expansions.observe("activity-command", true, false).expanded);
         assert_eq!(
-            AUTO_COMMAND_COLLAPSE_DELAY,
+            AUTO_ACTIVITY_COLLAPSE_DELAY,
             std::time::Duration::from_millis(500)
         );
     }
 
     #[test]
-    fn restarted_command_cancels_its_stale_delayed_collapse() {
-        let mut expansions = AutoCommandExpansions::default();
+    fn activity_first_seen_settled_still_opens_for_the_collapse_delay() {
+        let mut expansions = AutoActivityExpansions::default();
+        let settled = expansions.observe("activity-command", true, false);
+
+        assert!(settled.expanded);
+        let generation = settled
+            .collapse_generation
+            .expect("first observation should schedule a collapse");
+        assert!(expansions.finish_collapse("activity-command", generation));
+        assert!(!expansions.observe("activity-command", true, false).expanded);
+    }
+
+    #[test]
+    fn reactivated_activity_cancels_its_stale_delayed_collapse() {
+        let mut expansions = AutoActivityExpansions::default();
         expansions.observe("activity-command", true, true);
         let generation = expansions
             .observe("activity-command", true, false)
