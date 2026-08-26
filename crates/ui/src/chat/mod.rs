@@ -29,7 +29,7 @@ use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{
-    EntryContent, OrchestrateCallback, TimelineEntry, parse_orchestrate_callback,
+    EntryContent, OrchestrateCallback, Timeline, TimelineEntry, parse_orchestrate_callback,
 };
 use tcode_core::ui::RightTab;
 
@@ -47,15 +47,15 @@ use crate::window_state::WindowState;
 use self::components::assistant::MdState;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
-    ListSync, Segment, TurnListItem, TurnRenderArgs, activity_run_duration_ms, auto_expanded,
-    displayed_error_text, divergent_served_model, format_span, index_turns, latest_message_ids,
-    list_sync, live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
+    ListSync, Segment, TurnIndexCache, TurnListItem, TurnRenderArgs, activity_run_duration_ms,
+    auto_expanded, displayed_error_text, divergent_served_model, format_span, latest_message_ids,
+    live_activity_segment, live_edit_rows, manual_override_key, plain_text_as_markdown,
     segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
     work_log_auto_expands, work_log_capsule_label, work_log_counts, work_log_outcome,
     work_log_row_entries,
 };
 use self::residency::{
-    MarkdownEntry, ResidencyInput, decide, tail_turn_window, viewport_turn_window,
+    MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_turn_window, viewport_turn_window,
 };
 pub(crate) use crate::material::{
     CHAT_CONTENT_MAX_WIDTH as CONTENT_MAX_WIDTH, CHAT_CONTENT_MIN_PADDING as CONTENT_MIN_PADDING,
@@ -74,6 +74,7 @@ pub struct ChatView {
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
+    turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
     markdown_visible_turns: Range<usize>,
     markdown_scroll_top: Option<usize>,
@@ -138,6 +139,7 @@ impl ChatView {
             terminal_drawer,
             list_state,
             turn_items: Vec::new(),
+            turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
             markdown_visible_turns: 0..0,
             markdown_scroll_top: None,
@@ -158,11 +160,16 @@ impl ChatView {
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
         let session_key = self.workspace_store.read(cx).active_session_id();
-        let (running, turn_items) = self
+        let session_changed = session_key != self.session_key;
+        if session_changed {
+            self.expanded.clear();
+        }
+        let (running, list_sync) = self
             .workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
-                let turn_items = index_turns(
+                let list_sync = self.turn_index_cache.sync(
+                    &mut self.turn_items,
                     &timeline.turns,
                     &timeline.entries,
                     timeline
@@ -170,26 +177,33 @@ impl ChatView {
                         .as_ref()
                         .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
                     &self.expanded,
+                    session_changed,
                 );
-                (timeline.turn_running, turn_items)
+                (timeline.turn_running, list_sync)
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                let list_sync = self.turn_index_cache.sync(
+                    &mut self.turn_items,
+                    &[],
+                    &[],
+                    None,
+                    &self.expanded,
+                    session_changed,
+                );
+                (false, list_sync)
+            });
 
-        let session_changed = session_key != self.session_key;
         let requested_turn = session_key
             .as_deref()
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
-        let list_sync = list_sync(&self.turn_items, &turn_items, session_changed);
         if session_changed {
             self.md_states.clear();
-            self.expanded.clear();
             self.command_panels.borrow_mut().clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
-            self.markdown_visible_turns = tail_turn_window(turn_items.len());
-            self.markdown_scroll_top = Some(turn_items.len());
+            self.markdown_visible_turns = tail_turn_window(self.turn_items.len());
+            self.markdown_scroll_top = Some(self.turn_items.len());
         }
-        self.turn_items = turn_items;
 
         match list_sync {
             ListSync::None => {}
@@ -278,34 +292,13 @@ impl ChatView {
             .workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
-                let mut entries = Vec::new();
-                for entry in &timeline.entries {
-                    let markdown_bearing = matches!(
-                        entry.content,
-                        EntryContent::Item(ItemContent::AssistantMessage { .. })
-                            | EntryContent::Item(ItemContent::Reasoning { .. })
-                    ) || user_content(&entry.content).is_some();
-                    if markdown_bearing {
-                        entries.push(MarkdownEntry {
-                            id: entry.id.clone(),
-                            turn: entry.turn,
-                            turn_running: timeline
-                                .turns
-                                .get(entry.turn)
-                                .is_some_and(|turn| turn.running),
-                        });
-                    }
-                }
-                if let Some(plan) = &timeline.proposed_plan {
-                    entries.push(MarkdownEntry {
-                        id: format!("plan:{}", plan.item_id),
-                        turn: plan.turn,
-                        turn_running: timeline
-                            .turns
-                            .get(plan.turn)
-                            .is_some_and(|turn| turn.running),
-                    });
-                }
+                let scope = ResidencyScope::new(
+                    turn_count,
+                    self.markdown_visible_turns.clone(),
+                    one_shot_turn_target,
+                    timeline.turn_running,
+                );
+                let entries = markdown_entries_for_residency(timeline, &scope).entries;
                 let decisions = decide(ResidencyInput {
                     turn_count,
                     visible_turns: self.markdown_visible_turns.clone(),
@@ -1711,6 +1704,58 @@ impl ChatView {
     }
 }
 
+struct ResidencyMarkdownEntries {
+    entries: Vec<MarkdownEntry>,
+    #[cfg(test)]
+    constructions: usize,
+}
+
+fn markdown_entries_for_residency(
+    timeline: &Timeline,
+    scope: &ResidencyScope,
+) -> ResidencyMarkdownEntries {
+    let mut entries = Vec::new();
+    for entry in &timeline.entries {
+        let turn_running = timeline
+            .turns
+            .get(entry.turn)
+            .is_some_and(|turn| turn.running);
+        if !scope.includes(entry.turn, turn_running) {
+            continue;
+        }
+        let markdown_bearing = matches!(
+            entry.content,
+            EntryContent::Item(ItemContent::AssistantMessage { .. })
+                | EntryContent::Item(ItemContent::Reasoning { .. })
+        ) || user_content(&entry.content).is_some();
+        if markdown_bearing {
+            entries.push(MarkdownEntry {
+                id: entry.id.clone(),
+                turn: entry.turn,
+                turn_running,
+            });
+        }
+    }
+    if let Some(plan) = &timeline.proposed_plan {
+        let turn_running = timeline
+            .turns
+            .get(plan.turn)
+            .is_some_and(|turn| turn.running);
+        if scope.includes(plan.turn, turn_running) {
+            entries.push(MarkdownEntry {
+                id: format!("plan:{}", plan.item_id),
+                turn: plan.turn,
+                turn_running,
+            });
+        }
+    }
+    ResidencyMarkdownEntries {
+        #[cfg(test)]
+        constructions: entries.len(),
+        entries,
+    }
+}
+
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_markdown_scroll_position(cx);
@@ -1936,7 +1981,7 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::ChatView;
+    use super::{ChatView, ResidencyScope, markdown_entries_for_residency};
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
     use agent::ItemContent;
@@ -1948,6 +1993,21 @@ mod tests {
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry, TurnMeta};
 
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn residency_markdown_entry_allocations_are_bounded_by_candidate_windows() {
+        let mut timeline = synthetic_markdown_timeline(200);
+        timeline.turns[5].running = true;
+        timeline.turn_running = true;
+        let scope = ResidencyScope::new(200, 40..48, None, true);
+
+        let candidates = markdown_entries_for_residency(&timeline, &scope);
+
+        assert_eq!(candidates.constructions, 177);
+        assert!(candidates.constructions < timeline.entries.len());
+        assert!(candidates.entries.iter().any(|entry| entry.turn == 5));
+        assert!(candidates.entries.iter().any(|entry| entry.turn == 199));
+    }
 
     #[gpui::test]
     fn chat_view_applies_markdown_residency_decisions(cx: &mut TestAppContext) {
