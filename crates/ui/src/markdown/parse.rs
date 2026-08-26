@@ -9,14 +9,41 @@ use super::nodes::{
     TableCell, TableRow, TextMark,
 };
 
+pub(crate) struct ParsedDocument {
+    pub(crate) root: BlockNode,
+    pub(crate) root_starts: Option<Vec<usize>>,
+}
+
+#[cfg(test)]
 pub(crate) fn parse(source: &str) -> BlockNode {
+    parse_document(source).root
+}
+
+pub(crate) fn parse_document(source: &str) -> ParsedDocument {
     let parser = rushdown::parser::Parser::with_extensions(
         rushdown::parser::Options::default(),
         rushdown::parser::gfm(rushdown::parser::GfmOptions::default()),
     );
     let mut reader = rushdown::text::BasicReader::new(source);
     let (arena, doc_ref) = parser.parse(&mut reader);
-    block_node(&arena, doc_ref, source, None).unwrap_or(BlockNode::Unknown)
+    let mut root_starts = Vec::new();
+    let mut positions_available = true;
+    let children = arena[doc_ref]
+        .children(&arena)
+        .filter_map(|child| {
+            let block = block_node(&arena, child, source, None)?;
+            if let Some(pos) = arena[child].pos() {
+                root_starts.push(pos);
+            } else {
+                positions_available = false;
+            }
+            Some(block)
+        })
+        .collect();
+    ParsedDocument {
+        root: BlockNode::Root { children },
+        root_starts: positions_available.then_some(root_starts),
+    }
 }
 
 fn block_node(
