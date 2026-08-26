@@ -239,8 +239,9 @@ fn activity_detail(
     let detail = match &entry.content {
         EntryContent::Item(ItemContent::CommandExecution {
             command, output, ..
-        }) => command_detail
-            .unwrap_or_else(|| CommandPanelCache::new().render(&entry.id, command, output, cx)),
+        }) => command_detail.unwrap_or_else(|| {
+            CommandPanelCache::new().render(&entry.id, command, output, None, cx)
+        }),
         EntryContent::Item(ItemContent::ToolCall { input, output, .. }) => {
             let mut input_brief = tool_brief(input);
             if input_brief.is_empty() {
