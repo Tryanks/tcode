@@ -360,23 +360,33 @@ impl Element for Inline {
             let text = self.text.clone();
             let view = self.view.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
-                if !phase.bubble()
-                    || event.button != MouseButton::Right
-                    || !hitbox.is_hovered(window)
-                {
+                if !phase.bubble() || !hitbox.is_hovered(window) {
                     return;
                 }
-                let pending = Self::link_and_range_for_position(&layout, &links, event.position)
-                    .map(|(range, link)| {
-                        let target = view.read(cx).resolve_link(&link.url);
-                        let text = text.get(range).map(SharedString::from).unwrap_or_default();
-                        PendingLinkMenu {
-                            target,
-                            text,
-                            raw_url: link.url,
-                        }
-                    });
-                view.update(cx, |state, cx| state.set_pending_context_link(pending, cx));
+                match event.button {
+                    MouseButton::Left => {
+                        let origin = Self::link_for_position(&layout, &links, event.position)
+                            .is_some()
+                            .then_some(event.position);
+                        view.update(cx, |state, _| state.link_press_origin = origin);
+                    }
+                    MouseButton::Right => {
+                        let pending =
+                            Self::link_and_range_for_position(&layout, &links, event.position)
+                                .map(|(range, link)| {
+                                    let target = view.read(cx).resolve_link(&link.url);
+                                    let text =
+                                        text.get(range).map(SharedString::from).unwrap_or_default();
+                                    PendingLinkMenu {
+                                        target,
+                                        text,
+                                        raw_url: link.url,
+                                    }
+                                });
+                        view.update(cx, |state, cx| state.set_pending_context_link(pending, cx));
+                    }
+                    _ => {}
+                }
             }
         });
 
@@ -389,8 +399,19 @@ impl Element for Inline {
                 if !phase.bubble()
                     || event.button != MouseButton::Left
                     || !hitbox.is_hovered(window)
-                    || gpui_base::TextSelection::has_selection(window, cx)
                 {
+                    return;
+                }
+                let Some(origin) = view.update(cx, |state, _| state.link_press_origin.take())
+                else {
+                    return;
+                };
+                // A press-and-release on the link is a click even with the
+                // pixel of jitter a real mouse adds; farther apart is a
+                // drag-selection. click_count 1 keeps a double-click (which
+                // selects the word) from opening the link a second time.
+                let moved = event.position - origin;
+                if event.click_count != 1 || moved.x.abs() > px(3.) || moved.y.abs() > px(3.) {
                     return;
                 }
                 if let Some(link) = Self::link_for_position(&layout, &links, event.position) {

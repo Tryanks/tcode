@@ -907,6 +907,67 @@ mod tests {
     }
 
     #[gpui::test]
+    fn link_click_survives_pixel_jitter_but_not_a_drag(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (view, cx) = cx.add_window_view(|_, cx| RightClickRoot::new(cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let link_pos = view.read_with(cx, |root, cx| {
+            let link = root.markdown.read(cx).list_state.bounds_for_item(1).unwrap();
+            point(px(5.), link.center().y)
+        });
+
+        // A drag that starts on the link is a selection, not a click.
+        let far = point(link_pos.x + px(60.), link_pos.y);
+        cx.simulate_mouse_down(link_pos, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(far, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(far, MouseButton::Left, Modifiers::default());
+        assert_eq!(cx.opened_url(), None, "a drag must not open the link");
+
+        // A press-and-release with a pixel of jitter is still a click.
+        let jittered = point(link_pos.x + px(1.), link_pos.y + px(1.));
+        cx.simulate_mouse_down(link_pos, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(jittered, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(jittered, MouseButton::Left, Modifiers::default());
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+    }
+
+    #[gpui::test]
+    fn link_context_menu_action_opens_the_url(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        cx.update(crate::widgets::menu::init);
+        let (view, cx) = cx.add_window_view(|_, cx| RightClickRoot::new(cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let link_pos = view.read_with(cx, |root, cx| {
+            let link = root.markdown.read(cx).list_state.bounds_for_item(1).unwrap();
+            point(px(5.), link.center().y)
+        });
+        cx.simulate_mouse_down(link_pos, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(link_pos, MouseButton::Right, Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // Select "Open Link" and confirm; the action must dispatch through
+        // the trigger's ancestor chain to the OpenLink handler.
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+    }
+
+    #[gpui::test]
     fn right_click_off_link_is_swallowed_so_no_menu_opens(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);

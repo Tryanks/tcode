@@ -8,7 +8,7 @@ use std::{
 
 use gpui::{
     Bounds, Context, FocusHandle, IntoElement, ListAlignment, ListState, ParentElement as _,
-    Pixels, Render, SharedString, Styled as _, Window, px,
+    Pixels, Point, Render, SharedString, Styled as _, Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -35,6 +35,9 @@ pub struct MarkdownState {
     pub(super) base_dir: Option<PathBuf>,
     link_targets: LinkTargetCache,
     pub(super) pending_context_link: Option<PendingLinkMenu>,
+    /// Window position of the last left mouse-down that landed on a link;
+    /// a mouse-up nearby is a click, anything farther is a drag-selection.
+    pub(super) link_press_origin: Option<Point<Pixels>>,
     pub(super) is_selecting: bool,
     text: String,
     parsed: BlockNode,
@@ -58,6 +61,7 @@ impl MarkdownState {
             base_dir: None,
             link_targets: LinkTargetCache::default(),
             pending_context_link: None,
+            link_press_origin: None,
             is_selecting: false,
             text: text.to_string(),
             parsed,
