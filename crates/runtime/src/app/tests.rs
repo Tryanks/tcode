@@ -1059,6 +1059,74 @@ fn orchestrate_turn_records_the_context_split_on_the_user_message() {
 }
 
 #[test]
+fn orchestrate_title_generation_uses_only_the_users_request() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-title-source-test");
+    let scripted_title = scripted_provider(ProviderKind::Codex);
+    let title_commands = scripted_title.commands.clone();
+    let title_events = scripted_title.events.clone();
+    let state = cx.new_entity(|_| {
+        let mut state = AppState::new((*test_store).clone());
+        state.ai_title_generation_enabled = true;
+        state.set_provider_launcher_for_test(scripted_title.launcher);
+        state
+    });
+    let (commands, receiver) = smol::channel::unbounded();
+
+    state.host_update(cx, |state, cx| {
+        let mut active = live_session(ProviderKind::Codex, commands);
+        active.meta.id = "orchestrator-title".into();
+        active.meta.orchestrate_enabled = true;
+        active.live_model = active.meta.model.clone();
+        active.live_approval_mode = Some(active.meta.approval_mode);
+        state.residents.active = Some(active);
+
+        state.orchestrate_turn("执行某某任务".into(), Vec::new(), cx);
+        let delivery_id = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+            other => panic!("expected orchestrator SendTurn, got {other:?}"),
+        };
+        state.on_event(
+            "orchestrator-title",
+            AgentEvent::TurnAccepted { delivery_id },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let title_prompt = match title_commands.try_recv() {
+        Ok(SessionCommand::SendTurn { text, .. }) => text,
+        other => panic!("expected title-generation SendTurn, got {other:?}"),
+    };
+    assert_eq!(
+        title_prompt,
+        title_generation_prompt("执行某某任务", false),
+        "the hidden orchestrate prefix must not be sent to the title model"
+    );
+
+    title_events
+        .try_send(AgentEvent::ItemCompleted(ThreadItem {
+            id: "title".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "执行某某任务".into(),
+            },
+        }))
+        .unwrap();
+    title_events
+        .try_send(AgentEvent::TurnCompleted {
+            turn_id: "title-turn".into(),
+            status: TurnStatus::Completed,
+            usage: None,
+        })
+        .unwrap();
+    title_events
+        .try_send(AgentEvent::SessionClosed { reason: None })
+        .unwrap();
+    cx.run_until_parked();
+}
+
+#[test]
 fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let mut settings = OrchestrateSettings::default();
     let mut custom_profile = settings.child_models[0].clone();
