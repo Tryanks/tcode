@@ -193,7 +193,9 @@ settings:
   back: "Back"
   restore: "Restore defaults"
   restore_title: "Restore default settings?"
-  restore_description: "Reset language, theme, thread-title model, diff, provider, and orchestrate settings to their defaults. Your projects and conversations will not be changed."
+  restore_description: "Reset language, theme, thread-title model, diff, and orchestrate settings to their defaults. Your provider configuration, installed agents, projects, and conversations are kept."
+  reset_item: "Restore default"
+  reset_all: "Restore all defaults"
   cancel: "Cancel"
   save: "Save"
   general_section: "GENERAL"
@@ -202,6 +204,7 @@ settings:
   workspace_section: "WORKSPACE"
   providers_section: "PROVIDERS"
   orchestrate_section: "ORCHESTRATE"
+  reset_section: "RESET"
   language:
     title: "Language"
     description: "Choose the language used across tcode."
@@ -295,7 +298,6 @@ permissions:
     name: "Screen Recording"
     why: "Capture window screenshots for computer-use observations."
 orchestrate:
-  restore_default: "Restore default"
   child_approval:
     title: "Child approvals"
     description: "Who answers when a dispatched child thread hits a permission gate. Decision-layer routes the request to the lead model, which answers with the approve tool; Always allow auto-approves for the session; Manual waits for you to answer in the child thread."
