@@ -1120,9 +1120,7 @@ impl OrchestrateSettingsPanel {
                                 let popover = cx.entity();
                                 let selected = match (value.as_deref(), current.as_deref()) {
                                     (None, None) => true,
-                                    (Some(own), Some(current)) => {
-                                        own.eq_ignore_ascii_case(current)
-                                    }
+                                    (Some(own), Some(current)) => own.eq_ignore_ascii_case(current),
                                     _ => false,
                                 };
                                 h_flex()
