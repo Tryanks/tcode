@@ -1063,21 +1063,32 @@ impl ChatView {
                 })
             );
         let expanded = automatic || self.expanded.contains(&key);
+        let turn = entry.turn;
         let command_detail = if expanded {
             match &entry.content {
                 EntryContent::Item(ItemContent::CommandExecution {
                     command, output, ..
-                }) => Some(
-                    self.command_panels
-                        .borrow_mut()
-                        .render(&entry.id, command, output, cx),
-                ),
+                }) => {
+                    let panel_id = entry.id.clone();
+                    let on_cols_change = cx.listener(move |this, cols: &usize, _window, cx| {
+                        if this.command_panels.borrow_mut().resize(&panel_id, *cols) {
+                            this.list_state.remeasure_items(turn..turn + 1);
+                            cx.notify();
+                        }
+                    });
+                    Some(self.command_panels.borrow_mut().render(
+                        &entry.id,
+                        command,
+                        output,
+                        Some(Box::new(on_cols_change)),
+                        cx,
+                    ))
+                }
                 _ => None,
             }
         } else {
             None
         };
-        let turn = entry.turn;
         let click_key = key;
         components::activity::activity_row_with_command_detail(
             entry,
