@@ -336,7 +336,6 @@ orchestrate:
     enable: "允许 /orchestrate 向这个模型派发任务"
     disable: "暂停派发，但保留这个模型的定义"
     effort_label: "派发推理强度"
-    effort_placeholder: "模型默认"
     effort_default: "模型默认"
     description_placeholder: "定义该模型的评分、优势、适合任务、注意事项、推荐 effort 和升级定位…"
     remove: "删除这个子模型配置"
