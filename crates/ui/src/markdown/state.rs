@@ -41,16 +41,21 @@ pub struct MarkdownState {
     pub(super) is_selecting: bool,
     text: String,
     parsed: BlockNode,
+    root_block_starts: Option<Vec<usize>>,
+    has_potential_link_reference_definition: bool,
     pub(super) list_state: ListState,
     measured_content_height: Option<Pixels>,
     selection_revision: usize,
     pub(super) selection_adapter: MarkdownSelectionAdapter,
+    #[cfg(test)]
+    last_reparse_bytes: usize,
 }
 
 impl MarkdownState {
     /// Parse `text` immediately and create a Markdown state entity value.
     pub fn new(text: &str, cx: &mut Context<Self>) -> Self {
-        let parsed = super::parse(text);
+        let parsed_document = super::parse::parse_document(text);
+        let parsed = parsed_document.root;
         let block_count = root_block_count(&parsed);
         let selection_adapter = MarkdownSelectionAdapter::new(cx.entity().downgrade(), cx);
         Self {
@@ -65,12 +70,18 @@ impl MarkdownState {
             is_selecting: false,
             text: text.to_string(),
             parsed,
+            root_block_starts: parsed_document.root_starts,
+            has_potential_link_reference_definition: contains_potential_link_reference_definition(
+                text,
+            ),
             // Measure every block once so the list has a stable total height,
             // then construct/layout/paint only the visible blocks on warm frames.
             list_state: ListState::new(block_count, ListAlignment::Top, px(1000.)).measure_all(),
             measured_content_height: None,
             selection_revision: 0,
             selection_adapter,
+            #[cfg(test)]
+            last_reparse_bytes: text.len(),
         }
     }
 
@@ -79,6 +90,9 @@ impl MarkdownState {
         if text.is_empty() {
             return;
         }
+        self.has_potential_link_reference_definition |=
+            contains_potential_link_reference_definition(text)
+                || self.text.ends_with(']') && text.starts_with(':');
         self.text.push_str(text);
         self.reparse_append(cx);
     }
@@ -90,6 +104,8 @@ impl MarkdownState {
         }
         self.text.clear();
         self.text.push_str(text);
+        self.has_potential_link_reference_definition =
+            contains_potential_link_reference_definition(text);
         self.reparse_reset(cx);
     }
 
@@ -172,16 +188,54 @@ impl MarkdownState {
 
     fn reparse_append(&mut self, cx: &mut Context<Self>) {
         self.prepare_reparse(cx);
-        let parsed = super::parse(&self.text);
-        let old_blocks = root_blocks(&self.parsed);
-        let new_blocks = root_blocks(&parsed);
-        let unchanged = old_blocks
-            .iter()
-            .zip(new_blocks)
-            .take_while(|(old, new)| old == new)
-            .count();
-        let old_count = old_blocks.len();
-        let new_count = new_blocks.len();
+        let reparse_start = self.incremental_reparse_start();
+        let parsed_document = super::parse::parse_document(&self.text[reparse_start..]);
+        #[cfg(test)]
+        {
+            self.last_reparse_bytes = self.text.len() - reparse_start;
+        }
+
+        let old_count = root_block_count(&self.parsed);
+        let (parsed, unchanged, new_count) = if reparse_start == 0 {
+            let old_blocks = root_blocks(&self.parsed);
+            let new_blocks = root_blocks(&parsed_document.root);
+            let unchanged = old_blocks
+                .iter()
+                .zip(new_blocks)
+                .take_while(|(old, new)| old == new)
+                .count();
+            let new_count = new_blocks.len();
+            self.root_block_starts = parsed_document.root_starts;
+            (parsed_document.root, unchanged, new_count)
+        } else {
+            let old_prefix_count = old_count - 1;
+            let BlockNode::Root { mut children } =
+                std::mem::replace(&mut self.parsed, BlockNode::Unknown)
+            else {
+                unreachable!("parsed markdown document must have a root")
+            };
+            children.truncate(old_prefix_count);
+            let BlockNode::Root {
+                children: tail_children,
+            } = parsed_document.root
+            else {
+                unreachable!("parsed markdown tail must have a root")
+            };
+            let new_count = old_prefix_count + tail_children.len();
+            children.extend(tail_children);
+
+            self.root_block_starts =
+                match (self.root_block_starts.take(), parsed_document.root_starts) {
+                    (Some(mut prefix), Some(mut tail)) => {
+                        prefix.truncate(old_prefix_count);
+                        tail.iter_mut().for_each(|start| *start += reparse_start);
+                        prefix.extend(tail);
+                        Some(prefix)
+                    }
+                    _ => None,
+                };
+            (BlockNode::Root { children }, old_prefix_count, new_count)
+        };
         self.parsed = parsed;
         self.selection_revision = self.selection_revision.wrapping_add(1);
 
@@ -197,9 +251,27 @@ impl MarkdownState {
         cx.notify();
     }
 
+    fn incremental_reparse_start(&self) -> usize {
+        if self.has_potential_link_reference_definition {
+            return 0;
+        }
+        let block_count = root_block_count(&self.parsed);
+        self.root_block_starts
+            .as_ref()
+            .filter(|starts| starts.len() == block_count)
+            .and_then(|starts| starts.last().copied())
+            .unwrap_or(0)
+    }
+
     fn reparse_reset(&mut self, cx: &mut Context<Self>) {
         self.prepare_reparse(cx);
-        self.parsed = super::parse(&self.text);
+        let parsed_document = super::parse::parse_document(&self.text);
+        self.parsed = parsed_document.root;
+        self.root_block_starts = parsed_document.root_starts;
+        #[cfg(test)]
+        {
+            self.last_reparse_bytes = self.text.len();
+        }
         self.selection_revision = self.selection_revision.wrapping_add(1);
         let block_count = root_block_count(&self.parsed);
         // Even an edit that preserves the number of root blocks can change
@@ -302,6 +374,11 @@ impl MarkdownState {
     pub(super) fn has_measured_block(&self, index: usize) -> bool {
         self.list_state.bounds_for_item(index).is_some()
     }
+
+    #[cfg(test)]
+    fn last_reparse_bytes(&self) -> usize {
+        self.last_reparse_bytes
+    }
 }
 
 fn with_trailing_newline(mut text: String) -> String {
@@ -323,6 +400,10 @@ fn root_blocks(node: &BlockNode) -> &[BlockNode] {
         BlockNode::Root { children, .. } => children,
         _ => std::slice::from_ref(node),
     }
+}
+
+fn contains_potential_link_reference_definition(source: &str) -> bool {
+    source.contains("]:")
 }
 
 impl Render for MarkdownState {
@@ -423,6 +504,70 @@ mod tests {
         state.read_with(cx, |state, _| {
             assert_eq!(state.source(), "new **value**");
             assert_eq!(state.rendered_text(), "new value\n");
+        });
+    }
+
+    #[gpui::test]
+    fn streamed_appends_match_full_parse(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(super::super::init);
+        let documents = [
+            "plain paragraph\ncontinued line\n\n# atx heading\n\nSetext heading\n===\n",
+            "- outer\n  - nested one\n  - nested two\n\n1. ordered\n   1. nested ordered\n\n> quoted\n>\n> - with a list\n",
+            "````text\na literal ``` inside the longer fence\n````\n\n```rust\nfn main() {}\n```\n",
+            "before\n\n```rust\nlet unfinished = true;\n",
+            "| left | center | right |\n| :--- | :---: | ---: |\n| a | b | c |\n",
+            "An earlier [reference] is resolved later.\n\n[reference]: https://example.com \"title\"\n",
+        ];
+
+        for document in documents {
+            let expected = cx.update(|cx| cx.new(|cx| MarkdownState::new(document, cx)));
+            let expected_tree = expected.read_with(cx, |state, _| state.parsed.clone());
+            for chunk_size in [1, 7, 64] {
+                let streamed = cx.update(|cx| cx.new(|cx| MarkdownState::new("", cx)));
+                for chunk in document.as_bytes().chunks(chunk_size) {
+                    let chunk = std::str::from_utf8(chunk).expect("test corpus is ASCII");
+                    streamed.update(cx, |state, cx| state.push_str(chunk, cx));
+                }
+                streamed.read_with(cx, |state, _| {
+                    assert_eq!(state.parsed, expected_tree, "chunk size {chunk_size}");
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn append_reparses_only_the_last_root_block(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(super::super::init);
+        let document = (0..120)
+            .map(|ix| format!("## Closed block {ix}\n\nParagraph {ix}.\n\n"))
+            .collect::<String>();
+        assert!(document.len() > 2_000);
+        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(&document, cx)));
+
+        state.update(cx, |state, cx| state.push_str("new tail", cx));
+        state.read_with(cx, |state, _| {
+            assert!(
+                state.last_reparse_bytes() < 64,
+                "parsed {} of {} bytes",
+                state.last_reparse_bytes(),
+                state.text.len()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn link_reference_definitions_force_a_full_reparse(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(super::super::init);
+        let document = "An earlier [reference].\n\n[reference]: https://example.com\n\nTail";
+        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new(document, cx)));
+
+        state.update(cx, |state, cx| state.push_str(" grows", cx));
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.last_reparse_bytes(), state.text.len());
+            assert_eq!(state.parsed, super::super::parse(&state.text));
         });
     }
 

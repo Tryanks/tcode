@@ -247,12 +247,14 @@ fn measure_streaming(document: &str) -> (Duration, Vec<Duration>) {
     let state = cx.new(|cx| MarkdownState::new("", cx));
     let mut deltas = Vec::with_capacity(STREAM_BYTES / STREAM_DELTA_BYTES);
     let total_start = Instant::now();
+    let mut offset = 0;
     for end in (STREAM_DELTA_BYTES..=STREAM_BYTES).step_by(STREAM_DELTA_BYTES) {
         let start = Instant::now();
         state.update(&mut cx, |state, cx| {
-            state.set_text(black_box(&document[..end]), cx)
+            state.push_str(black_box(&document[offset..end]), cx)
         });
         deltas.push(start.elapsed());
+        offset = end;
     }
     (total_start.elapsed(), deltas)
 }
@@ -336,10 +338,12 @@ fn markdown_benchmarks(c: &mut Criterion) {
         let state = cx.new(|cx| MarkdownState::new("", cx));
         b.iter(|| {
             state.update(&mut cx, |state, cx| state.set_text("", cx));
+            let mut start = 0;
             for end in (STREAM_DELTA_BYTES..=STREAM_BYTES).step_by(STREAM_DELTA_BYTES) {
                 state.update(&mut cx, |state, cx| {
-                    state.set_text(black_box(&stream_document[..end]), cx)
+                    state.push_str(black_box(&stream_document[start..end]), cx)
                 });
+                start = end;
             }
         });
     });
