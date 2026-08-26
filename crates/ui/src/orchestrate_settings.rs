@@ -3,7 +3,7 @@
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use crate::widgets::input::{InputEvent, Textarea, TextareaState};
 use crate::widgets::switch::Switch;
 use crate::{
     icon::{Icon, IconName},
@@ -16,7 +16,7 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use agent::ProviderKind;
+use agent::{OptionDescriptor, ProviderKind, SelectOption};
 
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
@@ -36,7 +36,6 @@ struct ChildRowState {
     provider: ProviderKind,
     model: String,
     profile_id: Option<String>,
-    effort: Entity<InputState>,
     description: Entity<TextareaState>,
 }
 
@@ -178,23 +177,12 @@ impl OrchestrateSettingsPanel {
         }
 
         for (index, entry) in orchestrate.child_models.into_iter().enumerate() {
-            let effort = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder(crate::tr!("orchestrate.children.effort_placeholder"))
-                    .default_value(entry.effort.clone().unwrap_or_default())
-            });
             let description = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 9)
                     .placeholder(crate::tr!("orchestrate.children.description_placeholder"))
                     .default_value(entry.description)
             });
-            self.input_subscriptions
-                .push(cx.subscribe(&effort, move |this, _, event, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.commit_child_effort(index, cx);
-                    }
-                }));
             self.input_subscriptions
                 .push(cx.subscribe(&description, move |this, _, event, cx| {
                     if matches!(event, InputEvent::Change) {
@@ -205,7 +193,6 @@ impl OrchestrateSettingsPanel {
                 provider: entry.provider,
                 model: entry.model,
                 profile_id: entry.profile_id,
-                effort,
                 description,
             });
         }
@@ -265,25 +252,39 @@ impl OrchestrateSettingsPanel {
         );
     }
 
-    fn commit_child_effort(&self, index: usize, cx: &mut Context<Self>) {
-        let Some(row) = self.child_rows.get(index) else {
-            return;
-        };
-        let effort = row.effort.read(cx).value().trim().to_string();
-        let effort = (!effort.is_empty()).then_some(effort);
-        let provider = row.provider;
-        let model = row.model.clone();
+    fn set_child_effort(&self, index: usize, effort: Option<String>, cx: &mut Context<Self>) {
         self.update_child_models(
             move |models| {
-                if let Some(entry) = models.get_mut(index)
-                    && entry.provider == provider
-                    && entry.model == model
-                {
+                if let Some(entry) = models.get_mut(index) {
                     entry.effort = effort;
                 }
             },
             cx,
         );
+    }
+
+    /// The valid `reasoningEffort` choices the provider catalog declares for a
+    /// model; empty when the model has no reasoning selector.
+    fn child_effort_options(
+        &self,
+        provider: ProviderKind,
+        model: &str,
+        cx: &App,
+    ) -> Vec<SelectOption> {
+        self.store
+            .read(cx)
+            .provider_model_catalog(provider)
+            .into_iter()
+            .find(|spec| spec.id == model)
+            .into_iter()
+            .flat_map(|spec| spec.options)
+            .find_map(|option| match option {
+                OptionDescriptor::Select { id, options, .. } if id == "reasoningEffort" => {
+                    Some(options)
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     fn add_identity(&mut self, option: &ModelOption, window: &mut Window, cx: &mut Context<Self>) {
@@ -1058,22 +1059,123 @@ impl OrchestrateSettingsPanel {
                                     })),
                             ),
                     )
-                    .child(
+                    .child({
+                        let current = profile.effort.clone();
+                        let mut choices = self.child_effort_options(provider, &row.model, cx);
+                        // Keep a stored value the catalog no longer lists (legacy
+                        // free-text entries) visible so it can be seen and fixed.
+                        if let Some(value) = current.clone()
+                            && !choices
+                                .iter()
+                                .any(|choice| choice.value.eq_ignore_ascii_case(&value))
+                        {
+                            choices.push(SelectOption {
+                                label: value.clone(),
+                                value,
+                                description: None,
+                            });
+                        }
+                        let selected_label: gpui::SharedString = match current.as_deref() {
+                            Some(value) => choices
+                                .iter()
+                                .find(|choice| choice.value.eq_ignore_ascii_case(value))
+                                .map(|choice| choice.label.clone())
+                                .unwrap_or_else(|| value.to_string())
+                                .into(),
+                            None => crate::tr!("orchestrate.children.effort_default")
+                                .into_owned()
+                                .into(),
+                        };
+                        let trigger = Button::new(("orchestrate-child-effort-dropdown", index))
+                            .ghost()
+                            .outline()
+                            .compact()
+                            .child(
+                                h_flex()
+                                    .w(px(140.))
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .text_size(px(13.))
+                                    .child(selected_label)
+                                    .child(
+                                        Icon::new(IconName::ChevronDown)
+                                            .xsmall()
+                                            .text_color(cx.theme().muted_foreground),
+                                    ),
+                            );
+                        let panel = cx.entity();
+                        let dropdown = crate::material::overlay_popover((
+                            "orchestrate-child-effort-popover",
+                            index,
+                        ))
+                        .trigger(trigger)
+                        .content(move |_, _, cx| {
+                            let option = |value: Option<String>,
+                                          label: gpui::SharedString,
+                                          item: usize,
+                                          cx: &mut Context<gpui_base::PopoverState>|
+                             -> AnyElement {
+                                let panel = panel.clone();
+                                let popover = cx.entity();
+                                let selected = match (value.as_deref(), current.as_deref()) {
+                                    (None, None) => true,
+                                    (Some(own), Some(current)) => own.eq_ignore_ascii_case(current),
+                                    _ => false,
+                                };
+                                h_flex()
+                                    .id(("orchestrate-child-effort-option", item))
+                                    .w_full()
+                                    .px_2()
+                                    .py_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .rounded(crate::material::radius_button())
+                                    .text_size(px(13.))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(cx.theme().accent))
+                                    .child(div().flex_1().child(label))
+                                    .when(selected, |row| {
+                                        row.child(Icon::new(IconName::Check).xsmall())
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        let value = value.clone();
+                                        panel.update(cx, |panel, cx| {
+                                            panel.set_child_effort(index, value, cx);
+                                        });
+                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                    })
+                                    .into_any_element()
+                            };
+                            let mut list = v_flex().p_1().min_w(px(140.)).gap_0p5().child(option(
+                                None,
+                                crate::tr!("orchestrate.children.effort_default")
+                                    .into_owned()
+                                    .into(),
+                                0,
+                                cx,
+                            ));
+                            for (item, choice) in choices.iter().enumerate() {
+                                list = list.child(option(
+                                    Some(choice.value.clone()),
+                                    choice.label.clone().into(),
+                                    item + 1,
+                                    cx,
+                                ));
+                            }
+                            list
+                        });
                         v_flex()
-                            .w(px(160.))
                             .gap_1()
+                            .items_start()
                             .child(
                                 div()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(crate::tr!("orchestrate.children.effort_label")),
                             )
-                            .child(
-                                Input::new(&row.effort)
-                                    .small()
-                                    .rounded(crate::material::radius_input()),
-                            ),
-                    )
+                            .child(dropdown)
+                    })
                     .child(
                         Textarea::new(&row.description)
                             .text_sm()
