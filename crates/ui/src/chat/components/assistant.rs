@@ -15,6 +15,7 @@ use gpui::{
 };
 use gpui_base::{h_flex, v_flex};
 
+use crate::markdown::parse::ParsedDocument;
 use crate::markdown::{MarkdownState, MarkdownView};
 
 use super::super::model::{MdSync, md_sync};
@@ -30,6 +31,13 @@ impl MdState {
     pub(crate) fn new(text: &str, cx: &mut App) -> Self {
         Self {
             state: cx.new(|cx| MarkdownState::new(text, cx)),
+            synced: Arc::from(text),
+        }
+    }
+
+    pub(crate) fn from_parsed(text: &str, parsed: ParsedDocument, cx: &mut App) -> Self {
+        Self {
+            state: cx.new(|cx| MarkdownState::from_parsed(text, parsed, cx)),
             synced: Arc::from(text),
         }
     }

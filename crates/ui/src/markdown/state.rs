@@ -55,6 +55,15 @@ impl MarkdownState {
     /// Parse `text` immediately and create a Markdown state entity value.
     pub fn new(text: &str, cx: &mut Context<Self>) -> Self {
         let parsed_document = super::parse::parse_document(text);
+        Self::from_parsed(text, parsed_document, cx)
+    }
+
+    /// Create a Markdown state from a document parsed on another executor.
+    pub(crate) fn from_parsed(
+        text: &str,
+        parsed_document: super::parse::ParsedDocument,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let parsed = parsed_document.root;
         let block_count = root_block_count(&parsed);
         let selection_adapter = MarkdownSelectionAdapter::new(cx.entity().downgrade(), cx);
@@ -568,6 +577,40 @@ mod tests {
         state.read_with(cx, |state, _| {
             assert_eq!(state.last_reparse_bytes(), state.text.len());
             assert_eq!(state.parsed, super::super::parse(&state.text));
+        });
+    }
+
+    #[gpui::test]
+    fn pre_parsed_constructor_matches_synchronous_constructor(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(super::super::init);
+        let document =
+            "An earlier [reference].\n\n[reference]: https://example.com\n\nFinal paragraph.";
+        let parsed_document = super::super::parse::parse_document(document);
+        let synchronous = cx.update(|cx| cx.new(|cx| MarkdownState::new(document, cx)));
+        let pre_parsed =
+            cx.update(|cx| cx.new(|cx| MarkdownState::from_parsed(document, parsed_document, cx)));
+
+        let expected = synchronous.read_with(cx, |state, _| {
+            (
+                state.text.clone(),
+                state.parsed.clone(),
+                state.root_block_starts.clone(),
+                state.has_potential_link_reference_definition,
+                state.last_reparse_bytes,
+            )
+        });
+        pre_parsed.read_with(cx, |state, _| {
+            assert_eq!(
+                (
+                    state.text.clone(),
+                    state.parsed.clone(),
+                    state.root_block_starts.clone(),
+                    state.has_potential_link_reference_definition,
+                    state.last_reparse_bytes,
+                ),
+                expected
+            );
         });
     }
 

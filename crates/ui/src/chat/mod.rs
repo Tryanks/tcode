@@ -67,6 +67,16 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 /// Vertical rhythm between turns. Turns are separated by space and typographic
 /// hierarchy alone — there is deliberately no rule/divider under the user bubble.
 const TURN_GAP: f32 = 32.;
+/// Large documents are parsed away from the UI executor before becoming resident.
+const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
+
+struct PendingMarkdownBuild {
+    generation: u64,
+    session_key: Option<String>,
+    desired_text: String,
+    turn: usize,
+}
+
 pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -76,6 +86,8 @@ pub struct ChatView {
     turn_items: Vec<TurnListItem>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
+    pending_md_builds: HashMap<String, PendingMarkdownBuild>,
+    next_md_build_generation: u64,
     markdown_visible_turns: Range<usize>,
     markdown_scroll_top: Option<usize>,
     /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
@@ -93,6 +105,8 @@ pub struct ChatView {
     /// The live commit dialog entity while it is open (kept alive across frames).
     commit_dialog: Option<Entity<CommitDialog>>,
     _subscriptions: Vec<Subscription>,
+    #[cfg(test)]
+    markdown_remeasured_turns: Vec<usize>,
 }
 
 impl ChatView {
@@ -141,6 +155,8 @@ impl ChatView {
             turn_items: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
+            pending_md_builds: HashMap::new(),
+            next_md_build_generation: 0,
             markdown_visible_turns: 0..0,
             markdown_scroll_top: None,
             expanded: HashSet::new(),
@@ -152,6 +168,8 @@ impl ChatView {
             _copied_task: None,
             commit_dialog: None,
             _subscriptions: subscriptions,
+            #[cfg(test)]
+            markdown_remeasured_turns: Vec::new(),
         };
         this.sync_markdown_states(cx);
         this
@@ -198,6 +216,7 @@ impl ChatView {
             .and_then(|session_id| self.workspace_store.read(cx).pending_chat_turn(session_id));
         if session_changed {
             self.md_states.clear();
+            self.pending_md_builds.clear();
             self.command_panels.borrow_mut().clear();
             self.highlighted_turn = None;
             self.session_key = session_key;
@@ -341,11 +360,24 @@ impl ChatView {
             })
             .unwrap_or_default();
         self.md_states.retain(|id, _| !decisions.evict.contains(id));
+        self.pending_md_builds
+            .retain(|id, _| decisions.build.contains(id) && !decisions.evict.contains(id));
 
         let mut rebuilt_turns = HashSet::new();
         for (turn, id, text) in texts {
             match self.md_states.get_mut(&id) {
                 Some(md) => md.sync(text, cx),
+                None if self.pending_md_builds.contains_key(&id) => {
+                    let pending = self
+                        .pending_md_builds
+                        .get_mut(&id)
+                        .expect("pending Markdown build disappeared");
+                    pending.desired_text = text;
+                    pending.turn = turn;
+                }
+                None if text.len() > ASYNC_MARKDOWN_THRESHOLD_BYTES => {
+                    self.spawn_markdown_build(turn, id, text, cx);
+                }
                 None => {
                     self.md_states.insert(id, MdState::new(&text, cx));
                     rebuilt_turns.insert(turn);
@@ -368,10 +400,84 @@ impl ChatView {
                 // Eviction leaves this cache untouched. A lazy rebuild only
                 // invalidates rebuilt rows; ListState preserves the absolute
                 // scroll-top offset while it measures the parsed Markdown.
-                self.list_state.remeasure_items(range);
+                self.remeasure_markdown_turns(range);
                 range = turn..turn + 1;
             }
         }
+        self.remeasure_markdown_turns(range);
+    }
+
+    fn spawn_markdown_build(
+        &mut self,
+        turn: usize,
+        id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.next_md_build_generation = self.next_md_build_generation.wrapping_add(1);
+        let generation = self.next_md_build_generation;
+        self.pending_md_builds.insert(
+            id.clone(),
+            PendingMarkdownBuild {
+                generation,
+                session_key: self.session_key.clone(),
+                desired_text: text.clone(),
+                turn,
+            },
+        );
+        let parse_text = text;
+        cx.spawn(async move |this, cx| {
+            let parsed_text = parse_text.clone();
+            let parsed = cx
+                .background_executor()
+                .spawn(async move { crate::markdown::parse::parse_document(&parse_text) })
+                .await;
+            let _ = this.update(cx, |chat, cx| {
+                chat.finish_markdown_build(id, generation, parsed_text, parsed, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_markdown_build(
+        &mut self,
+        id: String,
+        generation: u64,
+        parsed_text: String,
+        parsed: crate::markdown::parse::ParsedDocument,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_md_builds.get(&id) else {
+            return;
+        };
+        if pending.generation != generation || pending.session_key != self.session_key {
+            return;
+        }
+        let desired_text = pending.desired_text.clone();
+        let turn = pending.turn;
+        self.pending_md_builds.remove(&id);
+
+        if desired_text != parsed_text && !desired_text.starts_with(&parsed_text) {
+            // An edit invalidated the parse. Re-evaluate residency and kick a
+            // replacement job for the latest text if it is still wanted.
+            self.sync_markdown_residency(None, cx);
+            return;
+        }
+
+        let mut state = MdState::from_parsed(&parsed_text, parsed, cx);
+        if desired_text != parsed_text {
+            state.sync(desired_text, cx);
+        }
+        self.md_states.insert(id, state);
+        if turn < self.turn_items.len() {
+            self.remeasure_markdown_turns(turn..turn + 1);
+        }
+        cx.notify();
+    }
+
+    fn remeasure_markdown_turns(&mut self, range: Range<usize>) {
+        #[cfg(test)]
+        self.markdown_remeasured_turns.extend(range.clone());
         self.list_state.remeasure_items(range);
     }
 
@@ -410,6 +516,11 @@ impl ChatView {
     #[cfg(test)]
     fn has_resident_markdown_state(&self, id: &str) -> bool {
         self.md_states.contains_key(id)
+    }
+
+    #[cfg(test)]
+    fn resident_markdown_source(&self, id: &str) -> Option<&str> {
+        self.md_states.get(id).map(|md| md.synced.as_ref())
     }
 
     fn toggle_expanded(&mut self, turn: usize, key: &str, cx: &mut Context<Self>) {
@@ -1981,7 +2092,9 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatView, ResidencyScope, markdown_entries_for_residency};
+    use super::{
+        ASYNC_MARKDOWN_THRESHOLD_BYTES, ChatView, ResidencyScope, markdown_entries_for_residency,
+    };
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
     use agent::ItemContent;
@@ -2076,6 +2189,116 @@ mod tests {
             px(7.),
             "rebuilding the scroll-top turn changed the list anchor"
         );
+    }
+
+    #[gpui::test]
+    fn large_markdown_becomes_resident_asynchronously_and_remeasures_turn(cx: &mut TestAppContext) {
+        let text = large_markdown("async content");
+        let timeline = single_assistant_timeline("large", &text);
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let view =
+            cx.add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let view = view.root(cx).expect("chat window should have a root");
+
+        view.read_with(cx, |chat, _| {
+            assert!(!chat.has_resident_markdown_state("large"));
+            assert!(!chat.markdown_remeasured_turns.contains(&0));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |chat, cx| {
+            assert!(chat.has_resident_markdown_state("large"));
+            assert_eq!(chat.resident_markdown_source("large"), Some(text.as_str()));
+            let rendered = chat
+                .md_states
+                .get("large")
+                .expect("large Markdown state should be resident")
+                .state
+                .read(cx)
+                .rendered_text();
+            assert!(rendered.contains("async content"));
+            assert!(chat.markdown_remeasured_turns.contains(&0));
+        });
+    }
+
+    #[gpui::test]
+    fn in_flight_markdown_update_finishes_with_latest_text(cx: &mut TestAppContext) {
+        let original = large_markdown("original");
+        let latest = large_markdown("edited");
+        let timeline = single_assistant_timeline("large", &original);
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let view = cx.add_window(|window, cx| {
+            ChatView::new(workspace_store.clone(), window_state, window, cx)
+        });
+        let view = view.root(cx).expect("chat window should have a root");
+        let generation = view.read_with(cx, |chat, _| {
+            chat.pending_md_builds
+                .get("large")
+                .expect("large build should be pending")
+                .generation
+        });
+
+        workspace_store.update(cx, |store, _| {
+            store.set_session_replica_for_test(
+                session_id,
+                single_assistant_timeline("large", &latest),
+            );
+        });
+        view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
+        view.read_with(cx, |chat, _| {
+            assert_eq!(chat.pending_md_builds.len(), 1);
+            assert_eq!(
+                chat.pending_md_builds["large"].generation, generation,
+                "a text update spawned a duplicate in-flight job"
+            );
+        });
+
+        cx.run_until_parked();
+        view.read_with(cx, |chat, _| {
+            assert_eq!(
+                chat.resident_markdown_source("large"),
+                Some(latest.as_str())
+            );
+            assert!(chat.pending_md_builds.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn session_switch_does_not_resurrect_in_flight_markdown(cx: &mut TestAppContext) {
+        let text = large_markdown("stale session");
+        let timeline = single_assistant_timeline("large", &text);
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let view = cx.add_window(|window, cx| {
+            ChatView::new(workspace_store.clone(), window_state, window, cx)
+        });
+        let view = view.root(cx).expect("chat window should have a root");
+        assert!(view.read_with(cx, |chat, _| chat.pending_md_builds.contains_key("large")));
+
+        workspace_store.update(cx, |store, _| {
+            store.set_session_replica_for_test("replacement-session".into(), Timeline::default());
+        });
+        view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
+        cx.run_until_parked();
+
+        view.read_with(cx, |chat, _| {
+            assert!(!chat.has_resident_markdown_state("large"));
+            assert!(!chat.pending_md_builds.contains_key("large"));
+        });
+    }
+
+    #[gpui::test]
+    fn small_markdown_is_resident_synchronously(cx: &mut TestAppContext) {
+        let text = "small **streaming** reply";
+        assert!(text.len() < ASYNC_MARKDOWN_THRESHOLD_BYTES);
+        let timeline = single_assistant_timeline("small", text);
+        let (workspace_store, window_state, _) = seed_chat(cx, timeline);
+        let view =
+            cx.add_window(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let view = view.root(cx).expect("chat window should have a root");
+
+        view.read_with(cx, |chat, _| {
+            assert_eq!(chat.resident_markdown_source("small"), Some(text));
+            assert!(!chat.pending_md_builds.contains_key("small"));
+        });
     }
 
     #[gpui::test]
@@ -2302,6 +2525,21 @@ This begins after the hard break."#;
             ]);
         }
         timeline
+    }
+
+    fn single_assistant_timeline(id: &str, text: &str) -> Timeline {
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta::default()];
+        timeline.entries.push(entry(id, assistant(text)));
+        timeline
+    }
+
+    fn large_markdown(marker: &str) -> String {
+        let mut text = format!("# {marker}\n\n");
+        while text.len() <= ASYNC_MARKDOWN_THRESHOLD_BYTES {
+            text.push_str("- a sufficiently substantial Markdown list item\n");
+        }
+        text
     }
 
     fn seed_chat(
