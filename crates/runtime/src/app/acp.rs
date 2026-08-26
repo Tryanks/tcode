@@ -238,13 +238,28 @@ impl AppState {
         self.preview_draft_or_persist_active(cx);
     }
 
-    /// Reset user settings to defaults, preserving the sidebar's per-project
-    /// collapsed state and the model favorites (UI state, not page settings).
-    /// The theme is reset too; the caller re-applies it to the window.
+    /// Reset the *preferences* to defaults. Anything the user had to configure
+    /// or install survives: provider profiles and their credentials, the ACP
+    /// agents on disk, and the legacy binary overrides — wiping those would cost
+    /// re-authentication and re-downloads, which is never what "restore
+    /// defaults" means. Sidebar/UI state (collapsed projects, favorites, sort,
+    /// layout, last-visited) is preserved for the same reason, and `unknown`
+    /// must survive so a newer build's keys are not destroyed by an older one.
+    /// The theme is reset; the caller re-applies it to the window.
     pub fn reset_settings(&mut self, cx: &mut HostCx) {
         let settings = Settings {
+            providers: self.settings.providers.clone(),
+            profiles: self.settings.profiles.clone(),
+            codex_binary: self.settings.codex_binary.clone(),
+            claude_binary: self.settings.claude_binary.clone(),
+            acp_agents: self.settings.acp_agents.clone(),
+            sidebar_collapsed: self.settings.sidebar_collapsed,
             collapsed_projects: self.settings.collapsed_projects.clone(),
             favorite_models: self.settings.favorite_models.clone(),
+            project_sort: self.settings.project_sort,
+            sidebar_layout: self.settings.sidebar_layout,
+            last_visited: self.settings.last_visited.clone(),
+            unknown: self.settings.unknown.clone(),
             ..Settings::default()
         };
         self.update_settings(settings, cx);
