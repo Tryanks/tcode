@@ -545,10 +545,11 @@ impl OrchestrateSettingsPanel {
             }
             ChildApprovalMode::Manual => crate::tr!("orchestrate.child_approval.manual"),
         };
-        // Ghost, not outline: a quiet resting trigger that only tints on hover,
-        // consistent with the General page dropdowns and the composer picker.
+        // A quiet resting trigger that only tints on hover, consistent with the
+        // General page dropdowns and the composer picker.
         let trigger = Button::new("orchestrate-child-approval-dropdown")
             .ghost()
+            .outline()
             .compact()
             .child(
                 h_flex()

@@ -1810,7 +1810,7 @@ impl Render for ChatView {
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
         .flex_1()
         .min_h_0()
-        .py_6();
+        .py_4();
 
         let composer: AnyElement = if native_subagent_readonly {
             div()

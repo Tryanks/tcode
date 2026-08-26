@@ -825,6 +825,8 @@ impl SettingsPage {
         let release_url = status.release_url.unwrap_or_default();
 
         crate::material::overlay_popover("tcode-update-popover")
+            // Prose card, not a menu: keep the roomier panel padding.
+            .p_3()
             .trigger(
                 Button::new("tcode-update-available")
                     .ghost()
@@ -1555,11 +1557,10 @@ impl SettingsPage {
         label: impl Into<SharedString>,
         cx: &Context<Self>,
     ) -> Button {
-        // Ghost, not outline: transparent at rest (value + muted chevron) with a
-        // light tint only on hover — the same quiet trigger the composer's model
-        // picker uses. An outlined trigger reads as a card nested inside the
-        // already-bordered group.
-        Button::new(id).ghost().compact().child(
+        // Ghost fill (transparent at rest, light tint on hover) over a hairline
+        // outline — the same quiet trigger the composer's model picker uses, but
+        // bordered so it reads as a dropdown rather than plain text.
+        Button::new(id).ghost().outline().compact().child(
             gpui_base::h_flex()
                 .w(px(160.))
                 .items_center()

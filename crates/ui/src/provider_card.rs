@@ -322,6 +322,8 @@ impl ProviderCard {
         let store = self.store.clone();
 
         crate::material::overlay_popover("update-popover")
+            // Prose card, not a menu: keep the roomier panel padding.
+            .p_3()
             .trigger(
                 Button::new("update-available")
                     .ghost()

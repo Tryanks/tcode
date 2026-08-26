@@ -207,7 +207,6 @@ impl Render for PopupMenu {
             .min_w(px(160.))
             .max_w(px(420.))
             .p_1()
-            .gap_1()
             .rounded(crate::material::radius_overlay())
             .bg(cx.theme().popover)
             .border_1()
@@ -217,7 +216,7 @@ impl Render for PopupMenu {
         for (index, item) in self.items.iter().enumerate() {
             match item {
                 MenuItem::Separator => {
-                    root = root.child(div().h(px(1.)).mx_1().bg(cx.theme().border))
+                    root = root.child(div().h(px(1.)).mx_1().my_1().bg(cx.theme().border))
                 }
                 MenuItem::Item {
                     label,

@@ -23,6 +23,7 @@ impl Composer {
         let right: AnyElement = if turn_running {
             Button::new("branch-picker")
                 .ghost()
+                .outline()
                 .compact()
                 .tooltip(crate::tr!("composer.wait_turn"))
                 .child(
@@ -39,16 +40,20 @@ impl Composer {
             let store_open = self.workspace_store.clone();
             let store_content = self.workspace_store.clone();
             let current = picker_current.clone();
-            let trigger = Button::new("branch-picker").ghost().compact().child(
-                h_flex()
-                    .gap_1p5()
-                    .items_center()
-                    .text_size(px(13.))
-                    .text_color(muted)
-                    .child(Icon::empty().path("icons/git-branch.svg").xsmall())
-                    .child(picker_current.clone())
-                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-            );
+            let trigger = Button::new("branch-picker")
+                .ghost()
+                .outline()
+                .compact()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .text_size(px(13.))
+                        .text_color(muted)
+                        .child(Icon::empty().path("icons/git-branch.svg").xsmall())
+                        .child(picker_current.clone())
+                        .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+                );
             crate::material::overlay_popover("branch-popover")
                 .anchor(Anchor::BottomRight)
                 .trigger(trigger)
@@ -158,7 +163,6 @@ impl Composer {
             h_flex()
                 .w_full()
                 .px_2()
-                .pt_2()
                 .items_center()
                 .justify_between()
                 .text_size(px(13.))
@@ -199,16 +203,20 @@ impl Composer {
 
         let store_content = self.workspace_store.clone();
         let base_default = base_default.to_string();
-        let trigger = Button::new("workspace-picker").ghost().compact().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_size(px(13.))
-                .text_color(muted)
-                .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
-                .child(label)
-                .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
-        );
+        let trigger = Button::new("workspace-picker")
+            .ghost()
+            .outline()
+            .compact()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .text_size(px(13.))
+                    .text_color(muted)
+                    .child(Icon::empty().path("icons/folder-closed.svg").xsmall())
+                    .child(label)
+                    .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
+            );
         crate::material::overlay_popover("workspace-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)

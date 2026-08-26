@@ -221,7 +221,10 @@ impl RenderOnce for Button {
                 theme.success.opacity(0.3),
                 theme.success,
             ),
-            ButtonVariant::Ghost => (transparent, theme.foreground, theme.muted, transparent),
+            // Transparent at rest; the hairline only shows with `.outline()`
+            // (border width is 0 otherwise), which is how select/dropdown
+            // triggers read as interactive controls.
+            ButtonVariant::Ghost => (transparent, theme.foreground, theme.muted, theme.border),
             ButtonVariant::Text => (
                 transparent,
                 theme.foreground.opacity(0.9),
