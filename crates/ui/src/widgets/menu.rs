@@ -3,8 +3,9 @@ use std::rc::Rc;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Render, RenderOnce, Role, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, prelude::FluentBuilder, px,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, RenderOnce, Role, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Window, anchored, deferred, div,
+    prelude::FluentBuilder, px,
 };
 use gpui_base::actions::{Cancel, Confirm, SelectDown, SelectUp};
 
@@ -338,21 +339,97 @@ pub trait ContextMenuExt:
 impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> ContextMenuExt for T {}
 
 #[derive(IntoElement)]
-pub struct ContextMenu<T: IntoElement + 'static> {
+pub struct ContextMenu<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> {
     id: ElementId,
     trigger: T,
     builder: MenuBuilder,
 }
-impl<T: IntoElement + 'static> RenderOnce for ContextMenu<T> {
+
+#[derive(Default)]
+struct ContextMenuState {
+    menu: Option<Entity<PopupMenu>>,
+    position: Point<Pixels>,
+    _subscription: Option<Subscription>,
+}
+
+impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> RenderOnce
+    for ContextMenu<T>
+{
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        menu_popover(
-            self.id,
-            self.trigger,
-            MouseButton::Right,
-            self.builder,
-            window,
-            cx,
-        )
+        let state = window.use_keyed_state((self.id, "context-menu"), cx, |_, _| {
+            ContextMenuState::default()
+        });
+        let builder = self.builder;
+        let mut trigger = self.trigger.on_mouse_down(MouseButton::Right, {
+            let state = state.clone();
+            move |event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                let position = event.position;
+                let builder = builder.clone();
+                let state = state.clone();
+                // Deeper bubble handlers have already run, but entity updates
+                // they queued may not be applied yet; build after this event
+                // settles so the builder reads their state.
+                window.defer(cx, move |window, cx| {
+                    let menu =
+                        PopupMenu::build(window, cx, |menu, window, cx| builder(menu, window, cx));
+                    // A builder can decide there is nothing to offer (e.g. a
+                    // right-click on non-link Markdown text): open nothing.
+                    if menu.read(cx).is_empty() {
+                        return;
+                    }
+                    let previous_focus = window.focused(cx);
+                    let menu_focus = menu.focus_handle(cx);
+                    gpui_base::GlobalState::register_deferred_popover(&menu_focus, cx);
+                    let subscription = window.subscribe(&menu, cx, {
+                        let state = state.clone();
+                        move |_, _: &DismissEvent, window, cx| {
+                            state.update(cx, |state, _| {
+                                state.menu = None;
+                                state._subscription = None;
+                            });
+                            gpui_base::GlobalState::unregister_deferred_popover(&menu_focus, cx);
+                            if menu_focus.contains_focused(window, cx)
+                                && let Some(previous) = &previous_focus
+                            {
+                                previous.focus(window, cx);
+                            }
+                            window.refresh();
+                        }
+                    });
+                    menu.focus_handle(cx).focus(window, cx);
+                    state.update(cx, |state, _| {
+                        state.menu = Some(menu);
+                        state.position = position;
+                        state._subscription = Some(subscription);
+                    });
+                    window.refresh();
+                });
+            }
+        });
+        let (menu, position) = {
+            let state = state.read(cx);
+            (state.menu.clone(), state.position)
+        };
+        if let Some(menu) = menu {
+            // The menu stays a child of the trigger so its actions dispatch
+            // through the trigger's ancestor chain, where on_action handlers
+            // (on the trigger itself or above it) live.
+            trigger = trigger.child(
+                deferred(
+                    anchored()
+                        .position(position)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(div().child(menu.clone()).on_mouse_down_out(
+                            move |_, _window, cx| {
+                                menu.update(cx, |_, cx| cx.emit(DismissEvent));
+                            },
+                        )),
+                )
+                .with_priority(gpui_base::POPUP_PRIORITY),
+            );
+        }
+        trigger
     }
 }
 
