@@ -134,7 +134,18 @@ pub(crate) fn segment_entries<'a>(
             | EntryContent::Item(ItemContent::WebSearch { .. })
             | EntryContent::Item(ItemContent::Other { .. })
             | EntryContent::Item(ItemContent::FileChange { .. }) => activities.push(entry),
-            EntryContent::Item(ItemContent::Reasoning { .. }) => activities.push(entry),
+            EntryContent::Item(ItemContent::Reasoning { .. }) => {
+                if activities.last().is_some_and(|previous| {
+                    matches!(
+                        &previous.content,
+                        EntryContent::Item(ItemContent::Reasoning { text })
+                            if text.trim().is_empty()
+                    )
+                }) {
+                    activities.pop();
+                }
+                activities.push(entry);
+            }
             EntryContent::Item(ItemContent::UserMessage { .. }) | EntryContent::Steer { .. } => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::User(entry));
@@ -1710,6 +1721,26 @@ mod tests {
             [Segment::ActivityRun(run)]
                 if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
                     == ["reason-1", "reason-2"]
+        ));
+    }
+
+    #[test]
+    fn consecutive_empty_reasoning_collapses_into_the_latest_reasoning() {
+        let entries = [
+            entry("empty-1", reasoning("")),
+            entry("empty-2", reasoning("  \n")),
+            entry("reason", reasoning("visible")),
+            command("command"),
+            entry("empty-3", reasoning("")),
+            entry("empty-4", reasoning("")),
+        ];
+
+        let segments = segment_entries(&entries, true).flow;
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::ActivityRun(run)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["reason", "command", "empty-4"]
         ));
     }
 
