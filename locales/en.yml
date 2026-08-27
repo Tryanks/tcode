@@ -38,6 +38,7 @@ chat:
   output: "Output tail"
   subagent_completed: "Completed"
   subagent_failed: "Failed"
+  subagent_interrupted: "Interrupted"
   changed_files: "CHANGED FILES (%{count})"
   changed_files_partial: "· PARTIAL"
   more_files: "+%{count} more"
