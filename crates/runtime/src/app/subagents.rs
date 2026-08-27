@@ -65,6 +65,7 @@ impl AppState {
             }
             let turn_status = match status {
                 ItemStatus::Failed | ItemStatus::Declined => TurnStatus::Failed,
+                ItemStatus::Interrupted => TurnStatus::Interrupted,
                 _ => TurnStatus::Completed,
             };
             self.sync_mirror_turn(&mirror_id, in_progress, &item.id, turn_status, cx);

@@ -362,7 +362,10 @@ fn tool_item_state(content: &ItemContent) -> Option<ToolState> {
     };
     Some(match status {
         ItemStatus::InProgress => ToolState::Active,
-        ItemStatus::Completed | ItemStatus::Failed | ItemStatus::Declined => ToolState::Finished,
+        ItemStatus::Completed
+        | ItemStatus::Failed
+        | ItemStatus::Interrupted
+        | ItemStatus::Declined => ToolState::Finished,
     })
 }
 

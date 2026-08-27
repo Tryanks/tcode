@@ -140,6 +140,8 @@ platform pays that inset.
   blocks sit 16px apart. There is deliberately **no divider/hairline under the
   user bubble** — the eye separates turns by the space around them and by the
   typographic step down from the 15px bubble to the muted activity summary.
+- Subagent capsules use a spinner while active, then a compact lifecycle chip:
+  green for completed, amber for interrupted, and red for failed or declined.
 - Turn activity = collapsible "Work Log" sections: an expanded section starts
   with an 11px uppercase muted label, followed by activity rows (muted ✓ +
   one-line summary; command/tool/subagent/reasoning). While a turn is running,

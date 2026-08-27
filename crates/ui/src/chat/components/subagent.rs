@@ -61,6 +61,22 @@ pub(crate) fn subagent_row(
             .child(Icon::new(IconName::Check).size(px(12.)))
             .child(crate::tr!("chat.subagent_completed"))
             .into_any_element(),
+        ItemStatus::Interrupted => h_flex()
+            .h(px(22.))
+            .px_2()
+            .gap_1()
+            .items_center()
+            .rounded(crate::material::radius_chip())
+            .bg(cx.theme().warning.opacity(0.12))
+            .text_color(cx.theme().warning)
+            .text_size(px(11.5))
+            .child(
+                Icon::new(IconName::CircleX)
+                    .size(px(12.))
+                    .text_color(cx.theme().warning),
+            )
+            .child(crate::tr!("chat.subagent_interrupted"))
+            .into_any_element(),
         ItemStatus::Failed | ItemStatus::Declined => h_flex()
             .h(px(22.))
             .px_2()
