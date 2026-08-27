@@ -1,7 +1,7 @@
 //! Codex provider: a small client for the newline-delimited JSON protocol used
 //! by `codex app-server`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufWriter;
 #[cfg(test)]
 use std::io::{BufRead, BufReader};
@@ -390,6 +390,13 @@ struct Actor {
     elicitations: PendingRequests<String, PendingElicitation>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
+    /// Stable parent capsule for each provider-native child thread. Codex 0.150
+    /// gives completion activities a fresh item id, so the activity id cannot
+    /// be the lifecycle identity after spawn.
+    subagent_parent_by_thread: HashMap<String, String>,
+    /// The v2 item lifecycle and its legacy fan-out describe the same activity.
+    /// Track their provider identity so only one canonical transition is sent.
+    seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
 }
@@ -456,6 +463,8 @@ async fn run_actor(
         elicitations: HashMap::new(),
         items: HashMap::new(),
         subagents: HashMap::new(),
+        subagent_parent_by_thread: HashMap::new(),
+        seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
         active_turn: None,
     };
@@ -1628,19 +1637,48 @@ impl Actor {
     }
 
     async fn handle_subagent_activity(&mut self, activity: &Value) {
-        let Some(parent_id) = activity.get("event_id").and_then(Value::as_str) else {
+        let Some(activity_id) = activity
+            .get("event_id")
+            .or_else(|| activity.get("id"))
+            .and_then(Value::as_str)
+        else {
             return;
         };
-        let Some(thread_id) = activity.get("agent_thread_id").and_then(Value::as_str) else {
+        let Some(thread_id) = activity
+            .get("agent_thread_id")
+            .or_else(|| activity.get("agentThreadId"))
+            .and_then(Value::as_str)
+        else {
             return;
+        };
+        let kind = activity
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("started");
+        let dedupe_key = format!("{activity_id}\0{thread_id}\0{kind}");
+        if !self.seen_subagent_activities.insert(dedupe_key) {
+            return;
+        }
+        let parent_id = if kind == "started" {
+            self.subagent_parent_by_thread
+                .entry(thread_id.to_owned())
+                .or_insert_with(|| activity_id.to_owned())
+                .clone()
+        } else {
+            self.subagent_parent_by_thread
+                .entry(thread_id.to_owned())
+                .or_insert_with(|| format!("codex-subagent:{thread_id}"))
+                .clone()
         };
         let path = activity
             .get("agent_path")
+            .or_else(|| activity.get("agentPath"))
             .and_then(Value::as_str)
             .unwrap_or("subagent");
         let (agent_type, description) = self
             .items
-            .get(parent_id)
+            .get(&parent_id)
+            .or_else(|| self.items.get(activity_id))
             .and_then(|item| match &item.content {
                 ItemContent::ToolCall { input, .. } => Some((
                     input
@@ -1667,43 +1705,55 @@ impl Actor {
         let child_item_id = format!("{parent_id}:{thread_id}");
         let subagent = self
             .subagents
-            .entry(parent_id.to_owned())
+            .entry(parent_id.clone())
             .or_insert_with(|| CodexSubagent {
                 agent_type,
                 description,
                 child_item_id,
             })
             .clone();
+        let status = match kind {
+            "completed" => ItemStatus::Completed,
+            "interrupted" => ItemStatus::Interrupted,
+            _ => ItemStatus::InProgress,
+        };
         let parent = ThreadItem {
-            id: parent_id.to_owned(),
+            id: parent_id.clone(),
             parent_item_id: None,
             content: ItemContent::Subagent {
                 agent_type: subagent.agent_type.clone(),
                 description: subagent.description.clone(),
-                status: ItemStatus::InProgress,
+                status,
                 summary: None,
             },
         };
-        self.items.insert(parent_id.to_owned(), parent.clone());
-        self.events.emit(AgentEvent::ItemUpdated(parent)).await;
+        self.items.insert(parent_id.clone(), parent.clone());
+        let parent_event = if status == ItemStatus::InProgress {
+            AgentEvent::ItemUpdated(parent)
+        } else {
+            AgentEvent::ItemCompleted(parent)
+        };
+        self.events.emit(parent_event).await;
 
         let child = ThreadItem {
             id: subagent.child_item_id,
-            parent_item_id: Some(parent_id.to_owned()),
+            parent_item_id: Some(parent_id),
             content: ItemContent::Subagent {
                 agent_type: subagent.agent_type,
-                description: match activity.get("kind").and_then(Value::as_str) {
-                    Some("interacted") => "interacted with parent".into(),
+                description: match kind {
+                    "interacted" => "interacted with parent".into(),
+                    "completed" => "child thread completed".into(),
+                    "interrupted" => "child thread interrupted".into(),
                     _ => "child thread started".into(),
                 },
-                status: ItemStatus::InProgress,
+                status,
                 summary: None,
             },
         };
-        let event = if activity.get("kind").and_then(Value::as_str) == Some("started") {
-            AgentEvent::ItemStarted(child)
-        } else {
-            AgentEvent::ItemUpdated(child)
+        let event = match kind {
+            "started" => AgentEvent::ItemStarted(child),
+            "completed" | "interrupted" => AgentEvent::ItemCompleted(child),
+            _ => AgentEvent::ItemUpdated(child),
         };
         self.events.emit(event).await;
     }
@@ -2142,6 +2192,16 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
             },
             status: map_status(item.get("status").and_then(Value::as_str)),
         },
+        "collabAgentToolCall" => ItemContent::ToolCall {
+            name: string_field(item, "tool"),
+            input: collab_tool_input(item),
+            output: item
+                .get("agentsStates")
+                .and_then(Value::as_object)
+                .filter(|states| !states.is_empty())
+                .map(|_| item["agentsStates"].to_string()),
+            status: map_status(item.get("status").and_then(Value::as_str)),
+        },
         "webSearch" => ItemContent::WebSearch {
             query: string_field(item, "query"),
         },
@@ -2157,7 +2217,48 @@ fn map_item(item: &Value) -> Option<ThreadItem> {
     })
 }
 
+fn collab_tool_input(item: &Value) -> Value {
+    let mut input = serde_json::Map::new();
+    for key in [
+        "senderThreadId",
+        "receiverThreadIds",
+        "prompt",
+        "model",
+        "reasoningEffort",
+    ] {
+        if let Some(value) = item.get(key).filter(|value| !value.is_null()) {
+            input.insert(key.to_owned(), value.clone());
+        }
+    }
+    let summary = item
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|prompt| !prompt.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            item.get("receiverThreadIds")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|ids| !ids.is_empty())
+        });
+    if let Some(summary) = summary {
+        input.insert("summary".into(), Value::String(summary));
+    }
+    Value::Object(input)
+}
+
 fn find_subagent_activity(value: &Value) -> Option<&Value> {
+    if let Some(item) = value
+        .get("item")
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("subAgentActivity"))
+    {
+        return Some(item);
+    }
     value
         .pointer("/event/payload")
         .filter(|payload| payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity"))
@@ -2167,7 +2268,8 @@ fn item_status(content: &ItemContent) -> ItemStatus {
     match content {
         ItemContent::CommandExecution { status, .. }
         | ItemContent::FileChange { status, .. }
-        | ItemContent::ToolCall { status, .. } => *status,
+        | ItemContent::ToolCall { status, .. }
+        | ItemContent::Subagent { status, .. } => *status,
         _ => ItemStatus::Completed,
     }
 }
@@ -2228,6 +2330,7 @@ fn map_status(status: Option<&str>) -> ItemStatus {
     match status {
         Some("completed") => ItemStatus::Completed,
         Some("failed") => ItemStatus::Failed,
+        Some("interrupted") => ItemStatus::Interrupted,
         Some("declined") => ItemStatus::Declined,
         _ => ItemStatus::InProgress,
     }
@@ -2373,6 +2476,8 @@ mod tests {
                 elicitations: HashMap::new(),
                 items: HashMap::new(),
                 subagents: HashMap::new(),
+                subagent_parent_by_thread: HashMap::new(),
+                seen_subagent_activities: HashSet::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
             },
@@ -3013,6 +3118,178 @@ mod tests {
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
+    }
+
+    #[test]
+    fn codex_0150_subagent_activity_uses_v2_fields_and_thread_identity() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.items.insert(
+                "call_spawn".into(),
+                ThreadItem {
+                    id: "call_spawn".into(),
+                    parent_item_id: None,
+                    content: ItemContent::ToolCall {
+                        name: "spawnAgent".into(),
+                        input: json!({"prompt":"Inspect protocol"}),
+                        output: None,
+                        status: ItemStatus::Completed,
+                    },
+                },
+            );
+            let started = json!({"item": {
+                "type": "subAgentActivity",
+                "id": "call_spawn",
+                "agentThreadId": "thread_child",
+                "agentPath": "/root/researcher",
+                "kind": "started"
+            }});
+            actor.handle_notification("item/started", &started).await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemUpdated(ThreadItem {
+                    id,
+                    content: ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    },
+                    ..
+                }) if id == "call_spawn"
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemStarted(ThreadItem {
+                    id,
+                    parent_item_id: Some(parent),
+                    content: ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                }) if id == "call_spawn:thread_child" && parent == "call_spawn"
+            ));
+
+            // Codex emits the instantaneous activity as item/started +
+            // item/completed and may additionally fan out the legacy event.
+            actor.handle_notification("item/completed", &started).await;
+            actor
+                .handle_notification(
+                    "thread/event",
+                    &json!({"event":{"payload":{
+                        "type":"sub_agent_activity",
+                        "event_id":"call_spawn",
+                        "agent_thread_id":"thread_child",
+                        "agent_path":"/root/researcher",
+                        "kind":"started"
+                    }}}),
+                )
+                .await;
+            assert!(events.try_recv().is_err(), "duplicate activity was emitted");
+
+            // Completion uses a fresh activity id in Codex 0.150. It must close
+            // the original thread-backed capsule instead of creating a second
+            // synthetic subagent.
+            let completed = json!({"item": {
+                "type": "subAgentActivity",
+                "id": "subagent-completed-turn-child",
+                "agentThreadId": "thread_child",
+                "agentPath": "/root/researcher",
+                "kind": "completed"
+            }});
+            actor.handle_notification("item/started", &completed).await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id,
+                    parent_item_id: None,
+                    content: ItemContent::Subagent {
+                        status: ItemStatus::Completed,
+                        ..
+                    }
+                }) if id == "call_spawn"
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    parent_item_id: Some(parent),
+                    content: ItemContent::Subagent {
+                        status: ItemStatus::Completed,
+                        ..
+                    },
+                    ..
+                }) if parent == "call_spawn"
+            ));
+            actor
+                .handle_notification("item/completed", &completed)
+                .await;
+            assert!(events.try_recv().is_err(), "completion was emitted twice");
+
+            let interrupted = json!({"item": {
+                "type": "subAgentActivity",
+                "id": "call_interrupt",
+                "agentThreadId": "thread_child",
+                "agentPath": "/root/researcher",
+                "kind": "interrupted"
+            }});
+            actor
+                .handle_notification("item/started", &interrupted)
+                .await;
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id,
+                    content: ItemContent::Subagent {
+                        status: ItemStatus::Interrupted,
+                        ..
+                    },
+                    ..
+                }) if id == "call_spawn"
+            ));
+            assert!(matches!(
+                events.recv().await.unwrap(),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    parent_item_id: Some(parent),
+                    content: ItemContent::Subagent {
+                        status: ItemStatus::Interrupted,
+                        ..
+                    },
+                    ..
+                }) if parent == "call_spawn"
+            ));
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn codex_0150_collab_tool_items_accept_new_values() {
+        for tool in [
+            "sendMessage",
+            "followupTask",
+            "interruptAgent",
+            "listAgents",
+        ] {
+            let item = map_item(&json!({
+                "type": "collabAgentToolCall",
+                "id": format!("call-{tool}"),
+                "tool": tool,
+                "status": if tool == "interruptAgent" { "interrupted" } else { "completed" },
+                "senderThreadId": "root-thread",
+                "receiverThreadIds": ["child-thread"],
+                "agentsStates": {}
+            }))
+            .unwrap();
+            assert!(matches!(
+                item.content,
+                ItemContent::ToolCall { name, status, .. }
+                    if name == tool
+                        && status == if tool == "interruptAgent" {
+                            ItemStatus::Interrupted
+                        } else {
+                            ItemStatus::Completed
+                        }
+            ));
+        }
     }
 
     #[test]

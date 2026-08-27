@@ -38,6 +38,7 @@ chat:
   output: "输出末尾"
   subagent_completed: "已完成"
   subagent_failed: "失败"
+  subagent_interrupted: "已中断"
   changed_files: "已更改文件（%{count}）"
   changed_files_partial: "· 部分归因"
   more_files: "+%{count} 个更多"

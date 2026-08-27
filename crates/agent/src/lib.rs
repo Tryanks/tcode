@@ -1272,6 +1272,7 @@ pub enum ItemStatus {
     InProgress,
     Completed,
     Failed,
+    Interrupted,
     Declined,
 }
 

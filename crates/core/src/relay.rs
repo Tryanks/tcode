@@ -298,6 +298,7 @@ fn status_outcome(status: ItemStatus, output: &str) -> String {
     let output = one_line(output);
     let label = match status {
         ItemStatus::Failed => "failed",
+        ItemStatus::Interrupted => "interrupted",
         ItemStatus::InProgress => "in progress",
         ItemStatus::Completed if !output.is_empty() => return output,
         ItemStatus::Completed => "completed",
