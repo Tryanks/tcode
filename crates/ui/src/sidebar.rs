@@ -315,12 +315,17 @@ fn animate_flat_thread_position(
     session_id: &str,
     target_top: f32,
 ) -> impl IntoElement + use<> {
-    row.with_spring(
-        gpui::SharedString::from(format!("flat-thread-position-{session_id}")),
-        SpringAnimation::new(FLAT_REORDER_SPRING)
-            .to(px(target_top))
-            .with_epsilon(0.25),
-        move |row, animated_top| row.relative().top(animated_top - px(target_top)),
+    // `list` positions each item root explicitly during prepaint, which
+    // overrides relative offsets applied to that root. Keep an unanimated
+    // outer item for the list to position and move the row inside it instead.
+    div().w_full().child(
+        row.with_spring(
+            gpui::SharedString::from(format!("flat-thread-position-{session_id}")),
+            SpringAnimation::new(FLAT_REORDER_SPRING)
+                .to(px(target_top))
+                .with_epsilon(0.25),
+            move |row, animated_top| row.relative().top(animated_top - px(target_top)),
+        ),
     )
 }
 
@@ -2366,8 +2371,8 @@ impl Render for SessionsSidebar {
 mod tests {
     use super::*;
     use agent::ProviderKind;
-    use gpui::{Pixels, TestAppContext, VisualTestContext, size};
-    use std::{cell::RefCell, path::PathBuf, rc::Rc};
+    use gpui::{TestAppContext, VisualTestContext, size};
+    use std::path::PathBuf;
     use tcode_core::project::Project;
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
@@ -2376,7 +2381,7 @@ mod tests {
 
     struct FlatReorderAnimationProbe {
         reversed: bool,
-        positions: Rc<RefCell<HashMap<&'static str, Pixels>>>,
+        list_state: ListState,
     }
 
     impl Render for FlatReorderAnimationProbe {
@@ -2386,22 +2391,20 @@ mod tests {
             } else {
                 ["first", "second"]
             };
-            let positions = self.positions.clone();
 
-            v_flex().children(order.into_iter().enumerate().map(|(index, id)| {
-                let positions = positions.clone();
+            list(self.list_state.clone(), move |index, _, _| {
+                let id = order[index];
                 let target_top = index as f32 * FLAT_ROOT_ROW_HEIGHT;
-                div().h(px(FLAT_ROOT_ROW_HEIGHT)).with_spring(
-                    gpui::SharedString::from(format!("flat-thread-position-{id}")),
-                    SpringAnimation::new(FLAT_REORDER_SPRING)
-                        .to(px(target_top))
-                        .with_epsilon(0.25),
-                    move |row, animated_top| {
-                        positions.borrow_mut().insert(id, animated_top);
-                        row.relative().top(animated_top - px(target_top))
-                    },
+                animate_flat_thread_position(
+                    div()
+                        .h(px(FLAT_ROOT_ROW_HEIGHT))
+                        .debug_selector(move || format!("flat-reorder-row-{id}")),
+                    id,
+                    target_top,
                 )
-            }))
+                .into_any_element()
+            })
+            .size_full()
         }
     }
 
@@ -2483,31 +2486,35 @@ mod tests {
 
     #[gpui::test]
     fn flat_rows_start_reordering_from_their_previous_positions(cx: &mut TestAppContext) {
-        let positions = Rc::new(RefCell::new(HashMap::new()));
-        let window = cx.open_window(size(px(200.), px(200.)), {
-            let positions = positions.clone();
-            move |_, _| FlatReorderAnimationProbe {
-                reversed: false,
-                positions,
-            }
+        let (probe, cx) = cx.add_window_view(|_, _| FlatReorderAnimationProbe {
+            reversed: false,
+            list_state: ListState::new(2, ListAlignment::Top, px(0.)),
         });
-        cx.run_until_parked();
-        assert_eq!(positions.borrow()["first"], px(0.));
-        assert_eq!(positions.borrow()["second"], px(FLAT_ROOT_ROW_HEIGHT));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(200.), px(200.)));
+        draw(cx);
 
-        window
-            .update(cx, |probe, _, cx| {
-                probe.reversed = true;
-                cx.notify();
-            })
-            .unwrap();
-        cx.run_until_parked();
-        assert_eq!(positions.borrow()["first"], px(0.));
-        assert_eq!(positions.borrow()["second"], px(FLAT_ROOT_ROW_HEIGHT));
+        let first_start = cx.debug_bounds("flat-reorder-row-first").unwrap().top();
+        let second_start = cx.debug_bounds("flat-reorder-row-second").unwrap().top();
+        assert_eq!(second_start - first_start, px(FLAT_ROOT_ROW_HEIGHT));
 
-        let callbacks = window
-            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
-            .unwrap();
+        probe.update(cx, |probe, cx| {
+            probe.reversed = true;
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("flat-reorder-row-first").unwrap().top(),
+            first_start,
+            "first row snapped to its destination instead of starting at its old position"
+        );
+        assert_eq!(
+            cx.debug_bounds("flat-reorder-row-second").unwrap().top(),
+            second_start,
+            "second row snapped to its destination instead of starting at its old position"
+        );
+
+        let callbacks = cx.update(|window, cx| window.simulate_next_frame(cx));
         assert!(callbacks > 0, "spring did not request an animation frame");
     }
 
