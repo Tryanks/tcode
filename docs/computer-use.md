@@ -123,21 +123,25 @@ Settings gains two pages:
   allow-JS-evaluate toggle. Its in-process WKWebView snapshot tool needs no TCC permission.
 - **Computer Use** — master enable toggle, image mode (`auto` / `always` / `never`),
   allow-input-actions toggle (off = observe-only), and one permission row per TCC kind:
-  live status, a **Grant** button (fires the TCC prompt and opens the matching
-  `x-apple.systempreferences` pane), and **Recheck**.
+  live status, a primary action, and **Recheck**. The primary action starts as
+  **Request Access** and fires only the native TCC request. If the permission is still missing,
+  the next explicit action becomes **Open System Settings** and deep-links the matching
+  `x-apple.systempreferences` pane. Returning to tcode also triggers a recheck.
 
 ### Restart continuity
 
 macOS applies some grants (notably Screen Recording) only after the app restarts, and shows its
-own "Quit & Reopen" dialog. tcode therefore treats any permission flow as a potential restart:
+own "Quit & Reopen" dialog. tcode therefore preserves Screen Recording flows across a restart:
 
-1. When the user clicks **Grant**, tcode first writes a small `relaunch.json` marker into the
-   data dir: `{ reopen_settings: "computer_use", active_session: <id> }`.
+1. Before a Screen Recording request, tcode writes a temporary `relaunch.json` marker into the
+   data dir: `{ reopen_settings: "computer_use", active_session: <id> }`. Accessibility does not
+   need this marker. Returning without a grant clears it.
 2. Session timelines are already continuously persisted (JSONL + resume cursors), so an
    externally-initiated quit loses nothing.
-3. On startup, a present marker is consumed: the previous active session is reopened, the
-   Settings window is reopened on the recorded page, and permissions are rechecked
-   automatically so the user immediately sees the new status.
+3. On startup, a present marker is consumed and validated against the current Screen Recording
+   status. After a real grant, the previous active session is reopened, the Settings window is
+   reopened on the recorded page, and permissions are rechecked automatically. A denied or stale
+   marker is discarded without changing the launch route.
 4. The Computer Use page also offers an explicit **Relaunch tcode** button (shown when a grant
    was detected as pending-restart) that writes the same marker and relaunches via
    `open -n <bundle>`.

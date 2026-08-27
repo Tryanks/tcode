@@ -287,7 +287,8 @@ browser:
 permissions:
   granted: "Granted"
   missing: "Not granted"
-  grant: "Grant"
+  grant: "Request Access"
+  open_settings: "Open System Settings"
   recheck: "Recheck"
   unsupported: "Only available on macOS."
   restart_banner: "Screen Recording grants take effect only after tcode restarts."

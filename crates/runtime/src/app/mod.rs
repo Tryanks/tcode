@@ -399,6 +399,13 @@ fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
     cx.emit(HostEvent::Runtime(event));
 }
 
+fn permission_relaunch_marker(
+    marker: Option<tcode_services::relaunch::RelaunchMarker>,
+    permissions: computer_use_mcp::permissions::PermissionStatus,
+) -> Option<tcode_services::relaunch::RelaunchMarker> {
+    marker.filter(|marker| marker.reopen_settings != "computer_use" || permissions.screen_recording)
+}
+
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
         Self::new_with_terminal_registry(store, LocalTerminalRegistry::default(), false)
@@ -425,7 +432,12 @@ impl AppState {
         // the first call, not just after a settings change.
         computer_use_mcp::config::set(settings.computer_use.clone());
         // Consume any restart-continuity marker left by a permission grant.
-        let pending_relaunch = tcode_services::relaunch::take(store.root());
+        // A denied Screen Recording flow must not reopen Settings on a later,
+        // unrelated launch even if the foreground cleanup never ran.
+        let pending_relaunch = permission_relaunch_marker(
+            tcode_services::relaunch::take(store.root()),
+            computer_use_mcp::permissions::check(),
+        );
         let terminal_preferences_path = store.root().join("terminal-ui.json");
         let terminal_preferences = std::fs::read(&terminal_preferences_path)
             .ok()

@@ -287,7 +287,8 @@ browser:
 permissions:
   granted: "已授权"
   missing: "未授权"
-  grant: "去授权"
+  grant: "请求授权"
+  open_settings: "打开系统设置"
   recheck: "重新检查"
   unsupported: "仅在 macOS 上可用。"
   restart_banner: "屏幕录制授权需重新启动 tcode 后才会生效。"

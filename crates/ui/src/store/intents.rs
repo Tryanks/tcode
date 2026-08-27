@@ -152,6 +152,9 @@ impl WorkspaceStore {
     pub fn write_relaunch_marker(&mut self, reopen_settings: String) {
         self.dispatch(Command::WriteRelaunchMarker { reopen_settings });
     }
+    pub fn clear_relaunch_marker(&mut self) {
+        self.dispatch(Command::ClearRelaunchMarker);
+    }
     pub fn set_sidebar_collapsed(&mut self, collapsed: bool) {
         self.dispatch(Command::SetSidebarCollapsed { collapsed });
     }

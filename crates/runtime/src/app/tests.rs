@@ -7,6 +7,22 @@ use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage};
 
 #[test]
+fn denied_screen_recording_drops_permission_relaunch_marker() {
+    let marker = tcode_services::relaunch::RelaunchMarker {
+        reopen_settings: "computer_use".into(),
+        active_session: Some("session-1".into()),
+    };
+
+    assert_eq!(
+        permission_relaunch_marker(
+            Some(marker),
+            computer_use_mcp::permissions::PermissionStatus::default(),
+        ),
+        None
+    );
+}
+
+#[test]
 fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-subagent-mirror-test");

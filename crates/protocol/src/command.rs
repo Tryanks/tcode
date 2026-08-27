@@ -101,6 +101,7 @@ pub enum Command {
     WriteRelaunchMarker {
         reopen_settings: String,
     },
+    ClearRelaunchMarker,
     SetTerminalHeight {
         height: f32,
     },

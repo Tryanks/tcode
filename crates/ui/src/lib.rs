@@ -1,5 +1,6 @@
 mod acp_panel;
 mod add_project_dialog;
+mod app_activation;
 pub mod assets;
 mod attachments;
 mod chat;
