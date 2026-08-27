@@ -146,7 +146,11 @@ platform pays that inset.
   the latest five activities remain directly visible. Once a sixth arrives,
   only the older prefix is summarized by a collapsed Work Log row (with a
   working spinner on its right); those five visible activities are excluded
-  from that row's counts. Assistant prose settles the run, folding every
+  from that row's counts. The newest command output or file-edit diff stays
+  automatically expanded until a newer activity appears. A superseded detail
+  folds immediately if it has already been visible for 500ms; otherwise it
+  stays open only for the remainder of that minimum visibility window.
+  Assistant prose settles the run, folding every
   activity in it under one summary row. A completed section's toggle summarizes
   only its real, nonzero events
   (commands, unique edited files, tool calls, subagents, and compactions); an
