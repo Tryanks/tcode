@@ -296,6 +296,7 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::SetActiveAcpAgent { .. } => {}
         Command::ResetSettings => {}
         Command::WriteRelaunchMarker { .. } => {}
+        Command::ClearRelaunchMarker => {}
         Command::SetTerminalHeight { .. } => {}
         Command::ToggleTerminalPanel => {}
         Command::CloseTerminalPanel => {}
@@ -444,6 +445,7 @@ fn every_command_and_query_crosses_ndjson() {
         Command::WriteRelaunchMarker {
             reopen_settings: "providers".into(),
         },
+        Command::ClearRelaunchMarker,
         Command::SetTerminalHeight { height: 260.0 },
         Command::ToggleTerminalPanel,
         Command::CloseTerminalPanel,

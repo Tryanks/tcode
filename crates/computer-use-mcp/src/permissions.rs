@@ -21,6 +21,44 @@ pub struct PermissionStatus {
     pub screen_recording: bool,
 }
 
+/// The explicit user-facing action to perform for a missing permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionGrantAction {
+    Request,
+    OpenSettings,
+}
+
+/// Chooses the next action for a missing permission without invoking TCC or
+/// opening another application. The Settings UI owns those platform effects.
+#[derive(Debug, Default)]
+pub struct PermissionGrantFlow {
+    attempted: PermissionStatus,
+}
+
+impl PermissionGrantFlow {
+    /// Return the action the UI should label without mutating the flow.
+    pub fn action(&self, kind: PermissionKind) -> PermissionGrantAction {
+        if self.attempted.granted(kind) {
+            PermissionGrantAction::OpenSettings
+        } else {
+            PermissionGrantAction::Request
+        }
+    }
+
+    /// Return the explicit effect for this click and advance a first request to
+    /// the System Settings fallback for later clicks.
+    pub fn advance(&mut self, kind: PermissionKind) -> PermissionGrantAction {
+        let action = self.action(kind);
+        if action == PermissionGrantAction::Request {
+            match kind {
+                PermissionKind::Accessibility => self.attempted.accessibility = true,
+                PermissionKind::ScreenRecording => self.attempted.screen_recording = true,
+            }
+        }
+        action
+    }
+}
+
 impl PermissionStatus {
     pub fn granted(&self, kind: PermissionKind) -> bool {
         match kind {
@@ -39,10 +77,11 @@ pub fn check() -> PermissionStatus {
     imp::check()
 }
 
-/// Fire the OS prompt for one permission kind. Accessibility prompts inline;
-/// Screen Recording prompts at most once per TCC reset, after which the user
-/// must flip the toggle in System Settings — pair this with
-/// [`open_settings_pane`]. Returns the (possibly already-granted) status.
+/// Fire the native request for one permission kind. The system prompt may
+/// complete asynchronously or stop appearing after an earlier attempt. Callers
+/// should offer [`open_settings_pane`] as a later, explicit fallback instead of
+/// opening it in the same action as this request. The return value is the native
+/// API's passthrough result, not a completion signal; use [`check`] for state.
 pub fn request(kind: PermissionKind) -> bool {
     imp::request(kind)
 }
@@ -185,6 +224,38 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&PermissionKind::ScreenRecording).unwrap(),
             "\"screen_recording\""
+        );
+    }
+
+    #[test]
+    fn first_grant_action_requests_permission() {
+        let mut flow = PermissionGrantFlow::default();
+
+        assert_eq!(
+            flow.advance(PermissionKind::ScreenRecording),
+            PermissionGrantAction::Request
+        );
+    }
+
+    #[test]
+    fn repeated_grant_action_opens_settings() {
+        let mut flow = PermissionGrantFlow::default();
+        let _ = flow.advance(PermissionKind::ScreenRecording);
+
+        assert_eq!(
+            flow.advance(PermissionKind::ScreenRecording),
+            PermissionGrantAction::OpenSettings
+        );
+    }
+
+    #[test]
+    fn grant_flow_exposes_the_next_action() {
+        let mut flow = PermissionGrantFlow::default();
+        let _ = flow.advance(PermissionKind::ScreenRecording);
+
+        assert_eq!(
+            flow.action(PermissionKind::ScreenRecording),
+            PermissionGrantAction::OpenSettings
         );
     }
 }

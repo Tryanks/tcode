@@ -586,6 +586,7 @@ fn dispatch_command(
         Command::WriteRelaunchMarker { reopen_settings } => {
             app.write_relaunch_marker(&reopen_settings)
         }
+        Command::ClearRelaunchMarker => app.clear_relaunch_marker(),
         Command::SetTerminalHeight { height } => app.set_terminal_height(height, cx),
         Command::ToggleTerminalPanel => app.toggle_terminal_panel(cx),
         Command::CloseTerminalPanel => app.close_terminal_panel(cx),
