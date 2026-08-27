@@ -19,6 +19,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 gpui-component-macros = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
+async-channel = "2"
 chrono = "0.4"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -37,9 +38,10 @@ raw-window-handle = { version = "0.6", features = ["std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
-objc2-app-kit = { version = "0.3.2", features = ["NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"] }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"] }
 objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"] }
-objc2-foundation = { version = "0.3.2", features = ["NSError"] }
+objc2-foundation = { version = "0.3.2", features = ["NSError", "NSNotification", "NSOperation", "NSString", "block2"] }
 objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKWebView"] }
 

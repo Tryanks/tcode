@@ -371,8 +371,8 @@ impl AppState {
     }
 
     /// Persist a restart-continuity marker naming the Settings page to reopen and
-    /// the session that is active now. Written *before* a permission grant or an
-    /// explicit relaunch, so an externally-initiated quit reopens cleanly.
+    /// the session that is active now. Written before a Screen Recording request
+    /// or an explicit relaunch, so an externally-initiated quit reopens cleanly.
     pub fn write_relaunch_marker(&self, reopen_settings: &str) {
         let marker = tcode_services::relaunch::RelaunchMarker {
             reopen_settings: reopen_settings.to_string(),
@@ -380,6 +380,12 @@ impl AppState {
         };
         if let Err(err) = tcode_services::relaunch::write(self.store.root(), &marker) {
             log::warn!("failed to write relaunch marker: {err}");
+        }
+    }
+
+    pub fn clear_relaunch_marker(&self) {
+        if let Err(err) = tcode_services::relaunch::clear(self.store.root()) {
+            log::warn!("failed to clear relaunch marker: {err}");
         }
     }
 

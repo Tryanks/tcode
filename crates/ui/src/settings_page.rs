@@ -25,7 +25,8 @@ use gpui::{
 use gpui_base::{StyledExt as _, v_flex};
 
 use computer_use_mcp::permissions::{
-    self, PermissionKind, PermissionStatus, open_settings_pane, relaunch_app, request,
+    self, PermissionGrantAction, PermissionGrantFlow, PermissionKind, PermissionStatus,
+    open_settings_pane, relaunch_app, request,
 };
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
@@ -112,6 +113,13 @@ pub struct SettingsPage {
     /// Whether a Screen Recording grant looks pending-restart (a fresh grant
     /// only takes effect after tcode relaunches). Drives the restart banner.
     sr_restart_hint: bool,
+    /// A temporary continuity marker exists for an in-flight Screen Recording
+    /// request. It is cleared when the app becomes active without a grant.
+    screen_recording_marker_pending: bool,
+    /// Separates the initial native TCC request from the explicit fallback that
+    /// opens System Settings when macOS will no longer show its prompt.
+    permission_grant_flow: PermissionGrantFlow,
+    _app_activation_observer: crate::app_activation::AppActivationObserver,
     /// One focus handle per toggle row, keyed by row id. The row owns keyboard
     /// activation, so its capture-phase Space handler must be able to tell
     /// "the row is focused" from "the inline reset button inside it is".
@@ -247,6 +255,7 @@ impl SettingsPage {
         // opened by a post-grant relaunch this is the "automatic recheck" that
         // surfaces the new status immediately.
         let perm_status = permissions::check();
+        let (app_activation_observer, app_activation_events) = crate::app_activation::observe();
         let mut page = Self {
             store,
             window_state,
@@ -262,6 +271,9 @@ impl SettingsPage {
             auto_archive_keep_input: auto_archive_keep_input.clone(),
             perm_status,
             sr_restart_hint: false,
+            screen_recording_marker_pending: false,
+            permission_grant_flow: PermissionGrantFlow::default(),
+            _app_activation_observer: app_activation_observer,
             toggle_focus: HashMap::new(),
             _subscriptions: subscriptions,
         };
@@ -287,6 +299,21 @@ impl SettingsPage {
         );
         page.build_provider_cards(cx);
         page.sync_acp_cards(window, cx);
+        cx.spawn(async move |this, cx| {
+            while app_activation_events.recv().await.is_ok() {
+                if this
+                    .update(cx, |this, cx| {
+                        if this.section == Section::ComputerUse {
+                            this.recheck_permissions(true, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         page
     }
 
@@ -1545,6 +1572,11 @@ impl SettingsPage {
 
     fn permission_row(&self, kind: PermissionKind, cx: &mut Context<Self>) -> AnyElement {
         let granted = self.perm_status.granted(kind);
+        let grant_action = self.permission_grant_flow.action(kind);
+        let grant_label = match grant_action {
+            PermissionGrantAction::Request => crate::tr!("permissions.grant"),
+            PermissionGrantAction::OpenSettings => crate::tr!("permissions.open_settings"),
+        };
         let (name_key, why_key, grant_id, recheck_id) = match kind {
             PermissionKind::Accessibility => (
                 "permissions.accessibility.name",
@@ -1570,7 +1602,7 @@ impl SettingsPage {
                     Button::new(grant_id)
                         .outline()
                         .small()
-                        .label(crate::tr!("permissions.grant"))
+                        .label(grant_label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.grant_permission(kind, cx);
                         })),
@@ -1581,7 +1613,7 @@ impl SettingsPage {
                         .small()
                         .label(crate::tr!("permissions.recheck"))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.recheck_permissions(cx);
+                            this.recheck_permissions(true, cx);
                         })),
                 );
         }
@@ -1641,24 +1673,41 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Persist the restart-continuity marker, then fire the OS prompt and open
-    /// the matching System Settings pane. The marker must be written *first*:
-    /// macOS may quit tcode from its own "Quit & Reopen" dialog.
+    /// Fire the native prompt first. If the permission remains missing, the
+    /// next explicit click opens System Settings as a fallback; doing both at
+    /// once races macOS's own consent dialog and duplicates its Open Settings
+    /// action.
     fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _cx| {
-            store.write_relaunch_marker("computer_use".into());
-        });
-        let _ = request(kind);
-        open_settings_pane(kind);
-        if kind == PermissionKind::ScreenRecording {
-            self.sr_restart_hint = true;
+        match self.permission_grant_flow.advance(kind) {
+            PermissionGrantAction::Request => {
+                if kind == PermissionKind::ScreenRecording {
+                    self.store.update(cx, |store, _cx| {
+                        store.write_relaunch_marker("computer_use".into());
+                    });
+                    self.screen_recording_marker_pending = true;
+                }
+                let _ = request(kind);
+                // Both native request APIs may return before the user has
+                // completed the system UI, so this immediate snapshot must not
+                // clear the temporary Screen Recording marker.
+                self.recheck_permissions(false, cx);
+            }
+            PermissionGrantAction::OpenSettings => {
+                open_settings_pane(kind);
+                cx.notify();
+            }
         }
-        self.perm_status = permissions::check();
-        cx.notify();
     }
 
-    fn recheck_permissions(&mut self, cx: &mut Context<Self>) {
+    fn recheck_permissions(&mut self, clear_ungranted_marker: bool, cx: &mut Context<Self>) {
         let fresh = permissions::check();
+        if clear_ungranted_marker && self.screen_recording_marker_pending && !fresh.screen_recording
+        {
+            self.store.update(cx, |store, _cx| {
+                store.clear_relaunch_marker();
+            });
+            self.screen_recording_marker_pending = false;
+        }
         // A Screen Recording grant that flips on still needs a restart to take
         // effect for the running process, so surface the relaunch affordance.
         if fresh.screen_recording && !self.perm_status.screen_recording {

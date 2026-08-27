@@ -2,10 +2,12 @@
 //!
 //! macOS applies some TCC grants (notably Screen Recording) only after the app
 //! restarts, and may quit tcode from its own "Quit & Reopen" dialog. Before any
-//! permission flow, the app drops a small `relaunch.json` marker into the data
-//! dir recording which Settings page to reopen and which session was active.
-//! On the next launch the marker is *taken* (read + deleted) so the app can
-//! reopen the session, reopen Settings on the recorded page, and recheck.
+//! Screen Recording permission flow, the app drops a small `relaunch.json`
+//! marker into the data dir recording which Settings page to reopen and which
+//! session was active. A denied flow clears the marker when the app becomes
+//! active again. On the next launch any remaining marker is *taken* (read +
+//! deleted) so the app can reopen the session, reopen Settings on the recorded
+//! page, and recheck.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +34,15 @@ pub fn write(data_dir: &Path, marker: &RelaunchMarker) -> std::io::Result<()> {
     let data = serde_json::to_vec_pretty(marker)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(marker_path(data_dir), data)
+}
+
+/// Discard a pending marker. Missing markers are already clear.
+pub fn clear(data_dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(marker_path(data_dir)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// Read the marker and delete it (consume-once). Returns `None` when absent or
@@ -82,6 +93,26 @@ mod tests {
         // A corrupt marker is deleted so it can't wedge future launches.
         assert!(!marker_path(&root).exists());
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_discards_a_pending_marker() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-relaunch-clear-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        write(
+            &root,
+            &RelaunchMarker {
+                reopen_settings: "computer_use".into(),
+                active_session: None,
+            },
+        )
+        .unwrap();
+
+        clear(&root).unwrap();
+
+        assert_eq!(take(&root), None);
         let _ = std::fs::remove_dir_all(root);
     }
 }
