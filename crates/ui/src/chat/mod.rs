@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ use crate::{
     icon::{Icon, IconName},
     sizing::Sizable as _,
 };
-use agent::{ItemContent, ItemStatus, RewindMode};
+use agent::{ItemContent, RewindMode};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity,
     FollowMode, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
@@ -68,14 +68,19 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 const TURN_GAP: f32 = 32.;
 /// Large documents are parsed away from the UI executor before becoming resident.
 const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
-/// Keep a just-settled live activity visible long enough for its final output
-/// or rendered diff to register before the automatically expanded detail folds.
-const AUTO_ACTIVITY_COLLAPSE_DELAY: Duration = Duration::from_millis(500);
+/// Minimum time an automatically expanded activity stays visible. The latest
+/// activity remains open beyond this until another activity supersedes it.
+const AUTO_ACTIVITY_MIN_VISIBILITY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoActivityExpansion {
-    Expanded,
-    CollapsePending(u64),
+    Expanded {
+        visible_since: Instant,
+    },
+    CollapsePending {
+        generation: u64,
+        visible_since: Instant,
+    },
     Collapsed,
 }
 
@@ -88,54 +93,94 @@ struct AutoActivityExpansions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AutoActivityObservation {
     expanded: bool,
-    collapse_generation: Option<u64>,
+    collapse: Option<(u64, Duration)>,
 }
 
 impl AutoActivityExpansions {
-    fn observe(&mut self, key: &str, enabled: bool, active: bool) -> AutoActivityObservation {
+    fn observe(
+        &mut self,
+        key: &str,
+        enabled: bool,
+        latest: bool,
+        now: Instant,
+    ) -> AutoActivityObservation {
         if !enabled {
             self.entries.remove(key);
             return AutoActivityObservation {
                 expanded: false,
-                collapse_generation: None,
+                collapse: None,
             };
         }
 
-        if active {
-            self.entries
-                .insert(key.to_string(), AutoActivityExpansion::Expanded);
+        let current = self.entries.get(key).copied();
+        if latest {
+            let visible_since = match current {
+                Some(AutoActivityExpansion::Expanded { visible_since })
+                | Some(AutoActivityExpansion::CollapsePending { visible_since, .. }) => {
+                    visible_since
+                }
+                Some(AutoActivityExpansion::Collapsed) | None => now,
+            };
+            self.entries.insert(
+                key.to_string(),
+                AutoActivityExpansion::Expanded { visible_since },
+            );
             return AutoActivityObservation {
                 expanded: true,
-                collapse_generation: None,
+                collapse: None,
             };
         }
 
-        match self.entries.get(key).copied() {
-            Some(AutoActivityExpansion::Expanded) | None => {
-                self.next_generation = self.next_generation.wrapping_add(1);
-                let generation = self.next_generation;
-                self.entries.insert(
-                    key.to_string(),
-                    AutoActivityExpansion::CollapsePending(generation),
-                );
-                AutoActivityObservation {
+        let visible_since = match current {
+            Some(AutoActivityExpansion::Expanded { visible_since }) => visible_since,
+            None => now,
+            Some(AutoActivityExpansion::CollapsePending { .. }) => {
+                return AutoActivityObservation {
                     expanded: true,
-                    collapse_generation: Some(generation),
-                }
+                    collapse: None,
+                };
             }
-            Some(AutoActivityExpansion::CollapsePending(_)) => AutoActivityObservation {
-                expanded: true,
-                collapse_generation: None,
-            },
-            Some(AutoActivityExpansion::Collapsed) => AutoActivityObservation {
+            Some(AutoActivityExpansion::Collapsed) => {
+                return AutoActivityObservation {
+                    expanded: false,
+                    collapse: None,
+                };
+            }
+        };
+        let remaining = AUTO_ACTIVITY_MIN_VISIBILITY
+            .saturating_sub(now.saturating_duration_since(visible_since));
+        if remaining.is_zero() {
+            self.entries
+                .insert(key.to_string(), AutoActivityExpansion::Collapsed);
+            AutoActivityObservation {
                 expanded: false,
-                collapse_generation: None,
-            },
+                collapse: None,
+            }
+        } else {
+            self.next_generation = self.next_generation.wrapping_add(1);
+            let generation = self.next_generation;
+            self.entries.insert(
+                key.to_string(),
+                AutoActivityExpansion::CollapsePending {
+                    generation,
+                    visible_since,
+                },
+            );
+            AutoActivityObservation {
+                expanded: true,
+                collapse: Some((generation, remaining)),
+            }
         }
     }
 
     fn finish_collapse(&mut self, key: &str, generation: u64) -> bool {
-        if self.entries.get(key) == Some(&AutoActivityExpansion::CollapsePending(generation)) {
+        if matches!(
+            self.entries.get(key),
+            Some(AutoActivityExpansion::CollapsePending {
+                generation: pending,
+                ..
+            }) if *pending == generation
+        ) {
             self.entries
                 .insert(key.to_string(), AutoActivityExpansion::Collapsed);
             true
@@ -621,13 +666,15 @@ impl ChatView {
         turn: usize,
         key: &str,
         enabled: bool,
-        active: bool,
+        latest: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let auto = self.auto_activity_expansions.observe(key, enabled, active);
-        if let Some(generation) = auto.collapse_generation {
+        let auto = self
+            .auto_activity_expansions
+            .observe(key, enabled, latest, Instant::now());
+        if let Some((generation, delay)) = auto.collapse {
             let collapse_key = key.to_string();
-            let timer = cx.background_executor().timer(AUTO_ACTIVITY_COLLAPSE_DELAY);
+            let timer = cx.background_executor().timer(delay);
             cx.spawn(async move |this, cx| {
                 timer.await;
                 let _ = this.update(cx, |this, cx| {
@@ -1135,14 +1182,12 @@ impl ChatView {
         let mut rows = Vec::new();
         for (activity_index, entry) in activities.iter().enumerate() {
             let latest = activity_index + 1 == activities.len();
-            if let EntryContent::Item(ItemContent::FileChange { changes, status }) = &entry.content
-            {
+            if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content {
                 let turn = entry.turn;
                 for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
-                    let active = latest && *status == ItemStatus::InProgress;
-                    let expanded = self.auto_activity_expanded(turn, &key, enabled, active, cx)
+                    let expanded = self.auto_activity_expanded(turn, &key, enabled, latest, cx)
                         || self.expanded.contains(&key);
                     let toggle_key = key.clone();
                     rows.push(components::changed_files::file_edit_row(
@@ -1187,16 +1232,13 @@ impl ChatView {
         }
         let key = format!("activity-{}", entry.id);
         let turn = entry.turn;
-        let (is_command, running) = match &entry.content {
-            EntryContent::Item(ItemContent::CommandExecution { status, .. }) => {
-                (true, *status == ItemStatus::InProgress)
-            }
-            _ => (false, false),
-        };
+        let is_command = matches!(
+            &entry.content,
+            EntryContent::Item(ItemContent::CommandExecution { .. })
+        );
         let auto_enabled =
             auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
-        let auto_expanded =
-            self.auto_activity_expanded(turn, &key, auto_enabled, latest && running, cx);
+        let auto_expanded = self.auto_activity_expanded(turn, &key, auto_enabled, latest, cx);
         let expanded = auto_expanded || self.expanded.contains(&key);
         let command_detail = if expanded {
             match &entry.content {
@@ -2252,7 +2294,7 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_COLLAPSE_DELAY, AutoActivityExpansions,
+        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansions,
         ChatView, ResidencyScope, markdown_entries_for_residency,
     };
     use crate::store::WorkspaceStore;
@@ -2263,62 +2305,131 @@ mod tests {
         Arc,
         atomic::{AtomicU64, Ordering},
     };
+    use std::time::{Duration, Instant};
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry, TurnMeta};
 
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn settled_live_activity_stays_expanded_until_delayed_collapse() {
+    fn latest_activity_stays_expanded_until_a_successor_appears() {
         let mut expansions = AutoActivityExpansions::default();
+        let first_seen = Instant::now();
 
-        let running = expansions.observe("activity-command", true, true);
+        let running = expansions.observe("activity-command", true, true, first_seen);
         assert!(running.expanded);
-        assert_eq!(running.collapse_generation, None);
+        assert_eq!(running.collapse, None);
 
-        let completed = expansions.observe("activity-command", true, false);
+        let completed = expansions.observe(
+            "activity-command",
+            true,
+            true,
+            first_seen + Duration::from_secs(1),
+        );
         assert!(completed.expanded);
-        let generation = completed
-            .collapse_generation
-            .expect("completion should schedule a delayed collapse");
+        assert_eq!(completed.collapse, None);
 
-        let rerender = expansions.observe("activity-command", true, false);
-        assert!(rerender.expanded);
-        assert_eq!(rerender.collapse_generation, None);
+        let superseded = expansions.observe(
+            "activity-command",
+            true,
+            false,
+            first_seen + Duration::from_secs(1),
+        );
+        assert!(!superseded.expanded);
+        assert_eq!(superseded.collapse, None);
+        assert_eq!(AUTO_ACTIVITY_MIN_VISIBILITY, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn early_successor_only_waits_for_remaining_minimum_visibility() {
+        let mut expansions = AutoActivityExpansions::default();
+        let first_seen = Instant::now();
+        expansions.observe("activity-command", true, true, first_seen);
+        let superseded = expansions.observe(
+            "activity-command",
+            true,
+            false,
+            first_seen + Duration::from_millis(200),
+        );
+
+        assert!(superseded.expanded);
+        let (generation, delay) = superseded
+            .collapse
+            .expect("early successor should schedule the remaining delay");
+        assert_eq!(delay, Duration::from_millis(300));
         assert!(expansions.finish_collapse("activity-command", generation));
-        assert!(!expansions.observe("activity-command", true, false).expanded);
-        assert_eq!(
-            AUTO_ACTIVITY_COLLAPSE_DELAY,
-            std::time::Duration::from_millis(500)
+        assert!(
+            !expansions
+                .observe(
+                    "activity-command",
+                    true,
+                    false,
+                    first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
+                )
+                .expanded
         );
     }
 
     #[test]
-    fn activity_first_seen_settled_still_opens_for_the_collapse_delay() {
+    fn activity_first_seen_non_latest_still_gets_full_visibility_window() {
         let mut expansions = AutoActivityExpansions::default();
-        let settled = expansions.observe("activity-command", true, false);
+        let first_seen = Instant::now();
+        let observed = expansions.observe("activity-command", true, false, first_seen);
 
-        assert!(settled.expanded);
-        let generation = settled
-            .collapse_generation
+        assert!(observed.expanded);
+        let (generation, delay) = observed
+            .collapse
             .expect("first observation should schedule a collapse");
+        assert_eq!(delay, AUTO_ACTIVITY_MIN_VISIBILITY);
         assert!(expansions.finish_collapse("activity-command", generation));
-        assert!(!expansions.observe("activity-command", true, false).expanded);
     }
 
     #[test]
     fn reactivated_activity_cancels_its_stale_delayed_collapse() {
         let mut expansions = AutoActivityExpansions::default();
-        expansions.observe("activity-command", true, true);
-        let generation = expansions
-            .observe("activity-command", true, false)
-            .collapse_generation
-            .expect("completion should schedule a collapse");
+        let first_seen = Instant::now();
+        expansions.observe("activity-command", true, true, first_seen);
+        let (generation, _) = expansions
+            .observe(
+                "activity-command",
+                true,
+                false,
+                first_seen + Duration::from_millis(100),
+            )
+            .collapse
+            .expect("supersession should schedule a collapse");
 
-        assert!(expansions.observe("activity-command", true, true).expanded);
+        assert!(
+            expansions
+                .observe(
+                    "activity-command",
+                    true,
+                    true,
+                    first_seen + Duration::from_millis(200),
+                )
+                .expanded
+        );
         assert!(!expansions.finish_collapse("activity-command", generation));
-        assert!(expansions.observe("activity-command", true, true).expanded);
+        assert!(
+            !expansions
+                .observe(
+                    "activity-command",
+                    true,
+                    false,
+                    first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
+                )
+                .expanded
+        );
 
-        assert!(!expansions.observe("activity-command", false, true).expanded);
+        assert!(
+            !expansions
+                .observe(
+                    "activity-command",
+                    false,
+                    true,
+                    first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
+                )
+                .expanded
+        );
     }
 
     #[test]
