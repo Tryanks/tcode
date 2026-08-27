@@ -68,8 +68,8 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 const TURN_GAP: f32 = 32.;
 /// Large documents are parsed away from the UI executor before becoming resident.
 const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
-/// Minimum time an automatically expanded activity stays visible. The latest
-/// activity remains open beyond this until another activity supersedes it.
+/// Target minimum time for the latest activity and its immediate predecessor.
+/// An activity with two newer successors folds immediately instead.
 const AUTO_ACTIVITY_MIN_VISIBILITY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +100,23 @@ struct AutoActivitySessionSnapshot {
     /// `None` while the session status has switched but its asynchronous
     /// timeline snapshot has not arrived yet.
     pending_keys: Option<HashSet<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoActivityRecency {
+    Latest,
+    ImmediatelySuperseded,
+    Older,
+}
+
+impl AutoActivityRecency {
+    fn from_newer_activity_count(count: usize) -> Self {
+        match count {
+            0 => Self::Latest,
+            1 => Self::ImmediatelySuperseded,
+            _ => Self::Older,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +155,7 @@ impl AutoActivityExpansions {
         session_key: &str,
         key: &str,
         enabled: bool,
-        latest: bool,
+        recency: AutoActivityRecency,
         now: Instant,
     ) -> AutoActivityObservation {
         if !enabled {
@@ -158,6 +175,7 @@ impl AutoActivityExpansions {
             .and_then(|snapshot| snapshot.pending_keys.as_mut())
             .is_some_and(|keys| keys.remove(key));
         if first_snapshot_observation {
+            let latest = recency == AutoActivityRecency::Latest;
             let state = if latest {
                 AutoActivityExpansion::Expanded { visible_since: now }
             } else {
@@ -170,12 +188,23 @@ impl AutoActivityExpansions {
             };
         }
 
+        if recency == AutoActivityRecency::Older {
+            // During rapid bursts, keep at most the current detail and its
+            // immediate predecessor open; a pending timer must not hold an
+            // activity open after a second successor arrives.
+            self.insert(session_key, key, AutoActivityExpansion::Collapsed);
+            return AutoActivityObservation {
+                expanded: false,
+                collapse: None,
+            };
+        }
+
         let current = self
             .entries_by_session
             .get(session_key)
             .and_then(|entries| entries.get(key))
             .copied();
-        if latest {
+        if recency == AutoActivityRecency::Latest {
             let visible_since = match current {
                 Some(AutoActivityExpansion::Expanded { visible_since })
                 | Some(AutoActivityExpansion::CollapsePending { visible_since, .. }) => {
@@ -766,7 +795,7 @@ impl ChatView {
         turn: usize,
         key: &str,
         enabled: bool,
-        latest: bool,
+        recency: AutoActivityRecency,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(session_key) = self.session_key.clone() else {
@@ -776,7 +805,7 @@ impl ChatView {
             &session_key,
             key,
             enabled,
-            latest,
+            recency,
             Instant::now(),
         );
         if let Some((generation, delay)) = auto.collapse {
@@ -1291,13 +1320,15 @@ impl ChatView {
     ) -> Vec<AnyElement> {
         let mut rows = Vec::new();
         for (activity_index, entry) in activities.iter().enumerate() {
-            let latest = activity_index + 1 == activities.len();
+            let recency = AutoActivityRecency::from_newer_activity_count(
+                activities.len() - activity_index - 1,
+            );
             if let EntryContent::Item(ItemContent::FileChange { changes, .. }) = &entry.content {
                 let turn = entry.turn;
                 for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
-                    let expanded = self.auto_activity_expanded(turn, &key, enabled, latest, cx)
+                    let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx)
                         || self.expanded.contains(&key);
                     let toggle_key = key.clone();
                     rows.push(components::changed_files::file_edit_row(
@@ -1316,7 +1347,7 @@ impl ChatView {
                     false,
                     live_reasoning_id == Some(entry.id.as_str()),
                     auto_expand,
-                    latest,
+                    recency,
                     cx,
                 ));
             }
@@ -1331,7 +1362,7 @@ impl ChatView {
         compact: bool,
         live_reasoning: bool,
         auto_expand: bool,
-        latest: bool,
+        recency: AutoActivityRecency,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if matches!(
@@ -1348,7 +1379,7 @@ impl ChatView {
         );
         let auto_enabled =
             auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
-        let auto_expanded = self.auto_activity_expanded(turn, &key, auto_enabled, latest, cx);
+        let auto_expanded = self.auto_activity_expanded(turn, &key, auto_enabled, recency, cx);
         let expanded = auto_expanded || self.expanded.contains(&key);
         let command_detail = if expanded {
             match &entry.content {
@@ -2405,7 +2436,9 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 mod tests {
     use super::{
         ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansion,
-        AutoActivityExpansions, ChatView, ResidencyScope, markdown_entries_for_residency,
+        AutoActivityExpansions,
+        AutoActivityRecency::{ImmediatelySuperseded, Latest, Older},
+        ChatView, ResidencyScope, markdown_entries_for_residency,
     };
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
@@ -2430,7 +2463,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen,
         );
         assert!(running.expanded);
@@ -2440,7 +2473,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen + Duration::from_secs(1),
         );
         assert!(completed.expanded);
@@ -2450,7 +2483,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            false,
+            ImmediatelySuperseded,
             first_seen + Duration::from_secs(1),
         );
         assert!(!superseded.expanded);
@@ -2466,14 +2499,14 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen,
         );
         let superseded = expansions.observe(
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            false,
+            ImmediatelySuperseded,
             first_seen + Duration::from_millis(200),
         );
 
@@ -2493,7 +2526,7 @@ mod tests {
                     AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     true,
-                    false,
+                    ImmediatelySuperseded,
                     first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
                 )
                 .expanded
@@ -2501,14 +2534,82 @@ mod tests {
     }
 
     #[test]
-    fn activity_first_seen_non_latest_still_gets_full_visibility_window() {
+    fn second_old_activity_collapses_before_minimum_visibility_ends() {
+        let mut expansions = AutoActivityExpansions::default();
+        let first_seen = Instant::now();
+
+        expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command-1",
+            true,
+            Latest,
+            first_seen,
+        );
+        let (oldest_generation, oldest_delay) = expansions
+            .observe(
+                AUTO_ACTIVITY_TEST_SESSION,
+                "activity-command-1",
+                true,
+                ImmediatelySuperseded,
+                first_seen + Duration::from_millis(100),
+            )
+            .collapse
+            .expect("the first old activity should retain its visibility window");
+        assert_eq!(oldest_delay, Duration::from_millis(400));
+        expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command-2",
+            true,
+            Latest,
+            first_seen + Duration::from_millis(100),
+        );
+
+        let oldest = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command-1",
+            true,
+            Older,
+            first_seen + Duration::from_millis(200),
+        );
+        let first_old = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command-2",
+            true,
+            ImmediatelySuperseded,
+            first_seen + Duration::from_millis(200),
+        );
+        let current = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command-3",
+            true,
+            Latest,
+            first_seen + Duration::from_millis(200),
+        );
+
+        assert!(!oldest.expanded);
+        assert_eq!(oldest.collapse, None);
+        assert!(first_old.expanded);
+        assert_eq!(
+            first_old.collapse.map(|(_, delay)| delay),
+            Some(Duration::from_millis(400))
+        );
+        assert!(current.expanded);
+        assert!(!expansions.finish_collapse(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command-1",
+            oldest_generation
+        ));
+    }
+
+    #[test]
+    fn activity_first_seen_immediately_superseded_gets_full_visibility_window() {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
         let observed = expansions.observe(
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            false,
+            ImmediatelySuperseded,
             first_seen,
         );
 
@@ -2543,15 +2644,22 @@ mod tests {
         );
         assert!(!expansions.awaiting_session_snapshot(Some(AUTO_ACTIVITY_TEST_SESSION)));
 
-        for key in &keys[..4] {
+        for (index, key) in keys[..4].iter().enumerate() {
+            let recency =
+                super::AutoActivityRecency::from_newer_activity_count(keys.len() - index - 1);
             let historical =
-                expansions.observe(AUTO_ACTIVITY_TEST_SESSION, key, true, false, returned_at);
+                expansions.observe(AUTO_ACTIVITY_TEST_SESSION, key, true, recency, returned_at);
             assert!(!historical.expanded, "historical {key} reopened");
             assert_eq!(historical.collapse, None);
         }
 
-        let latest =
-            expansions.observe(AUTO_ACTIVITY_TEST_SESSION, keys[4], true, true, returned_at);
+        let latest = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            keys[4],
+            true,
+            Latest,
+            returned_at,
+        );
         assert!(latest.expanded);
         assert_eq!(latest.collapse, None);
     }
@@ -2564,7 +2672,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen,
         );
 
@@ -2578,7 +2686,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            true,
+            Latest,
             returned_at,
         );
         assert!(returned.expanded);
@@ -2587,7 +2695,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            false,
+            ImmediatelySuperseded,
             returned_at + Duration::from_millis(200),
         );
         assert!(superseded.expanded);
@@ -2659,12 +2767,12 @@ mod tests {
     fn collapsed_activity_stays_collapsed_after_visiting_another_session() {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
-        expansions.observe("session-a", "activity-command", true, true, first_seen);
+        expansions.observe("session-a", "activity-command", true, Latest, first_seen);
         let superseded = expansions.observe(
             "session-a",
             "activity-command",
             true,
-            false,
+            ImmediatelySuperseded,
             first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
         );
         assert!(!superseded.expanded);
@@ -2673,7 +2781,7 @@ mod tests {
             "session-b",
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen + Duration::from_millis(600),
         );
         assert!(same_id_in_other_session.expanded);
@@ -2682,7 +2790,7 @@ mod tests {
             "session-a",
             "activity-command",
             true,
-            false,
+            ImmediatelySuperseded,
             first_seen + Duration::from_millis(700),
         );
         assert!(!revisited.expanded);
@@ -2693,13 +2801,13 @@ mod tests {
     fn pending_collapse_is_scoped_to_its_session() {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
-        expansions.observe("session-a", "activity-command", true, true, first_seen);
+        expansions.observe("session-a", "activity-command", true, Latest, first_seen);
         let (generation, _) = expansions
             .observe(
                 "session-a",
                 "activity-command",
                 true,
-                false,
+                ImmediatelySuperseded,
                 first_seen + Duration::from_millis(100),
             )
             .collapse
@@ -2708,7 +2816,7 @@ mod tests {
             "session-b",
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen + Duration::from_millis(200),
         );
 
@@ -2717,7 +2825,7 @@ mod tests {
             "session-b",
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen + Duration::from_millis(300),
         );
         assert!(other_session.expanded);
@@ -2732,7 +2840,7 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
-            true,
+            Latest,
             first_seen,
         );
         let (generation, _) = expansions
@@ -2740,7 +2848,7 @@ mod tests {
                 AUTO_ACTIVITY_TEST_SESSION,
                 "activity-command",
                 true,
-                false,
+                ImmediatelySuperseded,
                 first_seen + Duration::from_millis(100),
             )
             .collapse
@@ -2752,7 +2860,7 @@ mod tests {
                     AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     true,
-                    true,
+                    Latest,
                     first_seen + Duration::from_millis(200),
                 )
                 .expanded
@@ -2768,7 +2876,7 @@ mod tests {
                     AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     true,
-                    false,
+                    ImmediatelySuperseded,
                     first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
                 )
                 .expanded
@@ -2780,7 +2888,7 @@ mod tests {
                     AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     false,
-                    true,
+                    Latest,
                     first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
                 )
                 .expanded
