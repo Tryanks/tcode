@@ -48,7 +48,7 @@ use self::components::assistant::MdState;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
     ListSync, Segment, TurnIndexCache, TurnListItem, TurnRenderArgs, activity_run_duration_ms,
-    displayed_error_text, divergent_served_model, format_span, latest_message_ids,
+    displayed_error_text, divergent_served_model, format_elapsed_deciseconds, latest_message_ids,
     live_activity_segment, live_edit_rows, partition_activity_run, plain_text_as_markdown,
     segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
     work_log_capsule_label, work_log_counts, work_log_outcome,
@@ -1126,7 +1126,7 @@ impl ChatView {
                 capsule_label = crate::tr!("chat.work_log").into_owned();
             }
             let duration =
-                format_span((activity_run_duration_ms(folded, turn, is_last) + 500) / 1000);
+                format_elapsed_deciseconds(activity_run_duration_ms(folded, turn, is_last));
             let outcome = work_log_outcome(turn, folded, is_last);
             let rows = if expanded {
                 self.compose_work_log_rows(folded, cwd, live_reasoning_id, false, cx)
