@@ -151,7 +151,10 @@ platform pays that inset.
   from that row's counts. The newest command output or file-edit diff stays
   automatically expanded until a newer activity appears. A superseded detail
   folds immediately if it has already been visible for 500ms; otherwise it
-  stays open only for the remainder of that minimum visibility window.
+  stays open only for the remainder of that minimum visibility window. Opening
+  a running thread is a current-state snapshot, not a replay: among activities
+  that arrived while the thread was away, only the newest detail opens, and its
+  500ms visibility window starts when the thread becomes visible.
   Assistant prose settles the run, folding every
   activity in it under one summary row. A completed section's toggle summarizes
   only its real, nonzero events

@@ -49,9 +49,9 @@ use self::components::command_panel::CommandPanelCache;
 use self::model::{
     ListSync, Segment, TurnIndexCache, TurnListItem, TurnRenderArgs, activity_run_duration_ms,
     displayed_error_text, divergent_served_model, format_elapsed_deciseconds, latest_message_ids,
-    live_activity_segment, live_edit_rows, partition_activity_run, plain_text_as_markdown,
-    segment_entries, start_hub_projects, timeline_overdraw, user_content, user_visible_text,
-    work_log_capsule_label, work_log_counts, work_log_outcome,
+    live_activity_segment, live_edit_counts, live_edit_rows, partition_activity_run,
+    plain_text_as_markdown, segment_entries, start_hub_projects, timeline_overdraw, user_content,
+    user_visible_text, work_log_capsule_label, work_log_counts, work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_turn_window, viewport_turn_window,
@@ -87,7 +87,19 @@ enum AutoActivityExpansion {
 #[derive(Debug, Default)]
 struct AutoActivityExpansions {
     entries_by_session: HashMap<String, HashMap<String, AutoActivityExpansion>>,
+    /// Expandable details already present when the active session is hydrated.
+    /// Each key is consumed on first render so later live updates use the
+    /// ordinary minimum-visibility state machine.
+    session_snapshot: Option<AutoActivitySessionSnapshot>,
     next_generation: u64,
+}
+
+#[derive(Debug)]
+struct AutoActivitySessionSnapshot {
+    session_key: String,
+    /// `None` while the session status has switched but its asynchronous
+    /// timeline snapshot has not arrived yet.
+    pending_keys: Option<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +109,30 @@ struct AutoActivityObservation {
 }
 
 impl AutoActivityExpansions {
+    fn activate_session(&mut self, session_key: Option<&str>) {
+        self.session_snapshot = session_key.map(|session_key| AutoActivitySessionSnapshot {
+            session_key: session_key.to_string(),
+            pending_keys: None,
+        });
+    }
+
+    fn awaiting_session_snapshot(&self, session_key: Option<&str>) -> bool {
+        self.session_snapshot.as_ref().is_some_and(|snapshot| {
+            Some(snapshot.session_key.as_str()) == session_key && snapshot.pending_keys.is_none()
+        })
+    }
+
+    fn hydrate_session_snapshot(&mut self, session_key: &str, keys: HashSet<String>) {
+        if let Some(snapshot) = self
+            .session_snapshot
+            .as_mut()
+            .filter(|snapshot| snapshot.session_key == session_key)
+            && snapshot.pending_keys.is_none()
+        {
+            snapshot.pending_keys = Some(keys);
+        }
+    }
+
     fn observe(
         &mut self,
         session_key: &str,
@@ -111,6 +147,25 @@ impl AutoActivityExpansions {
             }
             return AutoActivityObservation {
                 expanded: false,
+                collapse: None,
+            };
+        }
+
+        let first_snapshot_observation = self
+            .session_snapshot
+            .as_mut()
+            .filter(|snapshot| snapshot.session_key == session_key)
+            .and_then(|snapshot| snapshot.pending_keys.as_mut())
+            .is_some_and(|keys| keys.remove(key));
+        if first_snapshot_observation {
+            let state = if latest {
+                AutoActivityExpansion::Expanded { visible_since: now }
+            } else {
+                AutoActivityExpansion::Collapsed
+            };
+            self.insert(session_key, key, state);
+            return AutoActivityObservation {
+                expanded: latest,
                 collapse: None,
             };
         }
@@ -204,6 +259,26 @@ impl AutoActivityExpansions {
             .or_default()
             .insert(key.to_string(), state);
     }
+}
+
+fn auto_activity_snapshot_keys(entries: &[Arc<TimelineEntry>]) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for entry in entries {
+        match &entry.content {
+            EntryContent::Item(ItemContent::CommandExecution { .. }) => {
+                keys.insert(format!("activity-{}", entry.id));
+            }
+            EntryContent::Item(ItemContent::FileChange { changes, .. }) => {
+                for (file_index, change) in changes.iter().enumerate() {
+                    if live_edit_counts(change.diff.as_deref()).is_some() {
+                        keys.insert(format!("activity-{}-file-{file_index}", entry.id));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    keys
 }
 
 struct PendingMarkdownBuild {
@@ -319,8 +394,13 @@ impl ChatView {
         let session_changed = session_key != self.session_key;
         if session_changed {
             self.expanded.clear();
+            self.auto_activity_expansions
+                .activate_session(session_key.as_deref());
         }
-        let (running, list_sync) = self
+        let awaiting_activity_snapshot = self
+            .auto_activity_expansions
+            .awaiting_session_snapshot(session_key.as_deref());
+        let (running, list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
             .with_active_timeline(|timeline| {
@@ -335,7 +415,9 @@ impl ChatView {
                     &self.expanded,
                     session_changed,
                 );
-                (timeline.turn_running, list_sync)
+                let activity_snapshot_keys = awaiting_activity_snapshot
+                    .then(|| auto_activity_snapshot_keys(&timeline.entries));
+                (timeline.turn_running, list_sync, activity_snapshot_keys)
             })
             .unwrap_or_else(|| {
                 let list_sync = self.turn_index_cache.sync(
@@ -346,8 +428,15 @@ impl ChatView {
                     &self.expanded,
                     session_changed,
                 );
-                (false, list_sync)
+                (false, list_sync, None)
             });
+
+        if let Some(session_key) = session_key.as_deref()
+            && let Some(keys) = activity_snapshot_keys
+        {
+            self.auto_activity_expansions
+                .hydrate_session_snapshot(session_key, keys);
+        }
 
         let requested_turn = session_key
             .as_deref()
@@ -2315,12 +2404,12 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansions,
-        ChatView, ResidencyScope, markdown_entries_for_residency,
+        ASYNC_MARKDOWN_THRESHOLD_BYTES, AUTO_ACTIVITY_MIN_VISIBILITY, AutoActivityExpansion,
+        AutoActivityExpansions, ChatView, ResidencyScope, markdown_entries_for_residency,
     };
     use crate::store::WorkspaceStore;
     use crate::window_state::WindowState;
-    use agent::ItemContent;
+    use agent::{ItemContent, ItemStatus};
     use gpui::{AppContext as _, Entity, TestAppContext};
     use std::sync::{
         Arc,
@@ -2432,6 +2521,137 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             generation
+        ));
+    }
+
+    #[test]
+    fn returning_session_shows_only_latest_snapshot_activity() {
+        let mut expansions = AutoActivityExpansions::default();
+        let returned_at = Instant::now();
+        let keys = [
+            "activity-command-1",
+            "activity-command-2",
+            "activity-command-3",
+            "activity-command-4",
+            "activity-command-5",
+        ];
+        expansions.activate_session(Some(AUTO_ACTIVITY_TEST_SESSION));
+        assert!(expansions.awaiting_session_snapshot(Some(AUTO_ACTIVITY_TEST_SESSION)));
+        expansions.hydrate_session_snapshot(
+            AUTO_ACTIVITY_TEST_SESSION,
+            keys.into_iter().map(str::to_owned).collect(),
+        );
+        assert!(!expansions.awaiting_session_snapshot(Some(AUTO_ACTIVITY_TEST_SESSION)));
+
+        for key in &keys[..4] {
+            let historical =
+                expansions.observe(AUTO_ACTIVITY_TEST_SESSION, key, true, false, returned_at);
+            assert!(!historical.expanded, "historical {key} reopened");
+            assert_eq!(historical.collapse, None);
+        }
+
+        let latest =
+            expansions.observe(AUTO_ACTIVITY_TEST_SESSION, keys[4], true, true, returned_at);
+        assert!(latest.expanded);
+        assert_eq!(latest.collapse, None);
+    }
+
+    #[test]
+    fn returning_session_restarts_latest_activity_visibility_window() {
+        let mut expansions = AutoActivityExpansions::default();
+        let first_seen = Instant::now();
+        expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            true,
+            first_seen,
+        );
+
+        let returned_at = first_seen + Duration::from_secs(10);
+        expansions.activate_session(Some(AUTO_ACTIVITY_TEST_SESSION));
+        expansions.hydrate_session_snapshot(
+            AUTO_ACTIVITY_TEST_SESSION,
+            ["activity-command".to_string()].into(),
+        );
+        let returned = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            true,
+            returned_at,
+        );
+        assert!(returned.expanded);
+
+        let superseded = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            false,
+            returned_at + Duration::from_millis(200),
+        );
+        assert!(superseded.expanded);
+        assert_eq!(
+            superseded.collapse.map(|(_, delay)| delay),
+            Some(Duration::from_millis(300))
+        );
+    }
+
+    #[gpui::test]
+    fn running_session_snapshot_renders_only_latest_command_expanded(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let mut timeline = Timeline::default();
+        timeline.turns = vec![TurnMeta {
+            running: true,
+            ..TurnMeta::default()
+        }];
+        // TurnMeta drives the live Work Log rendering under test. Keep the
+        // timeline-wide ticker idle so no perpetual clock task outlives this
+        // finite visual test.
+        timeline.entries.push(entry("user", user_item("go")));
+        for index in 1..=5 {
+            timeline.entries.push(entry(
+                &format!("command-{index}"),
+                EntryContent::Item(ItemContent::CommandExecution {
+                    command: format!("command {index}"),
+                    output: format!("output {index}"),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                }),
+            ));
+        }
+
+        let (workspace_store, window_state, session_id) = seed_chat(cx, timeline);
+        let (view, cx) = cx
+            .add_window_view(|window, cx| ChatView::new(workspace_store, window_state, window, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(1_024.), px(700.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let states = view.read_with(cx, |chat, _| {
+            let entries = chat
+                .auto_activity_expansions
+                .entries_by_session
+                .get(&session_id)
+                .expect("rendered session expansion state");
+            (1..=5)
+                .map(|index| entries.get(&format!("activity-command-{index}")).copied())
+                .collect::<Vec<_>>()
+        });
+        for (index, state) in states[..4].iter().enumerate() {
+            assert_eq!(
+                *state,
+                Some(AutoActivityExpansion::Collapsed),
+                "historical command {} reopened",
+                index + 1
+            );
+        }
+        assert!(matches!(
+            states[4],
+            Some(AutoActivityExpansion::Expanded { .. })
         ));
     }
 
