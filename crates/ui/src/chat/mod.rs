@@ -86,7 +86,7 @@ enum AutoActivityExpansion {
 
 #[derive(Debug, Default)]
 struct AutoActivityExpansions {
-    entries: HashMap<String, AutoActivityExpansion>,
+    entries_by_session: HashMap<String, HashMap<String, AutoActivityExpansion>>,
     next_generation: u64,
 }
 
@@ -99,20 +99,27 @@ struct AutoActivityObservation {
 impl AutoActivityExpansions {
     fn observe(
         &mut self,
+        session_key: &str,
         key: &str,
         enabled: bool,
         latest: bool,
         now: Instant,
     ) -> AutoActivityObservation {
         if !enabled {
-            self.entries.remove(key);
+            if let Some(entries) = self.entries_by_session.get_mut(session_key) {
+                entries.remove(key);
+            }
             return AutoActivityObservation {
                 expanded: false,
                 collapse: None,
             };
         }
 
-        let current = self.entries.get(key).copied();
+        let current = self
+            .entries_by_session
+            .get(session_key)
+            .and_then(|entries| entries.get(key))
+            .copied();
         if latest {
             let visible_since = match current {
                 Some(AutoActivityExpansion::Expanded { visible_since })
@@ -121,8 +128,9 @@ impl AutoActivityExpansions {
                 }
                 Some(AutoActivityExpansion::Collapsed) | None => now,
             };
-            self.entries.insert(
-                key.to_string(),
+            self.insert(
+                session_key,
+                key,
                 AutoActivityExpansion::Expanded { visible_since },
             );
             return AutoActivityObservation {
@@ -150,8 +158,7 @@ impl AutoActivityExpansions {
         let remaining = AUTO_ACTIVITY_MIN_VISIBILITY
             .saturating_sub(now.saturating_duration_since(visible_since));
         if remaining.is_zero() {
-            self.entries
-                .insert(key.to_string(), AutoActivityExpansion::Collapsed);
+            self.insert(session_key, key, AutoActivityExpansion::Collapsed);
             AutoActivityObservation {
                 expanded: false,
                 collapse: None,
@@ -159,8 +166,9 @@ impl AutoActivityExpansions {
         } else {
             self.next_generation = self.next_generation.wrapping_add(1);
             let generation = self.next_generation;
-            self.entries.insert(
-                key.to_string(),
+            self.insert(
+                session_key,
+                key,
                 AutoActivityExpansion::CollapsePending {
                     generation,
                     visible_since,
@@ -173,24 +181,28 @@ impl AutoActivityExpansions {
         }
     }
 
-    fn finish_collapse(&mut self, key: &str, generation: u64) -> bool {
+    fn finish_collapse(&mut self, session_key: &str, key: &str, generation: u64) -> bool {
         if matches!(
-            self.entries.get(key),
+            self.entries_by_session
+                .get(session_key)
+                .and_then(|entries| entries.get(key)),
             Some(AutoActivityExpansion::CollapsePending {
                 generation: pending,
                 ..
             }) if *pending == generation
         ) {
-            self.entries
-                .insert(key.to_string(), AutoActivityExpansion::Collapsed);
+            self.insert(session_key, key, AutoActivityExpansion::Collapsed);
             true
         } else {
             false
         }
     }
 
-    fn clear(&mut self) {
-        self.entries.clear();
+    fn insert(&mut self, session_key: &str, key: &str, state: AutoActivityExpansion) {
+        self.entries_by_session
+            .entry(session_key.to_string())
+            .or_default()
+            .insert(key.to_string(), state);
     }
 }
 
@@ -307,7 +319,6 @@ impl ChatView {
         let session_changed = session_key != self.session_key;
         if session_changed {
             self.expanded.clear();
-            self.auto_activity_expansions.clear();
         }
         let (running, list_sync) = self
             .workspace_store
@@ -669,18 +680,28 @@ impl ChatView {
         latest: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let auto = self
-            .auto_activity_expansions
-            .observe(key, enabled, latest, Instant::now());
+        let Some(session_key) = self.session_key.clone() else {
+            return false;
+        };
+        let auto = self.auto_activity_expansions.observe(
+            &session_key,
+            key,
+            enabled,
+            latest,
+            Instant::now(),
+        );
         if let Some((generation, delay)) = auto.collapse {
             let collapse_key = key.to_string();
+            let collapse_session_key = session_key.clone();
             let timer = cx.background_executor().timer(delay);
             cx.spawn(async move |this, cx| {
                 timer.await;
                 let _ = this.update(cx, |this, cx| {
-                    if this
-                        .auto_activity_expansions
-                        .finish_collapse(&collapse_key, generation)
+                    if this.auto_activity_expansions.finish_collapse(
+                        &collapse_session_key,
+                        &collapse_key,
+                        generation,
+                    ) && this.session_key.as_deref() == Some(collapse_session_key.as_str())
                     {
                         this.list_state.remeasure_items(turn..turn + 1);
                         cx.notify();
@@ -2308,6 +2329,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use tcode_core::session::{EntryContent, Timeline, TimelineEntry, TurnMeta};
 
+    const AUTO_ACTIVITY_TEST_SESSION: &str = "session-a";
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
@@ -2315,11 +2337,18 @@ mod tests {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
 
-        let running = expansions.observe("activity-command", true, true, first_seen);
+        let running = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            true,
+            first_seen,
+        );
         assert!(running.expanded);
         assert_eq!(running.collapse, None);
 
         let completed = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
             true,
@@ -2329,6 +2358,7 @@ mod tests {
         assert_eq!(completed.collapse, None);
 
         let superseded = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
             false,
@@ -2343,8 +2373,15 @@ mod tests {
     fn early_successor_only_waits_for_remaining_minimum_visibility() {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
-        expansions.observe("activity-command", true, true, first_seen);
+        expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            true,
+            first_seen,
+        );
         let superseded = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
             "activity-command",
             true,
             false,
@@ -2356,10 +2393,15 @@ mod tests {
             .collapse
             .expect("early successor should schedule the remaining delay");
         assert_eq!(delay, Duration::from_millis(300));
-        assert!(expansions.finish_collapse("activity-command", generation));
+        assert!(expansions.finish_collapse(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            generation
+        ));
         assert!(
             !expansions
                 .observe(
+                    AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     true,
                     false,
@@ -2373,23 +2415,109 @@ mod tests {
     fn activity_first_seen_non_latest_still_gets_full_visibility_window() {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
-        let observed = expansions.observe("activity-command", true, false, first_seen);
+        let observed = expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            false,
+            first_seen,
+        );
 
         assert!(observed.expanded);
         let (generation, delay) = observed
             .collapse
             .expect("first observation should schedule a collapse");
         assert_eq!(delay, AUTO_ACTIVITY_MIN_VISIBILITY);
-        assert!(expansions.finish_collapse("activity-command", generation));
+        assert!(expansions.finish_collapse(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            generation
+        ));
+    }
+
+    #[test]
+    fn collapsed_activity_stays_collapsed_after_visiting_another_session() {
+        let mut expansions = AutoActivityExpansions::default();
+        let first_seen = Instant::now();
+        expansions.observe("session-a", "activity-command", true, true, first_seen);
+        let superseded = expansions.observe(
+            "session-a",
+            "activity-command",
+            true,
+            false,
+            first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
+        );
+        assert!(!superseded.expanded);
+
+        let same_id_in_other_session = expansions.observe(
+            "session-b",
+            "activity-command",
+            true,
+            true,
+            first_seen + Duration::from_millis(600),
+        );
+        assert!(same_id_in_other_session.expanded);
+
+        let revisited = expansions.observe(
+            "session-a",
+            "activity-command",
+            true,
+            false,
+            first_seen + Duration::from_millis(700),
+        );
+        assert!(!revisited.expanded);
+        assert_eq!(revisited.collapse, None);
+    }
+
+    #[test]
+    fn pending_collapse_is_scoped_to_its_session() {
+        let mut expansions = AutoActivityExpansions::default();
+        let first_seen = Instant::now();
+        expansions.observe("session-a", "activity-command", true, true, first_seen);
+        let (generation, _) = expansions
+            .observe(
+                "session-a",
+                "activity-command",
+                true,
+                false,
+                first_seen + Duration::from_millis(100),
+            )
+            .collapse
+            .expect("supersession should schedule a collapse");
+        expansions.observe(
+            "session-b",
+            "activity-command",
+            true,
+            true,
+            first_seen + Duration::from_millis(200),
+        );
+
+        assert!(expansions.finish_collapse("session-a", "activity-command", generation));
+        let other_session = expansions.observe(
+            "session-b",
+            "activity-command",
+            true,
+            true,
+            first_seen + Duration::from_millis(300),
+        );
+        assert!(other_session.expanded);
+        assert_eq!(other_session.collapse, None);
     }
 
     #[test]
     fn reactivated_activity_cancels_its_stale_delayed_collapse() {
         let mut expansions = AutoActivityExpansions::default();
         let first_seen = Instant::now();
-        expansions.observe("activity-command", true, true, first_seen);
+        expansions.observe(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            true,
+            true,
+            first_seen,
+        );
         let (generation, _) = expansions
             .observe(
+                AUTO_ACTIVITY_TEST_SESSION,
                 "activity-command",
                 true,
                 false,
@@ -2401,6 +2529,7 @@ mod tests {
         assert!(
             expansions
                 .observe(
+                    AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     true,
                     true,
@@ -2408,10 +2537,15 @@ mod tests {
                 )
                 .expanded
         );
-        assert!(!expansions.finish_collapse("activity-command", generation));
+        assert!(!expansions.finish_collapse(
+            AUTO_ACTIVITY_TEST_SESSION,
+            "activity-command",
+            generation
+        ));
         assert!(
             !expansions
                 .observe(
+                    AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     true,
                     false,
@@ -2423,6 +2557,7 @@ mod tests {
         assert!(
             !expansions
                 .observe(
+                    AUTO_ACTIVITY_TEST_SESSION,
                     "activity-command",
                     false,
                     true,
