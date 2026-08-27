@@ -431,40 +431,45 @@ impl SettingsPage {
             } else {
                 cx.theme().muted_foreground
             };
-            crate::material::accessible_clickable(div(), id, Role::Tab, label.clone(), cx)
-                .aria_selected(active)
-                .child(
-                    gpui_base::h_flex()
-                        // Match the main sidebar thread rows: 30px tall, 13px
-                        // label, a tight 6px rounded rect tinted when active and
-                        // a neutral hover only when not.
-                        .h(px(30.))
-                        .items_center()
-                        .gap_2()
-                        .px_2()
-                        .rounded(px(6.))
-                        .cursor_pointer()
-                        .when(active, |s| s.bg(cx.theme().list_active))
-                        .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-                        .child(Icon::new(icon).size_4().text_color(fg))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .when(active, |d| d.font_medium())
-                                .text_color(fg)
-                                .child(label.clone()),
-                        ),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.section = section;
-                    // Refresh the TCC snapshot each time Computer Use becomes
-                    // visible (cheap native calls, event-driven).
-                    if section == Section::ComputerUse {
-                        this.perm_status = permissions::check();
-                    }
-                    cx.notify();
-                }))
-                .into_any_element()
+            crate::material::accessible_clickable(
+                gpui_base::h_flex(),
+                id,
+                Role::Tab,
+                label.clone(),
+                cx,
+            )
+            .aria_selected(active)
+            // Keep the hitbox, stable element id, and hover style on the
+            // same element. Splitting them across an outer clickable and
+            // an anonymous inner row leaves GPUI tracking two overlapping
+            // interaction regions, which makes hover paint stale or skip
+            // as the pointer crosses adjacent tabs.
+            .h(px(30.))
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .when(active, |s| s.bg(cx.theme().list_active))
+            .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
+            .child(Icon::new(icon).size_4().text_color(fg))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .when(active, |d| d.font_medium())
+                    .text_color(fg)
+                    .child(label.clone()),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.section = section;
+                // Refresh the TCC snapshot each time Computer Use becomes
+                // visible (cheap native calls, event-driven).
+                if section == Section::ComputerUse {
+                    this.perm_status = permissions::check();
+                }
+                cx.notify();
+            }))
+            .into_any_element()
         };
 
         v_flex()
