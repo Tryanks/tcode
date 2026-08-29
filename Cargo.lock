@@ -6848,9 +6848,9 @@ dependencies = [
 
 [[package]]
 name = "rio-graphics"
-version = "0.5.25"
+version = "0.5.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd06d1c1c8b584083f365ad6acfe841362a02554ec650ca4e18fc96ed1ba4985"
+checksum = "1b088ba47933b5e9f0c96596a8ccf91fb689682dcbcee16fd0e08ff5bf42a05f"
 dependencies = [
  "image",
  "parking_lot",
