@@ -1366,6 +1366,25 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_computer_use_allow_input(true), cx)
             },
         );
+        let allow_foreground_fallback_reset = self.reset_action(
+            "reset-cu-allow-foreground-fallback",
+            settings.computer_use.allow_foreground_fallback,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(
+                    |store| store.set_computer_use_allow_foreground_fallback(false),
+                    cx,
+                )
+            },
+        );
+        let show_agent_cursor_reset = self.reset_action(
+            "reset-cu-show-agent-cursor",
+            !settings.computer_use.show_agent_cursor,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_computer_use_show_agent_cursor(true), cx)
+            },
+        );
         let rows = vec![
             self.toggle_row(
                 "cu-enabled",
@@ -1385,6 +1404,24 @@ impl SettingsPage {
                 allow_input_reset,
                 cx,
                 WorkspaceStore::set_computer_use_allow_input,
+            ),
+            self.toggle_row(
+                "cu-allow-foreground-fallback",
+                crate::tr!("computer_use.allow_foreground_fallback.title"),
+                crate::tr!("computer_use.allow_foreground_fallback.description"),
+                settings.computer_use.allow_foreground_fallback,
+                allow_foreground_fallback_reset,
+                cx,
+                WorkspaceStore::set_computer_use_allow_foreground_fallback,
+            ),
+            self.toggle_row(
+                "cu-show-agent-cursor",
+                crate::tr!("computer_use.show_agent_cursor.title"),
+                crate::tr!("computer_use.show_agent_cursor.description"),
+                settings.computer_use.show_agent_cursor,
+                show_agent_cursor_reset,
+                cx,
+                WorkspaceStore::set_computer_use_show_agent_cursor,
             ),
         ];
         v_flex()

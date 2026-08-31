@@ -635,6 +635,8 @@ pub enum SettingsPatch {
     ComputerUseEnabled(bool),
     ComputerUseImageMode(ImageMode),
     ComputerUseAllowInput(bool),
+    ComputerUseAllowForegroundFallback(bool),
+    ComputerUseShowAgentCursor(bool),
     BrowserEnabled(bool),
     BrowserHomeUrl(Option<String>),
     BrowserAllowEvaluate(bool),
@@ -894,6 +896,12 @@ impl Settings {
             SettingsPatch::ComputerUseEnabled(value) => self.computer_use.enabled = value,
             SettingsPatch::ComputerUseImageMode(value) => self.computer_use.image_mode = value,
             SettingsPatch::ComputerUseAllowInput(value) => self.computer_use.allow_input = value,
+            SettingsPatch::ComputerUseAllowForegroundFallback(value) => {
+                self.computer_use.allow_foreground_fallback = value
+            }
+            SettingsPatch::ComputerUseShowAgentCursor(value) => {
+                self.computer_use.show_agent_cursor = value
+            }
             SettingsPatch::BrowserEnabled(value) => self.browser.enabled = value,
             SettingsPatch::BrowserHomeUrl(value) => self.browser.home_url = value,
             SettingsPatch::BrowserAllowEvaluate(value) => self.browser.allow_evaluate = value,

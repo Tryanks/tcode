@@ -267,6 +267,12 @@ computer_use:
   allow_input:
     title: "Allow input actions"
     description: "When off, the tools are observe-only: clicks, typing, and other actions are rejected."
+  allow_foreground_fallback:
+    title: "Foreground keyboard fallback"
+    description: "If background delivery can't start, retry keyboard input by briefly focusing the target window. Off by default; pointer actions never fall back to the foreground."
+  show_agent_cursor:
+    title: "Show agent cursor"
+    description: "Display a floating cursor and window highlight showing where the agent is acting. The real pointer is never moved."
   permissions_section: "SYSTEM PERMISSIONS"
   unsupported: "Computer use is only available on macOS."
 browser:
