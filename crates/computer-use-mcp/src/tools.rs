@@ -309,8 +309,8 @@ mod dispatch {
     use serde_json::json;
 
     use crate::backend::{
-        ActionOutcome, ActionRequest, ActionResult, CapturePolicy, ObserveRequest, RootFilters,
-        RootInfo, RootObservation,
+        ActionOutcome, ActionRequest, ActionResult, CapturePolicy, Delivery, ObserveRequest,
+        RootFilters, RootInfo, RootObservation,
     };
     use crate::outline::{self, UiNode};
 
@@ -540,18 +540,25 @@ mod dispatch {
         };
         let mut step_results = Vec::new();
         let mut stopped_at = None;
+        let mut activation = "none";
         for (index, action) in params.actions.iter().enumerate() {
             let result = match prepare_action(&previous.tree, action) {
                 Ok(request) => crate::backend::perform_action(&previous.root, &request)
-                    .unwrap_or_else(|error| ActionResult::didnt(error.to_string())),
-                Err(error) => ActionResult::didnt(error),
+                    .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None)),
+                Err(error) => ActionResult::didnt(error, Delivery::None),
             };
             let didnt = result.outcome == ActionOutcome::Didnt;
+            activation = match (activation, result.delivery) {
+                (_, Delivery::ForegroundHid) => "foreground",
+                ("none", Delivery::BackgroundPid) => "background",
+                (current, _) => current,
+            };
             step_results.push(json!({
                 "index": index + 1,
                 "action": action_name(action.action),
                 "outcome": result.outcome,
                 "message": result.message,
+                "delivery": result.delivery,
             }));
             if didnt {
                 stopped_at = Some(index + 1);
@@ -577,7 +584,7 @@ mod dispatch {
         let successor = crate::state::global().lock().unwrap().insert_observation(
             successor.root,
             successor.tree,
-            successor.screenshot_png,
+            successor.screenshot,
         );
         let diff = outline::diff_trees(&previous.tree, &successor.tree);
         let expectation_failed = expectation_status == "failed";
@@ -597,6 +604,7 @@ mod dispatch {
             "state_id": successor.state_id,
             "previous_state_id": previous.state_id,
             "outcome": outcome,
+            "activation": activation,
             "stopped_at": stopped_at,
             "steps": step_results,
             "expect": expectation_status,
@@ -719,7 +727,7 @@ mod dispatch {
         let successor = crate::state::global().lock().unwrap().insert_observation(
             observed.root,
             observed.tree,
-            observed.screenshot_png,
+            observed.screenshot,
         );
         let status = if matched { "matched" } else { "timeout" };
         let report = json!({
@@ -852,12 +860,18 @@ mod dispatch {
     }
 
     fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToolResult {
-        let screenshot_for_response = observed.screenshot_png.clone();
-        let observation = crate::state::global().lock().unwrap().insert_observation(
-            observed.root,
-            observed.tree,
-            observed.screenshot_png,
-        );
+        let RootObservation {
+            root,
+            tree,
+            text_sparse,
+            screenshot,
+            screenshot_mime,
+        } = observed;
+        let screenshot_for_response = screenshot.clone();
+        let observation = crate::state::global()
+            .lock()
+            .unwrap()
+            .insert_observation(root, tree, screenshot);
         let mut text = format!(
             "state_id: {}\nroot: {} app=\"{}\" title=\"{}\"\nelements: {} interactive: {}",
             observation.state_id,
@@ -867,7 +881,7 @@ mod dispatch {
             count_nodes(&observation.tree),
             outline::interactive_count(&observation.tree)
         );
-        if observed.text_sparse {
+        if text_sparse {
             text.push_str("\ntext_sparse: true");
         }
         if let Some(warning) = warning {
@@ -877,10 +891,10 @@ mod dispatch {
         text.push('\n');
         text.push_str(&outline::render_folded(&observation.tree));
         let extra = screenshot_for_response
-            .map(|png| {
+            .map(|screenshot| {
                 ContentBlock::image(
-                    base64::engine::general_purpose::STANDARD.encode(png),
-                    "image/png",
+                    base64::engine::general_purpose::STANDARD.encode(screenshot),
+                    screenshot_mime,
                 )
             })
             .into_iter()
@@ -1084,7 +1098,7 @@ mod dispatch {
         use super::*;
         use crate::outline::Frame;
 
-        fn sparse_observation(screenshot_png: Option<Vec<u8>>) -> RootObservation {
+        fn sparse_observation(screenshot: Option<Vec<u8>>) -> RootObservation {
             RootObservation {
                 root: RootInfo {
                     ref_id: "@r1".into(),
@@ -1110,7 +1124,8 @@ mod dispatch {
                     ..UiNode::default()
                 },
                 text_sparse: true,
-                screenshot_png,
+                screenshot,
+                screenshot_mime: "image/jpeg",
             }
         }
 
@@ -1129,13 +1144,12 @@ mod dispatch {
             assert_eq!(policy, CapturePolicy::IfSparse);
             assert!(policy.should_capture(true));
 
-            let result =
-                save_observation(sparse_observation(Some(vec![0x89, b'P', b'N', b'G'])), None);
+            let result = save_observation(sparse_observation(Some(vec![0xff, 0xd8, 0xff])), None);
             assert!(matches!(
                 result.content.as_slice(),
                 [ContentBlock::Text(text), ContentBlock::Image(image)]
                     if text.text.contains("text_sparse: true")
-                        && image.mime_type == "image/png"
+                        && image.mime_type == "image/jpeg"
             ));
         }
 

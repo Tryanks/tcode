@@ -24,8 +24,8 @@ use windows::Win32::System::Threading::{
 use windows::core::PWSTR;
 
 use super::{
-    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, ObserveRequest,
-    RootFilters, RootInfo, RootKind, RootObservation, matches_root_filters,
+    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, Delivery,
+    ObserveRequest, RootFilters, RootInfo, RootKind, RootObservation, matches_root_filters,
 };
 use crate::outline::{Frame, UiNode, canonical_role, is_text_sparse};
 
@@ -76,7 +76,7 @@ impl WindowsBackend {
             }
         };
         let text_sparse = is_text_sparse(&tree);
-        let screenshot_png = if request.capture.should_capture(text_sparse) {
+        let screenshot = if request.capture.should_capture(text_sparse) {
             Some(match capture::capture_window(root) {
                 Ok(png) => png,
                 Err(error) => {
@@ -107,7 +107,8 @@ impl WindowsBackend {
             root: root.clone(),
             tree,
             text_sparse,
-            screenshot_png,
+            screenshot,
+            screenshot_mime: "image/png",
         })
     }
 
@@ -120,7 +121,7 @@ impl WindowsBackend {
             ActionKind::Press => {
                 let target = target(root, request)?;
                 Ok(match target.press() {
-                    Ok(message) => ActionResult::worked(message),
+                    Ok(message) => ActionResult::worked(message, Delivery::Ax),
                     Err(uia_error) => {
                         let live_frame = target.frame();
                         let frame = live_frame
@@ -128,17 +129,19 @@ impl WindowsBackend {
                             .then_some(live_frame)
                             .or_else(|| request.target_frame.filter(|frame| frame.has_area()));
                         let Some(frame) = frame else {
-                            return Ok(ActionResult::didnt(format!(
-                                "{uia_error}; the target has no clickable frame"
-                            )));
+                            return Ok(ActionResult::didnt(
+                                format!("{uia_error}; the target has no clickable frame"),
+                                Delivery::None,
+                            ));
                         };
                         let (x, y) = frame.center();
                         let _cursor_guard = CursorGuard::acquire();
                         let _foreground_guard = ForegroundGuard::acquire(root);
                         input::click(x, y, super::MouseButton::Left, 1)?;
-                        ActionResult::unknown(format!(
-                            "{uia_error}; uiautomation mouse events were posted instead"
-                        ))
+                        ActionResult::unknown(
+                            format!("{uia_error}; uiautomation mouse events were posted instead"),
+                            Delivery::ForegroundHid,
+                        )
                     }
                 })
             }
@@ -149,7 +152,7 @@ impl WindowsBackend {
                 {
                     let target = target(root, request)?;
                     match target.press() {
-                        Ok(message) => return Ok(ActionResult::worked(message)),
+                        Ok(message) => return Ok(ActionResult::worked(message, Delivery::Ax)),
                         Err(uia_error) => {
                             let live_frame = target.frame();
                             let frame = live_frame
@@ -157,17 +160,21 @@ impl WindowsBackend {
                                 .then_some(live_frame)
                                 .or_else(|| request.target_frame.filter(|frame| frame.has_area()));
                             let Some(frame) = frame else {
-                                return Ok(ActionResult::didnt(format!(
-                                    "{uia_error}; the target has no clickable frame"
-                                )));
+                                return Ok(ActionResult::didnt(
+                                    format!("{uia_error}; the target has no clickable frame"),
+                                    Delivery::None,
+                                ));
                             };
                             let (x, y) = frame.center();
                             let _cursor_guard = CursorGuard::acquire();
                             let _foreground_guard = ForegroundGuard::acquire(root);
                             input::click(x, y, request.button, request.click_count)?;
-                            return Ok(ActionResult::unknown(format!(
-                                "{uia_error}; uiautomation mouse events were posted instead"
-                            )));
+                            return Ok(ActionResult::unknown(
+                                format!(
+                                    "{uia_error}; uiautomation mouse events were posted instead"
+                                ),
+                                Delivery::ForegroundHid,
+                            ));
                         }
                     }
                 }
@@ -177,6 +184,7 @@ impl WindowsBackend {
                 input::click(x, y, request.button, request.click_count)?;
                 Ok(ActionResult::unknown(
                     "uiautomation mouse events were posted",
+                    Delivery::ForegroundHid,
                 ))
             }
             ActionKind::SetText => {
@@ -185,15 +193,18 @@ impl WindowsBackend {
                 })?;
                 let target = target(root, request)?;
                 match target.set_text(text) {
-                    Ok(message) => Ok(ActionResult::worked(message)),
+                    Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
                     Err(uia_error) => {
                         let focus_failed = target.focus().is_err();
                         let click_point = if focus_failed {
                             let frame = target.frame();
                             if !frame.has_area() {
-                                return Ok(ActionResult::didnt(format!(
-                                    "{uia_error}; the target also rejected focus and has no clickable frame"
-                                )));
+                                return Ok(ActionResult::didnt(
+                                    format!(
+                                        "{uia_error}; the target also rejected focus and has no clickable frame"
+                                    ),
+                                    Delivery::None,
+                                ));
                             }
                             Some(frame.center())
                         } else {
@@ -206,9 +217,12 @@ impl WindowsBackend {
                         }
                         input::keypress(&["ctrl+a".into()])?;
                         input::type_text(text)?;
-                        Ok(ActionResult::unknown(format!(
-                            "{uia_error}; uiautomation keyboard replacement events were posted instead"
-                        )))
+                        Ok(ActionResult::unknown(
+                            format!(
+                                "{uia_error}; uiautomation keyboard replacement events were posted instead"
+                            ),
+                            Delivery::ForegroundHid,
+                        ))
                     }
                 }
             }
@@ -223,6 +237,7 @@ impl WindowsBackend {
                         if !frame.has_area() {
                             return Ok(ActionResult::didnt(
                                 "target rejected focus and has no clickable frame",
+                                Delivery::None,
                             ));
                         }
                         Some(frame.center())
@@ -240,6 +255,7 @@ impl WindowsBackend {
                 input::type_text(text)?;
                 Ok(ActionResult::unknown(
                     "uiautomation Unicode keyboard events were posted",
+                    Delivery::ForegroundHid,
                 ))
             }
             ActionKind::Keypress => {
@@ -253,6 +269,7 @@ impl WindowsBackend {
                         if !frame.has_area() {
                             return Ok(ActionResult::didnt(
                                 "keypress target rejected focus and has no clickable frame",
+                                Delivery::None,
                             ));
                         }
                         Some(frame.center())
@@ -270,6 +287,7 @@ impl WindowsBackend {
                 input::keypress(keys)?;
                 Ok(ActionResult::unknown(
                     "uiautomation keyboard events were posted",
+                    Delivery::ForegroundHid,
                 ))
             }
             ActionKind::Scroll => {
@@ -279,19 +297,23 @@ impl WindowsBackend {
                 if scroll_x == 0.0 && scroll_y == 0.0 {
                     return Ok(ActionResult::worked(
                         "scroll deltas were zero; no action was needed",
+                        Delivery::None,
                     ));
                 }
                 let target = scroll_target(root, request)?;
                 match target.scroll(scroll_x, scroll_y) {
-                    Ok(message) => Ok(ActionResult::worked(message)),
+                    Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
                     Err(uia_error) => {
                         let frame = target.frame();
                         let focus_failed = target.focus().is_err();
                         let mouse_action = if focus_failed {
                             if !frame.has_area() {
-                                return Ok(ActionResult::didnt(format!(
-                                    "{uia_error}; the target rejected focus and has no frame for keyboard fallback"
-                                )));
+                                return Ok(ActionResult::didnt(
+                                    format!(
+                                        "{uia_error}; the target rejected focus and has no frame for keyboard fallback"
+                                    ),
+                                    Delivery::None,
+                                ));
                             }
                             Some((frame.center(), true))
                         } else if frame.has_area() {
@@ -309,9 +331,12 @@ impl WindowsBackend {
                             }
                         }
                         input::scroll_with_keyboard(scroll_x, scroll_y)?;
-                        Ok(ActionResult::unknown(format!(
-                            "{uia_error}; uiautomation keyboard scroll events were posted instead"
-                        )))
+                        Ok(ActionResult::unknown(
+                            format!(
+                                "{uia_error}; uiautomation keyboard scroll events were posted instead"
+                            ),
+                            Delivery::ForegroundHid,
+                        ))
                     }
                 }
             }
@@ -324,6 +349,7 @@ impl WindowsBackend {
                 input::drag(path, request.button)?;
                 Ok(ActionResult::unknown(
                     "uiautomation mouse drag events were posted",
+                    Delivery::ForegroundHid,
                 ))
             }
             ActionKind::MoveMouse => {
@@ -332,6 +358,7 @@ impl WindowsBackend {
                 input::move_mouse(x, y)?;
                 Ok(ActionResult::unknown(
                     "a uiautomation mouse-move event was posted",
+                    Delivery::ForegroundHid,
                 ))
             }
         }

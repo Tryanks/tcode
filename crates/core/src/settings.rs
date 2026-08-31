@@ -567,6 +567,13 @@ pub struct ComputerUseSettings {
     /// Defaults to TRUE and tolerates an absent field in legacy files.
     #[serde(default = "default_true")]
     pub allow_input: bool,
+    /// Permit an opt-in foreground HID retry for keyboard actions when
+    /// background PID delivery cannot be initialized.
+    #[serde(default)]
+    pub allow_foreground_fallback: bool,
+    /// Show the agent cursor overlay. The overlay consumes this in a later PR.
+    #[serde(default = "default_true")]
+    pub show_agent_cursor: bool,
 }
 
 impl Default for ComputerUseSettings {
@@ -575,6 +582,8 @@ impl Default for ComputerUseSettings {
             enabled: false,
             image_mode: ImageMode::default(),
             allow_input: true,
+            allow_foreground_fallback: false,
+            show_agent_cursor: true,
         }
     }
 }
@@ -1270,6 +1279,8 @@ mod tests {
         // New fields tolerate an absent block: image mode auto, input allowed.
         assert_eq!(legacy.computer_use.image_mode, ImageMode::Auto);
         assert!(legacy.computer_use.allow_input);
+        assert!(!legacy.computer_use.allow_foreground_fallback);
+        assert!(legacy.computer_use.show_agent_cursor);
 
         // A legacy block that predates image_mode / allow_input still defaults
         // input ON (observe-only is opt-in, never the silent legacy behavior).
@@ -1278,12 +1289,16 @@ mod tests {
         assert!(partial.computer_use.enabled);
         assert_eq!(partial.computer_use.image_mode, ImageMode::Auto);
         assert!(partial.computer_use.allow_input);
+        assert!(!partial.computer_use.allow_foreground_fallback);
+        assert!(partial.computer_use.show_agent_cursor);
 
         let settings = Settings {
             computer_use: ComputerUseSettings {
                 enabled: true,
                 image_mode: ImageMode::Always,
                 allow_input: false,
+                allow_foreground_fallback: true,
+                show_agent_cursor: false,
             },
             ..Settings::default()
         };
@@ -1293,6 +1308,8 @@ mod tests {
         assert!(back.computer_use.enabled);
         assert_eq!(back.computer_use.image_mode, ImageMode::Always);
         assert!(!back.computer_use.allow_input);
+        assert!(back.computer_use.allow_foreground_fallback);
+        assert!(!back.computer_use.show_agent_cursor);
     }
 
     #[test]

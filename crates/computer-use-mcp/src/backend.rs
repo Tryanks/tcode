@@ -96,7 +96,8 @@ pub struct RootObservation {
     pub root: RootInfo,
     pub tree: UiNode,
     pub text_sparse: bool,
-    pub screenshot_png: Option<Vec<u8>>,
+    pub screenshot: Option<Vec<u8>>,
+    pub screenshot_mime: &'static str,
 }
 
 /// Supported desktop input action.
@@ -151,31 +152,46 @@ pub enum ActionOutcome {
     Unknown,
 }
 
+/// Mechanism used to deliver an action to the target application.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    Ax,
+    BackgroundPid,
+    ForegroundHid,
+    #[default]
+    None,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionResult {
     pub outcome: ActionOutcome,
     pub message: String,
+    pub delivery: Delivery,
 }
 
 impl ActionResult {
-    pub fn worked(message: impl Into<String>) -> Self {
+    pub fn worked(message: impl Into<String>, delivery: Delivery) -> Self {
         Self {
             outcome: ActionOutcome::Worked,
             message: message.into(),
+            delivery,
         }
     }
 
-    pub fn didnt(message: impl Into<String>) -> Self {
+    pub fn didnt(message: impl Into<String>, delivery: Delivery) -> Self {
         Self {
             outcome: ActionOutcome::Didnt,
             message: message.into(),
+            delivery,
         }
     }
 
-    pub fn unknown(message: impl Into<String>) -> Self {
+    pub fn unknown(message: impl Into<String>, delivery: Delivery) -> Self {
         Self {
             outcome: ActionOutcome::Unknown,
             message: message.into(),
+            delivery,
         }
     }
 }
@@ -266,6 +282,18 @@ pub fn perform_action(
     {
         let _ = (root, request);
         Err(BackendError::unsupported())
+    }
+}
+
+/// Process identifier of the currently frontmost macOS application.
+pub fn frontmost_pid() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::frontmost_pid()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
     }
 }
 
@@ -501,6 +529,18 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delivery_serializes_as_snake_case() {
+        for (delivery, expected) in [
+            (Delivery::Ax, "ax"),
+            (Delivery::BackgroundPid, "background_pid"),
+            (Delivery::ForegroundHid, "foreground_hid"),
+            (Delivery::None, "none"),
+        ] {
+            assert_eq!(serde_json::to_value(delivery).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn key_names_and_chords_map_to_macos_virtual_codes() {
