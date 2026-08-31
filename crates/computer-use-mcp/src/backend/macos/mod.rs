@@ -3,6 +3,7 @@ mod background;
 mod capture;
 mod focus;
 mod input;
+mod overlay;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -132,6 +133,7 @@ impl MacosBackend {
         root: &RootInfo,
         request: &ActionRequest,
     ) -> Result<ActionResult, BackendError> {
+        reflect_overlay(root, request);
         match request.kind {
             ActionKind::Press => {
                 let target = target(root, request)?;
@@ -433,6 +435,44 @@ fn keyboard_result_with_optional_foreground(
             format!("background PID delivery failed: {error}"),
             Delivery::None,
         ),
+    }
+}
+
+fn reflect_overlay(root: &RootInfo, request: &ActionRequest) {
+    let enabled = crate::config::get().show_agent_cursor;
+    overlay::set_enabled(enabled);
+    if !enabled {
+        return;
+    }
+    use overlay::OverlayActionKind as K;
+    let frame = root.frame;
+    match request.kind {
+        ActionKind::Drag => {
+            if let Some(path) = request.path.as_ref()
+                && let (Some(first), Some(last)) = (path.first(), path.last())
+            {
+                overlay::show_drag((first[0], first[1]), (last[0], last[1]), frame);
+                return;
+            }
+            overlay::highlight_window(frame);
+        }
+        ActionKind::TypeText | ActionKind::SetText | ActionKind::Keypress => {
+            match action_point(root, request) {
+                Ok(point) => overlay::show_action(K::Keyboard, point, frame),
+                Err(_) => overlay::highlight_window(frame),
+            }
+        }
+        other => {
+            let kind = match other {
+                ActionKind::Scroll => K::Scroll,
+                ActionKind::MoveMouse => K::Move,
+                _ => K::Click,
+            };
+            match action_point(root, request) {
+                Ok(point) => overlay::show_action(kind, point, frame),
+                Err(_) => overlay::highlight_window(frame),
+            }
+        }
     }
 }
 
