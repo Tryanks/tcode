@@ -255,6 +255,8 @@ fn settings_patches_round_trip() {
         SettingsPatch::ComputerUseEnabled(true),
         SettingsPatch::ComputerUseImageMode(ImageMode::Always),
         SettingsPatch::ComputerUseAllowInput(false),
+        SettingsPatch::ComputerUseAllowForegroundFallback(true),
+        SettingsPatch::ComputerUseShowAgentCursor(false),
         SettingsPatch::BrowserEnabled(false),
         SettingsPatch::BrowserHomeUrl(Some("https://example.com".into())),
         SettingsPatch::BrowserAllowEvaluate(false),

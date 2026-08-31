@@ -302,15 +302,15 @@ pub fn service() -> Service {
 mod dispatch {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use base64::Engine as _;
     use serde_json::json;
 
     use crate::backend::{
-        ActionOutcome, ActionRequest, ActionResult, CapturePolicy, ObserveRequest, RootFilters,
-        RootInfo, RootObservation,
+        ActionOutcome, ActionRequest, ActionResult, CapturePolicy, Delivery, ObserveRequest,
+        RootFilters, RootInfo, RootObservation,
     };
     use crate::outline::{self, UiNode};
 
@@ -356,14 +356,34 @@ mod dispatch {
     }
 
     static ROOTS: OnceLock<Mutex<RootRegistry>> = OnceLock::new();
-    static OBSERVATION_TRANSACTION: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct ObservationLanes {
+        by_pid: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+    }
+
+    impl ObservationLanes {
+        fn lane(&self, pid: u32) -> Arc<tokio::sync::Mutex<()>> {
+            Arc::clone(
+                self.by_pid
+                    .lock()
+                    .unwrap()
+                    .entry(pid)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        }
+    }
+
+    static OBSERVATION_LANES: OnceLock<ObservationLanes> = OnceLock::new();
 
     fn roots() -> &'static Mutex<RootRegistry> {
         ROOTS.get_or_init(|| Mutex::new(RootRegistry::default()))
     }
 
-    fn observation_transaction() -> &'static tokio::sync::Mutex<()> {
-        OBSERVATION_TRANSACTION.get_or_init(|| tokio::sync::Mutex::new(()))
+    fn observation_lane(pid: u32) -> Arc<tokio::sync::Mutex<()>> {
+        OBSERVATION_LANES
+            .get_or_init(ObservationLanes::default)
+            .lane(pid)
     }
 
     pub(super) async fn find_roots(params: FindRootsParams) -> CallToolResult {
@@ -419,11 +439,12 @@ mod dispatch {
         {
             return result;
         }
-        let _transaction = observation_transaction().lock().await;
         let root = match resolve_root(params.root.as_deref()) {
             Ok(root) => root,
             Err(result) => return *result,
         };
+        let lane = observation_lane(root.pid);
+        let _transaction = lane.lock().await;
         let capture = capture_policy(config.image_mode, params.mode, &permissions);
         let request = ObserveRequest {
             semantic: !matches!(params.mode, Some(ObserveMode::Visual)),
@@ -529,7 +550,12 @@ mod dispatch {
         if params.actions.is_empty() {
             return tool_error("act_ui requires at least one action");
         }
-        let _transaction = observation_transaction().lock().await;
+        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
+            Ok(observation) => observation.root.pid,
+            Err(error) => return tool_error(&error.to_string()),
+        };
+        let lane = observation_lane(pid);
+        let _transaction = lane.lock().await;
         let previous = match crate::state::global()
             .lock()
             .unwrap()
@@ -539,25 +565,42 @@ mod dispatch {
             Err(error) => return tool_error(&error.to_string()),
         };
         let mut step_results = Vec::new();
+        let mut action_descriptions = Vec::new();
         let mut stopped_at = None;
+        let mut activation = "none";
         for (index, action) in params.actions.iter().enumerate() {
             let result = match prepare_action(&previous.tree, action) {
                 Ok(request) => crate::backend::perform_action(&previous.root, &request)
-                    .unwrap_or_else(|error| ActionResult::didnt(error.to_string())),
-                Err(error) => ActionResult::didnt(error),
+                    .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None)),
+                Err(error) => ActionResult::didnt(error, Delivery::None),
             };
             let didnt = result.outcome == ActionOutcome::Didnt;
+            action_descriptions.push(crate::state::harness_action_description(
+                action_name(action.action),
+                action.r#ref.as_deref(),
+                &previous.tree,
+            ));
+            activation = match (activation, result.delivery) {
+                (_, Delivery::ForegroundHid) => "foreground",
+                ("none", Delivery::BackgroundPid) => "background",
+                (current, _) => current,
+            };
             step_results.push(json!({
                 "index": index + 1,
                 "action": action_name(action.action),
                 "outcome": result.outcome,
                 "message": result.message,
+                "delivery": result.delivery,
             }));
             if didnt {
                 stopped_at = Some(index + 1);
                 break;
             }
         }
+        crate::state::global()
+            .lock()
+            .unwrap()
+            .record_actions(&previous.root, action_descriptions);
 
         let expectation_preexisting = params
             .expect
@@ -577,7 +620,7 @@ mod dispatch {
         let successor = crate::state::global().lock().unwrap().insert_observation(
             successor.root,
             successor.tree,
-            successor.screenshot_png,
+            successor.screenshot,
         );
         let diff = outline::diff_trees(&previous.tree, &successor.tree);
         let expectation_failed = expectation_status == "failed";
@@ -597,6 +640,7 @@ mod dispatch {
             "state_id": successor.state_id,
             "previous_state_id": previous.state_id,
             "outcome": outcome,
+            "activation": activation,
             "stopped_at": stopped_at,
             "steps": step_results,
             "expect": expectation_status,
@@ -611,6 +655,8 @@ mod dispatch {
         } else {
             text.push_str(&diff.text);
         }
+        text.push_str("\n\n");
+        text.push_str(&successor.harness_annotation);
         bounded_success(Some(&successor.state_id), text, Vec::new())
     }
 
@@ -676,7 +722,12 @@ mod dispatch {
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
-        let _transaction = observation_transaction().lock().await;
+        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
+            Ok(observation) => observation.root.pid,
+            Err(error) => return tool_error(&error.to_string()),
+        };
+        let lane = observation_lane(pid);
+        let _transaction = lane.lock().await;
         let previous = match crate::state::global()
             .lock()
             .unwrap()
@@ -719,7 +770,7 @@ mod dispatch {
         let successor = crate::state::global().lock().unwrap().insert_observation(
             observed.root,
             observed.tree,
-            observed.screenshot_png,
+            observed.screenshot,
         );
         let status = if matched { "matched" } else { "timeout" };
         let report = json!({
@@ -852,12 +903,18 @@ mod dispatch {
     }
 
     fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToolResult {
-        let screenshot_for_response = observed.screenshot_png.clone();
-        let observation = crate::state::global().lock().unwrap().insert_observation(
-            observed.root,
-            observed.tree,
-            observed.screenshot_png,
-        );
+        let RootObservation {
+            root,
+            tree,
+            text_sparse,
+            screenshot,
+            screenshot_mime,
+        } = observed;
+        let screenshot_for_response = screenshot.clone();
+        let observation = crate::state::global()
+            .lock()
+            .unwrap()
+            .insert_observation(root, tree, screenshot);
         let mut text = format!(
             "state_id: {}\nroot: {} app=\"{}\" title=\"{}\"\nelements: {} interactive: {}",
             observation.state_id,
@@ -867,7 +924,7 @@ mod dispatch {
             count_nodes(&observation.tree),
             outline::interactive_count(&observation.tree)
         );
-        if observed.text_sparse {
+        if text_sparse {
             text.push_str("\ntext_sparse: true");
         }
         if let Some(warning) = warning {
@@ -876,11 +933,13 @@ mod dispatch {
         }
         text.push('\n');
         text.push_str(&outline::render_folded(&observation.tree));
+        text.push_str("\n\n");
+        text.push_str(&observation.harness_annotation);
         let extra = screenshot_for_response
-            .map(|png| {
+            .map(|screenshot| {
                 ContentBlock::image(
-                    base64::engine::general_purpose::STANDARD.encode(png),
-                    "image/png",
+                    base64::engine::general_purpose::STANDARD.encode(screenshot),
+                    screenshot_mime,
                 )
             })
             .into_iter()
@@ -1079,12 +1138,35 @@ mod dispatch {
         CallToolResult::error(vec![ContentBlock::text(message)])
     }
 
+    #[cfg(test)]
+    mod scheduling_tests {
+        use super::*;
+
+        #[test]
+        fn per_pid_lanes_allow_other_pids_and_serialize_the_same_pid() {
+            let lanes = ObservationLanes::default();
+            let first_pid = lanes.lane(1001);
+            let same_pid = lanes.lane(1001);
+            let other_pid = lanes.lane(2002);
+            assert!(Arc::ptr_eq(&first_pid, &same_pid));
+            assert!(!Arc::ptr_eq(&first_pid, &other_pid));
+
+            let first_guard = first_pid.try_lock().unwrap();
+            let other_guard = other_pid.try_lock().unwrap();
+            assert!(same_pid.try_lock().is_err());
+
+            drop(first_guard);
+            let same_pid_guard = same_pid.try_lock().unwrap();
+            drop((same_pid_guard, other_guard));
+        }
+    }
+
     #[cfg(all(test, target_os = "macos"))]
     mod tests {
         use super::*;
         use crate::outline::Frame;
 
-        fn sparse_observation(screenshot_png: Option<Vec<u8>>) -> RootObservation {
+        fn sparse_observation(screenshot: Option<Vec<u8>>) -> RootObservation {
             RootObservation {
                 root: RootInfo {
                     ref_id: "@r1".into(),
@@ -1110,7 +1192,8 @@ mod dispatch {
                     ..UiNode::default()
                 },
                 text_sparse: true,
-                screenshot_png,
+                screenshot,
+                screenshot_mime: "image/jpeg",
             }
         }
 
@@ -1129,13 +1212,12 @@ mod dispatch {
             assert_eq!(policy, CapturePolicy::IfSparse);
             assert!(policy.should_capture(true));
 
-            let result =
-                save_observation(sparse_observation(Some(vec![0x89, b'P', b'N', b'G'])), None);
+            let result = save_observation(sparse_observation(Some(vec![0xff, 0xd8, 0xff])), None);
             assert!(matches!(
                 result.content.as_slice(),
                 [ContentBlock::Text(text), ContentBlock::Image(image)]
                     if text.text.contains("text_sparse: true")
-                        && image.mime_type == "image/png"
+                        && image.mime_type == "image/jpeg"
             ));
         }
 
