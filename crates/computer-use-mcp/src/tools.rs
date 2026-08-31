@@ -302,7 +302,7 @@ pub fn service() -> Service {
 mod dispatch {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use base64::Engine as _;
@@ -356,14 +356,34 @@ mod dispatch {
     }
 
     static ROOTS: OnceLock<Mutex<RootRegistry>> = OnceLock::new();
-    static OBSERVATION_TRANSACTION: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct ObservationLanes {
+        by_pid: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+    }
+
+    impl ObservationLanes {
+        fn lane(&self, pid: u32) -> Arc<tokio::sync::Mutex<()>> {
+            Arc::clone(
+                self.by_pid
+                    .lock()
+                    .unwrap()
+                    .entry(pid)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        }
+    }
+
+    static OBSERVATION_LANES: OnceLock<ObservationLanes> = OnceLock::new();
 
     fn roots() -> &'static Mutex<RootRegistry> {
         ROOTS.get_or_init(|| Mutex::new(RootRegistry::default()))
     }
 
-    fn observation_transaction() -> &'static tokio::sync::Mutex<()> {
-        OBSERVATION_TRANSACTION.get_or_init(|| tokio::sync::Mutex::new(()))
+    fn observation_lane(pid: u32) -> Arc<tokio::sync::Mutex<()>> {
+        OBSERVATION_LANES
+            .get_or_init(ObservationLanes::default)
+            .lane(pid)
     }
 
     pub(super) async fn find_roots(params: FindRootsParams) -> CallToolResult {
@@ -419,11 +439,12 @@ mod dispatch {
         {
             return result;
         }
-        let _transaction = observation_transaction().lock().await;
         let root = match resolve_root(params.root.as_deref()) {
             Ok(root) => root,
             Err(result) => return *result,
         };
+        let lane = observation_lane(root.pid);
+        let _transaction = lane.lock().await;
         let capture = capture_policy(config.image_mode, params.mode, &permissions);
         let request = ObserveRequest {
             semantic: !matches!(params.mode, Some(ObserveMode::Visual)),
@@ -529,7 +550,12 @@ mod dispatch {
         if params.actions.is_empty() {
             return tool_error("act_ui requires at least one action");
         }
-        let _transaction = observation_transaction().lock().await;
+        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
+            Ok(observation) => observation.root.pid,
+            Err(error) => return tool_error(&error.to_string()),
+        };
+        let lane = observation_lane(pid);
+        let _transaction = lane.lock().await;
         let previous = match crate::state::global()
             .lock()
             .unwrap()
@@ -539,6 +565,7 @@ mod dispatch {
             Err(error) => return tool_error(&error.to_string()),
         };
         let mut step_results = Vec::new();
+        let mut action_descriptions = Vec::new();
         let mut stopped_at = None;
         let mut activation = "none";
         for (index, action) in params.actions.iter().enumerate() {
@@ -548,6 +575,11 @@ mod dispatch {
                 Err(error) => ActionResult::didnt(error, Delivery::None),
             };
             let didnt = result.outcome == ActionOutcome::Didnt;
+            action_descriptions.push(crate::state::harness_action_description(
+                action_name(action.action),
+                action.r#ref.as_deref(),
+                &previous.tree,
+            ));
             activation = match (activation, result.delivery) {
                 (_, Delivery::ForegroundHid) => "foreground",
                 ("none", Delivery::BackgroundPid) => "background",
@@ -565,6 +597,10 @@ mod dispatch {
                 break;
             }
         }
+        crate::state::global()
+            .lock()
+            .unwrap()
+            .record_actions(&previous.root, action_descriptions);
 
         let expectation_preexisting = params
             .expect
@@ -619,6 +655,8 @@ mod dispatch {
         } else {
             text.push_str(&diff.text);
         }
+        text.push_str("\n\n");
+        text.push_str(&successor.harness_annotation);
         bounded_success(Some(&successor.state_id), text, Vec::new())
     }
 
@@ -684,7 +722,12 @@ mod dispatch {
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
-        let _transaction = observation_transaction().lock().await;
+        let pid = match crate::state::global().lock().unwrap().get(&params.state_id) {
+            Ok(observation) => observation.root.pid,
+            Err(error) => return tool_error(&error.to_string()),
+        };
+        let lane = observation_lane(pid);
+        let _transaction = lane.lock().await;
         let previous = match crate::state::global()
             .lock()
             .unwrap()
@@ -890,6 +933,8 @@ mod dispatch {
         }
         text.push('\n');
         text.push_str(&outline::render_folded(&observation.tree));
+        text.push_str("\n\n");
+        text.push_str(&observation.harness_annotation);
         let extra = screenshot_for_response
             .map(|screenshot| {
                 ContentBlock::image(
@@ -1091,6 +1136,29 @@ mod dispatch {
 
     fn tool_error(message: &str) -> CallToolResult {
         CallToolResult::error(vec![ContentBlock::text(message)])
+    }
+
+    #[cfg(test)]
+    mod scheduling_tests {
+        use super::*;
+
+        #[test]
+        fn per_pid_lanes_allow_other_pids_and_serialize_the_same_pid() {
+            let lanes = ObservationLanes::default();
+            let first_pid = lanes.lane(1001);
+            let same_pid = lanes.lane(1001);
+            let other_pid = lanes.lane(2002);
+            assert!(Arc::ptr_eq(&first_pid, &same_pid));
+            assert!(!Arc::ptr_eq(&first_pid, &other_pid));
+
+            let first_guard = first_pid.try_lock().unwrap();
+            let other_guard = other_pid.try_lock().unwrap();
+            assert!(same_pid.try_lock().is_err());
+
+            drop(first_guard);
+            let same_pid_guard = same_pid.try_lock().unwrap();
+            drop((same_pid_guard, other_guard));
+        }
     }
 
     #[cfg(all(test, target_os = "macos"))]
