@@ -267,6 +267,12 @@ computer_use:
   allow_input:
     title: "允许输入操作"
     description: "关闭后工具仅用于观察：点击、输入等操作都会被拒绝。"
+  allow_foreground_fallback:
+    title: "前台键盘回退"
+    description: "当后台投递无法启动时，通过短暂聚焦目标窗口重试键盘输入。默认关闭；指针操作绝不回退到前台。"
+  show_agent_cursor:
+    title: "显示 agent 光标"
+    description: "显示一个浮动光标与窗口高亮，指示 agent 正在操作的位置。真实指针不会移动。"
   permissions_section: "系统权限"
   unsupported: "电脑操作仅在 macOS 上可用。"
 browser:

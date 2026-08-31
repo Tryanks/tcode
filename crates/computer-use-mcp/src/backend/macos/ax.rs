@@ -1,20 +1,28 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt;
+use std::os::raw::{c_char, c_int};
 use std::ptr;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use core_foundation::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFRelease, CFRetain, CFTypeID, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::number::CFNumber;
+use core_foundation::runloop::{
+    CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRun, CFRunLoopSourceRef, CFRunLoopWakeUp,
+    kCFRunLoopDefaultMode,
+};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 
 use super::super::{BackendError, BackendErrorCode, RootInfo, RootKind};
-use crate::outline::{Frame, UiNode, canonical_role};
+use crate::outline::{Frame, UiNode, canonical_role, is_text_sparse};
 
 type AXUIElementRef = CFTypeRef;
 type AXValueRef = CFTypeRef;
+type AXObserverRef = CFTypeRef;
 type AXError = i32;
 type AXValueType = u32;
 
@@ -25,6 +33,20 @@ const AX_VALUE_CGRECT: AXValueType = 3;
 const MAX_DEPTH: usize = 18;
 const MAX_NODES: usize = 3_000;
 const MAX_CHILDREN_PER_NODE: usize = 500;
+
+type AddNotificationAndCheckRemote =
+    unsafe extern "C" fn(AXObserverRef, AXUIElementRef, CFStringRef, *mut c_void) -> AXError;
+
+static ACTIVATED_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+static WEB_SPARSE_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+static AX_OBSERVERS: OnceLock<Mutex<HashMap<u32, usize>>> = OnceLock::new();
+
+const RTLD_LAZY: c_int = 1;
+
+unsafe extern "C" {
+    fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -57,6 +79,18 @@ unsafe extern "C" {
     fn AXValueGetTypeID() -> CFTypeID;
     fn AXValueGetType(value: AXValueRef) -> AXValueType;
     fn AXValueGetValue(value: AXValueRef, value_type: AXValueType, value_ptr: *mut c_void) -> bool;
+    fn AXObserverCreateWithInfoCallback(
+        pid: i32,
+        callback: extern "C" fn(AXObserverRef, AXUIElementRef, CFStringRef, CFTypeRef, *mut c_void),
+        observer: *mut AXObserverRef,
+    ) -> AXError;
+    fn AXObserverGetRunLoopSource(observer: AXObserverRef) -> CFRunLoopSourceRef;
+    fn AXObserverAddNotification(
+        observer: AXObserverRef,
+        element: AXUIElementRef,
+        notification: CFStringRef,
+        refcon: *mut c_void,
+    ) -> AXError;
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -317,8 +351,263 @@ pub(super) fn root_kind(root: &RootInfo) -> RootKind {
     }
 }
 
+fn should_activate_chromium(root: &RootInfo) -> bool {
+    is_chromium_bundle(&root.bundle_id) || lock_set(&WEB_SPARSE_PIDS).contains(&root.pid)
+}
+
+fn is_chromium_bundle(bundle_id: &str) -> bool {
+    let bundle_id = bundle_id.to_ascii_lowercase();
+    ["chrome", "chromium", "electron"]
+        .into_iter()
+        .any(|marker| bundle_id.contains(marker))
+}
+
+fn activate_chromium_accessibility(pid: u32, application: AXUIElementRef) {
+    for attribute_name in ["AXManualAccessibility", "AXEnhancedUserInterface"] {
+        let attribute = CFString::new(attribute_name);
+        // SAFETY: application is a live AX application element and both the
+        // attribute string and kCFBooleanTrue remain live for this call.
+        let code = unsafe {
+            AXUIElementSetAttributeValue(
+                application,
+                attribute.as_concrete_TypeRef(),
+                CFBoolean::true_value().as_CFTypeRef(),
+            )
+        };
+        if code != AX_SUCCESS {
+            log::debug!(
+                "Chromium AX activation attribute {attribute_name} was rejected for pid {pid}: {}",
+                ax_error_name(code)
+            );
+        }
+    }
+
+    let first_activation = lock_set(&ACTIVATED_PIDS).insert(pid);
+    if !first_activation {
+        return;
+    }
+    register_chromium_observer(pid, application);
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+fn register_chromium_observer(pid: u32, application: AXUIElementRef) {
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        log::debug!("Chromium AX observer pid {pid} is out of range");
+        return;
+    };
+    let mut observer: AXObserverRef = ptr::null();
+    // SAFETY: the output pointer is valid, the callback has the verified AX
+    // ABI, and a null/failed observer is handled without dereferencing it.
+    let code = unsafe {
+        AXObserverCreateWithInfoCallback(pid_i32, chromium_observer_callback, &mut observer)
+    };
+    if code != AX_SUCCESS || observer.is_null() {
+        log::debug!(
+            "could not create Chromium AX observer for pid {pid}: {}",
+            ax_error_name(code)
+        );
+        return;
+    }
+
+    for notification_name in CHROMIUM_NOTIFICATIONS {
+        let notification = CFString::new(notification_name);
+        let code =
+            add_chromium_notification(observer, application, notification.as_concrete_TypeRef());
+        if code != AX_SUCCESS && code != -25210 {
+            log::debug!(
+                "Chromium AX notification {notification_name} was rejected for pid {pid}: {}",
+                ax_error_name(code)
+            );
+        }
+    }
+
+    // SAFETY: observer is a live create-rule AXObserver returned above; the
+    // borrowed run-loop source remains live while the observer is retained.
+    let source = unsafe { AXObserverGetRunLoopSource(observer) };
+    if source.is_null() || add_observer_run_loop_source(source).is_none() {
+        log::debug!("could not attach Chromium AX observer for pid {pid} to its run loop");
+        // SAFETY: observer is the create-rule object returned above and has not
+        // been handed to the persistent registry on this failure path.
+        unsafe { CFRelease(observer) };
+        return;
+    }
+
+    observer_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(pid, observer as usize);
+}
+
+const CHROMIUM_NOTIFICATIONS: [&str; 13] = [
+    "AXFocusedUIElementChanged",
+    "AXFocusedWindowChanged",
+    "AXApplicationActivated",
+    "AXApplicationDeactivated",
+    "AXApplicationHidden",
+    "AXApplicationShown",
+    "AXWindowCreated",
+    "AXWindowMoved",
+    "AXWindowResized",
+    "AXValueChanged",
+    "AXTitleChanged",
+    "AXSelectedChildrenChanged",
+    "AXLayoutChanged",
+];
+
+extern "C" fn chromium_observer_callback(
+    _observer: AXObserverRef,
+    _element: AXUIElementRef,
+    _notification: CFStringRef,
+    _info: CFTypeRef,
+    _refcon: *mut c_void,
+) {
+}
+
+fn add_chromium_notification(
+    observer: AXObserverRef,
+    application: AXUIElementRef,
+    notification: CFStringRef,
+) -> AXError {
+    if let Some(add_remote) = remote_notification_adder() {
+        // SAFETY: the function pointer was resolved with the verified private
+        // AX observer ABI and all supplied AX/CF references are live.
+        return unsafe { add_remote(observer, application, notification, ptr::null_mut()) };
+    }
+    // SAFETY: observer, application, and notification are live values using
+    // the public AXObserverAddNotification ABI; null refcon is permitted.
+    unsafe { AXObserverAddNotification(observer, application, notification, ptr::null_mut()) }
+}
+
+fn remote_notification_adder() -> Option<AddNotificationAndCheckRemote> {
+    static ADDER: OnceLock<Option<AddNotificationAndCheckRemote>> = OnceLock::new();
+    *ADDER.get_or_init(|| {
+        // SAFETY: the framework path and flags are valid C inputs; null means
+        // the optional private helper is unavailable.
+        let handle = unsafe {
+            dlopen(
+                c"/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices".as_ptr(),
+                RTLD_LAZY,
+            )
+        };
+        if handle.is_null() {
+            log::debug!(
+                "HIServices private AX helpers are unavailable; using public observer registration"
+            );
+            return None;
+        }
+        // SAFETY: RTLD_DEFAULT is the verified macOS sentinel and the private
+        // symbol name is a static NUL-terminated C string.
+        let symbol = unsafe {
+            dlsym(
+                (-2_isize) as *mut c_void,
+                c"_AXObserverAddNotificationAndCheckRemote".as_ptr(),
+            )
+        };
+        if symbol.is_null() {
+            log::debug!(
+                "remote AX observer registration helper is unavailable; using public API"
+            );
+            None
+        } else {
+            // SAFETY: the symbol uses the verified private AX observer
+            // registration ABI represented by AddNotificationAndCheckRemote.
+            Some(unsafe {
+                std::mem::transmute::<*mut c_void, AddNotificationAndCheckRemote>(symbol)
+            })
+        }
+    })
+}
+
+struct ObserverRunLoop {
+    run_loop: usize,
+    first_source: usize,
+}
+
+fn add_observer_run_loop_source(source: CFRunLoopSourceRef) -> Option<()> {
+    static RUN_LOOP: OnceLock<Option<ObserverRunLoop>> = OnceLock::new();
+    let runtime = RUN_LOOP
+        .get_or_init(|| start_observer_run_loop(source))
+        .as_ref()?;
+    if runtime.first_source != source as usize {
+        // SAFETY: the persistent run loop and borrowed AXObserver source are
+        // live; CFRunLoopAddSource retains the source in the default mode.
+        unsafe {
+            CFRunLoopAddSource(
+                runtime.run_loop as core_foundation::runloop::CFRunLoopRef,
+                source,
+                kCFRunLoopDefaultMode,
+            );
+            CFRunLoopWakeUp(runtime.run_loop as core_foundation::runloop::CFRunLoopRef);
+        }
+    }
+    Some(())
+}
+
+fn start_observer_run_loop(source: CFRunLoopSourceRef) -> Option<ObserverRunLoop> {
+    let source_address = source as usize;
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let thread = std::thread::Builder::new()
+        .name("tcode-cu-ax-observer".into())
+        .spawn(move || {
+            // SAFETY: this call obtains the current dedicated thread's live
+            // Core Foundation run loop.
+            let run_loop = unsafe { CFRunLoopGetCurrent() };
+            // SAFETY: source_address is the live AXObserver source passed into
+            // this thread setup, and the default mode is a static CF value.
+            unsafe {
+                CFRunLoopAddSource(
+                    run_loop,
+                    source_address as CFRunLoopSourceRef,
+                    kCFRunLoopDefaultMode,
+                );
+            }
+            if ready_tx.send(run_loop as usize).is_err() {
+                return;
+            }
+            // SAFETY: this dedicated thread owns and runs its current run loop
+            // for the process lifetime to service persistent AX observers.
+            unsafe { CFRunLoopRun() };
+            log::debug!("persistent Chromium AX observer run loop stopped unexpectedly");
+        });
+    if let Err(error) = thread {
+        log::debug!("could not spawn Chromium AX observer run-loop thread: {error}");
+        return None;
+    }
+    match ready_rx.recv() {
+        Ok(run_loop) => Some(ObserverRunLoop {
+            run_loop,
+            first_source: source_address,
+        }),
+        Err(error) => {
+            log::debug!("Chromium AX observer run-loop thread failed during setup: {error}");
+            None
+        }
+    }
+}
+
+fn lock_set(
+    cell: &'static OnceLock<Mutex<HashSet<u32>>>,
+) -> std::sync::MutexGuard<'static, HashSet<u32>> {
+    cell.get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn observer_registry() -> &'static Mutex<HashMap<u32, usize>> {
+    AX_OBSERVERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub(super) fn observe_tree(root: &RootInfo) -> Result<UiNode, BackendError> {
-    let (_application, window) = locate_window(root)?;
+    let application = create_application(root.pid).ok_or_else(|| {
+        BackendError::new(
+            BackendErrorCode::RootNotFound,
+            format!("could not create an AX application for pid {}", root.pid),
+        )
+    })?;
+    if should_activate_chromium(root) {
+        activate_chromium_accessibility(root.pid, application.as_ax());
+    }
+    let window = locate_window_in_application(application.as_ax(), root)?;
     let mut context = WalkContext {
         count: 0,
         visited: HashSet::new(),
@@ -335,6 +624,9 @@ pub(super) fn observe_tree(root: &RootInfo) -> Result<UiNode, BackendError> {
     }
     if !tree.frame.has_area() {
         tree.frame = root.frame;
+    }
+    if is_text_sparse(&tree) {
+        lock_set(&WEB_SPARSE_PIDS).insert(root.pid);
     }
     Ok(tree)
 }
@@ -398,8 +690,16 @@ fn locate_window(root: &RootInfo) -> Result<(OwnedCf, OwnedCf), BackendError> {
             format!("could not create an AX application for pid {}", root.pid),
         )
     })?;
-    let windows = copy_attribute_elements(application.as_ax(), "AXWindows", 200);
-    let window = windows
+    let window = locate_window_in_application(application.as_ax(), root)?;
+    Ok((application, window))
+}
+
+fn locate_window_in_application(
+    application: AXUIElementRef,
+    root: &RootInfo,
+) -> Result<OwnedCf, BackendError> {
+    let windows = copy_attribute_elements(application, "AXWindows", 200);
+    windows
         .into_iter()
         .max_by(|left, right| {
             window_match_score(left.as_ax(), root)
@@ -410,8 +710,7 @@ fn locate_window(root: &RootInfo) -> Result<(OwnedCf, OwnedCf), BackendError> {
                 BackendErrorCode::RootNotFound,
                 format!("no AX window matched root {}", root.ref_id),
             )
-        })?;
-    Ok((application, window))
+        })
 }
 
 fn window_match_score(window: AXUIElementRef, root: &RootInfo) -> f64 {
@@ -725,5 +1024,24 @@ fn ax_error_name(code: AXError) -> &'static str {
         -25214 => "parameterized attribute unsupported",
         -25215 => "not enough precision",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chromium_bundle_detection_is_case_insensitive_and_narrow() {
+        for bundle_id in [
+            "com.google.Chrome",
+            "org.chromium.Chromium",
+            "com.example.ELECTRON.shell",
+        ] {
+            assert!(is_chromium_bundle(bundle_id));
+        }
+        for bundle_id in ["com.apple.Safari", "com.example.chromatic", ""] {
+            assert!(!is_chromium_bundle(bundle_id));
+        }
     }
 }

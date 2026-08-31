@@ -1,7 +1,9 @@
 mod ax;
+mod background;
 mod capture;
 mod focus;
 mod input;
+mod overlay;
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -18,12 +20,13 @@ use core_graphics::window::{
 };
 
 use super::{
-    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, ObserveRequest,
-    RootFilters, RootInfo, RootObservation, matches_root_filters,
+    ActionKind, ActionRequest, ActionResult, BackendError, BackendErrorCode, Delivery,
+    ObserveRequest, RootFilters, RootInfo, RootObservation, matches_root_filters,
 };
 use crate::outline::{UiNode, is_text_sparse};
 
-use self::focus::{CursorGuard, FocusGuard};
+use self::background::{BackgroundActivation, BackgroundDispatcher};
+use self::focus::FocusGuard;
 
 pub(super) struct MacosBackend;
 
@@ -113,14 +116,15 @@ impl MacosBackend {
         };
         let text_sparse = is_text_sparse(&tree);
         let should_capture = request.capture.should_capture(text_sparse);
-        let screenshot_png = should_capture
+        let screenshot = should_capture
             .then(|| capture::capture_window(root))
             .transpose()?;
         Ok(RootObservation {
             root: root.clone(),
             tree,
             text_sparse,
-            screenshot_png,
+            screenshot,
+            screenshot_mime: "image/jpeg",
         })
     }
 
@@ -129,12 +133,13 @@ impl MacosBackend {
         root: &RootInfo,
         request: &ActionRequest,
     ) -> Result<ActionResult, BackendError> {
+        reflect_overlay(root, request);
         match request.kind {
             ActionKind::Press => {
                 let target = target(root, request)?;
                 Ok(match target.press() {
-                    Ok(()) => ActionResult::worked("AXPress completed"),
-                    Err(error) => ActionResult::didnt(error.to_string()),
+                    Ok(()) => ActionResult::worked("AXPress completed", Delivery::Ax),
+                    Err(error) => ActionResult::didnt(error.to_string(), Delivery::None),
                 })
             }
             ActionKind::Click => {
@@ -143,21 +148,44 @@ impl MacosBackend {
                 {
                     let target = target(root, request)?;
                     if target.press().is_ok() {
-                        return Ok(ActionResult::worked("AXPress completed for click target"));
+                        return Ok(ActionResult::worked(
+                            "AXPress completed for click target",
+                            Delivery::Ax,
+                        ));
                     }
                     let (x, y) = target.frame().center();
-                    let _cursor_guard = CursorGuard::acquire();
-                    let _focus_guard = FocusGuard::acquire(root);
-                    input::click(x, y, request.button, request.click_count)?;
-                    return Ok(ActionResult::unknown(
-                        "AXPress was rejected; physical click events were posted",
-                    ));
+                    return Ok(
+                        match background(root, |dispatcher| {
+                            dispatcher.click(x, y, request.button, request.click_count)
+                        }) {
+                            Ok(()) => ActionResult::unknown(
+                                "AXPress was rejected; click events were posted directly to the target pid",
+                                Delivery::BackgroundPid,
+                            ),
+                            Err(error) => ActionResult::didnt(
+                                format!(
+                                    "AXPress was rejected; background click delivery failed: {error}"
+                                ),
+                                Delivery::None,
+                            ),
+                        },
+                    );
                 }
                 let (x, y) = action_point(root, request)?;
-                let _cursor_guard = CursorGuard::acquire();
-                let _focus_guard = FocusGuard::acquire(root);
-                input::click(x, y, request.button, request.click_count)?;
-                Ok(ActionResult::unknown("physical click events were posted"))
+                Ok(
+                    match background(root, |dispatcher| {
+                        dispatcher.click(x, y, request.button, request.click_count)
+                    }) {
+                        Ok(()) => ActionResult::unknown(
+                            "click events were posted directly to the target pid",
+                            Delivery::BackgroundPid,
+                        ),
+                        Err(error) => ActionResult::didnt(
+                            format!("background click delivery failed: {error}"),
+                            Delivery::None,
+                        ),
+                    },
+                )
             }
             ActionKind::SetText => {
                 let text = request.text.as_deref().ok_or_else(|| {
@@ -165,29 +193,44 @@ impl MacosBackend {
                 })?;
                 let target = target(root, request)?;
                 match target.set_text(text) {
-                    Ok(()) => Ok(ActionResult::worked("AXValue was set")),
+                    Ok(()) => Ok(ActionResult::worked("AXValue was set", Delivery::Ax)),
                     Err(ax_error) => {
                         let click_point = if target.focus().is_err() {
                             let frame = target.frame();
                             if !frame.has_area() {
-                                return Ok(ActionResult::didnt(format!(
-                                    "{ax_error}; the target also rejected focus and has no clickable frame"
-                                )));
+                                return Ok(ActionResult::didnt(
+                                    format!(
+                                        "{ax_error}; the target also rejected focus and has no clickable frame"
+                                    ),
+                                    Delivery::None,
+                                ));
                             }
                             Some(frame.center())
                         } else {
                             None
                         };
-                        let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                        let _focus_guard = FocusGuard::acquire(root);
-                        if let Some((x, y)) = click_point {
-                            input::click(x, y, super::MouseButton::Left, 1)?;
-                        }
-                        input::keypress(&["cmd+a".into()])?;
-                        input::type_text(text)?;
-                        Ok(ActionResult::unknown(format!(
-                            "{ax_error}; keyboard replacement events were posted instead"
-                        )))
+                        Ok(
+                            match background(root, |dispatcher| {
+                                if let Some((x, y)) = click_point {
+                                    dispatcher.click(x, y, super::MouseButton::Left, 1)?;
+                                }
+                                dispatcher.keypress(&["cmd+a".into()])?;
+                                dispatcher.type_text(text)
+                            }) {
+                                Ok(()) => ActionResult::unknown(
+                                    format!(
+                                        "{ax_error}; keyboard replacement events were posted directly to the target pid"
+                                    ),
+                                    Delivery::BackgroundPid,
+                                ),
+                                Err(error) => ActionResult::didnt(
+                                    format!(
+                                        "{ax_error}; background keyboard replacement delivery failed: {error}"
+                                    ),
+                                    Delivery::None,
+                                ),
+                            },
+                        )
                     }
                 }
             }
@@ -202,6 +245,7 @@ impl MacosBackend {
                         if !frame.has_area() {
                             return Ok(ActionResult::didnt(
                                 "target rejected focus and has no clickable frame",
+                                Delivery::None,
                             ));
                         }
                         Some(frame.center())
@@ -211,13 +255,30 @@ impl MacosBackend {
                 } else {
                     None
                 };
-                let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                let _focus_guard = FocusGuard::acquire(root);
-                if let Some((x, y)) = click_point {
-                    input::click(x, y, super::MouseButton::Left, 1)?;
-                }
-                input::type_text(text)?;
-                Ok(ActionResult::unknown("Unicode keyboard events were posted"))
+                let attempt = background(root, |dispatcher| {
+                    if let Some((x, y)) = click_point {
+                        dispatcher.click(x, y, super::MouseButton::Left, 1)?;
+                    }
+                    dispatcher.type_text(text)
+                });
+                Ok(keyboard_result_with_optional_foreground(
+                    root,
+                    attempt,
+                    |root| {
+                        let focus_guard = FocusGuard::acquire(root);
+                        if !focus_guard.is_ready() {
+                            return Err(BackendError::new(
+                                BackendErrorCode::OperationFailed,
+                                "foreground HID retry could not activate and raise the target window",
+                            ));
+                        }
+                        if let Some((x, y)) = click_point {
+                            input::click(x, y, super::MouseButton::Left, 1)?;
+                        }
+                        input::type_text(text)
+                    },
+                    "Unicode keyboard events",
+                ))
             }
             ActionKind::Keypress => {
                 let keys = request.keys.as_deref().ok_or_else(|| {
@@ -230,6 +291,7 @@ impl MacosBackend {
                         if !frame.has_area() {
                             return Ok(ActionResult::didnt(
                                 "keypress target rejected focus and has no clickable frame",
+                                Delivery::None,
                             ));
                         }
                         Some(frame.center())
@@ -239,13 +301,30 @@ impl MacosBackend {
                 } else {
                     None
                 };
-                let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                let _focus_guard = FocusGuard::acquire(root);
-                if let Some((x, y)) = click_point {
-                    input::click(x, y, super::MouseButton::Left, 1)?;
-                }
-                input::keypress(keys)?;
-                Ok(ActionResult::unknown("keyboard events were posted"))
+                let attempt = background(root, |dispatcher| {
+                    if let Some((x, y)) = click_point {
+                        dispatcher.click(x, y, super::MouseButton::Left, 1)?;
+                    }
+                    dispatcher.keypress(keys)
+                });
+                Ok(keyboard_result_with_optional_foreground(
+                    root,
+                    attempt,
+                    |root| {
+                        let focus_guard = FocusGuard::acquire(root);
+                        if !focus_guard.is_ready() {
+                            return Err(BackendError::new(
+                                BackendErrorCode::OperationFailed,
+                                "foreground HID retry could not activate and raise the target window",
+                            ));
+                        }
+                        if let Some((x, y)) = click_point {
+                            input::click(x, y, super::MouseButton::Left, 1)?;
+                        }
+                        input::keypress(keys)
+                    },
+                    "keyboard events",
+                ))
             }
             ActionKind::Scroll => {
                 let action_point = if request.target_path.is_some()
@@ -255,31 +334,143 @@ impl MacosBackend {
                 } else {
                     None
                 };
-                let _cursor_guard = CursorGuard::acquire();
-                let _focus_guard = FocusGuard::acquire(root);
-                if let Some((x, y)) = action_point {
-                    input::move_mouse(x, y)?;
-                }
-                input::scroll(
-                    request.scroll_x.unwrap_or(0.0),
-                    request.scroll_y.unwrap_or(0.0),
-                )?;
-                Ok(ActionResult::unknown("scroll-wheel events were posted"))
+                Ok(
+                    match background(root, |dispatcher| {
+                        if let Some((x, y)) = action_point {
+                            dispatcher.move_mouse(x, y)?;
+                        }
+                        dispatcher.scroll(
+                            request.scroll_x.unwrap_or(0.0),
+                            request.scroll_y.unwrap_or(0.0),
+                        )
+                    }) {
+                        Ok(()) => ActionResult::unknown(
+                            "scroll-wheel events were posted directly to the target pid",
+                            Delivery::BackgroundPid,
+                        ),
+                        Err(error) => ActionResult::didnt(
+                            format!("background scroll delivery failed: {error}"),
+                            Delivery::None,
+                        ),
+                    },
+                )
             }
             ActionKind::Drag => {
                 let path = request.path.as_deref().ok_or_else(|| {
                     BackendError::new(BackendErrorCode::InvalidAction, "drag requires a path")
                 })?;
-                let _cursor_guard = CursorGuard::acquire();
-                let _focus_guard = FocusGuard::acquire(root);
-                input::drag(path, request.button)?;
-                Ok(ActionResult::unknown("drag events were posted"))
+                Ok(
+                    match background(root, |dispatcher| dispatcher.drag(path, request.button)) {
+                        Ok(()) => ActionResult::unknown(
+                            "drag events were posted directly to the target pid",
+                            Delivery::BackgroundPid,
+                        ),
+                        Err(error) => ActionResult::didnt(
+                            format!("background drag delivery failed: {error}"),
+                            Delivery::None,
+                        ),
+                    },
+                )
             }
             ActionKind::MoveMouse => {
                 let (x, y) = action_point(root, request)?;
-                let _focus_guard = FocusGuard::acquire(root);
-                input::move_mouse(x, y)?;
-                Ok(ActionResult::unknown("mouse-move event was posted"))
+                Ok(
+                    match background(root, |dispatcher| dispatcher.move_mouse(x, y)) {
+                        Ok(()) => ActionResult::unknown(
+                            "mouse-move event was posted directly to the target pid",
+                            Delivery::BackgroundPid,
+                        ),
+                        Err(error) => ActionResult::didnt(
+                            format!("background mouse-move delivery failed: {error}"),
+                            Delivery::None,
+                        ),
+                    },
+                )
+            }
+        }
+    }
+}
+
+pub(super) fn frontmost_pid() -> Option<u32> {
+    ax::frontmost_application_pid()
+}
+
+fn background(
+    root: &RootInfo,
+    action: impl FnOnce(&BackgroundDispatcher) -> Result<(), BackendError>,
+) -> Result<(), BackendError> {
+    let _activation = BackgroundActivation::acquire(root)?;
+    let dispatcher = BackgroundDispatcher::new(root)?;
+    action(&dispatcher)
+}
+
+fn keyboard_result_with_optional_foreground(
+    root: &RootInfo,
+    background_attempt: Result<(), BackendError>,
+    foreground_attempt: impl FnOnce(&RootInfo) -> Result<(), BackendError>,
+    action_name: &str,
+) -> ActionResult {
+    match background_attempt {
+        Ok(()) => ActionResult::unknown(
+            format!("{action_name} were posted directly to the target pid"),
+            Delivery::BackgroundPid,
+        ),
+        Err(background_error) if crate::config::get().allow_foreground_fallback => {
+            match foreground_attempt(root) {
+                Ok(()) => ActionResult::unknown(
+                    format!(
+                        "background PID delivery failed ({background_error}); {action_name} were retried through foreground HID delivery"
+                    ),
+                    Delivery::ForegroundHid,
+                ),
+                Err(foreground_error) => ActionResult::didnt(
+                    format!(
+                        "background PID delivery failed ({background_error}); foreground HID retry also failed: {foreground_error}"
+                    ),
+                    Delivery::None,
+                ),
+            }
+        }
+        Err(error) => ActionResult::didnt(
+            format!("background PID delivery failed: {error}"),
+            Delivery::None,
+        ),
+    }
+}
+
+fn reflect_overlay(root: &RootInfo, request: &ActionRequest) {
+    let enabled = crate::config::get().show_agent_cursor;
+    overlay::set_enabled(enabled);
+    if !enabled {
+        return;
+    }
+    use overlay::OverlayActionKind as K;
+    let frame = root.frame;
+    match request.kind {
+        ActionKind::Drag => {
+            if let Some(path) = request.path.as_ref()
+                && let (Some(first), Some(last)) = (path.first(), path.last())
+            {
+                overlay::show_drag((first[0], first[1]), (last[0], last[1]), frame);
+                return;
+            }
+            overlay::highlight_window(frame);
+        }
+        ActionKind::TypeText | ActionKind::SetText | ActionKind::Keypress => {
+            match action_point(root, request) {
+                Ok(point) => overlay::show_action(K::Keyboard, point, frame),
+                Err(_) => overlay::highlight_window(frame),
+            }
+        }
+        other => {
+            let kind = match other {
+                ActionKind::Scroll => K::Scroll,
+                ActionKind::MoveMouse => K::Move,
+                _ => K::Click,
+            };
+            match action_point(root, request) {
+                Ok(point) => overlay::show_action(kind, point, frame),
+                Err(_) => overlay::highlight_window(frame),
             }
         }
     }

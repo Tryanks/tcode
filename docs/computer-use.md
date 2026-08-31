@@ -30,7 +30,9 @@ Core contract, inherited from pi-computer-use:
   `inspect_ui` query the full stored tree without touching the live UI.
 - **Honest outcomes.** `act_ui` reports `worked` / `didnt` / `unknown` per step, stops at the
   first failure (`stopped_at`), and never treats event delivery alone as semantic success when an
-  `expect` condition was given.
+  `expect` condition was given. Each step also reports `delivery` (`ax`, `background_pid`,
+  `foreground_hid`, or `none`), while the transaction reports `activation` (`none`, `background`,
+  or `foreground`). AX-only transactions therefore have `activation: "none"`.
 - **Bounded output.** Model-visible text is capped; oversized results return a preview plus a
   continuation ref for `read_text`.
 
@@ -48,7 +50,8 @@ not run OCR or synthesize `pictureOnly` nodes; the model reads the attached pixe
   - `tools.rs` — rmcp `ToolRouter` (same streamable-HTTP + bearer-token shape as
     `preview-mcp` / `orchestrate-mcp`).
   - `backend/` — platform dispatch plus shared contracts. `backend/macos/` uses the AX C API
-    (`AXUIElement*`), CGEvent input synthesis, and `screencapture -l <windowid>` capture.
+    (`AXUIElement*`), per-process CGEvent input synthesis, and `screencapture -l <windowid>`
+    capture.
     `backend/windows/` is a thin adapter over the `uiautomation` crate for COM setup, Control View
     traversal, patterns, input, and GDI-backed screenshot capture. Other platforms get a stub
     backend whose tools return a clear "unsupported platform" error.
@@ -80,8 +83,52 @@ observations:
   marker.
 - `never` never captures or attaches an image; sparse observations still include the marker.
 
-The window is captured at most once per observation. The fallback is intentionally OCR-free and
-does not add `pictureOnly` or other synthesized nodes.
+The window is captured at most once per observation. On macOS, `screencapture`'s PNG is decoded,
+downscaled while preserving aspect ratio (long edge at most 1568 pixels and area at most about
+629,145 pixels), and returned as JPEG at quality 80 with MIME `image/jpeg`. Windows capture stays
+PNG and is labeled `image/png`. The fallback is intentionally OCR-free and does not add
+`pictureOnly` or other synthesized nodes.
+
+## macOS background input delivery
+
+AX-first actions remain background-safe: `AXPress`, setting `AXValue`, and setting `AXFocused`
+are attempted before synthesized input. Coordinate, pointer, scroll, drag, and keyboard fallbacks
+use `CGEventPostToPid` instead of the global HID tap. Every event is stamped with the target pid,
+window number, and private window-routing field. Mouse events additionally carry click state,
+pressure, and both window-under-pointer fields. When SkyLight's optional
+`CGEventSetWindowLocation` symbol is available, events also receive a window-local point computed
+directly from the AX top-left screen coordinates. Missing private symbols are treated as an
+optional capability, not a crash condition. Because these events are never posted globally, the
+system cursor does not move.
+
+When the target is not already frontmost, a `BackgroundActivation` guard installs one per-pid
+event tap for the current app and one for the target on a dedicated CFRunLoop thread. While armed,
+the current-app tap drops only focus-message event types 13, 19, and 20; other events and all
+target-tap events pass through. The guard then sends the target window an AppKit-defined
+application-activated event (subtype 1) and a PID-directed down/up click at the window center as a
+readiness primer. On teardown it sends application-deactivated subtype 2 when the target is still
+backgrounded, invalidates the taps, stops the run loop, joins its thread, and only then releases
+the callback contexts. A nil NSEvent or unavailable private API is logged and skipped; inability
+to establish safe focus suppression makes the action return `didnt` unless an eligible foreground
+keyboard fallback is enabled.
+
+`allow_foreground_fallback` defaults to `false`. When enabled, only `type_text` and `keypress` may
+retry through the legacy activate/raise foreground HID path, and only after background setup or
+delivery fails. Pointer action kinds never activate or raise an app. `show_agent_cursor` defaults
+to `true` and is persisted/plumbed through the computer-use configuration as the seam for the
+later overlay work; this part does not render an overlay.
+
+## Chromium accessibility activation
+
+Before walking a Chromium/Electron AX tree (bundle id contains `chrome`, `chromium`, or `electron`,
+case-insensitively), the backend best-effort sets `AXManualAccessibility` and
+`AXEnhancedUserInterface` on the application element. A pid whose earlier tree was text-sparse is
+also activated on its next observation, covering branded Electron apps whose bundle id does not
+advertise the runtime. The first activation per pid creates a persistent AX observer, attaches its
+source to a dedicated process-lifetime run loop, and subscribes to focus, application visibility,
+window create/move/resize, value/title/selection, and layout notifications. It prefers the optional
+remote-check registration symbol and falls back to public `AXObserverAddNotification`, then waits
+about 300 ms before the first walk so the renderer can publish its complete tree.
 
 ## Windows backend
 
@@ -127,6 +174,10 @@ Settings gains two pages:
   **Request Access** and fires only the native TCC request. If the permission is still missing,
   the next explicit action becomes **Open System Settings** and deep-links the matching
   `x-apple.systempreferences` pane. Returning to tcode also triggers a recheck.
+
+The persisted computer-use block additionally accepts `allow_foreground_fallback` (default
+`false`) and `show_agent_cursor` (default `true`). Both use serde defaults, so settings files from
+before background delivery continue to load without migration.
 
 ### Restart continuity
 

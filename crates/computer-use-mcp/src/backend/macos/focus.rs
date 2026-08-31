@@ -1,14 +1,11 @@
 use std::time::{Duration, Instant};
 
-use core_graphics::display::CGDisplay;
-use core_graphics::event::CGEvent;
-use core_graphics::geometry::CGPoint;
-
 use super::super::RootInfo;
-use super::{ax, input};
+use super::ax;
 
 pub(super) struct FocusGuard {
     previous_pid: Option<u32>,
+    ready: bool,
 }
 
 impl FocusGuard {
@@ -20,7 +17,10 @@ impl FocusGuard {
             return Self::noop();
         };
         if previous_pid == root.pid {
-            return Self::noop();
+            return Self {
+                previous_pid: None,
+                ready: true,
+            };
         }
         if !ax::activate_application(root.pid) {
             log::debug!(
@@ -41,6 +41,7 @@ impl FocusGuard {
                 Some(pid) if pid == root.pid => {
                     return Self {
                         previous_pid: Some(previous_pid),
+                        ready: true,
                     };
                 }
                 Some(_) if Instant::now() < deadline => {
@@ -66,7 +67,14 @@ impl FocusGuard {
     }
 
     fn noop() -> Self {
-        Self { previous_pid: None }
+        Self {
+            previous_pid: None,
+            ready: false,
+        }
+    }
+
+    pub(super) fn is_ready(&self) -> bool {
+        self.ready
     }
 
     fn restore_after_failed_acquire(previous_pid: u32) {
@@ -84,40 +92,6 @@ impl Drop for FocusGuard {
             && !ax::activate_application(previous_pid)
         {
             log::debug!("could not restore previous macOS application pid {previous_pid}");
-        }
-    }
-}
-
-pub(super) struct CursorGuard {
-    saved_point: Option<CGPoint>,
-}
-
-impl CursorGuard {
-    pub(super) fn acquire() -> Self {
-        let saved_point = match input::event_source().and_then(|source| {
-            CGEvent::new(source).map_err(|()| {
-                super::super::BackendError::new(
-                    super::super::BackendErrorCode::OperationFailed,
-                    "CoreGraphics could not create an event to read the cursor position",
-                )
-            })
-        }) {
-            Ok(event) => Some(event.location()),
-            Err(error) => {
-                log::debug!("could not save the macOS cursor position: {error}");
-                None
-            }
-        };
-        Self { saved_point }
-    }
-}
-
-impl Drop for CursorGuard {
-    fn drop(&mut self) {
-        if let Some(point) = self.saved_point
-            && let Err(error) = CGDisplay::warp_mouse_cursor_position(point)
-        {
-            log::debug!("could not restore the macOS cursor position: {error:?}");
         }
     }
 }

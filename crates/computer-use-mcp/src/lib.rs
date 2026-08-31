@@ -13,6 +13,11 @@ pub mod permissions;
 pub mod state;
 pub mod tools;
 
+/// Return the frontmost application pid on macOS, or `None` elsewhere.
+pub fn frontmost_pid() -> Option<u32> {
+    backend::frontmost_pid()
+}
+
 /// A running computer-use MCP server and the bearer token required to access it.
 pub struct ComputerUseMcpServer {
     /// Streamable-HTTP endpoint, e.g. `http://127.0.0.1:53211/computer-use`.

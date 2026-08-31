@@ -116,6 +116,12 @@ impl WorkspaceStore {
     pub fn set_computer_use_allow_input(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ComputerUseAllowInput(value));
     }
+    pub fn set_computer_use_allow_foreground_fallback(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ComputerUseAllowForegroundFallback(value));
+    }
+    pub fn set_computer_use_show_agent_cursor(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ComputerUseShowAgentCursor(value));
+    }
     pub fn set_browser_enabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::BrowserEnabled(value));
     }
