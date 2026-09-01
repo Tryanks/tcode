@@ -2809,8 +2809,8 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
 }
 
 /// T3's `normalizeClaudeCliEffort`: `ultrathink` → no flag (prompt prefix);
-/// `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5 / Opus 5 / Opus 4.8 /
-/// Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise passthrough.
+/// `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5.x / Opus 5 /
+/// Opus 4.8 / Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise passthrough.
 fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Option<String> {
     let effort = effort?;
     if effort == "ultrathink" {
@@ -2820,6 +2820,7 @@ fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Opt
         return Some("xhigh".to_owned());
     }
     if effort == "xhigh"
+        && model != Some("claude-fable-5-1")
         && model != Some("claude-fable-5")
         && model != Some("claude-opus-5")
         && model != Some("claude-opus-4-8")
@@ -2901,6 +2902,25 @@ fn model(id: &str, display_name: &str, options: Vec<OptionDescriptor>) -> ModelS
 /// `BUILT_IN_MODELS` (S1 §2).
 fn built_in_models() -> Vec<ModelSpec> {
     vec![
+        model(
+            "claude-fable-5-1",
+            "Claude Fable 5.1",
+            vec![
+                reasoning(
+                    &[
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                        "ultracode",
+                        "ultrathink",
+                    ],
+                    "high",
+                ),
+                context_window(),
+            ],
+        ),
         model(
             "claude-fable-5",
             "Claude Fable 5",
@@ -3023,6 +3043,7 @@ fn model_spec(id: &str) -> Option<ModelSpec> {
 /// Whether a version-gated model is available at the installed Claude version.
 fn model_available(id: &str, version: Option<(u32, u32, u32)>) -> bool {
     match id {
+        "claude-fable-5-1" => version_ge(version, (2, 1, 257)),
         "claude-opus-5" => version_ge(version, (2, 1, 219)),
         "claude-fable-5" => version_ge(version, (2, 1, 169)),
         "claude-opus-4-8" => version_ge(version, (2, 1, 154)),
@@ -3378,6 +3399,10 @@ mod tests {
             Some("max")
         );
         assert_eq!(
+            normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5-1")).as_deref(),
+            Some("xhigh")
+        );
+        assert_eq!(
             normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5")).as_deref(),
             Some("xhigh")
         );
@@ -3445,6 +3470,8 @@ mod tests {
         assert!(old.contains(&"claude-opus-4-6".to_string()));
         assert!(old.contains(&"claude-haiku-4-5".to_string()));
         // Exact boundary is inclusive.
+        assert!(ids(Some((2, 1, 257))).contains(&"claude-fable-5-1".to_string()));
+        assert!(!ids(Some((2, 1, 256))).contains(&"claude-fable-5-1".to_string()));
         assert!(ids(Some((2, 1, 154))).contains(&"claude-opus-4-8".to_string()));
         assert!(!ids(Some((2, 1, 153))).contains(&"claude-opus-4-8".to_string()));
         assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
