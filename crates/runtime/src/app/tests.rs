@@ -5702,14 +5702,10 @@ fn plan_workspace_save_completes_after_background_executor_runs() {
     state.host_update(cx, |state, cx| {
         state.start_draft("plan-project".into(), cwd.clone(), cx);
         state.save_plan_to_workspace("# Saved plan".into(), cx);
-        // Race-free observation point: the blocking pool cannot have run yet
-        // inside this update, so a synchronous write would be visible here.
-        // Checking after host_update returns raced the real thread (flaked
-        // on fast Windows runners).
-        assert!(
-            !cwd.join("PLAN-1.md").exists(),
-            "the GPUI update must not perform the write synchronously"
-        );
+        // No "not written yet" assertion here: the write runs on the global
+        // smol pool, whose threads are concurrent with this update, so any
+        // file-existence check races them (flaked on fast Windows runners
+        // both inside and after this update).
     });
 
     // The write lands on a real blocking thread that run_until_parked does
