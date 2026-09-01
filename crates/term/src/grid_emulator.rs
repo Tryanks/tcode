@@ -680,7 +680,7 @@ impl GridEmulator {
         for row in 0..screen_lines {
             state.term.grid[Line(row as i32 - display_offset as i32)].dirty = false;
         }
-        let styles = state.term.grid.style_set.styles().to_vec();
+        let styles = state.term.grid.styles().to_vec();
         let mut zero_width = HashMap::new();
         for square in visible_rows
             .iter()
