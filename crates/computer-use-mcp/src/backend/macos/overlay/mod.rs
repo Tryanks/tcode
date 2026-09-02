@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-
-mod border;
 mod cursor;
 mod ffi;
 mod geometry;
@@ -9,12 +6,10 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use border::BorderUi;
 use cursor::CursorUi;
 
 use self::ffi::{class, dispatch_main, send_id, send_void};
-use self::geometry::{is_finite_point, is_valid_frame};
-use crate::outline::Frame;
+use self::geometry::is_finite_point;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -30,74 +25,55 @@ pub(crate) enum OverlayActionKind {
 pub(crate) fn set_enabled(on: bool) {
     let was_enabled = ENABLED.swap(on, Ordering::AcqRel);
     if was_enabled && !on {
-        enqueue(UiCommand::Clear);
+        clear();
     }
 }
 
-pub(crate) fn show_action(
-    kind: OverlayActionKind,
-    ax_screen_point: (f64, f64),
-    window_frame: Frame,
-) {
+pub(crate) fn show_action(pid: u32, kind: OverlayActionKind, ax_screen_point: (f64, f64)) {
     if !ENABLED.load(Ordering::Acquire) || !is_finite_point(ax_screen_point) {
         return;
     }
     enqueue(UiCommand::ShowAction {
+        pid,
         kind,
         point: ax_screen_point,
-        window_frame,
     });
 }
 
-pub(crate) fn show_drag(from: (f64, f64), to: (f64, f64), window_frame: Frame) {
+pub(crate) fn show_drag(pid: u32, from: (f64, f64), to: (f64, f64)) {
     if !ENABLED.load(Ordering::Acquire) || !is_finite_point(from) || !is_finite_point(to) {
         return;
     }
-    enqueue(UiCommand::ShowDrag {
-        from,
-        to,
-        window_frame,
-    });
-}
-
-pub(crate) fn highlight_window(window_frame: Frame) {
-    if !ENABLED.load(Ordering::Acquire) || !is_valid_frame(window_frame) {
-        return;
-    }
-    enqueue(UiCommand::Highlight(window_frame));
+    enqueue(UiCommand::ShowDrag { pid, from, to });
 }
 
 pub(crate) fn clear() {
-    if ENABLED.load(Ordering::Acquire) {
-        enqueue(UiCommand::Clear);
-    }
+    enqueue(UiCommand::Clear);
 }
 
 enum UiCommand {
     ShowAction {
+        pid: u32,
         kind: OverlayActionKind,
         point: (f64, f64),
-        window_frame: Frame,
     },
     ShowDrag {
+        pid: u32,
         from: (f64, f64),
         to: (f64, f64),
-        window_frame: Frame,
     },
-    Highlight(Frame),
     Clear,
 }
 
 struct OverlayState {
     cursor: Option<CursorUi>,
-    border: Option<BorderUi>,
+    target_pid: Option<u32>,
+    poll_armed: bool,
 }
 
 impl OverlayState {
-    fn show_action(&mut self, kind: OverlayActionKind, point: (f64, f64), window_frame: Frame) {
-        if is_valid_frame(window_frame) {
-            self.highlight(window_frame);
-        }
+    fn show_action(&mut self, pid: u32, kind: OverlayActionKind, point: (f64, f64)) {
+        self.set_target(pid);
         let Some(display) = ffi::display_frame_for_ax_point(point) else {
             return;
         };
@@ -105,14 +81,12 @@ impl OverlayState {
             self.cursor = CursorUi::new();
         }
         if let Some(cursor) = self.cursor.as_mut() {
-            cursor.show(kind, point, display);
+            cursor.show(kind, point, display, is_target_frontmost(pid));
         }
     }
 
-    fn show_drag(&mut self, from: (f64, f64), to: (f64, f64), window_frame: Frame) {
-        if is_valid_frame(window_frame) {
-            self.highlight(window_frame);
-        }
+    fn show_drag(&mut self, pid: u32, from: (f64, f64), to: (f64, f64)) {
+        self.set_target(pid);
         let Some(from_display) = ffi::display_frame_for_ax_point(from) else {
             return;
         };
@@ -121,19 +95,30 @@ impl OverlayState {
             self.cursor = CursorUi::new();
         }
         if let Some(cursor) = self.cursor.as_mut() {
-            cursor.show_drag(from, to, from_display, to_display);
+            cursor.show_drag(from, to, from_display, to_display, is_target_frontmost(pid));
         }
     }
 
-    fn highlight(&mut self, window_frame: Frame) {
-        let Some(display) = ffi::display_frame_for_ax_point(window_frame.center()) else {
+    fn set_target(&mut self, pid: u32) {
+        self.target_pid = Some(pid);
+        if !self.poll_armed
+            && ffi::dispatch_main_after(FOREGROUND_POLL_INTERVAL_NS, poll_foreground)
+        {
+            self.poll_armed = true;
+        }
+    }
+
+    fn refresh_visibility(&mut self) {
+        let Some(pid) = self.target_pid else {
             return;
         };
-        if self.border.is_none() {
-            self.border = BorderUi::new();
+        let is_frontmost = is_target_frontmost(pid);
+        if !is_frontmost && !target_process_exists(pid) {
+            self.clear();
+            return;
         }
-        if let Some(border) = self.border.as_mut() {
-            border.show(window_frame, display);
+        if let Some(cursor) = self.cursor.as_mut() {
+            cursor.set_visible(is_frontmost);
         }
     }
 
@@ -141,20 +126,38 @@ impl OverlayState {
         if let Some(cursor) = self.cursor.as_mut() {
             cursor.hide();
         }
-        if let Some(border) = self.border.as_mut() {
-            border.hide();
-        }
+        self.target_pid = None;
     }
 }
 
-// This thread-local is intentionally read only by `run_command`, which is
-// exclusively submitted to the process main queue. Objective-C window and
-// layer pointers therefore never cross back into background-thread UI code.
+const FOREGROUND_POLL_INTERVAL_NS: i64 = 200_000_000;
+
+fn is_target_frontmost(pid: u32) -> bool {
+    super::ax::frontmost_application_pid() == Some(pid)
+}
+
+fn target_process_exists(pid: u32) -> bool {
+    i32::try_from(pid).ok().is_some_and(|pid| {
+        class(c"NSRunningApplication").is_some_and(|application| {
+            ffi::send_id_i32(
+                application,
+                c"runningApplicationWithProcessIdentifier:",
+                pid,
+            )
+            .is_some()
+        })
+    })
+}
+
+// This thread-local is intentionally read only by callbacks submitted to the
+// process main queue. Objective-C window and layer pointers therefore never
+// cross back into background-thread UI code.
 thread_local! {
     static MAIN_STATE: RefCell<OverlayState> = const {
         RefCell::new(OverlayState {
             cursor: None,
-            border: None,
+            target_pid: None,
+            poll_armed: false,
         })
     };
 }
@@ -190,18 +193,33 @@ unsafe extern "C" fn run_command(context: *mut c_void) {
             return;
         };
         match *command {
-            UiCommand::ShowAction {
-                kind,
-                point,
-                window_frame,
-            } => state.show_action(kind, point, window_frame),
-            UiCommand::ShowDrag {
-                from,
-                to,
-                window_frame,
-            } => state.show_drag(from, to, window_frame),
-            UiCommand::Highlight(window_frame) => state.highlight(window_frame),
+            UiCommand::ShowAction { pid, kind, point } => state.show_action(pid, kind, point),
+            UiCommand::ShowDrag { pid, from, to } => state.show_drag(pid, from, to),
             UiCommand::Clear => state.clear(),
+        }
+    });
+    if let Some(pool) = pool {
+        let _ = send_void(pool, c"drain");
+    }
+}
+
+// SAFETY: libdispatch calls this with the null context supplied when the poll is armed.
+unsafe extern "C" fn poll_foreground(_context: *mut c_void) {
+    let pool = class(c"NSAutoreleasePool").and_then(|pool| send_id(pool, c"new"));
+    let _ = MAIN_STATE.try_with(|state| {
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return;
+        };
+        state.poll_armed = false;
+        if ENABLED.load(Ordering::Acquire) && state.target_pid.is_some() {
+            state.refresh_visibility();
+            if state.target_pid.is_some()
+                && ffi::dispatch_main_after(FOREGROUND_POLL_INTERVAL_NS, poll_foreground)
+            {
+                state.poll_armed = true;
+            }
+        } else {
+            state.clear();
         }
     });
     if let Some(pool) = pool {
