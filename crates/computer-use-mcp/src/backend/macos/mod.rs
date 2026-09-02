@@ -445,21 +445,17 @@ fn reflect_overlay(root: &RootInfo, request: &ActionRequest) {
         return;
     }
     use overlay::OverlayActionKind as K;
-    let frame = root.frame;
     match request.kind {
         ActionKind::Drag => {
             if let Some(path) = request.path.as_ref()
                 && let (Some(first), Some(last)) = (path.first(), path.last())
             {
-                overlay::show_drag((first[0], first[1]), (last[0], last[1]), frame);
-                return;
+                overlay::show_drag(root.pid, (first[0], first[1]), (last[0], last[1]));
             }
-            overlay::highlight_window(frame);
         }
         ActionKind::TypeText | ActionKind::SetText | ActionKind::Keypress => {
-            match action_point(root, request) {
-                Ok(point) => overlay::show_action(K::Keyboard, point, frame),
-                Err(_) => overlay::highlight_window(frame),
+            if let Ok(point) = action_point(root, request) {
+                overlay::show_action(root.pid, K::Keyboard, point);
             }
         }
         other => {
@@ -468,9 +464,8 @@ fn reflect_overlay(root: &RootInfo, request: &ActionRequest) {
                 ActionKind::MoveMouse => K::Move,
                 _ => K::Click,
             };
-            match action_point(root, request) {
-                Ok(point) => overlay::show_action(kind, point, frame),
-                Err(_) => overlay::highlight_window(frame),
+            if let Ok(point) = action_point(root, request) {
+                overlay::show_action(root.pid, kind, point);
             }
         }
     }

@@ -46,6 +46,8 @@ unsafe extern "C" {
 unsafe extern "C" {
     static _dispatch_main_q: c_void;
     fn dispatch_async_f(queue: Id, context: *mut c_void, work: DispatchFn);
+    fn dispatch_after_f(when: u64, queue: Id, context: *mut c_void, work: DispatchFn);
+    fn dispatch_time(when: u64, delta: i64) -> u64;
 }
 
 macro_rules! invoke {
@@ -109,6 +111,15 @@ pub(super) fn send_id_id(receiver: Id, name: &CStr, value: Id) -> Option<Id> {
     (!result.is_null()).then_some(result)
 }
 
+pub(super) fn send_id_i32(receiver: Id, name: &CStr, value: i32) -> Option<Id> {
+    let selector = selector(name)?;
+    if !can_send(receiver, selector) {
+        return None;
+    }
+    let result = invoke!(Id, receiver, selector, i32 => value);
+    (!result.is_null()).then_some(result)
+}
+
 pub(super) fn send_id_rect(receiver: Id, name: &CStr, rect: CGRect) -> Option<Id> {
     let selector = selector(name)?;
     if !can_send(receiver, selector) {
@@ -142,28 +153,6 @@ pub(super) fn send_id_window_init(
     (!value.is_null()).then_some(value)
 }
 
-pub(super) fn send_id_rounded_rect(
-    receiver: Id,
-    name: &CStr,
-    rect: CGRect,
-    x_radius: f64,
-    y_radius: f64,
-) -> Option<Id> {
-    let selector = selector(name)?;
-    if !can_send(receiver, selector) {
-        return None;
-    }
-    let value = invoke!(
-        Id,
-        receiver,
-        selector,
-        CGRect => rect,
-        f64 => x_radius,
-        f64 => y_radius,
-    );
-    (!value.is_null()).then_some(value)
-}
-
 pub(super) fn send_id_color(
     receiver: Id,
     name: &CStr,
@@ -188,35 +177,6 @@ pub(super) fn send_id_color(
     (!value.is_null()).then_some(value)
 }
 
-pub(super) fn send_id_f32(receiver: Id, name: &CStr, value: f32) -> Option<Id> {
-    let selector = selector(name)?;
-    if !can_send(receiver, selector) {
-        return None;
-    }
-    let result = invoke!(Id, receiver, selector, f32 => value);
-    (!result.is_null()).then_some(result)
-}
-
-pub(super) fn send_id_objects(
-    receiver: Id,
-    name: &CStr,
-    objects: *const Id,
-    count: usize,
-) -> Option<Id> {
-    let selector = selector(name)?;
-    if !can_send(receiver, selector) || (objects.is_null() && count != 0) {
-        return None;
-    }
-    let value = invoke!(
-        Id,
-        receiver,
-        selector,
-        *const Id => objects,
-        usize => count,
-    );
-    (!value.is_null()).then_some(value)
-}
-
 pub(super) fn send_void(receiver: Id, name: &CStr) -> bool {
     let Some(selector) = selector(name) else {
         return false;
@@ -236,17 +196,6 @@ pub(super) fn send_void_id(receiver: Id, name: &CStr, value: Id) -> bool {
         return false;
     }
     invoke!((), receiver, selector, Id => value);
-    true
-}
-
-pub(super) fn send_void_two_ids(receiver: Id, name: &CStr, first: Id, second: Id) -> bool {
-    let Some(selector) = selector(name) else {
-        return false;
-    };
-    if !can_send(receiver, selector) {
-        return false;
-    }
-    invoke!((), receiver, selector, Id => first, Id => second);
     true
 }
 
@@ -338,17 +287,6 @@ pub(super) fn send_void_rect(receiver: Id, name: &CStr, value: CGRect) -> bool {
     true
 }
 
-pub(super) fn send_void_rect_bool(receiver: Id, name: &CStr, rect: CGRect, value: bool) -> bool {
-    let Some(selector) = selector(name) else {
-        return false;
-    };
-    if !can_send(receiver, selector) {
-        return false;
-    }
-    invoke!((), receiver, selector, CGRect => rect, i8 => i8::from(value));
-    true
-}
-
 pub(super) fn dispatch_main(context: *mut c_void, work: DispatchFn) -> bool {
     let queue = dispatch_get_main_queue();
     if queue.is_null() {
@@ -357,6 +295,20 @@ pub(super) fn dispatch_main(context: *mut c_void, work: DispatchFn) -> bool {
     // SAFETY: the caller owns context until work runs; libdispatch invokes work
     // exactly once with that unchanged context on the main queue.
     unsafe { dispatch_async_f(queue, context, work) };
+    true
+}
+
+pub(super) fn dispatch_main_after(delay_ns: i64, work: DispatchFn) -> bool {
+    let queue = dispatch_get_main_queue();
+    if queue.is_null() {
+        return false;
+    }
+    // SAFETY: queue is the process main queue, dispatch_time accepts a relative
+    // nanosecond delta from DISPATCH_TIME_NOW, and the null context needs no owner.
+    unsafe {
+        let when = dispatch_time(0, delay_ns);
+        dispatch_after_f(when, queue, std::ptr::null_mut(), work);
+    }
     true
 }
 

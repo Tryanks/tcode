@@ -103,17 +103,18 @@ impl CursorUi {
         kind: OverlayActionKind,
         ax_point: (f64, f64),
         display: DisplayGeometry,
+        visible: bool,
     ) {
         self.set_kind(kind);
         let appkit_point = ax_screen_to_appkit(ax_point, display);
-        if !self.visible {
-            let spawn = (display.appkit.x - 48.0, display.appkit.y - 48.0);
-            let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(spawn));
-            self.visible = true;
+        if self.visible {
+            animate_window_origin(self.window, window_origin(appkit_point));
+        } else {
+            // A hidden panel has no on-screen position to slide from: land on
+            // the point, then reveal.
+            let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(appkit_point));
         }
-        let _ = send_void(self.window, c"orderFrontRegardless");
-        let _ = send_void(self.window, c"displayIfNeeded");
-        animate_window_origin(self.window, window_origin(appkit_point));
+        self.set_visible(visible);
     }
 
     /// Must only be called from the process main queue.
@@ -123,23 +124,33 @@ impl CursorUi {
         to_ax: (f64, f64),
         from_display: DisplayGeometry,
         to_display: DisplayGeometry,
+        visible: bool,
     ) {
         self.set_kind(OverlayActionKind::Drag);
         let from = ax_screen_to_appkit(from_ax, from_display);
         let to = ax_screen_to_appkit(to_ax, to_display);
         let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(from));
-        let _ = send_void(self.window, c"orderFrontRegardless");
-        let _ = send_void(self.window, c"displayIfNeeded");
-        self.visible = true;
+        self.set_visible(visible);
         animate_window_origin(self.window, window_origin(to));
     }
 
     /// Must only be called from the process main queue.
-    pub(super) fn hide(&mut self) {
-        if self.visible {
-            let _ = send_void_id(self.window, c"orderOut:", ptr::null_mut());
-            self.visible = false;
+    pub(super) fn set_visible(&mut self, visible: bool) {
+        if visible == self.visible {
+            return;
         }
+        if visible {
+            let _ = send_void(self.window, c"orderFrontRegardless");
+            let _ = send_void(self.window, c"displayIfNeeded");
+        } else {
+            let _ = send_void_id(self.window, c"orderOut:", ptr::null_mut());
+        }
+        self.visible = visible;
+    }
+
+    /// Must only be called from the process main queue.
+    pub(super) fn hide(&mut self) {
+        self.set_visible(false);
     }
 
     fn set_kind(&self, kind: OverlayActionKind) {
