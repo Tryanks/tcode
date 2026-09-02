@@ -3764,6 +3764,27 @@ fn opencode_effort_is_applied_per_turn_without_restart() {
 }
 
 #[test]
+fn queued_message_stamps_live_context_window_change() {
+    let mut active = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
+    active.meta.model = Some("claude-opus-5".into());
+    active.live_option_selections.push(OptionSelection {
+        id: "contextWindow".into(),
+        value: serde_json::json!("1m"),
+    });
+    active.meta.option_selections.push(OptionSelection {
+        id: "contextWindow".into(),
+        value: serde_json::json!(500_000),
+    });
+
+    active.push_queued("queued".into(), Vec::new());
+    assert_eq!(active.queue[0].context_window_changed, Some(500_000));
+
+    active.runtime = Runtime::Idle;
+    active.push_scheduled("idle".into(), Vec::new(), SystemTime::now());
+    assert_eq!(active.queue[1].context_window_changed, None);
+}
+
+#[test]
 fn native_rewind_waits_for_provider_confirmation_before_pruning() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-rewind-test");

@@ -193,6 +193,22 @@ pub(crate) fn composer_state(
             worktree: status.worktree.clone(),
         })
     });
+    let token_usage = timeline
+        .and_then(|timeline| timeline.usage)
+        .map(|mut usage| {
+            if let Some(status) = status
+                && status.provider == agent::ProviderKind::ClaudeCode
+                && let (Some(model), Some(reported)) =
+                    (status.requested_model.as_deref(), usage.context_window)
+            {
+                let resolved = agent::claude::resolved_context_window(
+                    model,
+                    &status.provider_option_selections,
+                );
+                usage.context_window = Some(reported.min(resolved));
+            }
+            usage
+        });
 
     ComposerState {
         has_active_session: status.is_some(),
@@ -239,7 +255,7 @@ pub(crate) fn composer_state(
         interaction_mode: status
             .map(|status| status.interaction_mode)
             .unwrap_or_default(),
-        token_usage: timeline.and_then(|timeline| timeline.usage),
+        token_usage,
         provider,
         approval_mode,
         native_approval_modes_enabled,
@@ -412,6 +428,34 @@ mod tests {
         );
         assert_eq!(state.pending_approval, Some(request));
         assert_eq!(state.pending_approval_count, 2);
+    }
+
+    #[test]
+    fn composer_state_clamps_claude_context_window_to_selected_limit() {
+        let mut status = session_status();
+        status.provider = agent::ProviderKind::ClaudeCode;
+        status.requested_model = Some("claude-sonnet-4-6".into());
+        status.provider_option_selections = vec![agent::OptionSelection {
+            id: "contextWindow".into(),
+            value: serde_json::json!(500_000),
+        }];
+        let mut timeline = Timeline::default();
+        timeline.usage = Some(agent::TokenUsage {
+            context_window: Some(1_000_000),
+            ..Default::default()
+        });
+
+        let state = composer_state(
+            Some(&status),
+            Some(&timeline),
+            &Settings::default(),
+            &ProvidersStatus::default(),
+        );
+
+        assert_eq!(
+            state.token_usage.and_then(|usage| usage.context_window),
+            Some(500_000)
+        );
     }
 
     #[test]

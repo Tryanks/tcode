@@ -234,6 +234,15 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
             EntryContent::ContextCompacted => {
                 activity(&mut body, "context", "provider", "compacted")
             }
+            EntryContent::ContextWindowChanged { window } => activity(
+                &mut body,
+                "context",
+                "provider",
+                &format!(
+                    "window set to {}",
+                    agent::claude::format_context_window(*window)
+                ),
+            ),
             EntryContent::ModelChanged { .. } => {}
             EntryContent::Item(ItemContent::WebSearch { query }) => activity(
                 &mut body,

@@ -300,10 +300,18 @@ impl Composer {
             );
 
         let store_entity = self.workspace_store.clone();
+        let composer_entity = cx.entity();
+        let context_window_custom = self.context_window_custom.clone();
         crate::material::overlay_popover("traits-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
             .content(move |_, _, cx| {
+                let popover = cx.entity();
+                composer_entity.update(cx, |composer, _cx| {
+                    composer.traits_popover = Some(popover.clone());
+                });
+                let context_window_custom_error =
+                    composer_entity.read(cx).context_window_custom_error;
                 render_traits_pane(
                     &spec,
                     &selections,
@@ -311,7 +319,9 @@ impl Composer {
                     locked,
                     pending_restart,
                     &store_entity,
-                    &cx.entity(),
+                    &context_window_custom,
+                    context_window_custom_error,
+                    &popover,
                     cx,
                 )
             })
@@ -971,6 +981,8 @@ fn render_traits_pane(
     locked: bool,
     pending_restart: bool,
     store_entity: &Entity<WorkspaceStore>,
+    context_window_custom: &Entity<InputState>,
+    context_window_custom_error: bool,
     popover: &Entity<PopoverState>,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
@@ -1002,6 +1014,7 @@ fn render_traits_pane(
                 default_value,
             } => {
                 let is_reasoning = id == "reasoningEffort";
+                let is_context_window = id == "contextWindow";
                 pane = pane.child(section_header(label, cx));
                 if is_reasoning && locked {
                     pane = pane.child(
@@ -1015,11 +1028,18 @@ fn render_traits_pane(
                     );
                     continue;
                 }
-                let resolved = resolved_select_value(id, options, default_value, selections);
+                let resolved = (!is_context_window)
+                    .then(|| resolved_select_value(id, options, default_value, selections))
+                    .flatten();
+                let resolved_window = is_context_window
+                    .then(|| agent::claude::resolved_context_window(&spec.id, selections));
                 for (index, opt) in options.iter().enumerate() {
                     let is_default = default_value.as_deref() == Some(opt.value.as_str());
                     let is_ultra = is_reasoning && opt.value == "ultrathink";
-                    let is_selected = if is_reasoning && ultrathink_armed {
+                    let is_selected = if let Some(resolved_window) = resolved_window {
+                        agent::claude::parse_context_window_tokens(&serde_json::json!(opt.value))
+                            == Some(resolved_window)
+                    } else if is_reasoning && ultrathink_armed {
                         is_ultra
                     } else if is_ultra {
                         false
@@ -1067,6 +1087,60 @@ fn render_traits_pane(
                                 pop.update(cx, |st, cx| st.dismiss(window, cx));
                             }),
                     );
+                }
+                if let Some(resolved_window) = resolved_window {
+                    let preset_selected = options.iter().any(|opt| {
+                        agent::claude::parse_context_window_tokens(&serde_json::json!(opt.value))
+                            == Some(resolved_window)
+                    });
+                    let custom_selected = !preset_selected;
+                    let mut label = crate::tr!("composer.context_window_custom").into_owned();
+                    if custom_selected {
+                        label.push_str(&format!(
+                            " ({})",
+                            agent::claude::format_context_window(resolved_window)
+                        ));
+                    }
+                    let input = context_window_custom.clone();
+                    pane = pane
+                        .child(
+                            h_flex()
+                                .id("trait-opt-context-window-custom")
+                                .flex_none()
+                                .w_full()
+                                .px_2()
+                                .py_1p5()
+                                .gap_2()
+                                .items_center()
+                                .rounded(px(6.))
+                                .cursor_pointer()
+                                .text_size(px(13.))
+                                .hover(|s| s.bg(cx.theme().muted))
+                                .child(div().flex_1().min_w_0().child(label))
+                                .when(custom_selected, |this| {
+                                    this.child(
+                                        Icon::new(IconName::Check).xsmall().text_color(primary),
+                                    )
+                                })
+                                .on_click(move |_, window, cx| {
+                                    input.update(cx, |state, cx| state.focus(window, cx));
+                                }),
+                        )
+                        .child(
+                            v_flex()
+                                .px_2()
+                                .pb_1()
+                                .gap_1()
+                                .child(Input::new(context_window_custom).appearance(false))
+                                .when(context_window_custom_error, |this| {
+                                    this.child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(cx.theme().danger)
+                                            .child(crate::tr!("composer.context_window_invalid")),
+                                    )
+                                }),
+                        );
                 }
             }
             OptionDescriptor::Boolean {

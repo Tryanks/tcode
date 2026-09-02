@@ -37,6 +37,8 @@ pub struct QueuedMessage {
     /// the timeline can split the prefix from the user's own words; `None` for
     /// every ordinary send.
     pub(super) context_len: Option<usize>,
+    /// Context-window selection changed while the provider was live.
+    pub(super) context_window_changed: Option<u64>,
     /// Orchestration callbacks arriving during the same provider-start window
     /// are folded into one wake-up turn. Once that turn is live, later callbacks
     /// are steered into it instead of becoming more queued turns.
@@ -98,6 +100,7 @@ impl From<&str> for QueuedMessage {
             options: TurnOptions::default(),
             ultrathink: false,
             context_len: None,
+            context_window_changed: None,
             kind: QueuedMessageKind::User,
         }
     }
@@ -421,6 +424,7 @@ impl ActiveSession {
         let options = self.turn_options();
         let ultrathink = std::mem::take(&mut self.pending_ultrathink);
         let context_len = std::mem::take(&mut self.pending_context_len);
+        let context_window_changed = self.context_window_change();
         self.queue.push(QueuedMessage {
             id,
             text,
@@ -430,6 +434,7 @@ impl ActiveSession {
             options,
             ultrathink,
             context_len,
+            context_window_changed,
             kind: QueuedMessageKind::User,
         });
         id
@@ -449,6 +454,7 @@ impl ActiveSession {
         let options = self.turn_options();
         let ultrathink = std::mem::take(&mut self.pending_ultrathink);
         let context_len = std::mem::take(&mut self.pending_context_len);
+        let context_window_changed = self.context_window_change();
         self.queue.push(QueuedMessage {
             id,
             text,
@@ -458,6 +464,7 @@ impl ActiveSession {
             options,
             ultrathink,
             context_len,
+            context_window_changed,
             kind: QueuedMessageKind::User,
         });
         id
@@ -490,9 +497,20 @@ impl ActiveSession {
             options,
             ultrathink: false,
             context_len: None,
+            context_window_changed: None,
             kind: QueuedMessageKind::OrchestrateCallback,
         });
         id
+    }
+
+    fn context_window_change(&self) -> Option<u64> {
+        if !matches!(self.runtime, Runtime::Live(_)) {
+            return None;
+        }
+        let model = self.meta.model.as_deref().unwrap_or_default();
+        let selected = agent::claude::resolved_context_window(model, &self.meta.option_selections);
+        let live = agent::claude::resolved_context_window(model, &self.live_option_selections);
+        (selected != live).then_some(selected)
     }
 
     /// Dispatch at most one eligible queued message as an ordinary turn. FIFO
