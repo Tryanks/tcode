@@ -93,3 +93,16 @@ pub(crate) fn context_compacted_divider(id: &str, cx: &App) -> AnyElement {
         cx,
     )
 }
+
+pub(crate) fn context_window_changed_divider(id: &str, window: u64, cx: &App) -> AnyElement {
+    divider(
+        SharedString::from(format!("context-window-changed-{id}")),
+        crate::tr!(
+            "chat.context_window_changed",
+            window = agent::claude::format_context_window(window)
+        )
+        .into_owned(),
+        cx.theme().muted_foreground,
+        cx,
+    )
+}

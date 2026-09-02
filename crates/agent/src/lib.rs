@@ -1171,6 +1171,11 @@ pub enum AgentEvent {
     /// The provider compacted its context window (Claude `system/compact_boundary`;
     /// Codex `contextCompaction` item). Rendered as a "Context compacted" work-log row.
     ContextCompacted,
+    /// A tcode-level context-window change. This is never emitted by an adapter;
+    /// the runtime persists it after the user message that selected the window.
+    ContextWindowChanged {
+        window: u64,
+    },
     /// Structured plan / task list for the sidebar (Codex `turn/plan/updated`,
     /// Claude `TodoWrite`). Replaces the current turn's plan wholesale.
     PlanUpdated {

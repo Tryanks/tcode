@@ -891,6 +891,14 @@ impl ChatView {
                         &entry.id, cx,
                     ));
                 }
+                Segment::ContextWindowChanged(entry) => {
+                    let EntryContent::ContextWindowChanged { window } = entry.content else {
+                        unreachable!();
+                    };
+                    column = column.child(components::dividers::context_window_changed_divider(
+                        &entry.id, window, cx,
+                    ));
+                }
                 Segment::ActivityRun(activities) => {
                     let segment_id = activities[0].id.as_str();
                     column = column.child(self.compose_work_log(

@@ -19,6 +19,7 @@ chat:
   work_log_interrupted: "Interrupted"
   served_model_tooltip: "Serving model differs from the requested model"
   context_compacted: "Context compacted"
+  context_window_changed: "Context window set to %{window}"
   previous_logs: "+%{count} previous log entries"
   hide_previous_logs: "Hide %{count} previous log entries"
   subagent_count: "%{count} subagents"
@@ -564,6 +565,9 @@ composer:
   trait_fast: "Fast"
   trait_normal: "Normal"
   option_default: " (default)"
+  context_window_custom: "Custom"
+  context_window_custom_placeholder: "e.g. 500k (100k–1M)"
+  context_window_invalid: "Enter 100k–1M tokens, e.g. 500k"
   ultrathink_locked: 'Your prompt contains "ultrathink" in the text. Remove it to change this option.'
   context: "Context"
   context_heading: "CONTEXT"
