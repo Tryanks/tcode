@@ -109,6 +109,9 @@ pub struct Composer {
     /// Unsent text is isolated by persisted thread or project New thread page.
     text_cache: ComposerTextCache,
     model_search: Entity<InputState>,
+    context_window_custom: Entity<InputState>,
+    context_window_custom_error: bool,
+    traits_popover: Option<Entity<PopoverState>>,
     /// `None` = follow the active session's provider (set on first open).
     picker_rail: Option<PickerRail>,
     /// Whether the approval panel's detail is expanded.
@@ -184,6 +187,10 @@ impl Composer {
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
+        });
+        let context_window_custom = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::tr!("composer.context_window_custom_placeholder"))
         });
         let user_input_custom = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -268,6 +275,38 @@ impl Composer {
                     cx.notify();
                 }
             }),
+            cx.subscribe_in(
+                &context_window_custom,
+                window,
+                |this, input, event, window, cx| match event {
+                    InputEvent::PressEnter { .. } => {
+                        let value = input.read(cx).value().to_string();
+                        if let Some(tokens) = agent::claude::parse_context_window_tokens(
+                            &serde_json::Value::String(value),
+                        ) {
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.set_active_option(
+                                    "contextWindow".to_string(),
+                                    Some(serde_json::json!(tokens)),
+                                );
+                            });
+                            this.context_window_custom_error = false;
+                            input.update(cx, |state, cx| state.set_value("", window, cx));
+                            if let Some(popover) = this.traits_popover.clone() {
+                                popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            }
+                        } else {
+                            this.context_window_custom_error = true;
+                            cx.notify();
+                        }
+                    }
+                    InputEvent::Change => {
+                        this.context_window_custom_error = false;
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            ),
         ];
 
         Self {
@@ -278,6 +317,9 @@ impl Composer {
             fallback_review_seeded: None,
             text_cache: ComposerTextCache::default(),
             model_search,
+            context_window_custom,
+            context_window_custom_error: false,
+            traits_popover: None,
             picker_rail: None,
             approval_expanded: false,
             ui_request_id: None,

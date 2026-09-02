@@ -369,6 +369,12 @@ pub(super) fn traits_chip_label(
                     parts.push(o.label.clone());
                     continue;
                 }
+                if id == "contextWindow" {
+                    parts.push(agent::claude::format_context_window(
+                        agent::claude::resolved_context_window(&spec.id, selections),
+                    ));
+                    continue;
+                }
                 let part = resolved_select_value(id, options, default_value, selections)
                     .and_then(|value| options.iter().find(|o| o.value == value))
                     .map(|option| option.label.clone())
@@ -865,10 +871,11 @@ mod tests {
                 },
             ],
         };
-        // Defaults resolve to "High · 200k".
+        // Context windows resolve from the model's native default, not the
+        // descriptor's stale fallback.
         assert_eq!(
             traits_chip_label(&spec, &[], false),
-            Some("High · 200k".into())
+            Some("High · 1M".into())
         );
         // A selection overrides the default.
         let sel = vec![agent::OptionSelection {
@@ -878,6 +885,14 @@ mod tests {
         assert_eq!(
             traits_chip_label(&spec, &sel, false),
             Some("High · 1M".into())
+        );
+        let custom = vec![agent::OptionSelection {
+            id: "contextWindow".into(),
+            value: serde_json::json!(500_000),
+        }];
+        assert_eq!(
+            traits_chip_label(&spec, &custom, false),
+            Some("High · 500k".into())
         );
 
         // Fast Mode boolean → Fast/Normal; a plain boolean → "<Label> On/Off".

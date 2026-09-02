@@ -418,6 +418,9 @@ impl AppState {
             &message.attachments,
             cx,
         );
+        if let Some(window) = message.context_window_changed {
+            self.record_event(session_id, &AgentEvent::ContextWindowChanged { window }, cx);
+        }
         if is_active {
             // `/orchestrate` stores its provider-only guidance as a prefix and
             // records the byte boundary in `context_len`. Titles should describe

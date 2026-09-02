@@ -382,6 +382,7 @@ impl AppState {
             | AgentEvent::UserInputResolved { .. }
             | AgentEvent::TokenUsage(_)
             | AgentEvent::ContextCompacted
+            | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::ProposedPlanDelta { .. }
             | AgentEvent::ProposedPlan { .. }

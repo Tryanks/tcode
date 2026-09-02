@@ -429,6 +429,10 @@ pub enum EntryContent {
     },
     /// The provider compacted its context window (a "Context compacted" work-log row).
     ContextCompacted,
+    /// The user changed the context window for the next provider turn.
+    ContextWindowChanged {
+        window: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -852,6 +856,16 @@ impl Timeline {
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ContextCompacted,
+                    ts,
+                    turn,
+                }));
+            }
+            AgentEvent::ContextWindowChanged { window } => {
+                let turn = self.ensure_turn(ts);
+                let id = self.synthetic_id("context-window");
+                self.entries.push(Arc::new(TimelineEntry {
+                    id,
+                    content: EntryContent::ContextWindowChanged { window: *window },
                     ts,
                     turn,
                 }));
@@ -1413,6 +1427,17 @@ mod tests {
             &timeline.entries[2].content,
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "after"
         ));
+    }
+
+    #[test]
+    fn context_window_change_folds_into_the_timeline() {
+        let timeline =
+            Timeline::fold_events([AgentEvent::ContextWindowChanged { window: 500_000 }]);
+
+        assert!(timeline.entries.iter().any(|entry| matches!(
+            entry.content,
+            EntryContent::ContextWindowChanged { window: 500_000 }
+        )));
     }
 
     #[test]

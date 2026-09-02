@@ -317,6 +317,7 @@ fn launch_settings_json(
     thinking: Option<bool>,
     fast_mode: bool,
     ultracode: bool,
+    auto_compact_window: Option<u64>,
 ) -> Option<String> {
     let mut settings = serde_json::Map::new();
     if let Some(thinking) = thinking {
@@ -327,6 +328,9 @@ fn launch_settings_json(
     }
     if ultracode {
         settings.insert("ultracode".into(), json!(true));
+    }
+    if let Some(window) = auto_compact_window {
+        settings.insert("autoCompactWindow".into(), json!(window));
     }
     (!settings.is_empty())
         .then(|| serde_json::to_string(&Value::Object(settings)).unwrap_or_default())
@@ -341,14 +345,22 @@ impl ClaudeLaunchOptions {
         let ultracode = resolved_effort.as_deref() == Some("ultracode");
         let effort = normalize_claude_cli_effort(resolved_effort.as_deref(), model);
 
-        // Model id: append `[1m]` when the 1M context window is selected.
+        let window = resolved_context_window(model.unwrap_or_default(), selections);
+        let native_window = native_context_window(model.unwrap_or_default());
+        let effective_model_window = if native_window == 200_000 && window > native_window {
+            1_000_000
+        } else {
+            native_window
+        };
         let model_id = model.map(|m| {
-            if selection_str(selections, "contextWindow").as_deref() == Some("1m") {
-                format!("{m}[1m]")
+            let base = m.strip_suffix("[1m]").unwrap_or(m);
+            if native_window == 200_000 && window > native_window {
+                format!("{base}[1m]")
             } else {
-                m.to_owned()
+                base.to_owned()
             }
         });
+        let auto_compact_window = (window < effective_model_window).then_some(window);
 
         // `--settings` object: only supported/true keys are emitted.
         let fast_supported = spec
@@ -366,7 +378,8 @@ impl ClaudeLaunchOptions {
             None
         };
 
-        let settings_json = launch_settings_json(thinking, fast_mode, ultracode);
+        let settings_json =
+            launch_settings_json(thinking, fast_mode, ultracode, auto_compact_window);
 
         ClaudeLaunchOptions {
             model_id,
@@ -2861,7 +2874,7 @@ fn reasoning(values: &[&str], default: &str) -> OptionDescriptor {
     }
 }
 
-fn context_window() -> OptionDescriptor {
+fn context_window(default: &str) -> OptionDescriptor {
     OptionDescriptor::Select {
         id: "contextWindow".to_owned(),
         label: "Context Window".to_owned(),
@@ -2877,8 +2890,59 @@ fn context_window() -> OptionDescriptor {
                 description: None,
             },
         ],
-        default_value: Some("200k".to_owned()),
+        default_value: Some(default.to_owned()),
     }
+}
+
+/// Parse a Claude context-window selection into a validated token count.
+pub fn parse_context_window_tokens(value: &Value) -> Option<u64> {
+    let tokens = match value {
+        Value::Number(number) => number.as_u64()?,
+        Value::String(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            if let Some(value) = value.strip_suffix('k') {
+                value.parse::<u64>().ok()?.checked_mul(1_000)?
+            } else if let Some(value) = value.strip_suffix('m') {
+                value.parse::<u64>().ok()?.checked_mul(1_000_000)?
+            } else {
+                let value = value.parse::<u64>().ok()?;
+                if value < 1_000 {
+                    value.checked_mul(1_000)?
+                } else {
+                    value
+                }
+            }
+        }
+        _ => return None,
+    };
+    (100_000..=1_000_000).contains(&tokens).then_some(tokens)
+}
+
+/// Return the model's native context-window size in tokens.
+pub fn native_context_window(model_id: &str) -> u64 {
+    match model_id.strip_suffix("[1m]").unwrap_or(model_id) {
+        "claude-fable-5" | "claude-fable-5-1" | "claude-opus-5" | "claude-sonnet-5"
+        | "claude-opus-4-7" | "claude-opus-4-8" => 1_000_000,
+        _ => 200_000,
+    }
+}
+
+/// Format a context-window token count for display.
+pub fn format_context_window(tokens: u64) -> String {
+    if tokens == 1_000_000 {
+        "1M".to_owned()
+    } else {
+        format!("{}k", tokens / 1_000)
+    }
+}
+
+/// Resolve the selected context window, falling back to the model's native size.
+pub fn resolved_context_window(model_id: &str, selections: &[OptionSelection]) -> u64 {
+    selections
+        .iter()
+        .find(|selection| selection.id == "contextWindow")
+        .and_then(|selection| parse_context_window_tokens(&selection.value))
+        .unwrap_or_else(|| native_context_window(model_id))
 }
 
 fn boolean(id: &str, label: &str) -> OptionDescriptor {
@@ -2918,7 +2982,7 @@ fn built_in_models() -> Vec<ModelSpec> {
                     ],
                     "high",
                 ),
-                context_window(),
+                context_window("1m"),
             ],
         ),
         model(
@@ -2937,7 +3001,7 @@ fn built_in_models() -> Vec<ModelSpec> {
                     ],
                     "high",
                 ),
-                context_window(),
+                context_window("1m"),
             ],
         ),
         model(
@@ -2957,7 +3021,7 @@ fn built_in_models() -> Vec<ModelSpec> {
                     "high",
                 ),
                 boolean("fastMode", "Fast Mode"),
-                context_window(),
+                context_window("1m"),
             ],
         ),
         model(
@@ -2977,6 +3041,7 @@ fn built_in_models() -> Vec<ModelSpec> {
                     "high",
                 ),
                 boolean("fastMode", "Fast Mode"),
+                context_window("1m"),
             ],
         ),
         model(
@@ -2988,6 +3053,7 @@ fn built_in_models() -> Vec<ModelSpec> {
                     "xhigh",
                 ),
                 boolean("fastMode", "Fast Mode"),
+                context_window("1m"),
             ],
         ),
         model(
@@ -2996,7 +3062,7 @@ fn built_in_models() -> Vec<ModelSpec> {
             vec![
                 reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
                 boolean("fastMode", "Fast Mode"),
-                context_window(),
+                context_window("200k"),
             ],
         ),
         model(
@@ -3015,7 +3081,7 @@ fn built_in_models() -> Vec<ModelSpec> {
                     &["low", "medium", "high", "xhigh", "max", "ultrathink"],
                     "high",
                 ),
-                context_window(),
+                context_window("1m"),
             ],
         ),
         model(
@@ -3023,7 +3089,7 @@ fn built_in_models() -> Vec<ModelSpec> {
             "Claude Sonnet 4.6",
             vec![
                 reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                context_window(),
+                context_window("200k"),
             ],
         ),
         model(
@@ -3491,8 +3557,113 @@ mod tests {
     }
 
     #[test]
+    fn parse_context_window_values() {
+        assert_eq!(parse_context_window_tokens(&json!("200k")), Some(200_000));
+        assert_eq!(parse_context_window_tokens(&json!("1m")), Some(1_000_000));
+        assert_eq!(parse_context_window_tokens(&json!("1M")), Some(1_000_000));
+        assert_eq!(parse_context_window_tokens(&json!("500k")), Some(500_000));
+        assert_eq!(parse_context_window_tokens(&json!("500000")), Some(500_000));
+        assert_eq!(parse_context_window_tokens(&json!("500")), Some(500_000));
+        assert_eq!(parse_context_window_tokens(&json!(750_000)), Some(750_000));
+        assert_eq!(parse_context_window_tokens(&json!(99_999)), None);
+        assert_eq!(parse_context_window_tokens(&json!(1_000_001)), None);
+        assert_eq!(parse_context_window_tokens(&json!("99k")), None);
+        assert_eq!(parse_context_window_tokens(&json!("1001k")), None);
+        assert_eq!(parse_context_window_tokens(&json!("garbage")), None);
+        assert_eq!(parse_context_window_tokens(&json!(-200_000)), None);
+        assert_eq!(parse_context_window_tokens(&json!(null)), None);
+        assert_eq!(native_context_window("claude-opus-5[1m]"), 1_000_000);
+        assert_eq!(native_context_window("claude-sonnet-4-6[1m]"), 200_000);
+        assert_eq!(format_context_window(200_000), "200k");
+        assert_eq!(format_context_window(750_000), "750k");
+        assert_eq!(format_context_window(1_000_000), "1M");
+    }
+
+    #[test]
+    fn catalog_context_window_defaults_match_native_windows() {
+        let default = |model_id: &str| {
+            model_spec(model_id)
+                .unwrap()
+                .options
+                .into_iter()
+                .find_map(|option| match option {
+                    OptionDescriptor::Select {
+                        id, default_value, ..
+                    } if id == "contextWindow" => default_value,
+                    _ => None,
+                })
+        };
+
+        for model_id in [
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+        ] {
+            assert_eq!(default(model_id).as_deref(), Some("1m"));
+        }
+        for model_id in ["claude-sonnet-4-6", "claude-opus-4-6"] {
+            assert_eq!(default(model_id).as_deref(), Some("200k"));
+        }
+        assert_eq!(default("claude-haiku-4-5"), None);
+        assert_eq!(default("claude-opus-4-5"), None);
+    }
+
+    #[test]
+    fn context_window_launch_semantics() {
+        let resolve = |model, value: Option<Value>| {
+            let selections = value
+                .map(|value| {
+                    vec![OptionSelection {
+                        id: "contextWindow".into(),
+                        value,
+                    }]
+                })
+                .unwrap_or_default();
+            ClaudeLaunchOptions::resolve(Some(model), &selections)
+        };
+        let auto_compact = |launch: &ClaudeLaunchOptions| {
+            launch.settings_json.as_deref().map(|settings| {
+                serde_json::from_str::<Value>(settings).unwrap()["autoCompactWindow"].clone()
+            })
+        };
+
+        let launch = resolve("claude-opus-5", Some(json!("200k")));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
+        assert_eq!(auto_compact(&launch), Some(json!(200_000)));
+
+        let launch = resolve("claude-opus-5", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
+        assert!(launch.settings_json.is_none());
+
+        let launch = resolve("claude-opus-5", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
+        assert_eq!(auto_compact(&launch), Some(json!(500_000)));
+
+        let launch = resolve("claude-sonnet-4-6", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6[1m]"));
+        assert!(launch.settings_json.is_none());
+
+        let launch = resolve("claude-sonnet-4-6", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6[1m]"));
+        assert_eq!(auto_compact(&launch), Some(json!(500_000)));
+
+        for value in [Some(json!("200k")), None] {
+            let launch = resolve("claude-sonnet-4-6", value);
+            assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6"));
+            assert!(launch.settings_json.is_none());
+        }
+
+        let launch = resolve("claude-fable-5", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5"));
+        assert!(launch.settings_json.is_none());
+    }
+
+    #[test]
     fn launch_options_resolve_effort_context_and_settings() {
-        // 1M context suffix + ultracode → effort xhigh + settings.ultracode.
+        // Ultracode → effort xhigh + settings.ultracode.
         let launch = ClaudeLaunchOptions::resolve(
             Some("claude-opus-4-8"),
             &[
@@ -3528,7 +3699,7 @@ mod tests {
                 },
             ],
         );
-        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5[1m]"));
+        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5"));
         assert_eq!(launch.effort, None);
         assert!(launch.ultrathink);
         assert!(launch.settings_json.is_none());

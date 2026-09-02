@@ -27,6 +27,7 @@ pub(crate) enum Segment<'a> {
     Relay(&'a TimelineEntry),
     ModelChange(&'a TimelineEntry),
     ContextCompacted(&'a TimelineEntry),
+    ContextWindowChanged(&'a TimelineEntry),
     User(&'a TimelineEntry),
     Assistant(&'a TimelineEntry),
     Error(&'a TimelineEntry),
@@ -162,6 +163,10 @@ pub(crate) fn segment_entries<'a>(
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::ContextCompacted(entry));
             }
+            EntryContent::ContextWindowChanged { .. } => {
+                flush_activities(&mut segments, &mut activities);
+                segments.push(Segment::ContextWindowChanged(entry));
+            }
             EntryContent::Item(ItemContent::AssistantMessage { .. }) => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::Assistant(entry));
@@ -215,6 +220,7 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             | EntryContent::Item(ItemContent::Other { .. }) => counts.tools += 1,
             EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
             EntryContent::ContextCompacted
+            | EntryContent::ContextWindowChanged { .. }
             | EntryContent::Steer { .. }
             | EntryContent::Item(ItemContent::UserMessage { .. })
             | EntryContent::Item(ItemContent::AssistantMessage { .. })
@@ -1094,6 +1100,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             reason.hash(hash);
         }
         EntryContent::ContextCompacted => {}
+        EntryContent::ContextWindowChanged { window } => window.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => {
             "web_search".len().hash(hash);
             serde_json::json!({ "query": query })
@@ -1585,6 +1592,24 @@ mod tests {
         ));
         assert!(matches!(segments[4], Segment::Assistant(entry) if entry.id == "assistant-2"));
         assert!(matches!(segments[5], Segment::Error(entry) if entry.id == "error"));
+    }
+
+    #[test]
+    fn segment_entries_flushes_activities_before_context_window_changes() {
+        let entries = [
+            command("cmd"),
+            entry(
+                "window",
+                EntryContent::ContextWindowChanged { window: 500_000 },
+            ),
+        ];
+        let segments = segment_entries(&entries, false).flow;
+
+        assert!(matches!(
+            segments.as_slice(),
+            [Segment::ActivityRun(activities), Segment::ContextWindowChanged(entry)]
+                if activities.len() == 1 && entry.id == "window"
+        ));
     }
 
     #[test]
