@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc, sync::LazyLock};
 use gpui::{App, Global, Hsla, Pixels, Rgba, SharedString, Window, WindowAppearance, px};
 use gpui_base::{
     ColorTokens, RadiusTokens, ResizableTheme, ScrollbarMode, ScrollbarStyles, ScrollbarTheme,
-    SemanticThemeTokens, TypographyTokens,
+    SemanticThemeTokens, ThemeAppearance, TypographyTokens,
 };
 use serde::Deserialize;
 
@@ -194,6 +194,7 @@ impl TryFrom<ThemeConfig> for Theme {
 
         let tokens = SemanticThemeTokens {
             colors: ColorTokens {
+                selection: primary.alpha(0.3),
                 background,
                 foreground,
                 surface: popover,
@@ -300,24 +301,31 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Dark => cx.global::<Themes>().dark.clone(),
     };
     let base_theme = gpui_base::Theme {
+        appearance: match mode {
+            ThemeMode::Light => ThemeAppearance::Light,
+            ThemeMode::Dark => ThemeAppearance::Dark,
+        },
         tokens: theme.tokens.clone(),
-        scrollbar: ScrollbarTheme {
-            mode: if cx.should_auto_hide_scrollbars() {
+        scrollbar: ScrollbarTheme::new()
+            .with_mode(if cx.should_auto_hide_scrollbars() {
                 ScrollbarMode::Scrolling
             } else {
                 ScrollbarMode::Hover
-            },
-            styles: ScrollbarStyles::default()
-                .track(|style| style.bg(theme.scrollbar))
-                .track_hover(|style| style.bg(theme.scrollbar))
-                .track_active(|style| style.bg(theme.scrollbar).border_color(theme.border))
-                .thumb(|style| style.bg(theme.scrollbar_thumb).radius(theme.radius))
-                .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(theme.radius))
-                .thumb_active(|style| style.bg(theme.scrollbar_thumb_hover).radius(theme.radius)),
-        },
+            })
+            .with_styles(
+                ScrollbarStyles::default()
+                    .track(|style| style.bg(theme.scrollbar))
+                    .track_hover(|style| style.bg(theme.scrollbar))
+                    .track_active(|style| style.bg(theme.scrollbar).border_color(theme.border))
+                    .thumb(|style| style.bg(theme.scrollbar_thumb).radius(theme.radius))
+                    .thumb_hover(|style| style.bg(theme.scrollbar_thumb_hover).radius(theme.radius))
+                    .thumb_active(|style| {
+                        style.bg(theme.scrollbar_thumb_hover).radius(theme.radius)
+                    }),
+            ),
         resizable: ResizableTheme {
-            handle: theme.border,
-            active_handle: theme.ring,
+            handle: Some(theme.border),
+            active_handle: Some(theme.ring),
         },
     };
     cx.set_global(base_theme);
