@@ -13,10 +13,10 @@ tcode-voice = { path = "../voice" }
 term = { path = "../term" }
 preview-mcp = { path = "../preview-mcp" }
 computer-use-mcp = { path = "../computer-use-mcp" }
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
-gpui-component-macros = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
+gpui = { package = "gpui-pre", version = "0.3.1" }
+gpui-base = "0.6.0"
+gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }
+gpui-component-macros = "0.6.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"
@@ -32,7 +32,7 @@ syntect = { version = "5.3.0", default-features = false, features = ["parsing", 
 imara-diff = "0.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "fd3bc2bbb8a2c4dfe268c1475682476ada54cd0c" }
+gpui-wry = "0.6.0"
 wry = { version = "0.53.3", package = "lb-wry" }
 raw-window-handle = { version = "0.6", features = ["std"] }
 
@@ -47,8 +47,8 @@ objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKW
 
 [dev-dependencies]
 criterion = "0.8"
-gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui = { package = "gpui-pre", version = "0.3.1", features = ["test-support"] }
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.1", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 tcode-runtime = { path = "../runtime", features = ["test-support"] }
 # dump-create is only needed by examples/sanitize_syntaxes.rs and the syntax-set
 # regression test; the shipped binary keeps the lean dependency feature set.
