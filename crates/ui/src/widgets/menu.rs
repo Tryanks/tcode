@@ -350,6 +350,7 @@ struct ContextMenuState {
     menu: Option<Entity<PopupMenu>>,
     position: Point<Pixels>,
     _subscription: Option<Subscription>,
+    _deferred: Option<gpui_base::DeferredPopover>,
 }
 
 impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> RenderOnce
@@ -380,15 +381,15 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     }
                     let previous_focus = window.focused(cx);
                     let menu_focus = menu.focus_handle(cx);
-                    gpui_base::GlobalState::register_deferred_popover(&menu_focus, cx);
+                    let deferred = gpui_base::GlobalState::register_deferred_popover(cx);
                     let subscription = window.subscribe(&menu, cx, {
                         let state = state.clone();
                         move |_, _: &DismissEvent, window, cx| {
                             state.update(cx, |state, _| {
                                 state.menu = None;
                                 state._subscription = None;
+                                state._deferred = None;
                             });
-                            gpui_base::GlobalState::unregister_deferred_popover(&menu_focus, cx);
                             if menu_focus.contains_focused(window, cx)
                                 && let Some(previous) = &previous_focus
                             {
@@ -402,6 +403,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         state.menu = Some(menu);
                         state.position = position;
                         state._subscription = Some(subscription);
+                        state._deferred = Some(deferred);
                     });
                     window.refresh();
                 });
