@@ -263,6 +263,35 @@ impl OrchestrateSettingsPanel {
         );
     }
 
+    fn set_child_fast(&self, index: usize, fast: bool, cx: &mut Context<Self>) {
+        self.update_child_models(
+            move |models| {
+                if let Some(entry) = models.get_mut(index) {
+                    entry.fast = fast;
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Whether the provider catalog declares a fast mode for a model: Claude's
+    /// `fastMode` boolean or a Codex `serviceTier` selector offering `fast`.
+    fn child_fast_supported(&self, provider: ProviderKind, model: &str, cx: &App) -> bool {
+        self.store
+            .read(cx)
+            .provider_model_catalog(provider)
+            .into_iter()
+            .find(|spec| spec.id == model)
+            .into_iter()
+            .flat_map(|spec| spec.options)
+            .any(|option| match option {
+                OptionDescriptor::Boolean { id, .. } => id == "fastMode",
+                OptionDescriptor::Select { id, options, .. } => {
+                    id == "serviceTier" && options.iter().any(|choice| choice.value == "fast")
+                }
+            })
+    }
+
     /// The valid `reasoningEffort` choices the provider catalog declares for a
     /// model; empty when the model has no reasoning selector.
     fn child_effort_options(
@@ -341,6 +370,7 @@ impl OrchestrateSettingsPanel {
             profile_id: option.profile_id.clone(),
             enabled: true,
             effort: option.effort.clone(),
+            fast: false,
             description: OrchestrateSettings::builtin_child_definition(
                 option.provider,
                 &option.id,
@@ -1007,10 +1037,14 @@ impl OrchestrateSettingsPanel {
             };
             let provider = row.provider;
             let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
-            let effort = profile
+            let mut effort = profile
                 .effort
                 .clone()
                 .unwrap_or_else(|| crate::tr!("orchestrate.children.effort_default").into_owned());
+            if profile.fast {
+                effort.push_str(" · ");
+                effort.push_str(&crate::tr!("orchestrate.children.fast_label"));
+            }
             let subtitle = if let Some(id) = row.profile_id.as_deref() {
                 let profile_settings = self.store.read(cx).provider_profile_settings(id);
                 let profile_name = profile_settings
@@ -1210,16 +1244,51 @@ impl OrchestrateSettingsPanel {
                             }
                             list
                         });
-                        v_flex()
-                            .gap_1()
-                            .items_start()
+                        let fast_supported = self.child_fast_supported(provider, &row.model, cx);
+                        h_flex()
+                            .gap_4()
+                            .items_end()
                             .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!("orchestrate.children.effort_label")),
+                                v_flex()
+                                    .gap_1()
+                                    .items_start()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(crate::tr!("orchestrate.children.effort_label")),
+                                    )
+                                    .child(dropdown),
                             )
-                            .child(dropdown)
+                            // Keep a stored `fast` visible even when the catalog no
+                            // longer declares support, so it can be switched off.
+                            .when(fast_supported || profile.fast, |row| {
+                                row.child(
+                                    v_flex()
+                                        .gap_1()
+                                        .items_start()
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(crate::tr!(
+                                                    "orchestrate.children.fast_label"
+                                                )),
+                                        )
+                                        .child(
+                                            Switch::new(("orchestrate-child-fast", index))
+                                                .checked(profile.fast)
+                                                .tooltip(crate::tr!(
+                                                    "orchestrate.children.fast_hint"
+                                                ))
+                                                .on_click(cx.listener(
+                                                    move |this, checked: &bool, _, cx| {
+                                                        this.set_child_fast(index, *checked, cx);
+                                                    },
+                                                )),
+                                        ),
+                                )
+                            })
                     })
                     .child(
                         Textarea::new(&row.description)

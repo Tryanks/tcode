@@ -1154,6 +1154,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             ProviderKind::Codex,
             "gpt-5.6-sol".into(),
             Some("medium".into()),
+            false,
             None
         )
     );
@@ -1170,6 +1171,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             ProviderKind::Codex,
             "gpt-5.6-sol".into(),
             Some("medium".into()),
+            false,
             Some("kimi".into()),
         )
     );
@@ -1196,6 +1198,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             ProviderKind::ClaudeCode,
             "claude-opus-4-8".into(),
             Some("high".into()),
+            false,
             None
         )
     );
@@ -2242,6 +2245,7 @@ fn child_meta_links_parent_project_and_maps_effort() {
         ProviderKind::Codex,
         Some("gpt-test".into()),
         Some("high".into()),
+        true,
         Some("work-codex".into()),
         ApprovalMode::AutoAcceptEdits,
         PathBuf::from("/p/sub"),
@@ -2255,9 +2259,41 @@ fn child_meta_links_parent_project_and_maps_effort() {
     assert_eq!(child.approval_mode, ApprovalMode::AutoAcceptEdits);
     assert!(child.archive_on_complete);
     assert_eq!(child.result_max_chars, Some(2400));
-    assert_eq!(child.option_selections.len(), 1);
+    assert_eq!(child.option_selections.len(), 2);
     assert_eq!(child.option_selections[0].id, "reasoningEffort");
     assert_eq!(child.option_selections[0].value, serde_json::json!("high"));
+    assert_eq!(child.option_selections[1].id, "serviceTier");
+    assert_eq!(child.option_selections[1].value, serde_json::json!("fast"));
+
+    let claude = build_child_meta(
+        &parent,
+        ProviderKind::ClaudeCode,
+        None,
+        None,
+        true,
+        None,
+        ApprovalMode::FullAccess,
+        PathBuf::from("/p"),
+        false,
+        None,
+    );
+    assert_eq!(claude.option_selections.len(), 1);
+    assert_eq!(claude.option_selections[0].id, "fastMode");
+    assert_eq!(claude.option_selections[0].value, serde_json::json!(true));
+
+    let pi = build_child_meta(
+        &parent,
+        ProviderKind::Pi,
+        None,
+        None,
+        true,
+        None,
+        ApprovalMode::FullAccess,
+        PathBuf::from("/p"),
+        false,
+        None,
+    );
+    assert!(pi.option_selections.is_empty());
 }
 
 #[test]
@@ -2448,6 +2484,7 @@ fn dispatched_brief_carries_report_contract_footer() {
                 ProviderKind::Codex,
                 Some("gpt-test".into()),
                 None,
+                false,
                 None,
                 ApprovalMode::FullAccess,
                 "Child".into(),
