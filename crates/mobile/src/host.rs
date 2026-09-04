@@ -47,6 +47,13 @@ pub trait MobileHost: 'static {
     fn last_host_id(&self) -> Option<String>;
     fn set_last_host_id(&self, host_id: Option<&str>);
 
+    /// When `Some((addr, port))`, this client can only pair with that one
+    /// endpoint (a browser page can only reach its own origin): the pairing
+    /// form hides the address and port fields and asks for the code alone.
+    fn fixed_pairing_endpoint(&self) -> Option<(String, u16)> {
+        None
+    }
+
     /// Pair with a host; `done` runs on the main thread.
     fn pair(&self, request: PairRequest, cx: &mut App, done: PairDone);
 
