@@ -43,6 +43,7 @@ pub mod theme;
 mod thread_export;
 pub(crate) mod time;
 pub(crate) mod toast;
+pub(crate) mod usage;
 pub mod widgets;
 mod window_caption;
 mod window_state;

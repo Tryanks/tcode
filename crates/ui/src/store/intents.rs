@@ -438,6 +438,9 @@ impl WorkspaceStore {
     pub fn refresh_provider_status(&mut self) {
         self.dispatch(Command::RefreshProviderStatus);
     }
+    pub fn refresh_provider_usage(&mut self) {
+        self.dispatch(Command::RefreshProviderUsage);
+    }
     pub fn check_provider_versions(&mut self) {
         self.dispatch(Command::CheckProviderVersions);
     }

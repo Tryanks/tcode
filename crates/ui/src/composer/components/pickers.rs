@@ -375,6 +375,7 @@ impl Composer {
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.workspace_store.read(cx).composer_state();
         let usage = composer.token_usage;
+        let account_usage = composer.usage.clone();
         let provider = composer.provider;
         let pct = usage.and_then(|u| context_meter::used_percentage(&u));
         let overloaded = pct.map(context_meter::is_overloaded).unwrap_or(false);
@@ -400,7 +401,9 @@ impl Composer {
         crate::material::overlay_popover("context-popover")
             .anchor(Anchor::BottomLeft)
             .trigger(trigger)
-            .content(move |_, _, cx| render_context_meter_pane(usage, provider, pct, cx))
+            .content(move |_, _, cx| {
+                render_context_meter_pane(usage, account_usage.clone(), provider, pct, cx)
+            })
             .into_any_element()
     }
 
@@ -1298,6 +1301,7 @@ fn render_overflow_pane(
 /// "<Provider> automatically compacts its context when needed." line.
 fn render_context_meter_pane(
     usage: Option<TokenUsage>,
+    account_usage: Option<tcode_core::usage::ProviderUsage>,
     provider: Option<ProviderKind>,
     pct: Option<f32>,
     cx: &mut Context<PopoverState>,
@@ -1399,6 +1403,92 @@ fn render_context_meter_pane(
                     provider = provider_label(provider)
                 )),
         );
+    }
+
+    // Account rate-limit windows, exactly as the provider reported them: a
+    // Codex Pro account shows only its weekly window, a Claude Max account
+    // shows 5h + weekly + any model-scoped weekly.
+    if let Some(account) = account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()) {
+        pane = pane.child(crate::material::faded_hairline(cx));
+        // 256px only affords one trailing fact: the plan when the provider
+        // named it, otherwise how fresh the numbers are.
+        let trailing = account
+            .plan
+            .as_deref()
+            .map(crate::usage::plan_label)
+            .unwrap_or_else(|| {
+                let ago = crate::time::humanize_ago(
+                    crate::time::now_secs().saturating_sub(account.fetched_at),
+                );
+                crate::tr!("usage.updated", when = ago).into_owned()
+            });
+        pane = pane.child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .items_center()
+                .gap_3()
+                .text_size(px(11.))
+                .font_medium()
+                .text_color(muted)
+                .child(crate::tr!("usage.title"))
+                .child(trailing),
+        );
+        // The raw provider error is Settings-only; at 256px this pane just
+        // says the number is missing.
+        if account.error.is_some() {
+            pane = pane.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(crate::tr!("usage.unavailable")),
+            );
+        } else {
+            let now = crate::time::now_secs();
+            for window in &account.windows {
+                let fill = crate::usage::bar_color(window.used_percent, cx);
+                pane = pane.child(
+                    v_flex()
+                        .w_full()
+                        .gap(px(3.))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_between()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(11.))
+                                .child(
+                                    div()
+                                        .text_color(muted)
+                                        .child(crate::usage::window_label(window)),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(muted)
+                                        .child(crate::usage::percent_label(window.used_percent)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(4.))
+                                .rounded_full()
+                                .bg(cx.theme().muted)
+                                .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
+                                    window.used_percent.clamp(0.0, 100.0) / 100.0,
+                                ))),
+                        )
+                        .when_some(
+                            crate::usage::resets_label(window.resets_at, now),
+                            |col, label| {
+                                col.child(div().text_size(px(10.5)).text_color(muted).child(label))
+                            },
+                        ),
+                );
+            }
+        }
     }
 
     pane.into_any_element()

@@ -1053,6 +1053,19 @@ impl WorkspaceStore {
         self.providers_replica.providers_checking
     }
 
+    /// The latest usage fetch for a provider profile, when one has landed.
+    pub fn provider_usage(&self, profile_id: &str) -> Option<tcode_core::usage::ProviderUsage> {
+        self.providers_replica
+            .provider_usage
+            .get(profile_id)
+            .cloned()
+    }
+
+    /// A usage fetch is in flight for this profile.
+    pub fn usage_checking(&self, profile_id: &str) -> bool {
+        self.providers_replica.usage_checking.contains(profile_id)
+    }
+
     pub fn window_caption_state(&self) -> (bool, tcode_core::ui::RightTab) {
         self.active_conversation_ui()
             .map(|ui| (ui.right_panel_open, ui.right_tab))
