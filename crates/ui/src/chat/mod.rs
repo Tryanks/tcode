@@ -1640,6 +1640,7 @@ impl ChatView {
         let plan_showing = panel.plan_showing;
         let preview_showing = panel.preview_showing;
         let terminal_open = panel.terminal_open;
+        let remote = self.workspace_store.read(cx).is_remote();
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
@@ -1651,7 +1652,9 @@ impl ChatView {
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            .when(cfg!(feature = "local-host"), |this| {
+                            // Terminal bytes and the preview reverse RPC are
+                            // local-only until P4 of the remote plan.
+                            .when(cfg!(feature = "local-host") && !remote, |this| {
                                 this.child(
                                     Button::new("panel-layout")
                                         .ghost()
@@ -1680,19 +1683,22 @@ impl ChatView {
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
-                            .child(
-                                Button::new("preview-panel")
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::Globe)
-                                    .selected(preview_showing)
-                                    .tooltip(crate::tr!("chat.toggle_preview"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_preview_panel(cx));
-                                    })),
-                            )
+                            .when(!remote, |this| {
+                                this.child(
+                                    Button::new("preview-panel")
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::Globe)
+                                        .selected(preview_showing)
+                                        .tooltip(crate::tr!("chat.toggle_preview"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_store.update(cx, |store, cx| {
+                                                store.toggle_preview_panel(cx)
+                                            });
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("diff-panel")
                                     .ghost()

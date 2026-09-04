@@ -199,6 +199,9 @@ mod tests {
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,
             sidebar_layout: SidebarLayout::Flat,
+            remote_hosting_enabled: true,
+            remote_port: Some(47_420),
+            remote_host_name: Some("Desk Mac".into()),
             last_visited: std::collections::HashMap::from([("sess-a".to_string(), 42)]),
             acp_agents: BTreeMap::new(),
         };

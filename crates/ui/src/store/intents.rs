@@ -152,6 +152,15 @@ impl WorkspaceStore {
     pub fn set_sidebar_layout(&mut self, value: SidebarLayout) {
         self.patch_settings(SettingsPatch::SidebarLayout(value));
     }
+    pub fn set_remote_hosting_enabled(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::RemoteHostingEnabled(value));
+    }
+    pub fn set_remote_port(&mut self, value: Option<u16>) {
+        self.patch_settings(SettingsPatch::RemotePort(value));
+    }
+    pub fn set_remote_host_name(&mut self, value: Option<String>) {
+        self.patch_settings(SettingsPatch::RemoteHostName(value));
+    }
     pub fn reset_settings(&mut self) {
         self.dispatch(Command::ResetSettings);
     }

@@ -234,6 +234,50 @@ fn wrong_token_gets_rejected_and_closed() {
 }
 
 #[test]
+fn devices_are_listed_and_revoking_refuses_the_token() {
+    let data = TestDir::new();
+    let (mux, _) = fake_host();
+    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
+    let port = server.local_addr().port();
+    let code = server.new_pairing_code();
+    let paired = pair("127.0.0.1", port, &code.code, "laptop").unwrap();
+
+    let devices = server.devices();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].name, "laptop");
+    assert!(devices[0].created_unix > 0);
+
+    assert!(server.revoke_device(&devices[0].id).unwrap());
+    assert!(server.devices().is_empty());
+    // A second revoke of the same id is a no-op, not an error.
+    assert!(!server.revoke_device(&devices[0].id).unwrap());
+
+    smol::block_on(async {
+        let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
+            .await
+            .unwrap();
+        let (mut websocket, _) =
+            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
+                .await
+                .unwrap();
+        websocket
+            .send(Message::Text(
+                json!({"type": "hello", "protocol_version": 1, "token": paired.token})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let Some(Ok(Message::Text(reply))) = websocket.next().await else {
+            panic!("expected text rejection");
+        };
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["type"], "hello_rejected");
+    });
+    server.shutdown();
+}
+
+#[test]
 fn paired_host_shape_is_public() {
     let host = PairedHost {
         host_id: "id".into(),

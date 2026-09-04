@@ -656,6 +656,9 @@ pub enum SettingsPatch {
     FallbackReviewModel(String),
     FallbackReviewProfileId(Option<String>),
     SidebarLayout(SidebarLayout),
+    RemoteHostingEnabled(bool),
+    RemotePort(Option<u16>),
+    RemoteHostName(Option<String>),
 }
 
 impl Default for BrowserSettings {
@@ -776,6 +779,17 @@ pub struct Settings {
     /// Sidebar thread layout (flat by default; grouped keeps the legacy view).
     #[serde(default)]
     pub sidebar_layout: SidebarLayout,
+    /// Whether this desktop app also serves the remote protocol to other tcode
+    /// clients. Absent in legacy files → hosting off.
+    #[serde(default)]
+    pub remote_hosting_enabled: bool,
+    /// Port the remote listener binds. None uses the 47420 default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_port: Option<u16>,
+    /// Name this host advertises while pairing and on the discovery beacon.
+    /// None uses the machine name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_host_name: Option<String>,
     /// Per-session last-visited time (unix secs), keyed by session id. A session
     /// whose `updated_at` exceeds its last-visited time (and isn't active) shows
     /// an unread dot. Opening a thread refreshes it; "Mark unread" clears it.
@@ -841,6 +855,9 @@ impl Default for Settings {
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
             sidebar_layout: SidebarLayout::default(),
+            remote_hosting_enabled: false,
+            remote_port: None,
+            remote_host_name: None,
             last_visited: HashMap::new(),
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),
@@ -929,6 +946,9 @@ impl Settings {
                 self.fallback_review.profile_id = value;
             }
             SettingsPatch::SidebarLayout(value) => self.sidebar_layout = value,
+            SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,
+            SettingsPatch::RemotePort(value) => self.remote_port = value,
+            SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
         }
     }
 }
@@ -1499,6 +1519,29 @@ mod tests {
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert!(back.sidebar_collapsed);
     }
+    #[test]
+    fn remote_hosting_fields_default_off_and_round_trip() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(!legacy.remote_hosting_enabled, "legacy files never host");
+        assert_eq!(legacy.remote_port, None);
+        assert_eq!(legacy.remote_host_name, None);
+
+        let mut settings = Settings::default();
+        settings.apply(SettingsPatch::RemoteHostingEnabled(true));
+        settings.apply(SettingsPatch::RemotePort(Some(47_421)));
+        settings.apply(SettingsPatch::RemoteHostName(Some("Desk Mac".into())));
+        let back: Settings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(back.remote_hosting_enabled);
+        assert_eq!(back.remote_port, Some(47_421));
+        assert_eq!(back.remote_host_name.as_deref(), Some("Desk Mac"));
+
+        // Defaults stay out of the file entirely.
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("remote_port"), "{json}");
+        assert!(!json.contains("remote_host_name"), "{json}");
+    }
+
     #[test]
     fn resolves_builtin_and_user_profiles() {
         let mut settings = Settings::default();

@@ -29,6 +29,8 @@ mod provider_dialog;
 mod provider_model_picker;
 pub(crate) mod provider_models;
 pub(crate) mod provider_status;
+#[cfg(feature = "remote")]
+pub mod remote;
 pub(crate) mod runtime_event;
 mod scroll;
 pub mod settings;

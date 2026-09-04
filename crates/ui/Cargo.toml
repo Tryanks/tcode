@@ -4,15 +4,19 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["local-host"]
+default = ["local-host", "remote"]
 local-host = ["dep:tcode-runtime"]
+# Hosting/pairing UI. Off for wasm targets, which cannot listen or discover.
+remote = ["dep:tcode-remote", "dep:qrcode"]
 
 [dependencies]
 agent = { path = "../agent" }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core" }
 tcode-protocol = { path = "../protocol" }
+tcode-remote = { path = "../remote", optional = true }
 tcode-runtime = { path = "../runtime", optional = true }
+qrcode = { version = "0.14", default-features = false, optional = true }
 tcode-services = { path = "../services" }
 tcode-voice = { path = "../voice" }
 term = { path = "../term" }

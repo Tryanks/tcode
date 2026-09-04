@@ -43,6 +43,14 @@ pub struct PairingCode {
     pub addrs: Vec<String>,
 }
 
+/// One paired device, as shown by the hosting UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub created_unix: u64,
+}
+
 struct ActiveCode {
     code: String,
     expires: Instant,
@@ -72,6 +80,29 @@ impl RemoteServer {
 
     pub fn new_pairing_code(&self) -> PairingCode {
         mint_pairing_code(&self.shared)
+    }
+
+    /// Devices that hold a valid token, oldest pairing first.
+    pub fn devices(&self) -> Vec<DeviceInfo> {
+        self.shared
+            .auth
+            .lock()
+            .unwrap()
+            .devices
+            .iter()
+            .map(|device| DeviceInfo {
+                id: device.id.to_string(),
+                name: device.name.clone(),
+                created_unix: device.created_unix,
+            })
+            .collect()
+    }
+
+    /// Revoke a device's token. A connection already using it survives at most
+    /// one keepalive interval: the websocket loop rechecks the token on every
+    /// ping and closes when it no longer validates.
+    pub fn revoke_device(&self, id: &str) -> io::Result<bool> {
+        self.shared.auth.lock().unwrap().revoke(id)
     }
 
     pub fn shutdown(mut self) {
@@ -387,12 +418,12 @@ async fn websocket(
         Some(Ok(Message::Text(text))) => serde_json::from_str::<Hello>(&text).ok(),
         _ => None,
     };
-    let accepted = hello.is_some_and(|hello| {
+    let token = hello.filter(|hello| {
         hello.kind == "hello"
             && hello.protocol_version == 1
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
-    if !accepted {
+    let Some(token) = token.map(|hello| hello.token) else {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
             "reason": "invalid token or protocol version"
@@ -402,7 +433,7 @@ async fn websocket(
             .await;
         let _ = websocket.close(None).await;
         return Ok(());
-    }
+    };
     let hello_ok = {
         let auth = shared.auth.lock().unwrap();
         serde_json::json!({
@@ -469,6 +500,12 @@ async fn websocket(
                 .map_err(io::Error::other)?,
             Input::Host(Err(_)) => break,
             Input::Ping => {
+                // Revoking a device only rewrites remote.json; this is what
+                // actually evicts a connection that already presented the token.
+                if !shared.auth.lock().unwrap().token_is_valid(&token) {
+                    let _ = websocket.close(None).await;
+                    break;
+                }
                 if unanswered_pings >= 2 {
                     let _ = websocket.close(None).await;
                     break;

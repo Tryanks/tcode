@@ -69,6 +69,17 @@ impl AuthStore {
         Ok(token)
     }
 
+    /// Drop a paired device by id. Returns whether anything was removed.
+    pub fn revoke(&mut self, id: &str) -> io::Result<bool> {
+        let before = self.devices.len();
+        self.devices.retain(|device| device.id.to_string() != id);
+        if self.devices.len() == before {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
+    }
+
     pub fn token_is_valid(&self, token: &str) -> bool {
         let candidate = Sha256::digest(token.as_bytes());
         self.devices.iter().any(|device| {

@@ -371,6 +371,53 @@ impl AppShell {
     }
 }
 
+impl AppShell {
+    /// A slim status bar above the chat column, shown only over a remote link
+    /// that is not currently connected.
+    fn render_connection_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.store.read(cx);
+        let host = store.remote_host_name()?;
+        let (text, accent) = match store.connection_state() {
+            tcode_client::ConnectionState::Connected => return None,
+            tcode_client::ConnectionState::Reconnecting { attempt } => (
+                crate::tr!("remote.banner.reconnecting", host = host, attempt = attempt)
+                    .into_owned(),
+                cx.theme().warning,
+            ),
+            tcode_client::ConnectionState::Offline => (
+                crate::tr!("remote.banner.offline", host = host).into_owned(),
+                cx.theme().danger,
+            ),
+        };
+        let reconnecting = matches!(
+            store.connection_state(),
+            tcode_client::ConnectionState::Reconnecting { .. }
+        );
+        Some(
+            gpui_base::h_flex()
+                .flex_none()
+                .w_full()
+                .h(px(28.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .bg(accent.opacity(0.12))
+                .text_size(px(12.))
+                .text_color(cx.theme().foreground)
+                .when(reconnecting, |bar| {
+                    bar.child({
+                        use crate::sizing::Sizable as _;
+                        crate::widgets::spinner::Spinner::new().xsmall()
+                    })
+                })
+                .child(text)
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for AppShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let route = self.window_state.read(cx).route;
@@ -507,12 +554,13 @@ impl Render for AppShell {
         // The chat and right columns are reading surfaces (T1): they sit on a
         // near-opaque plane over the vibrancy canvas (docs/visual-redesign.md).
         let chat_panel = resizable_panel().visible(chat_visible).child(
-            div()
+            gpui_base::v_flex()
                 .size_full()
                 .bg(crate::material::content_surface(cx))
                 // T1 paper floats above the glass canvas.
                 .shadow_sm()
-                .child(self.chat.clone()),
+                .children(self.render_connection_banner(cx))
+                .child(div().flex_1().min_h_0().child(self.chat.clone())),
         );
         let right = resizable_panel()
             .visible(diff_open)

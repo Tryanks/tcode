@@ -113,7 +113,7 @@ Constraints from the brief:
   a project, wrong token is refused, dropping client A's socket and
   reconnecting re-seeds its replicas. Manual e2e on this Mac: `tcode-headless
   serve` + `tcode --connect …` runs a real provider turn.
-- Status: P1a (`tcode-remote`, `tcode-headless`) **done**; P1b (desktop `--connect`, Settings → Remote) pending.
+- Status: **done** (P1a transport + headless; P1b desktop `--connect`, Settings → Remote, `tcode --pair`). Screenshots in `docs/images/remote/`.
 
 ### P2 — iOS and Android clients
 
@@ -129,6 +129,41 @@ Constraints from the brief:
   this Mac (`127.0.0.1` / `10.0.2.2`); screenshots of hosts, pairing, sessions,
   and a live chat turn checked into `docs/images/mobile/`.
 - Status: pending.
+
+#### P2a notes
+
+P2a vendors the mobile GPUI backends and adds native shells with a safe-area-aware
+placeholder view. The checked-in smoke-test captures are
+`docs/images/mobile/ios-p2a-hello.png` and
+`docs/images/mobile/android-p2a-hello.png`.
+
+The iOS host was built and run against the installed iOS 26.5 runtime on the
+booted iPhone 17 simulator with:
+
+```sh
+xcrun simctl list runtimes
+crates/ios/host/build.sh --simulator
+xcrun simctl install booted crates/ios/host/build/Build/Products/Debug-iphonesimulator/Tcode.app
+xcrun simctl launch booted com.tryanks.tcode
+xcrun simctl io booted screenshot docs/images/mobile/ios-p2a-hello.png
+```
+
+The Android host was built for API 26/arm64-v8a, then run on the
+`Lims20Pixel6` AVD in the reference project's non-destructive lavapipe mode:
+
+```sh
+crates/android/host/build.sh
+/opt/homebrew/share/android-commandlinetools/emulator/emulator \
+  -avd Lims20Pixel6 -qt-hide-window -no-audio -no-snapshot -gpu lavapipe
+adb install -r crates/android/host/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -W -n com.tryanks.tcode/.GpuiActivity
+adb exec-out screencap -p > docs/images/mobile/android-p2a-hello.png
+```
+
+The placeholder deliberately uses plain GPUI for P2a. Pulling in `tcode-ui`
+currently also pulls its desktop-only runtime, terminal, webview, voice, and
+services dependency graph; the shared mobile screens and theme remain P2 work
+once that crate's ongoing portability changes land.
 
 ### P3 — Browser client
 

@@ -316,14 +316,19 @@ impl Render for AddProjectDialog {
                                     .flex_1()
                                     .rounded(crate::material::radius_input()),
                             )
-                            .child(
-                                Button::new("browse-project-directory")
-                                    .rounded(crate::material::radius_button())
-                                    .label(crate::tr!("sidebar.browse"))
-                                    .on_click(cx.listener(|dialog, _, window, cx| {
-                                        dialog.browse(window, cx);
-                                    })),
-                            ),
+                            // The native picker browses THIS machine; over a
+                            // remote link the typed path is validated against
+                            // the host instead (Query::IsDirectory).
+                            .when(!self.store.read(cx).is_remote(), |row| {
+                                row.child(
+                                    Button::new("browse-project-directory")
+                                        .rounded(crate::material::radius_button())
+                                        .label(crate::tr!("sidebar.browse"))
+                                        .on_click(cx.listener(|dialog, _, window, cx| {
+                                            dialog.browse(window, cx);
+                                        })),
+                                )
+                            }),
                     )
                     .when(self.path_error, |column| {
                         column.child(

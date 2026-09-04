@@ -177,6 +177,7 @@ settings:
   browser: "浏览器"
   computer_use: "电脑操作"
   orchestrate: "Orchestrate"
+  remote: "远程"
   archived: "已归档对话"
   archived_section: "已归档对话"
   archived_empty: "没有已归档的对话"
@@ -854,3 +855,59 @@ toast:
   show_details: "展开详情"
   hide_details: "收起详情"
   copy_error: "复制错误"
+remote:
+  intro: "在本机运行 tcode 主机以供其他设备连接，或让此窗口连接到别处运行的主机。"
+  apply: "应用"
+  host:
+    section: "将本机作为主机"
+    title: "将本机作为主机"
+    description: "向网络中已配对的 tcode 客户端提供本机的会话。"
+    unavailable: "当前窗口已连接到其他主机，无法同时作为主机。"
+  port:
+    title: "端口"
+    description: "远程监听器在所有网卡上绑定的 TCP 端口。"
+  host_name:
+    title: "主机名称"
+    description: "配对时以及在发现广播中向客户端展示的名称。"
+  code:
+    title: "配对码"
+    description: "生成新的六位配对码以配对其他设备。"
+    expired: "配对码已过期"
+    new: "生成新码"
+    expires: "%{time} 后过期"
+    listening: "正在监听 %{addrs} 端口 %{port}"
+    no_addresses: "仅本机"
+  devices:
+    section: "已配对设备"
+    empty: "尚未配对任何设备。"
+    paired_on: "配对于 %{date}"
+    revoke: "吊销"
+  connect:
+    section: "连接到其他主机"
+    connected_to: "已连接到 %{name}"
+    connected_description: "此窗口为客户端；会话与提供商都运行在主机上。"
+    back_to_local: "返回本地"
+  hosts:
+    section: "已配对主机"
+    empty: "尚未配对任何主机。"
+    connect: "连接"
+    current: "已连接"
+    remove: "移除"
+  discover:
+    section: "发现"
+    title: "在网络中查找主机"
+    description: "监听局域网中正在广播的 tcode 主机。"
+    search: "搜索"
+    none: "未发现主机，请改用配对码。"
+    pair: "使用"
+  pair:
+    section: "使用配对码配对"
+    description: "输入主机地址、端口以及其显示的六位配对码。"
+    action: "配对"
+    address_placeholder: "192.168.1.10"
+    code_placeholder: "123456"
+    bad_code: "配对码必须为六位数字。"
+    paired: "已与 %{name} 配对"
+  banner:
+    reconnecting: "正在重新连接 %{host}…（第 %{attempt} 次）"
+    offline: "离线 —— 无法连接到 %{host}"

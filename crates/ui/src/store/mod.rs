@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
-use tcode_client::HostLink;
+use tcode_client::{ConnectionState, HostLink};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
@@ -104,6 +104,10 @@ pub struct WorkspaceStore {
     preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     #[cfg(feature = "local-host")]
     import_routes: Option<ImportRoutes>,
+    /// Name of the remote host this store is a client of. `None` means the host
+    /// runs in this process, so local affordances are available.
+    remote_host: Option<String>,
+    connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
     session_replica: Option<(String, Timeline)>,
@@ -191,6 +195,8 @@ impl WorkspaceStore {
             preview_requests: None,
             #[cfg(feature = "local-host")]
             import_routes: None,
+            remote_host: None,
+            connection_state: ConnectionState::Connected,
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
             session_replica: None,
@@ -306,6 +312,43 @@ impl WorkspaceStore {
         self.terminal_registry = local.terminals;
         self.preview_requests = local.preview_requests;
         self.import_routes = Some(local.import_routes);
+    }
+
+    /// Mark this store as a client of a remote host and start tracking the
+    /// link's connection state so the workspace can show its banner.
+    pub fn attach_remote(&mut self, host_name: String, cx: &mut Context<Self>) {
+        self.remote_host = Some(host_name);
+        self.connection_state = self.host.connection_state();
+        let changes = self.host.connection_state_changes();
+        cx.spawn(async move |this, cx| {
+            while let Ok(state) = changes.recv().await {
+                if this
+                    .update(cx, |store, cx| {
+                        store.connection_state = state;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Whether the host lives in another process. Local-only affordances
+    /// (terminals, preview, computer use, the native directory picker) are
+    /// unavailable while this is true — see P4 of docs/plans/remote-and-mobile.md.
+    pub fn is_remote(&self) -> bool {
+        self.remote_host.is_some()
+    }
+
+    pub fn remote_host_name(&self) -> Option<&str> {
+        self.remote_host.as_deref()
+    }
+
+    pub fn connection_state(&self) -> &ConnectionState {
+        &self.connection_state
     }
 
     pub fn sync_active_conversation_ui(&mut self) {

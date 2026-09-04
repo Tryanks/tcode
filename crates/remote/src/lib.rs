@@ -8,4 +8,4 @@ pub mod server;
 mod wire;
 
 pub use mux::{Connection, HostMux};
-pub use server::{PairingCode, RemoteConfig, RemoteServer, StaticBundle, serve};
+pub use server::{DeviceInfo, PairingCode, RemoteConfig, RemoteServer, StaticBundle, serve};

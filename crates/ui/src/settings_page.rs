@@ -66,6 +66,8 @@ enum Section {
     Browser,
     ComputerUse,
     Orchestrate,
+    #[cfg(feature = "remote")]
+    Remote,
     Archived,
 }
 
@@ -97,6 +99,9 @@ pub struct SettingsPage {
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
+    /// Hosting/pairing controls. Present only with the `remote` feature.
+    #[cfg(feature = "remote")]
+    remote_panel: Entity<crate::remote::RemotePanel>,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
     /// Shared provider/model picker configured for fallback reviews.
@@ -144,6 +149,8 @@ impl SettingsPage {
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
+                #[cfg(feature = "remote")]
+                "remote" => Section::Remote,
                 "archived" => Section::Archived,
                 _ => Section::General,
             })
@@ -241,6 +248,8 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
+        #[cfg(feature = "remote")]
+        let remote_panel = cx.new(|cx| crate::remote::RemotePanel::new(store.clone(), window, cx));
         let settings = store.read(cx).settings();
         let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
         let home_url_input = cx.new(|cx| {
@@ -267,6 +276,8 @@ impl SettingsPage {
             provider_cards: Vec::new(),
             acp_panel,
             orchestrate_panel,
+            #[cfg(feature = "remote")]
+            remote_panel,
             title_model_picker,
             fallback_review_model_picker,
             acp_cards: Vec::new(),
@@ -478,6 +489,21 @@ impl SettingsPage {
             .into_any_element()
         };
 
+        #[cfg(feature = "remote")]
+        let remote_nav_item = |this: &Self, cx: &mut Context<Self>| {
+            nav_item(
+                this,
+                "settings-nav-remote",
+                IconName::HardDrive,
+                crate::tr!("settings.remote").into_owned().into(),
+                Section::Remote,
+                cx,
+            )
+        };
+        #[cfg(not(feature = "remote"))]
+        let remote_nav_item = |_: &Self, _: &mut Context<Self>| div().into_any_element();
+
+        let remote = self.store.read(cx).is_remote();
         v_flex()
             .flex_none()
             .w(px(NAV_WIDTH))
@@ -541,14 +567,18 @@ impl SettingsPage {
                         Section::Browser,
                         cx,
                     ))
-                    .child(nav_item(
-                        self,
-                        "settings-nav-computer-use",
-                        IconName::LayoutDashboard,
-                        crate::tr!("settings.computer_use").into_owned().into(),
-                        Section::ComputerUse,
-                        cx,
-                    ))
+                    // Computer use drives THIS machine's desktop; a remote link
+                    // has no local affordances to grant (P4 of the remote plan).
+                    .when(!remote, |tabs| {
+                        tabs.child(nav_item(
+                            self,
+                            "settings-nav-computer-use",
+                            IconName::LayoutDashboard,
+                            crate::tr!("settings.computer_use").into_owned().into(),
+                            Section::ComputerUse,
+                            cx,
+                        ))
+                    })
                     .child(nav_item(
                         self,
                         "settings-nav-orchestrate",
@@ -557,6 +587,7 @@ impl SettingsPage {
                         Section::Orchestrate,
                         cx,
                     ))
+                    .child(remote_nav_item(self, cx))
                     .child(nav_item(
                         self,
                         "settings-nav-archived",
@@ -721,6 +752,11 @@ impl SettingsPage {
     }
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Its nav entry is hidden over a remote link, so a section remembered
+        // from a relaunch marker must not strand the page on it either.
+        if self.section == Section::ComputerUse && self.store.read(cx).is_remote() {
+            self.section = Section::General;
+        }
         // Usage is fetched on demand: kick one refresh off on the transition
         // into the section (any entry path — nav click, route key, restore),
         // not on every frame it renders.
@@ -740,6 +776,8 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
+            #[cfg(feature = "remote")]
+            Section::Remote => v_flex().child(self.remote_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
         div()

@@ -177,6 +177,7 @@ settings:
   browser: "Browser"
   computer_use: "Computer Use"
   orchestrate: "Orchestrate"
+  remote: "Remote"
   archived: "Archived Threads"
   archived_section: "ARCHIVED THREADS"
   archived_empty: "No archived threads"
@@ -860,3 +861,59 @@ toast:
   show_details: "Show details"
   hide_details: "Hide details"
   copy_error: "Copy error"
+remote:
+  intro: "Run tcode's host here and connect from another device, or point this window at a host running elsewhere."
+  apply: "Apply"
+  host:
+    section: "HOST THIS COMPUTER"
+    title: "Host this computer"
+    description: "Serve this computer's sessions to paired tcode clients on your network."
+    unavailable: "Unavailable while this window is connected to another host."
+  port:
+    title: "Port"
+    description: "TCP port the remote listener binds on every interface."
+  host_name:
+    title: "Host name"
+    description: "Shown to clients while pairing and on the discovery beacon."
+  code:
+    title: "PAIRING CODE"
+    description: "Mint a fresh six-digit code to pair another device."
+    expired: "Pairing code expired"
+    new: "New code"
+    expires: "Expires in %{time}"
+    listening: "Listening on %{addrs} port %{port}"
+    no_addresses: "this machine only"
+  devices:
+    section: "PAIRED DEVICES"
+    empty: "No devices paired yet."
+    paired_on: "Paired %{date}"
+    revoke: "Revoke"
+  connect:
+    section: "CONNECT TO ANOTHER HOST"
+    connected_to: "Connected to %{name}"
+    connected_description: "This window is a client; sessions and providers run on the host."
+    back_to_local: "Back to local"
+  hosts:
+    section: "PAIRED HOSTS"
+    empty: "No paired hosts yet."
+    connect: "Connect"
+    current: "Connected"
+    remove: "Remove"
+  discover:
+    section: "DISCOVER"
+    title: "Find hosts on this network"
+    description: "Listen for tcode hosts broadcasting on the local network."
+    search: "Search"
+    none: "No hosts found. Pair by code instead."
+    pair: "Use"
+  pair:
+    section: "PAIR WITH A CODE"
+    description: "Enter the host's address, port and the six-digit code it is showing."
+    action: "Pair"
+    address_placeholder: "192.168.1.10"
+    code_placeholder: "123456"
+    bad_code: "A pairing code is six digits."
+    paired: "Paired with %{name}"
+  banner:
+    reconnecting: "Reconnecting to %{host}… (attempt %{attempt})"
+    offline: "Offline — %{host} is unreachable"

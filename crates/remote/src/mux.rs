@@ -287,18 +287,27 @@ mod tests {
         let mux = HostMux::new(to_host, from_host);
         let one = mux.attach();
         let two = mux.attach();
+        // Each connection forwards on its own thread, so the two lines can
+        // reach the mux in either order. Tag them by topic and resolve
+        // ownership from the payload rather than from arrival order.
         one.to_host
             .send_blocking("{\"id\":7,\"payload\":{\"type\":\"subscribe\",\"content\":{\"topic\":{\"type\":\"index\"}}}}\n".into())
             .unwrap();
         two.to_host
-            .send_blocking("{\"id\":7,\"payload\":{\"type\":\"subscribe\",\"content\":{\"topic\":{\"type\":\"index\"}}}}\n".into())
+            .send_blocking("{\"id\":7,\"payload\":{\"type\":\"subscribe\",\"content\":{\"topic\":{\"type\":\"providers\"}}}}\n".into())
             .unwrap();
-        let first: serde_json::Value =
-            serde_json::from_str(host_rx.recv_blocking().unwrap().trim_end()).unwrap();
-        let second: serde_json::Value =
-            serde_json::from_str(host_rx.recv_blocking().unwrap().trim_end()).unwrap();
-        let first_id = first["id"].as_u64().unwrap();
-        let second_id = second["id"].as_u64().unwrap();
+        let mut ids = HashMap::<String, u64>::new();
+        for _ in 0..2 {
+            let line: serde_json::Value =
+                serde_json::from_str(host_rx.recv_blocking().unwrap().trim_end()).unwrap();
+            let topic = line["payload"]["content"]["topic"]["type"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            ids.insert(topic, line["id"].as_u64().unwrap());
+        }
+        let first_id = ids["index"];
+        let second_id = ids["providers"];
         assert_ne!(first_id, second_id);
         host_tx
             .send_blocking(format!(
