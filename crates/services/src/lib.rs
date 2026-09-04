@@ -8,6 +8,7 @@ pub mod import;
 pub mod process;
 pub mod provider_auth;
 pub mod provider_probe;
+pub mod provider_usage;
 pub mod relaunch;
 pub mod session_search;
 pub mod settings;

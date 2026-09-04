@@ -62,6 +62,7 @@ const CONTENT_MAX_WIDTH: f32 = 768.;
 enum Section {
     General,
     Providers,
+    Usage,
     Browser,
     ComputerUse,
     Orchestrate,
@@ -103,6 +104,9 @@ pub struct SettingsPage {
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
+    /// Latches the one usage refresh fired when Usage becomes the active
+    /// section; cleared as soon as the page shows anything else.
+    usage_refresh_sent: bool,
     /// Editable "Home URL" for the Browser page; committed on change.
     home_url_input: Entity<InputState>,
     auto_archive_idle_input: Entity<InputState>,
@@ -136,6 +140,7 @@ impl SettingsPage {
             .update(cx, |state, _| state.pending_settings_section.take())
             .map(|section| match section.as_str() {
                 "providers" => Section::Providers,
+                "usage" => Section::Usage,
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
@@ -266,6 +271,7 @@ impl SettingsPage {
             fallback_review_model_picker,
             acp_cards: Vec::new(),
             section,
+            usage_refresh_sent: false,
             home_url_input: home_url_input.clone(),
             auto_archive_idle_input: auto_archive_idle_input.clone(),
             auto_archive_keep_input: auto_archive_keep_input.clone(),
@@ -521,6 +527,14 @@ impl SettingsPage {
                     ))
                     .child(nav_item(
                         self,
+                        "settings-nav-usage",
+                        IconName::ChartPie,
+                        crate::tr!("settings.usage").into_owned().into(),
+                        Section::Usage,
+                        cx,
+                    ))
+                    .child(nav_item(
+                        self,
                         "settings-nav-browser",
                         IconName::Globe,
                         crate::tr!("settings.browser").into_owned().into(),
@@ -707,9 +721,22 @@ impl SettingsPage {
     }
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Usage is fetched on demand: kick one refresh off on the transition
+        // into the section (any entry path — nav click, route key, restore),
+        // not on every frame it renders.
+        if self.section == Section::Usage {
+            if !self.usage_refresh_sent {
+                self.usage_refresh_sent = true;
+                self.store
+                    .update(cx, |store, _cx| store.refresh_provider_usage());
+            }
+        } else {
+            self.usage_refresh_sent = false;
+        }
         let column = match self.section {
             Section::General => self.render_general(cx),
             Section::Providers => self.render_providers(window, cx),
+            Section::Usage => self.render_usage(cx),
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
@@ -1132,6 +1159,236 @@ impl SettingsPage {
             section = section.child(card.clone());
         }
         section
+    }
+
+    /// Usage: one card per enabled Codex / Claude Code profile listing the
+    /// account rate-limit windows the provider reported — never more, never a
+    /// synthesized one (a Codex Pro account genuinely has no 5h window).
+    fn render_usage(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+        let store = self.store.read(cx);
+        let profiles: Vec<_> = store
+            .enabled_profiles()
+            .into_iter()
+            .filter(|profile| {
+                matches!(
+                    profile.kind,
+                    agent::ProviderKind::Codex | agent::ProviderKind::ClaudeCode
+                )
+            })
+            .collect();
+        let rows: Vec<(String, String, agent::ProviderKind, _, bool)> = profiles
+            .iter()
+            .map(|profile| {
+                (
+                    profile.id.clone(),
+                    store.provider_profile_display_name(&profile.id),
+                    profile.kind,
+                    store.provider_usage(&profile.id),
+                    store.usage_checking(&profile.id),
+                )
+            })
+            .collect();
+        let updated_at = rows
+            .iter()
+            .filter_map(|(_, _, _, usage, _)| usage.as_ref().map(|usage| usage.fetched_at))
+            .max();
+        let checking = rows.iter().any(|(_, _, _, _, checking)| *checking);
+        let muted = cx.theme().muted_foreground;
+
+        let mut header = gpui_base::h_flex().w_full().items_center().gap_2().child(
+            div()
+                .flex_1()
+                .pl_3()
+                .text_size(px(11.))
+                .font_medium()
+                .text_color(muted)
+                .child(crate::tr!("usage.section")),
+        );
+        if let Some(updated_at) = updated_at {
+            let ago = humanize_ago(now_secs().saturating_sub(updated_at));
+            header = header.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(crate::tr!("usage.updated", when = ago).into_owned()),
+            );
+        }
+        header = header.child(
+            Button::new("refresh-usage")
+                .ghost()
+                .xsmall()
+                .loading(checking)
+                .icon(Icon::empty().path("icons/rotate-ccw.svg"))
+                .tooltip(crate::tr!("usage.refresh"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.store
+                        .update(cx, |store, _cx| store.refresh_provider_usage());
+                })),
+        );
+
+        let mut section = v_flex().w_full().gap_3().child(header);
+        if rows.is_empty() {
+            section = section.child(crate::material::grouped(
+                vec![self.usage_note_row(crate::tr!("usage.no_profiles").into_owned(), None, cx)],
+                cx,
+            ));
+        }
+        for (profile_id, name, kind, usage, checking) in rows {
+            let mut card_rows = vec![self.usage_card_header(
+                &name,
+                kind,
+                usage.as_ref().and_then(|u| u.plan.clone()),
+                cx,
+            )];
+            match &usage {
+                Some(usage) if usage.error.is_some() => card_rows.push(self.usage_note_row(
+                    crate::tr!("usage.unavailable").into_owned(),
+                    usage.error.clone(),
+                    cx,
+                )),
+                Some(usage) if !usage.windows.is_empty() => {
+                    let now = now_secs();
+                    card_rows.extend(
+                        usage
+                            .windows
+                            .iter()
+                            .map(|window| self.usage_window_row(window, now, cx)),
+                    );
+                }
+                _ if checking => card_rows.push(self.usage_note_row(
+                    crate::tr!("usage.checking").into_owned(),
+                    None,
+                    cx,
+                )),
+                _ => card_rows.push(self.usage_note_row(
+                    crate::tr!("usage.no_data").into_owned(),
+                    None,
+                    cx,
+                )),
+            }
+            section = section.child(
+                div()
+                    .id(SharedString::from(format!("usage-card-{profile_id}")))
+                    .child(crate::material::grouped(card_rows, cx)),
+            );
+        }
+        section
+    }
+
+    /// A usage card's title row: provider glyph + profile name + plan chip.
+    fn usage_card_header(
+        &self,
+        name: &str,
+        kind: agent::ProviderKind,
+        plan: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        self.row_frame(cx)
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(16.))
+                    .child(crate::provider_card::provider_glyph(kind).small()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .font_medium()
+                    .child(name.to_owned()),
+            )
+            .when_some(plan, |row, plan| {
+                row.child(crate::material::semantic_chip(
+                    crate::usage::plan_label(&plan),
+                    cx.theme().muted,
+                    muted,
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// One rate-limit window: label + "resets in …" on the left, percent on
+    /// the right, a 6px bar underneath.
+    fn usage_window_row(
+        &self,
+        window: &tcode_core::usage::UsageWindow,
+        now: u64,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let fill = crate::usage::bar_color(window.used_percent, cx);
+        self.row_frame(cx)
+            .flex_col()
+            .items_start()
+            .gap_2()
+            .child(
+                gpui_base::h_flex()
+                    .w_full()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .font_medium()
+                                    .child(crate::usage::window_label(window)),
+                            )
+                            .when_some(
+                                crate::usage::resets_label(window.resets_at, now),
+                                |col, label| {
+                                    col.child(
+                                        div().text_size(px(11.)).text_color(muted).child(label),
+                                    )
+                                },
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.5))
+                            .text_color(muted)
+                            .child(crate::usage::percent_label(window.used_percent)),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(cx.theme().muted)
+                    .child(div().h_full().rounded_full().bg(fill).w(gpui::relative(
+                        window.used_percent.clamp(0.0, 100.0) / 100.0,
+                    ))),
+            )
+            .into_any_element()
+    }
+
+    /// A muted status row inside a usage card ("Checking…", "No usage data
+    /// yet", or "Usage unavailable" over the provider's own error text).
+    fn usage_note_row(
+        &self,
+        label: String,
+        detail: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        self.row_frame(cx)
+            .flex_col()
+            .items_start()
+            .gap(px(2.))
+            .text_color(muted)
+            .child(div().text_size(px(11.5)).child(label))
+            .when_some(detail, |col, detail| {
+                col.child(div().text_size(px(11.)).child(detail))
+            })
+            .into_any_element()
     }
 
     /// Archived Threads: archived sessions grouped by project, each with

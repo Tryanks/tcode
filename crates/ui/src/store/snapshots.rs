@@ -67,6 +67,8 @@ pub(crate) struct ComposerState {
     pub options_pending_restart: bool,
     pub interaction_mode: agent::InteractionMode,
     pub token_usage: Option<agent::TokenUsage>,
+    /// Account rate-limit windows for the profile driving this session.
+    pub usage: Option<tcode_core::usage::ProviderUsage>,
     pub provider: Option<agent::ProviderKind>,
     pub approval_mode: agent::ApprovalMode,
     pub native_approval_modes_enabled: bool,
@@ -210,6 +212,16 @@ pub(crate) fn composer_state(
             usage
         });
 
+    // The session names its profile explicitly only when it is not on the
+    // provider's built-in one; both resolve into the same usage map.
+    let usage = status.and_then(|status| {
+        let profile_id = status
+            .requested_profile_id
+            .clone()
+            .unwrap_or_else(|| Settings::builtin_profile_id(status.provider).to_owned());
+        providers.provider_usage.get(&profile_id).cloned()
+    });
+
     ComposerState {
         has_active_session: status.is_some(),
         terminal_contexts: status
@@ -256,6 +268,7 @@ pub(crate) fn composer_state(
             .map(|status| status.interaction_mode)
             .unwrap_or_default(),
         token_usage,
+        usage,
         provider,
         approval_mode,
         native_approval_modes_enabled,

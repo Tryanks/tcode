@@ -400,6 +400,7 @@ impl AppState {
         }
 
         if matches!(event, AgentEvent::TurnCompleted { .. }) {
+            self.refresh_provider_usage_if_stale(cx);
             // The turn is over: the next queued message (if any) now goes out as
             // an ordinary turn, FIFO, one at a time.
             let mut restart = false;

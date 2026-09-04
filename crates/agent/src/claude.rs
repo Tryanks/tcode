@@ -289,6 +289,102 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     })
 }
 
+/// Ask a short-lived Claude Code process for its subscription usage.
+pub async fn read_usage(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> Result<Value, AgentError> {
+    let binary = crate::resolve_binary(binary_path.as_deref(), "claude")?;
+    let binary_display = binary.to_string_lossy().into_owned();
+    let mut cmd = crate::process::async_command(&binary);
+    cmd.arg("--print")
+        .arg("--input-format")
+        .arg("stream-json")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT");
+    for (key, value) in launch_env.pairs(ProviderKind::ClaudeCode) {
+        cmd.env(key, value);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| AgentError::Spawn(format!("spawning `{binary_display}`: {err}")))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AgentError::Spawn("child stdin missing".into()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AgentError::Spawn("child stdout missing".into()))?;
+
+    write_line(
+        &mut stdin,
+        &json!({
+            "type": "control_request",
+            "request_id": "usage-1",
+            "request": { "subtype": "get_usage" }
+        }),
+    )
+    .await?;
+
+    let read_response = async {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Some(line) = lines.next().await {
+            let line = line.map_err(AgentError::Io)?;
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if message.get("type").and_then(Value::as_str) != Some("control_response") {
+                continue;
+            }
+            let Some(response) = message.get("response") else {
+                continue;
+            };
+            if response.get("request_id").and_then(Value::as_str) != Some("usage-1") {
+                continue;
+            }
+            if response.get("subtype").and_then(Value::as_str) == Some("error") {
+                let error = response
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| response.get("error").unwrap_or(response).to_string());
+                return Err(AgentError::Provider(error));
+            }
+            return response.get("response").cloned().ok_or_else(|| {
+                AgentError::Protocol("Claude usage response omitted response".into())
+            });
+        }
+        Err(AgentError::Protocol(
+            "Claude stdout closed before usage response".into(),
+        ))
+    };
+
+    let result = smol::future::or(async { Some(read_response.await) }, async {
+        smol::Timer::after(std::time::Duration::from_secs(20)).await;
+        None
+    })
+    .await
+    .unwrap_or_else(|| {
+        Err(AgentError::Protocol(
+            "Claude usage request timed out".into(),
+        ))
+    });
+
+    let _ = stdin.close().await;
+    let _ = child.kill();
+    let _ = child.status().await;
+    result
+}
+
 fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
     if registrations.is_empty() {
         Vec::new()

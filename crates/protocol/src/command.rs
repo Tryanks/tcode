@@ -64,6 +64,9 @@ pub enum Command {
         profile_id: String,
     },
     RefreshProviderStatus,
+    /// Re-fetch account usage / rate-limit windows for every usage-capable
+    /// provider profile (Codex, Claude Code).
+    RefreshProviderUsage,
     CheckProviderVersions,
     UpdateProvider {
         provider: ProviderKind,
