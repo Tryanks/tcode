@@ -578,6 +578,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e308e9866b891743e3fdf9dfd6b57f85c5062ca01ce4fed6f393e76eb5accea4"
+dependencies = [
+ "atomic-waker",
+ "futures-core",
+ "futures-io",
+ "futures-task",
+ "log",
+ "pin-project-lite",
+ "tungstenite",
+]
+
+[[package]]
 name = "atk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1896,6 +1911,12 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
+
+[[package]]
+name = "data-encoding"
+version = "2.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "data-url"
@@ -4166,6 +4187,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6522,6 +6553,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7742,6 +7779,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8423,6 +8471,7 @@ dependencies = [
  "async-channel",
  "log",
  "serde_json",
+ "smol",
  "tcode-protocol",
 ]
 
@@ -8441,7 +8490,17 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "mcp-host",
+ "orchestrate-mcp",
+ "qrcode",
+ "serde",
+ "serde_json",
+ "tcode-protocol",
  "tcode-remote",
+ "tcode-runtime",
+ "tcode-services",
+ "ureq",
 ]
 
 [[package]]
@@ -8459,10 +8518,25 @@ dependencies = [
 name = "tcode-remote"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "async-tungstenite",
+ "base64 0.23.1",
+ "futures-lite",
+ "futures-util",
+ "getrandom 0.3.4",
+ "if-addrs",
  "log",
  "serde",
  "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "smol",
+ "socket2",
  "tcode-protocol",
+ "tungstenite",
+ "ureq",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -8470,6 +8544,7 @@ name = "tcode-runtime"
 version = "0.1.0"
 dependencies = [
  "agent",
+ "async-channel",
  "base64 0.23.1",
  "computer-use-mcp",
  "log",
@@ -8478,6 +8553,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tcode-client",
  "tcode-core",
  "tcode-protocol",
  "tcode-services",
@@ -8542,6 +8618,7 @@ dependencies = [
  "smol",
  "syntect",
  "sys-locale",
+ "tcode-client",
  "tcode-core",
  "tcode-protocol",
  "tcode-runtime",
@@ -9076,6 +9153,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eadc29d668c91fcc564941132e17b28a7ceb2f3ebf0b9dae3e03fd7a6748eb0d"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "sha1",
+ "thiserror 2.0.19",
+ "utf-8",
 ]
 
 [[package]]
