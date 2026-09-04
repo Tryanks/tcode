@@ -120,12 +120,28 @@ pub(crate) async fn response<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    response_with_body_mode(stream, status, content_type, body, false).await
+}
+
+/// HEAD has the same representation headers as GET, without a body.
+pub(crate) async fn response_with_body_mode<S>(
+    stream: &mut S,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body).await?;
+    if !head_only {
+        stream.write_all(body).await?;
+    }
     stream.flush().await
 }
 

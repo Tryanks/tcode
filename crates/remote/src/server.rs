@@ -18,7 +18,7 @@ use tungstenite::protocol::Role;
 
 use crate::auth::AuthStore;
 use crate::mux::HostMux;
-use crate::wire::{Request, content_type, read_request, response};
+use crate::wire::{Request, content_type, read_request, response, response_with_body_mode};
 
 const PAIRING_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const MAX_PAIRING_FAILURES: u8 = 5;
@@ -219,7 +219,9 @@ async fn handle_connection(
             )
             .await
         }
-        ("GET", path) => serve_static(&mut stream, path, &shared).await,
+        ("GET" | "HEAD", path) => {
+            serve_static(&mut stream, path, &shared, request.method == "HEAD").await
+        }
         _ => {
             response(
                 &mut stream,
@@ -352,7 +354,12 @@ where
     response(stream, status, "application/json", &body).await
 }
 
-async fn serve_static<S>(stream: &mut S, request_path: &str, shared: &Shared) -> io::Result<()>
+async fn serve_static<S>(
+    stream: &mut S,
+    request_path: &str,
+    shared: &Shared,
+    head_only: bool,
+) -> io::Result<()>
 where
     S: futures_lite::io::AsyncWrite + Unpin,
 {
@@ -368,13 +375,16 @@ where
             .map(|(_, bytes)| *bytes)
     });
     match found {
-        Some(bytes) => response(stream, "200 OK", content_type(lookup), bytes).await,
+        Some(bytes) => {
+            response_with_body_mode(stream, "200 OK", content_type(lookup), bytes, head_only).await
+        }
         None => {
-            response(
+            response_with_body_mode(
                 stream,
                 "404 Not Found",
                 "text/plain; charset=utf-8",
                 b"not found",
+                head_only,
             )
             .await
         }

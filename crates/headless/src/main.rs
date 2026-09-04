@@ -12,6 +12,21 @@ use tcode_remote::{HostMux, RemoteConfig, serve};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::SessionStore;
 
+#[cfg(feature = "web")]
+const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = Some(&[
+    ("/index.html", include_bytes!("../../web/dist/index.html")),
+    (
+        "/tcode_web.js",
+        include_bytes!("../../web/dist/tcode_web.js"),
+    ),
+    (
+        "/tcode_web_bg.wasm",
+        include_bytes!("../../web/dist/tcode_web_bg.wasm"),
+    ),
+]);
+#[cfg(not(feature = "web"))]
+const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = None;
+
 const DEFAULT_LISTEN: &str = "0.0.0.0:47420";
 
 fn main() {
@@ -74,12 +89,29 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             listen,
             host_name: name,
             data_dir: remote_data_dir,
-            static_bundle: None,
+            static_bundle: STATIC_BUNDLE,
         },
     )
     .map_err(|error| format!("remote listener failed: {error}"))?;
     let pairing = server.new_pairing_code();
     print_pairing(&pairing)?;
+    #[cfg(feature = "web")]
+    {
+        let bound = server.local_addr();
+        if bound.ip().is_unspecified() {
+            let mut addrs = pairing.addrs.clone();
+            addrs.push(if bound.is_ipv6() { "::1" } else { "127.0.0.1" }.into());
+            for addr in addrs {
+                if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+                    if ip.is_ipv4() == bound.is_ipv4() {
+                        println!("Browser: http://{}/", SocketAddr::new(ip, bound.port()));
+                    }
+                }
+            }
+        } else {
+            println!("Browser: http://{bound}/");
+        }
+    }
     let beacon = start_beacon(
         pairing.host_id.clone(),
         pairing.host_name.clone(),

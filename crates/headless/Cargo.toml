@@ -7,6 +7,10 @@ edition = "2024"
 name = "tcode-headless"
 path = "src/main.rs"
 
+[features]
+default = []
+web = []
+
 [dependencies]
 async-channel = "2"
 mcp-host = { path = "../mcp-host" }

@@ -242,3 +242,95 @@ shell, WebSocket implementation, and bundle/serve work remain P3; no deeper
 Every phase: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets
 --locked -- -D warnings`, `cargo test --workspace --locked`, plus the phase gate.
 Commit only after the gate passes on the integrated tree.
+
+#### P3a notes
+
+P3a adds `tcode-web`, an empty native library with all browser dependencies
+behind `cfg(target_family = "wasm")`. The wasm shell supplies `WebHost` to
+`run_with_host`; it uses the single-threaded GPUI web patch, retains the
+`ApplicationHandle`, adopts GPUI's generated canvas, and embeds Noto Sans
+(the accompanying OFL is in `crates/web/assets`) plus the existing DM Sans.
+Pairing and sockets always use the page origin, irrespective of saved addresses.
+Hosts/tokens and the last host use `tcode.hosts` / `tcode.last_host` in localStorage.
+The transport authenticates before sending records, replays subscriptions by
+topic before queued commands, retries at 1–30 seconds, and retries immediately
+on online/visible events. Closing channels releases sockets, timers and listeners.
+
+Build tools must match the pinned Rust bindings: `wasm-bindgen` 0.2.121,
+`wasm-bindgen-futures` 0.4.71, `js-sys` and `web-sys` 0.3.98. No timer dependency
+or multithreaded web feature is added. `wasm-opt` is optional (a notice is printed
+when unavailable).
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.121 --locked
+cargo check -p tcode-web --target wasm32-unknown-unknown
+crates/web/build.sh
+cargo build -p tcode-headless --features web
+TCODE_DATA_DIR=/tmp/tcode-host-p3a target/debug/tcode-headless serve \
+  --listen 127.0.0.1:47420 --name web-host
+curl -sI http://127.0.0.1:47420/ | head -3
+curl -sI http://127.0.0.1:47420/tcode_web_bg.wasm
+```
+
+The build writes `crates/web/dist/{index.html,tcode_web.js,tcode_web_bg.wasm}`
+(and wasm-bindgen declaration files). Only headless's opt-in `web` feature embeds
+those three runtime files; building it before the bundle exists reports the
+`crates/web/build.sh` hint. Without `web`, static requests remain 404. Static
+HEAD now returns the GET headers with no body, including the WASM MIME type.
+
+Open the browser URL in the preview tools, wait for
+`document.body.dataset.tcodeReady === 'true'`, inspect the canvas and console,
+and save `docs/images/mobile/p3a-browser.png`. The explicit debug entry uses
+the same `MobileHost::pair` and `connect` methods as the screens:
+
+```sh
+curl -s http://127.0.0.1:47420/admin/pair
+```
+
+```js
+const web = await import('/tcode_web.js');
+await web.debug_pair_and_connect('CODE_FROM_CURL'); // first index_snapshot line
+web.debug_connection_state(); // JSON: state, transition history, index_snapshots
+```
+
+Stop and restart the same host/data directory, invoking
+`debug_connection_state()` while stopped and after restart. Expect
+`Reconnecting { attempt: … }` then `Connected`, and another index snapshot
+without sending another subscribe. Dispatching an `online` event or making the
+page visible interrupts backoff. Debug exports retain only the most recent
+probe transport and are intended for this transport smoke test.
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build -p tcode
+! strings target/debug/tcode | grep -q tcode_web_bg
+```
+
+Validation for P3a uses an isolated checkout of HEAD `d7bfe6663` plus the P3a
+changes because phone/UI work is concurrently in progress. This honors the
+HEAD MobileHost contract without changing the other engineer's files. Native
+workspace checks include `tcode-web`; its native library has no dependencies.
+
+P3a verification on this Mac: native fmt/Clippy and workspace tests passed
+(956 passed, 0 failed, 2 ignored), wasm check and optimized bundle build passed,
+and the desktop binary scan found no `tcode_web_bg` marker. The requested
+47420 port was already held by a pre-existing `mac-host`; the browser smoke
+test used 47422 without stopping it. `GET`/`HEAD` returned 200 HTML and
+`application/wasm`; a separate headless build without `web` returned 404.
+Preview MCP pairing returned an index snapshot; stopping/restarting the same
+host produced Reconnecting → Connected and replayed the index subscription.
+
+`preview_screenshot` was attempted but refused with “preview is not visible;
+the user is viewing another conversation”. Multiple tcode processes were
+running, and the Computer Use app surface did not control the instance owning
+that preview. The saved `docs/images/mobile/p3a-browser.png` is therefore a
+Chrome DevTools capture of the same served bundle at 390×844 CSS pixels
+(780×1688 PNG), showing HEAD's placeholder. Chrome's final console showed only
+the two GPUI graphics initialization info messages; the inline favicon avoids
+an automatic favicon 404. The literal preview-screenshot gate remains for an
+orchestrator with the owning conversation visible. Optional wasm Clippy with
+`-D warnings` hits HEAD's unused `Rc` import in `crates/mobile`; normal wasm
+check passes with that warning and a platform `instance_flags` dead-code warning.

@@ -10,3 +10,6 @@
 /crates/android/host/.gradle/
 /crates/android/host/app/src/main/jniLibs/
 /crates/android/host/local.properties
+
+# Generated browser bundle.
+/crates/web/dist/
