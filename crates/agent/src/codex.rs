@@ -92,6 +92,31 @@ pub async fn list_models(
     result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
 }
 
+/// Read the account-wide rate limits from `codex app-server` and tear the
+/// process down after the single request completes.
+pub async fn read_rate_limits(
+    binary_path: Option<PathBuf>,
+    launch_env: LaunchEnv,
+) -> Result<Value, AgentError> {
+    let (mut child, mut stdin, lines, mut stderr_tail) =
+        spawn_server(binary_path.as_deref(), &[], &launch_env)?;
+    let result = async {
+        initialize(&mut stdin, &lines).await?;
+        send_json(
+            &mut stdin,
+            &json!({ "id": 2, "method": "account/rateLimits/read", "params": {} }),
+        )?;
+        wait_for_response(&lines, 2).await
+    }
+    .await;
+    let status = result
+        .is_err()
+        .then(|| settle_child_exit(&mut child))
+        .flatten();
+    stop_child(&mut child, stdin);
+    result.map_err(|err| enrich_startup_error(err, status, &mut stderr_tail))
+}
+
 async fn initialize(
     stdin: &mut BufWriter<ChildStdin>,
     lines: &Receiver<ChildOutput>,

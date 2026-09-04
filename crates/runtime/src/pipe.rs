@@ -392,6 +392,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(&mut cx);
                 }
+                state.refresh_provider_usage(&mut cx);
                 state.refresh_provider_status(&mut cx);
             }
             state.sync_terminal_handles();
@@ -562,6 +563,7 @@ fn dispatch_command(
         }
         Command::DeleteProfile { profile_id } => app.delete_profile(&profile_id, cx),
         Command::RefreshProviderStatus => app.refresh_provider_status(cx),
+        Command::RefreshProviderUsage => app.refresh_provider_usage(cx),
         Command::CheckProviderVersions => app.check_provider_versions(cx),
         Command::UpdateProvider { provider } => app.update_provider(provider, cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),

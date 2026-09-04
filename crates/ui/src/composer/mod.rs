@@ -55,9 +55,9 @@ use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::ui::WorkspaceMode;
 use tcode_protocol::PathEntry;
 
-/// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3.
-const METER_BLUE: u32 = 0x3B82F6;
-const METER_RED: u32 = 0xEF4444;
+/// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3. Shared
+/// with the usage bars so both instruments read the same.
+use crate::usage::{METER_BLUE, METER_RED};
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
 const FILE_MENU_ROW_CAP: usize = 50;
