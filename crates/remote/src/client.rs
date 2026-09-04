@@ -8,35 +8,14 @@ use std::time::Duration;
 use async_channel::{Receiver, Sender};
 use async_tungstenite::WebSocketStream;
 use futures_util::{FutureExt as _, StreamExt as _};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use smol::Async;
 use tungstenite::Message;
-use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PairedHost {
-    pub host_id: String,
-    pub name: String,
-    pub addrs: Vec<String>,
-    pub port: u16,
-    pub token: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PairInvite {
-    pub host_id: String,
-    pub name: String,
-    pub addrs: Vec<String>,
-    pub port: u16,
-    pub code: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectionState {
-    Connected,
-    Reconnecting { attempt: u32 },
-    Offline,
-}
+pub use tcode_client::ConnectionState;
+pub use tcode_client::pairing::{
+    PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
+};
 
 pub struct RemoteClient {
     pub to_host: Sender<String>,
@@ -67,51 +46,8 @@ pub fn pair(addr: &str, port: u16, code: &str, device_name: &str) -> Result<Pair
         addrs: vec![addr.to_owned()],
         port,
         token: response.token,
+        last_connected_unix: None,
     })
-}
-
-pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
-    let url = Url::parse(value).ok()?;
-    if url.scheme() != "tcode" || url.host_str() != Some("pair") {
-        return None;
-    }
-    let fields: HashMap<_, _> = url.query_pairs().into_owned().collect();
-    if fields.get("v")? != "1" {
-        return None;
-    }
-    let port = fields.get("port")?.parse().ok()?;
-    let addrs = fields
-        .get("addrs")?
-        .split(',')
-        .filter(|address| !address.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if addrs.is_empty() {
-        return None;
-    }
-    let code = fields.get("code")?.clone();
-    if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    Some(PairInvite {
-        host_id: fields.get("host")?.clone(),
-        name: fields.get("name")?.clone(),
-        addrs,
-        port,
-        code,
-    })
-}
-
-pub fn pair_url(invite: &PairInvite) -> String {
-    let mut url = Url::parse("tcode://pair").expect("static pairing URL is valid");
-    url.query_pairs_mut()
-        .append_pair("v", "1")
-        .append_pair("host", &invite.host_id)
-        .append_pair("name", &invite.name)
-        .append_pair("addrs", &invite.addrs.join(","))
-        .append_pair("port", &invite.port.to_string())
-        .append_pair("code", &invite.code);
-    url.into()
 }
 
 pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
@@ -397,21 +333,4 @@ fn socket_addr(address: &str, port: u16) -> Result<SocketAddr, String> {
         .parse()
         .map_err(|error| format!("invalid host address: {error}"))?;
     Ok(SocketAddr::new(ip, port))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pairing_url_round_trip() {
-        let invite = PairInvite {
-            host_id: "host-id".into(),
-            name: "Desk & Mac".into(),
-            addrs: vec!["192.168.1.2".into(), "fd00::1".into()],
-            port: 47_420,
-            code: "123456".into(),
-        };
-        assert_eq!(parse_pair_url(&pair_url(&invite)), Some(invite));
-    }
 }

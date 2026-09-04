@@ -8624,9 +8624,11 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "log",
+ "serde",
  "serde_json",
  "smol",
  "tcode-protocol",
+ "url",
 ]
 
 [[package]]
@@ -8671,21 +8673,15 @@ dependencies = [
 name = "tcode-mobile"
 version = "0.1.0"
 dependencies = [
- "agent",
+ "async-channel",
  "dirs 6.0.0",
- "env_logger",
  "gpui-android",
- "gpui-base",
  "gpui-ios",
  "gpui-pre",
- "gpui-pre-platform",
  "log",
- "serde",
  "serde_json",
  "tcode-client",
- "tcode-core",
  "tcode-remote",
- "tcode-ui",
 ]
 
 [[package]]
@@ -8717,10 +8713,10 @@ dependencies = [
  "sha2 0.10.9",
  "smol",
  "socket2",
+ "tcode-client",
  "tcode-protocol",
  "tungstenite",
  "ureq",
- "url",
  "uuid",
 ]
 

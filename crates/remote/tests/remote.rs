@@ -285,6 +285,7 @@ fn paired_host_shape_is_public() {
         addrs: vec!["127.0.0.1".into()],
         port: 1,
         token: "token".into(),
+        last_connected_unix: None,
     };
     assert_eq!(host.port, 1);
 }

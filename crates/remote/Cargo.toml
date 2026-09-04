@@ -14,9 +14,10 @@ server = [
     "dep:sha2",
     "dep:uuid",
 ]
-client = ["dep:socket2", "dep:ureq", "dep:url"]
+client = ["dep:socket2", "dep:ureq"]
 
 [dependencies]
+tcode-client = { path = "../client" }
 tcode-protocol = { path = "../protocol", optional = true }
 async-channel = "2"
 async-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
@@ -34,5 +35,4 @@ smol = "2"
 socket2 = { version = "0.6", optional = true }
 tungstenite = "0.27"
 ureq = { version = "2", default-features = false, features = [], optional = true }
-url = { version = "2", optional = true }
 uuid = { version = "1", features = ["v4", "serde"], optional = true }

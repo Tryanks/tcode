@@ -1,5 +1,7 @@
 //! Transport-agnostic client endpoint for a tcode host.
 
+pub mod pairing;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
