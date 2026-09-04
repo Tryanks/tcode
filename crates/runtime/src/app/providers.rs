@@ -403,8 +403,62 @@ impl AppState {
     }
 
     /// Fetch account usage / rate-limit windows for every usage-capable profile.
-    pub fn refresh_provider_usage(&mut self, _cx: &mut HostCx) {
-        // Filled in by the usage feature: see services::provider_usage.
+    pub fn refresh_provider_usage(&mut self, cx: &mut HostCx) {
+        self.refresh_provider_usage_inner(cx, false);
+    }
+
+    /// Refresh usage unless the profile already has a result from the last two
+    /// minutes. Called after turns to avoid repeatedly polling provider CLIs.
+    pub fn refresh_provider_usage_if_stale(&mut self, cx: &mut HostCx) {
+        self.refresh_provider_usage_inner(cx, true);
+    }
+
+    fn refresh_provider_usage_inner(&mut self, cx: &mut HostCx, stale_only: bool) {
+        let now = now_secs();
+        for profile in self.all_profiles() {
+            let profile_id = profile.id;
+            let provider = profile.kind;
+            if !matches!(provider, ProviderKind::Codex | ProviderKind::ClaudeCode)
+                || self
+                    .providers
+                    .provider_snapshots
+                    .get(&profile_id)
+                    .is_some_and(|snapshot| !snapshot.installed)
+                || self.providers.usage_checking.contains(&profile_id)
+                || stale_only
+                    && self
+                        .providers
+                        .provider_usage
+                        .get(&profile_id)
+                        .is_some_and(|usage| now.saturating_sub(usage.fetched_at) < 120)
+            {
+                continue;
+            }
+            self.providers.usage_checking.insert(profile_id.clone());
+            let binary = self.resolve_profile_binary(&profile_id);
+            let settings = self.settings.clone();
+            let settings_store = self.settings_store.clone();
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
+                let env_profile_id = profile_id.clone();
+                let launch_env = host_cx
+                    .unblock(move || {
+                        let secrets = settings_store.profile_secrets(&env_profile_id);
+                        launch_env_for_profile(&settings, &env_profile_id, secrets)
+                    })
+                    .await;
+                let usage = tcode_services::provider_usage::fetch_provider_usage(
+                    provider, binary, launch_env,
+                )
+                .await;
+                host_cx.enqueue(move |state, _cx| {
+                    state.providers.usage_checking.remove(&profile_id);
+                    if let Some(usage) = usage {
+                        state.providers.provider_usage.insert(profile_id, usage);
+                    }
+                });
+            });
+        }
     }
 
     /// Check every provider and the running tcode build in the background,

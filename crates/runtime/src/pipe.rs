@@ -392,6 +392,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 if state.provider_update_checks_enabled() {
                     state.check_provider_versions(&mut cx);
                 }
+                state.refresh_provider_usage(&mut cx);
                 state.refresh_provider_status(&mut cx);
             }
             state.sync_terminal_handles();
