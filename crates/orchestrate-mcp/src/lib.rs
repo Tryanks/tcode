@@ -19,6 +19,8 @@ pub enum OrchestrateOp {
         worktree: Option<bool>,
         archive_on_complete: Option<bool>,
         result_max_chars: Option<u32>,
+        /// Per-dispatch override of the profile's fast-mode setting.
+        fast: Option<bool>,
     },
     Status {
         parent_id: String,
@@ -28,6 +30,8 @@ pub enum OrchestrateOp {
         parent_id: String,
         thread_id: String,
         message: String,
+        /// Switch the child's fast mode before delivering the message.
+        fast: Option<bool>,
     },
     Result {
         parent_id: String,

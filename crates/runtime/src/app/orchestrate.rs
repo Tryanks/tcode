@@ -303,6 +303,24 @@ impl AppState {
         Ok(id)
     }
 
+    /// Switch a child's fast mode and persist it. Fast mode is a launch-time
+    /// option, so a live child restarts before its next turn (see
+    /// `options_changed_while_live`); a turn already running is unaffected.
+    fn set_child_fast(&mut self, thread_id: &str, fast: bool, cx: &mut HostCx) {
+        let Some(mut meta) = self
+            .resident(thread_id)
+            .map(|child| child.meta.clone())
+            .or_else(|| self.find_meta(thread_id))
+        else {
+            return;
+        };
+        apply_fast_selection(&mut meta.option_selections, meta.provider, fast);
+        if let Some(child) = self.resident_mut(thread_id) {
+            child.meta.option_selections = meta.option_selections.clone();
+        }
+        self.persist_meta(&meta, cx);
+    }
+
     /// Resolve one MCP operation on the host owner thread.
     pub(crate) fn handle_orchestrate_op(
         &mut self,
@@ -334,6 +352,7 @@ impl AppState {
                 worktree,
                 archive_on_complete,
                 result_max_chars,
+                fast: fast_override,
             } => {
                 let resolved = (|| {
                     let (provider, model, effort, fast, profile_id) = resolve_orchestrate_dispatch(
@@ -349,6 +368,9 @@ impl AppState {
                         return Err(format!("unknown profile: {id}"));
                     }
                     let approval_mode = resolve_dispatch_access(access.as_deref())?;
+                    // The profile's fast setting is the default; a dispatch may
+                    // override it either way on the user's explicit instruction.
+                    let fast = fast_override.unwrap_or(fast);
                     Ok((provider, model, effort, fast, profile_id, approval_mode))
                 })();
                 let (provider, model, effort, fast, profile_id, approval_mode) = match resolved {
@@ -462,12 +484,16 @@ impl AppState {
                 parent_id,
                 thread_id,
                 message,
+                fast,
             } => {
                 let result = (|| {
                     let archived = self
                         .require_child(&parent_id, &thread_id)?
                         .archived_at
                         .is_some();
+                    if let Some(fast) = fast {
+                        self.set_child_fast(&thread_id, fast, cx);
+                    }
                     // A follow-up starts a new piece of work: a result reported
                     // before it must not be delivered as the answer to it.
                     self.child_reported_results.remove(&thread_id);
@@ -1128,7 +1154,7 @@ pub(super) fn render_orchestrate_configuration(
         text.push_str(identity);
     }
     text.push_str(
-        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. When an entry names a `profile`, pass it exactly as listed. The definitions below are user-configured routing guidance.\n",
+        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. When an entry names a `profile`, pass it exactly as listed. A profile marked `fast mode` dispatches with the provider's fast mode; pass `fast: true|false` on a dispatch (or on a `send`, for a child that already exists) to override that only when the user explicitly asks. The definitions below are user-configured routing guidance.\n",
     );
     if !settings.child_models.iter().any(|child| child.enabled) {
         text.push_str("No child models are enabled. Work without dispatching until the user enables one in Settings → Orchestrate.");
@@ -1347,13 +1373,23 @@ pub(super) fn build_child_meta(
             value: serde_json::Value::String(effort),
         });
     }
-    if fast && let Some((id, value)) = fast_selection(provider) {
-        meta.option_selections.push(OptionSelection {
+    apply_fast_selection(&mut meta.option_selections, provider, fast);
+    meta
+}
+
+/// Set or clear the provider's fast-mode selection in `selections`. Other
+/// selections (a Codex `flex` tier, say) are left alone.
+fn apply_fast_selection(selections: &mut Vec<OptionSelection>, provider: ProviderKind, fast: bool) {
+    let Some((id, value)) = fast_selection(provider) else {
+        return;
+    };
+    selections.retain(|selection| !(selection.id == id && selection.value == value));
+    if fast {
+        selections.push(OptionSelection {
             id: id.into(),
             value,
         });
     }
-    meta
 }
 
 /// The option selection that turns on a provider's fast mode: Claude's
