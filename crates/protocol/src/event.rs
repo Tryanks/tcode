@@ -111,6 +111,12 @@ pub struct ProvidersStatus {
     pub provider_versions: HashMap<ProviderKind, ProviderVersionStatus>,
     pub tcode_update: TcodeUpdateStatus,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    /// Latest account usage per profile id (Codex / Claude Code only).
+    #[serde(default)]
+    pub provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
+    /// Profile ids with a usage fetch in flight.
+    #[serde(default)]
+    pub usage_checking: HashSet<String>,
     pub acp_marketplace_items: Vec<AcpMarketplaceItem>,
     pub acp_registry_loading: bool,
     pub acp_registry_error: Option<String>,

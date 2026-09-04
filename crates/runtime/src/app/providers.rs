@@ -6,6 +6,10 @@ pub struct ProviderCatalog {
     pub provider_versions: HashMap<ProviderKind, ProviderVersionState>,
     pub tcode_update: TcodeUpdateState,
     pub provider_snapshots: HashMap<String, ProviderSnapshot>,
+    /// Latest account usage per profile id (Codex / Claude Code).
+    pub provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
+    /// Profile ids with a usage fetch in flight.
+    pub usage_checking: HashSet<String>,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
 }
 
@@ -20,6 +24,8 @@ impl ProviderCatalog {
             provider_versions: HashMap::new(),
             tcode_update: TcodeUpdateState::default(),
             provider_snapshots: HashMap::new(),
+            provider_usage: HashMap::new(),
+            usage_checking: HashSet::new(),
             provider_secret_names,
         }
     }
@@ -59,6 +65,8 @@ impl ProviderCatalog {
                 checking: self.tcode_update.checking,
             },
             provider_snapshots: self.provider_snapshots.clone(),
+            provider_usage: self.provider_usage.clone(),
+            usage_checking: self.usage_checking.clone(),
             acp_marketplace_items,
             acp_registry_loading,
             acp_registry_error,
@@ -392,6 +400,11 @@ impl AppState {
                 });
             });
         }
+    }
+
+    /// Fetch account usage / rate-limit windows for every usage-capable profile.
+    pub fn refresh_provider_usage(&mut self, _cx: &mut HostCx) {
+        // Filled in by the usage feature: see services::provider_usage.
     }
 
     /// Check every provider and the running tcode build in the background,

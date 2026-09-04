@@ -286,6 +286,7 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::CreateThirdPartyProfile { .. } => {}
         Command::DeleteProfile { .. } => {}
         Command::RefreshProviderStatus => {}
+        Command::RefreshProviderUsage => {}
         Command::CheckProviderVersions => {}
         Command::UpdateProvider { .. } => {}
         Command::SetSidebarCollapsed { .. } => {}
@@ -415,6 +416,7 @@ fn every_command_and_query_crosses_ndjson() {
             profile_id: "profile".into(),
         },
         Command::RefreshProviderStatus,
+        Command::RefreshProviderUsage,
         Command::CheckProviderVersions,
         Command::UpdateProvider {
             provider: ProviderKind::Codex,
