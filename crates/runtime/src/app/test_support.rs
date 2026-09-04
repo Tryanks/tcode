@@ -2,7 +2,6 @@ use super::*;
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
 
 use crate::host::HostMsg;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
@@ -41,7 +40,6 @@ pub(super) struct TestAppContext {
     outgoing_tx: smol::channel::Sender<String>,
     pub(super) outgoing_rx: smol::channel::Receiver<String>,
     outgoing: Vec<String>,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
     domain_diff: Option<DomainDiff>,
     state: Option<Weak<RefCell<AppState>>>,
 }
@@ -56,7 +54,6 @@ impl Default for TestAppContext {
             outgoing_tx,
             outgoing_rx,
             outgoing: Vec::new(),
-            pending: Arc::new(Mutex::new(HashMap::new())),
             domain_diff: None,
             state: None,
         }
@@ -72,11 +69,7 @@ impl TestAppContext {
     }
 
     pub(super) fn host_cx(&self) -> HostCx {
-        HostCx::new(
-            self.mailbox_tx.clone(),
-            self.outgoing_tx.clone(),
-            self.pending.clone(),
-        )
+        HostCx::new(self.mailbox_tx.clone(), self.outgoing_tx.clone())
     }
 
     pub(super) fn run_until_parked(&mut self) {

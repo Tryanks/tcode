@@ -795,7 +795,7 @@ mod tests {
         ));
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host, cx));
+        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)

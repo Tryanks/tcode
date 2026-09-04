@@ -3,11 +3,16 @@ name = "tcode-ui"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["local-host"]
+local-host = ["dep:tcode-runtime"]
+
 [dependencies]
 agent = { path = "../agent" }
+tcode-client = { path = "../client" }
 tcode-core = { path = "../core" }
 tcode-protocol = { path = "../protocol" }
-tcode-runtime = { path = "../runtime" }
+tcode-runtime = { path = "../runtime", optional = true }
 tcode-services = { path = "../services" }
 tcode-voice = { path = "../voice" }
 term = { path = "../term" }

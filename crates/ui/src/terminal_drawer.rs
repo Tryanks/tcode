@@ -57,12 +57,14 @@ const PANE_PADDING: f32 = 8.;
 const SELECTION_DRAG_THRESHOLD: f32 = 2.;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(feature = "local-host")]
 struct ScreenPoint {
     x: f32,
     y: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "local-host")]
 enum SelectionDragAction {
     None,
     ClearAndWait,
@@ -84,6 +86,7 @@ enum SelectionDragAction {
 }
 
 #[derive(Default)]
+#[cfg(feature = "local-host")]
 struct SelectionDrag {
     selecting: Option<u64>,
     pending_simple: Option<(u64, (usize, usize), SelectionSide)>,
@@ -91,6 +94,7 @@ struct SelectionDrag {
     last_reported_point: HashMap<u64, (usize, usize)>,
 }
 
+#[cfg(feature = "local-host")]
 impl SelectionDrag {
     fn on_down(
         &mut self,
@@ -207,12 +211,14 @@ struct TerminalClear(u64);
 struct TerminalAddContext(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "local-host")]
 enum ClipboardShortcut {
     Copy,
     Paste,
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "local-host")]
 struct GridGeometry {
     bounds: Bounds<Pixels>,
     cols: usize,
@@ -221,12 +227,14 @@ struct GridGeometry {
     cell_height: f32,
 }
 
+#[cfg(feature = "local-host")]
 struct TerminalEventSubscription {
     receiver: smol::channel::Receiver<TermEvent>,
     _task: Task<()>,
 }
 
 #[derive(Clone)]
+#[cfg(feature = "local-host")]
 struct MarkedText {
     terminal_id: u64,
     text: String,
@@ -332,6 +340,7 @@ struct TerminalGridCache {
 }
 
 #[derive(Clone)]
+#[cfg(feature = "local-host")]
 struct TerminalImage {
     image: Arc<RenderImage>,
     width: usize,
@@ -339,18 +348,21 @@ struct TerminalImage {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "local-host")]
 struct VirtualPlaceholderPaint {
     run: PlaceholderRun,
     screen_line: usize,
     start_screen_col: usize,
 }
 
+#[cfg(feature = "local-host")]
 struct OrderedGraphicOverlay {
     overlay: GraphicOverlay,
     protocol_order: u8,
     placement_order: u32,
 }
 
+#[cfg(feature = "local-host")]
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
@@ -380,6 +392,7 @@ pub struct TerminalDrawer {
     _store_subscriptions: Vec<gpui::Subscription>,
 }
 
+#[cfg(feature = "local-host")]
 impl TerminalDrawer {
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
@@ -1515,12 +1528,14 @@ impl TerminalDrawer {
     }
 }
 
+#[cfg(feature = "local-host")]
 impl Focusable for TerminalDrawer {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
+#[cfg(feature = "local-host")]
 impl Render for TerminalDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.terminal_focused = self.focus_handle.is_focused(window);
@@ -2367,6 +2382,7 @@ fn layout_cursor(state: &TermSnapshot, palette: TerminalPalette) -> Option<Curso
     })
 }
 
+#[cfg(feature = "local-host")]
 struct TerminalInputHandler {
     drawer: Entity<TerminalDrawer>,
     terminal_id: u64,
@@ -2374,6 +2390,7 @@ struct TerminalInputHandler {
     cell_width: Pixels,
 }
 
+#[cfg(feature = "local-host")]
 impl InputHandler for TerminalInputHandler {
     fn selected_text_range(
         &mut self,
@@ -2490,6 +2507,7 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
+#[cfg(feature = "local-host")]
 fn terminal_clipboard_shortcut(
     key: &str,
     modifiers: gpui::Modifiers,
@@ -2520,6 +2538,7 @@ fn terminal_clipboard_shortcut(
     }
 }
 
+#[cfg(feature = "local-host")]
 fn terminal_link_modifier(modifiers: gpui::Modifiers, use_platform_modifier: bool) -> bool {
     if use_platform_modifier {
         modifiers.platform
@@ -2528,6 +2547,7 @@ fn terminal_link_modifier(modifiers: gpui::Modifiers, use_platform_modifier: boo
     }
 }
 
+#[cfg(feature = "local-host")]
 fn prepare_terminal_paste(text: &str, bracketed_paste: bool) -> String {
     if bracketed_paste {
         format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
@@ -2536,6 +2556,7 @@ fn prepare_terminal_paste(text: &str, bracketed_paste: bool) -> String {
     }
 }
 
+#[cfg(feature = "local-host")]
 fn term_modifiers(modifiers: gpui::Modifiers) -> TermModifiers {
     TermModifiers {
         shift: modifiers.shift,
@@ -2545,6 +2566,7 @@ fn term_modifiers(modifiers: gpui::Modifiers) -> TermModifiers {
     }
 }
 
+#[cfg(feature = "local-host")]
 fn term_mouse_button(button: MouseButton) -> Option<TermMouseButton> {
     match button {
         MouseButton::Left => Some(TermMouseButton::Left),
@@ -2554,10 +2576,12 @@ fn term_mouse_button(button: MouseButton) -> Option<TermMouseButton> {
     }
 }
 
+#[cfg(feature = "local-host")]
 fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }
 
+#[cfg(feature = "local-host")]
 fn grid_point_and_side(
     x: f32,
     y: f32,
@@ -2591,10 +2615,12 @@ fn grid_point_and_side(
     ((row.max(0) as usize, column.min(last_column)), side)
 }
 
+#[cfg(feature = "local-host")]
 fn selection_drag_started(dx: f32, dy: f32) -> bool {
     dx.hypot(dy) > SELECTION_DRAG_THRESHOLD
 }
 
+#[cfg(feature = "local-host")]
 fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32) -> Option<i32> {
     let geometry = geometry?;
     let top = geometry.bounds.top();
@@ -2610,6 +2636,7 @@ fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32
     Some(lines.clamp(1, 3) * pixels.signum() as i32)
 }
 
+#[cfg(feature = "local-host")]
 fn terminal_image(graphic: GraphicData) -> Option<TerminalImage> {
     if graphic.width == 0 || graphic.height == 0 {
         return None;
@@ -2649,6 +2676,7 @@ fn terminal_image(graphic: GraphicData) -> Option<TerminalImage> {
     })
 }
 
+#[cfg(feature = "local-host")]
 fn virtual_placeholder_paints(state: &TermSnapshot) -> Vec<VirtualPlaceholderPaint> {
     let mut paints = Vec::new();
     for (screen_line, row) in state.visible_rows.iter().enumerate() {
@@ -2694,6 +2722,7 @@ fn virtual_placeholder_paints(state: &TermSnapshot) -> Vec<VirtualPlaceholderPai
     paints
 }
 
+#[cfg(feature = "local-host")]
 fn flush_virtual_placeholder_paint(
     paints: &mut Vec<VirtualPlaceholderPaint>,
     current: &mut Option<(IncompletePlacement, usize)>,
@@ -2709,6 +2738,7 @@ fn flush_virtual_placeholder_paint(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "local-host")]
 fn layout_graphic_overlays(
     atlas_placements: &[AtlasPlacement],
     kitty_placements: &[KittyPlacement],
@@ -2832,6 +2862,7 @@ fn layout_graphic_overlays(
     overlays
 }
 
+#[cfg(feature = "local-host")]
 fn push_graphic_overlay(
     overlays: &mut Vec<OrderedGraphicOverlay>,
     mut overlay: GraphicOverlay,
@@ -2848,6 +2879,7 @@ fn push_graphic_overlay(
     }
 }
 
+#[cfg(feature = "local-host")]
 fn paint_graphic_overlays(
     window: &mut Window,
     overlays: &[OrderedGraphicOverlay],
@@ -2870,6 +2902,7 @@ fn paint_graphic_overlays(
     }
 }
 
+#[cfg(feature = "local-host")]
 fn paint_graphic_overlay(
     window: &mut Window,
     overlay: &GraphicOverlay,

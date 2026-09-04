@@ -4,9 +4,7 @@
 //! reach it only through serialized protocol messages. Background completions use
 //! the same mailbox via [`HostCx::enqueue`].
 
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
 
 use tcode_protocol::{
     EventEnvelope, HostMessage, RuntimeNotification, ServerEvent, Topic, encode_line,
@@ -41,20 +39,14 @@ pub type HostTask<T> = smol::Task<T>;
 pub struct HostCx {
     mailbox: smol::channel::Sender<HostMsg>,
     events: smol::channel::Sender<String>,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
 }
 
 impl HostCx {
     pub(crate) fn new(
         mailbox: smol::channel::Sender<HostMsg>,
         events: smol::channel::Sender<String>,
-        pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
     ) -> Self {
-        Self {
-            mailbox,
-            events,
-            pending,
-        }
+        Self { mailbox, events }
     }
 
     pub fn emit(&mut self, event: HostEvent) {
@@ -73,10 +65,6 @@ impl HostCx {
     }
 
     pub(crate) fn send_message(&self, message: HostMessage) {
-        let id = match &message {
-            HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. } => Some(*id),
-            _ => None,
-        };
         let line = match encode_line(&message) {
             Ok(line) => line,
             Err(error) => {
@@ -84,13 +72,7 @@ impl HostCx {
                 return;
             }
         };
-        if let Some(id) = id
-            && let Some(waiter) = self.pending.lock().unwrap().remove(&id)
-        {
-            let _ = waiter.try_send(line);
-        } else {
-            let _ = self.events.try_send(line);
-        }
+        let _ = self.events.try_send(line);
     }
 
     pub fn spawn_background<T: Send + 'static>(

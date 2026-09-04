@@ -94,7 +94,7 @@ Constraints from the brief:
   progress. Terminal drawer and preview panel compile out without it.
 - Gate: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo fmt --all --check`, `cargo check -p tcode-ui --no-default-features`.
-- Status: pending.
+- Status: **done** (commit follows this plan update).
 
 ### P1 — Remote transport, pairing, headless host
 
@@ -113,7 +113,7 @@ Constraints from the brief:
   a project, wrong token is refused, dropping client A's socket and
   reconnecting re-seeds its replicas. Manual e2e on this Mac: `tcode-headless
   serve` + `tcode --connect …` runs a real provider turn.
-- Status: pending.
+- Status: P1a (`tcode-remote`, `tcode-headless`) **done**; P1b (desktop `--connect`, Settings → Remote) pending.
 
 ### P2 — iOS and Android clients
 

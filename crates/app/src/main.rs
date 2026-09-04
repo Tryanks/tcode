@@ -221,6 +221,7 @@ fn main() {
         Err(error) => log::warn!("MCP host failed to bind: {error}"),
     }
     let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
+    let link = host.link();
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -260,7 +261,7 @@ fn main() {
             theme::init_with_json(&theme_json, cx);
 
             let workspace_store =
-                cx.new(|cx| tcode_ui::store::WorkspaceStore::new(host.clone(), cx));
+                cx.new(|cx| tcode_ui::store::WorkspaceStore::new_local(&host, cx));
             let initial_settings = workspace_store.read(cx).settings();
             let sidebar_collapsed = initial_settings.sidebar_collapsed;
             let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
@@ -274,7 +275,7 @@ fn main() {
             // synchronously before the window (and settings page) is built, so
             // the page mounts already on the recorded section. No-op otherwise.
             if let Ok(CommandResponse::PendingRelaunchSection(Some(section))) =
-                host.command_blocking(Command::ApplyPendingRelaunch)
+                link.command_blocking(Command::ApplyPendingRelaunch)
             {
                 window_state.update(cx, |state, cx| {
                     state.pending_settings_section = Some(section);
@@ -298,11 +299,14 @@ fn main() {
                 cx.theme().theme_name()
             );
             let quit_subscription = cx.on_app_quit({
-                let host = host.clone();
+                let link = link.clone();
+                let stopped = host.stopped.clone();
                 move |_cx| {
-                    let host = host.clone();
+                    let link = link.clone();
+                    let stopped = stopped.clone();
                     async move {
-                        let _ = host.shutdown().await;
+                        let _ = link.shutdown().await;
+                        let _ = stopped.recv().await;
                     }
                 }
             });
@@ -396,7 +400,7 @@ fn main() {
                 }
 
                 if open_latest {
-                    let _ = host.dispatch(Command::OpenLatestSession);
+                    let _ = link.dispatch(Command::OpenLatestSession);
                     for _ in 0..100 {
                         if cx.update(|cx| workspace_store.read(cx).active_session_id().is_some()) {
                             break;

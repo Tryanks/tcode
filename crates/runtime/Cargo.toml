@@ -8,6 +8,7 @@ test-support = []
 
 [dependencies]
 agent = { path = "../agent" }
+async-channel = "2"
 base64 = "0.23"
 computer-use-mcp = { path = "../computer-use-mcp" }
 log = "0.4"
@@ -17,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
 tcode-core = { path = "../core" }
+tcode-client = { path = "../client" }
 tcode-protocol = { path = "../protocol" }
 tcode-services = { path = "../services" }
 term = { path = "../term" }

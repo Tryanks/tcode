@@ -1,15 +1,17 @@
 //! NDJSON in-process client/host pipe with typed endpoint APIs.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use tcode_client::HostLink;
+#[cfg(test)]
+use tcode_client::{HostEventReceiver, HostEventTryRecvError};
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, ProtocolError, Query,
-    QueryResponse, Subscription, decode_client_line, decode_host_line, encode_line,
+    QueryResponse, decode_client_line,
 };
 #[cfg(test)]
-use tcode_protocol::{EventEnvelope, ServerEvent, Topic};
+use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
 use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
@@ -26,7 +28,7 @@ pub struct HostServices {
     /// Generate AI-authored titles after the first completed turn.
     pub ai_title_generation: bool,
     /// Split at host construction: URL/tokens stay host-side and the
-    /// non-serializable WebView broker receiver moves once to `HostHandle`.
+    /// non-serializable WebView broker receiver moves once to `SpawnedHost`.
     /// A remote transport replaces that receiver with reverse RPC.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
     /// Deliberate construction-time local handle. The broker receiver stays
@@ -38,255 +40,43 @@ pub struct HostServices {
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
 
-struct HostHandleInner {
-    client_tx: smol::channel::Sender<String>,
-    event_rx: smol::channel::Receiver<String>,
-    stopped_rx: smol::channel::Receiver<()>,
+#[derive(Clone, Default)]
+pub struct ImportRoutes(Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>);
+
+#[derive(Clone)]
+pub struct SpawnedHost {
+    pub to_host: async_channel::Sender<String>,
+    pub from_host: async_channel::Receiver<String>,
+    pub stopped: async_channel::Receiver<()>,
+    pub terminals: LocalTerminalRegistry,
+    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    pub import_routes: ImportRoutes,
+    link: Arc<OnceLock<HostLink>>,
     #[cfg(feature = "test-support")]
-    test_mailbox: smol::channel::Sender<HostMsg>,
-    next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
-    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
-    preview_requests: Mutex<Option<smol::channel::Receiver<preview_mcp::BrokerRequest>>>,
-    terminals: LocalTerminalRegistry,
+    test_mailbox: async_channel::Sender<HostMsg>,
 }
 
-/// Client-side endpoint for the host.
-#[derive(Clone)]
-pub struct HostHandle {
-    inner: Arc<HostHandleInner>,
-}
-
-/// Client-side receiver that decodes each host NDJSON record on receipt.
-#[derive(Clone)]
-pub struct HostEventReceiver {
-    wire: smol::channel::Receiver<String>,
-}
-
-#[derive(Debug)]
-pub enum HostEventTryRecvError {
-    Empty,
-    Closed,
-    Protocol(ProtocolError),
-}
-
-impl HostEventReceiver {
-    pub async fn recv(&self) -> Result<HostMessage, ProtocolError> {
-        let line = self.wire.recv().await.map_err(transport_error)?;
-        decode_host_line(&line)
-    }
-
-    pub fn recv_blocking(&self) -> Result<HostMessage, ProtocolError> {
-        let line = self.wire.recv_blocking().map_err(transport_error)?;
-        decode_host_line(&line)
-    }
-
-    pub fn try_recv(&self) -> Result<HostMessage, HostEventTryRecvError> {
-        let line = self.wire.try_recv().map_err(|error| match error {
-            smol::channel::TryRecvError::Empty => HostEventTryRecvError::Empty,
-            smol::channel::TryRecvError::Closed => HostEventTryRecvError::Closed,
-        })?;
-        decode_host_line(&line).map_err(HostEventTryRecvError::Protocol)
-    }
-}
-
-impl HostHandle {
-    fn next_id(&self) -> u64 {
-        self.inner.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn send_payload(&self, id: u64, payload: ClientPayload) -> Result<(), ProtocolError> {
-        let line = encode_line(&ClientMessage { id, payload })?;
-        self.inner
-            .client_tx
-            .try_send(line)
-            .map_err(|error| ProtocolError {
-                code: "transport_closed".into(),
-                message: error.to_string(),
+impl SpawnedHost {
+    pub fn link(&self) -> HostLink {
+        self.link
+            .get_or_init(|| {
+                let link = HostLink::new(self.to_host.clone(), self.from_host.clone());
+                smol::spawn({
+                    let link = link.clone();
+                    async move { link.pump().await }
+                })
+                .detach();
+                link
             })
+            .clone()
     }
 
-    async fn request(&self, payload: ClientPayload) -> Result<HostMessage, ProtocolError> {
-        let id = self.next_id();
-        let (sender, receiver) = smol::channel::bounded(1);
-        self.inner.pending.lock().unwrap().insert(id, sender);
-        if let Err(error) = self.send_payload(id, payload) {
-            self.inner.pending.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        let line = receiver.recv().await.map_err(|error| ProtocolError {
-            code: "transport_closed".into(),
-            message: error.to_string(),
-        })?;
-        decode_host_line(&line)
-    }
-
-    /// Fire a mutation through the serialized pipe. Its correlated ack is intentionally
-    /// ignored by this fire-and-forget UI convenience.
-    pub fn dispatch(&self, command: Command) -> Result<(), ProtocolError> {
-        let id = self.next_id();
-        self.send_payload(id, ClientPayload::Command(command))
-    }
-
-    pub async fn command(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
-        match self.request(ClientPayload::Command(command)).await? {
-            HostMessage::Ack { result, .. } => result,
-            other => Err(unexpected_response("command ack", &other)),
-        }
-    }
-
-    pub fn command_blocking(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
-        smol::block_on(self.command(command))
-    }
-
-    pub async fn query(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
-        match self.request(ClientPayload::Query(query)).await? {
-            HostMessage::QueryResult { result, .. } => result,
-            other => Err(unexpected_response("query result", &other)),
-        }
-    }
-
-    /// Drain the host's store-write barrier, close the serialized client
-    /// endpoint, and wait until the state-owning thread has exited.
-    ///
-    /// This is the terminal lifecycle operation for the one-client in-process
-    /// transport. Closing happens after the correlated command result so the
-    /// shutdown request itself is always delivered.
-    pub async fn shutdown(&self) -> Result<(), ProtocolError> {
-        let result = self.command(Command::ShutdownAllAndFlush).await;
-        self.inner.client_tx.close();
-        let stopped = self.inner.stopped_rx.recv().await;
-        match result? {
-            CommandResponse::Unit => {}
-            other => {
-                return Err(ProtocolError {
-                    code: "unexpected_response".into(),
-                    message: format!("expected unit shutdown ack, got {other:?}"),
-                });
-            }
-        }
-        stopped.map_err(|error| ProtocolError {
-            code: "host_stop_failed".into(),
-            message: error.to_string(),
-        })
-    }
-
+    #[cfg(feature = "test-support")]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
-        smol::block_on(self.shutdown())
+        self.link().shutdown_blocking()?;
+        self.stopped.recv_blocking().map_err(transport_error)
     }
 
-    pub fn subscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
-        let id = self.next_id();
-        self.send_payload(id, ClientPayload::Subscribe(subscription))
-    }
-
-    /// Decoded events consumed by the client-side replica pump.
-    pub fn event_receiver(&self) -> HostEventReceiver {
-        HostEventReceiver {
-            wire: self.inner.event_rx.clone(),
-        }
-    }
-
-    /// Take the preview MCP request receiver once.
-    ///
-    /// This is a deliberate local-transport affordance because each request
-    /// includes a reply sender and a native WebView must answer on the client.
-    /// A remote transport must replace it with reverse RPC.
-    pub fn take_preview_requests(
-        &self,
-    ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.inner.preview_requests.lock().unwrap().take()
-    }
-
-    /// Access the construction-time live-terminal handle registry.
-    ///
-    /// No bytes or layout metadata use JSON here: terminal bytes stay on the
-    /// split term channels, while layout is replicated in `SessionStatus`.
-    pub fn terminal_registry(&self) -> LocalTerminalRegistry {
-        self.inner.terminals.clone()
-    }
-
-    /// Start an import through a command and receive its progress stream.
-    /// The command and ack cross NDJSON; the progress receiver is a deliberate
-    /// local affordance correlated by the command's wire id.
-    pub async fn start_external_import(
-        &self,
-        project_id: String,
-        threads: Vec<tcode_protocol::ExternalThread>,
-    ) -> Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
-        let id = self.next_id();
-        let (progress_sender, progress_receiver) = smol::channel::unbounded();
-        self.inner
-            .import_routes
-            .lock()
-            .unwrap()
-            .insert(id, progress_sender);
-        let (ack_sender, ack_receiver) = smol::channel::bounded(1);
-        self.inner.pending.lock().unwrap().insert(id, ack_sender);
-        if let Err(error) = self.send_payload(
-            id,
-            ClientPayload::Command(Command::StartExternalImport {
-                project_id,
-                threads,
-            }),
-        ) {
-            self.inner.pending.lock().unwrap().remove(&id);
-            self.inner.import_routes.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        let started = match ack_receiver
-            .recv()
-            .await
-            .map(|line| decode_host_line(&line))
-        {
-            Ok(Ok(HostMessage::Ack {
-                result: Ok(CommandResponse::ExternalImportStarted(started)),
-                ..
-            })) => started,
-            Ok(Ok(HostMessage::Ack {
-                result: Ok(other), ..
-            })) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(ProtocolError {
-                    code: "unexpected_response".into(),
-                    message: format!("expected external-import started result, got {other:?}"),
-                });
-            }
-            Ok(Ok(HostMessage::Ack {
-                result: Err(error), ..
-            })) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(error);
-            }
-            Ok(Ok(other)) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(unexpected_response("external-import ack", &other));
-            }
-            Ok(Err(error)) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(error);
-            }
-            Err(error) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(ProtocolError {
-                    code: "transport_closed".into(),
-                    message: error.to_string(),
-                });
-            }
-        };
-        if !started {
-            self.inner.import_routes.lock().unwrap().remove(&id);
-            return Ok(None);
-        }
-        Ok(Some(progress_receiver))
-    }
-
-    /// Test-fixture ingress for assertions that compare a client replica with
-    /// the authoritative host value after an internal mutation.
-    ///
-    /// This is intentionally absent from production builds. The mutation
-    /// enters the real host mailbox over a deliberate typed local affordance;
-    /// any emitted events still cross the serialized path to the client.
     #[cfg(feature = "test-support")]
     pub async fn update_state_for_test<R>(
         &self,
@@ -296,31 +86,50 @@ impl HostHandle {
         R: Send + 'static,
     {
         let (sender, receiver) = smol::channel::bounded(1);
-        self.inner
-            .test_mailbox
+        self.test_mailbox
             .send(HostMsg::Enqueued(Box::new(move |state, cx| {
                 let result = update(state, cx);
                 let _ = sender.try_send(result);
             })))
             .await
-            .map_err(|error| ProtocolError {
-                code: "transport_closed".into(),
-                message: error.to_string(),
-            })?;
-        receiver.recv().await.map_err(|error| ProtocolError {
-            code: "transport_closed".into(),
-            message: error.to_string(),
-        })
+            .map_err(transport_error)?;
+        receiver.recv().await.map_err(transport_error)
     }
 }
 
-fn unexpected_response(expected: &str, actual: &HostMessage) -> ProtocolError {
-    ProtocolError {
-        code: "unexpected_response".into(),
-        message: format!("expected {expected}, got {actual:?}"),
+pub async fn start_external_import(
+    link: &HostLink,
+    routes: &ImportRoutes,
+    project_id: String,
+    threads: Vec<tcode_protocol::ExternalThread>,
+) -> Result<Option<async_channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
+    let (id, response) = link.command_with_id(Command::StartExternalImport {
+        project_id,
+        threads,
+    });
+    let (sender, receiver) = async_channel::unbounded();
+    routes.0.lock().unwrap().insert(id, sender);
+    match response.await {
+        Ok(CommandResponse::ExternalImportStarted(true)) => Ok(Some(receiver)),
+        Ok(CommandResponse::ExternalImportStarted(false)) => {
+            routes.0.lock().unwrap().remove(&id);
+            Ok(None)
+        }
+        Ok(other) => {
+            routes.0.lock().unwrap().remove(&id);
+            Err(ProtocolError {
+                code: "unexpected_response".into(),
+                message: format!("expected external-import started result, got {other:?}"),
+            })
+        }
+        Err(error) => {
+            routes.0.lock().unwrap().remove(&id);
+            Err(error)
+        }
     }
 }
 
+#[cfg(feature = "test-support")]
 fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError {
         code: "transport_closed".into(),
@@ -328,19 +137,19 @@ fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     }
 }
 
-/// Spawn the dedicated host thread and return its typed client endpoint.
-pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<HostHandle> {
+/// Spawn the dedicated host thread and return its serialized transport and local affordances.
+pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<SpawnedHost> {
     fn assert_send<T: Send>() {}
     assert_send::<AppState>();
 
-    let (client_tx, client_rx) = smol::channel::unbounded::<String>();
-    let (event_tx, event_rx) = smol::channel::unbounded::<String>();
+    let (client_tx, client_rx) = async_channel::unbounded::<String>();
+    let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
     let terminals = LocalTerminalRegistry::default();
     // Deliberate local-transport affordance: the WebView broker request
     // receiver cannot cross serde. Move its single consumer exactly once into
-    // `HostHandle`; a remote transport must replace it with reverse RPC. The
+    // the local client; a remote transport must replace it with reverse RPC. The
     // host retains only the URL/token registry used to register providers.
     let (preview_registration, preview_requests) = match services.preview.take() {
         Some(preview_mcp::PreviewMcpServer {
@@ -351,20 +160,11 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
-    let pending = Arc::new(Mutex::new(HashMap::new()));
-    let import_routes = Arc::new(Mutex::new(HashMap::new()));
-    let inner = Arc::new(HostHandleInner {
-        client_tx,
-        event_rx,
-        stopped_rx,
-        #[cfg(feature = "test-support")]
-        test_mailbox: mailbox_tx.clone(),
-        next_id: AtomicU64::new(1),
-        pending: pending.clone(),
-        import_routes: import_routes.clone(),
-        preview_requests: Mutex::new(preview_requests),
-        terminals: terminals.clone(),
-    });
+    let import_routes = ImportRoutes::default();
+    let host_terminals = terminals.clone();
+    let host_import_routes = import_routes.clone();
+    #[cfg(feature = "test-support")]
+    let test_mailbox = mailbox_tx.clone();
 
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -372,7 +172,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         .spawn(move || {
             let mut state = AppState::new_with_terminal_registry(
                 store,
-                terminals,
+                host_terminals,
                 services.ai_title_generation,
             );
             if let Some((url, tokens)) = preview_registration {
@@ -384,7 +184,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.token);
             }
-            let mut cx = HostCx::new(mailbox_tx, event_tx, pending);
+            let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_orchestrate_requests(&mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
@@ -397,7 +197,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(());
-            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx, import_routes));
+            smol::block_on(host_loop(
+                state,
+                cx,
+                client_rx,
+                mailbox_rx,
+                host_import_routes,
+            ));
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -407,7 +213,17 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         )
     })?;
 
-    Ok(HostHandle { inner })
+    Ok(SpawnedHost {
+        to_host: client_tx,
+        from_host: event_rx,
+        stopped: stopped_rx,
+        terminals,
+        preview_requests,
+        import_routes,
+        link: Arc::new(OnceLock::new()),
+        #[cfg(feature = "test-support")]
+        test_mailbox,
+    })
 }
 
 async fn host_loop(
@@ -415,7 +231,7 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostMsg>,
-    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    import_routes: ImportRoutes,
 ) {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
@@ -461,7 +277,7 @@ fn handle_client_message(
     state: &mut AppState,
     cx: &mut HostCx,
     message: ClientMessage,
-    import_routes: &Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    import_routes: &ImportRoutes,
 ) {
     let ClientMessage { id, payload } = message;
     match payload {
@@ -515,7 +331,7 @@ pub(crate) fn handle_client_message_for_test(
     cx: &mut HostCx,
     message: ClientMessage,
 ) {
-    handle_client_message(state, cx, message, &Arc::new(Mutex::new(HashMap::new())));
+    handle_client_message(state, cx, message, &ImportRoutes::default());
 }
 
 enum CommandOutcome {
@@ -528,7 +344,7 @@ fn dispatch_command(
     cx: &mut HostCx,
     request_id: u64,
     command: Command,
-    import_routes: &Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    import_routes: &ImportRoutes,
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
@@ -616,7 +432,7 @@ fn dispatch_command(
             let receiver = app.start_external_import(&project_id, threads, cx);
             response = CommandResponse::ExternalImportStarted(receiver.is_some());
             if let Some(receiver) = receiver {
-                let route = import_routes.lock().unwrap().get(&request_id).cloned();
+                let route = import_routes.0.lock().unwrap().get(&request_id).cloned();
                 let import_routes = import_routes.clone();
                 cx.spawn_detached(async move {
                     if let Some(route) = route {
@@ -626,10 +442,10 @@ fn dispatch_command(
                             }
                         }
                     }
-                    import_routes.lock().unwrap().remove(&request_id);
+                    import_routes.0.lock().unwrap().remove(&request_id);
                 });
             } else {
-                import_routes.lock().unwrap().remove(&request_id);
+                import_routes.0.lock().unwrap().remove(&request_id);
             }
         }
         Command::FinishExternalImport { project_id } => app.finish_external_import(&project_id, cx),
@@ -811,20 +627,16 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             match events.try_recv() {
-                Ok(HostMessage::Event(envelope)) => {
+                Ok(envelope) => {
                     if ready(&envelope) {
                         return envelope;
                     }
                 }
-                Ok(_) => {}
                 Err(HostEventTryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Err(HostEventTryRecvError::Closed) => {
                     panic!("host event stream closed before the expected event")
-                }
-                Err(HostEventTryRecvError::Protocol(error)) => {
-                    panic!("invalid host event line: {error:?}")
                 }
             }
         }
@@ -839,26 +651,30 @@ mod tests {
         std::fs::create_dir_all(&project_root).expect("create project root");
         let store = SessionStore::open_at(data_root.clone()).expect("open session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
-        let events = host.event_receiver();
 
-        host.inner
-            .client_tx
+        host.to_host
             .try_send("{not valid ndjson}\n".into())
             .expect("send malformed client line");
         let decode_error = loop {
             if let HostMessage::Ack {
                 id: 0,
                 result: Err(error),
-            } = events
-                .recv_blocking()
-                .expect("receive protocol-error response")
+            } = tcode_protocol::decode_host_line(
+                &host
+                    .from_host
+                    .recv_blocking()
+                    .expect("receive protocol-error response"),
+            )
+            .expect("decode protocol-error response")
             {
                 break error;
             }
         };
         assert_eq!(decode_error.code, "decode_error");
+        let link = host.link();
+        let events = link.events();
 
-        host.subscribe(Subscription {
+        link.subscribe(Subscription {
             topic: Topic::Index,
         })
         .expect("send subscription");
@@ -873,7 +689,7 @@ mod tests {
             }) if sessions.is_empty() && projects.is_empty()
         ));
 
-        let project_id = match host
+        let project_id = match link
             .command_blocking(Command::CreateProject {
                 root: project_root.clone(),
             })
@@ -900,10 +716,14 @@ mod tests {
                 .any(|project| project.id == project_id && project.root == project_root)
         );
 
-        let import_progress =
-            smol::block_on(host.start_external_import(project_id.clone(), Vec::new()))
-                .expect("start import over command")
-                .expect("known project starts an import");
+        let import_progress = smol::block_on(start_external_import(
+            &link,
+            &host.import_routes,
+            project_id.clone(),
+            Vec::new(),
+        ))
+        .expect("start import over command")
+        .expect("known project starts an import");
         assert_eq!(
             import_progress
                 .recv_blocking()
@@ -914,26 +734,34 @@ mod tests {
             }
         );
         assert!(
-            smol::block_on(host.start_external_import("missing".into(), Vec::new()))
-                .expect("unknown import command response")
-                .is_none()
+            smol::block_on(start_external_import(
+                &link,
+                &host.import_routes,
+                "missing".into(),
+                Vec::new(),
+            ))
+            .expect("unknown import command response")
+            .is_none()
         );
 
         assert_eq!(
-            smol::block_on(host.query(Query::IsDirectory {
+            smol::block_on(link.query(Query::IsDirectory {
                 path: project_root.clone(),
             }))
             .expect("query directory over pipe"),
             QueryResponse::IsDirectory(true)
         );
         assert_eq!(
-            smol::block_on(host.query(Query::ListActiveWorkspace))
+            smol::block_on(link.query(Query::ListActiveWorkspace))
                 .expect("query inactive workspace over pipe"),
             QueryResponse::ActiveWorkspace(Vec::new())
         );
 
-        host.shutdown_blocking()
+        link.shutdown_blocking()
             .expect("drain quit barrier and stop host");
+        host.stopped
+            .recv_blocking()
+            .expect("wait for host thread to stop");
         drop(host);
         std::fs::remove_dir_all(data_root).expect("remove test data");
     }

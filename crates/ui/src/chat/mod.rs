@@ -38,6 +38,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
+#[cfg(feature = "local-host")]
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_secs;
 use crate::window_caption;
@@ -321,6 +322,7 @@ pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
+    #[cfg(feature = "local-host")]
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
@@ -385,12 +387,14 @@ impl ChatView {
                 cx.notify();
             }),
         ];
+        #[cfg(feature = "local-host")]
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
 
         let mut this = Self {
             workspace_store,
             window_state,
             composer,
+            #[cfg(feature = "local-host")]
             terminal_drawer,
             list_state,
             turn_items: Vec::new(),
@@ -1647,19 +1651,22 @@ impl ChatView {
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            .child(
-                                Button::new("panel-layout")
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::PanelBottom)
-                                    .selected(terminal_open)
-                                    .tooltip(crate::tr!("chat.toggle_terminal"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_terminal_panel(cx))
-                                    })),
-                            )
+                            .when(cfg!(feature = "local-host"), |this| {
+                                this.child(
+                                    Button::new("panel-layout")
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::PanelBottom)
+                                        .selected(terminal_open)
+                                        .tooltip(crate::tr!("chat.toggle_terminal"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_store.update(cx, |store, cx| {
+                                                store.toggle_terminal_panel(cx)
+                                            })
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("plan-panel")
                                     .ghost()
@@ -2241,8 +2248,11 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
+        #[cfg(feature = "local-host")]
         let panel = self.workspace_store.read(cx).chat_panel_state();
+        #[cfg(feature = "local-host")]
         let terminal_open = panel.terminal_open;
+        #[cfg(feature = "local-host")]
         let terminal_height = panel.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
@@ -2349,6 +2359,7 @@ impl Render for ChatView {
             )
             .child(composer);
 
+        #[cfg(feature = "local-host")]
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
             let drawer_resize = self.terminal_drawer.clone();
@@ -2376,6 +2387,8 @@ impl Render for ChatView {
         } else {
             main.into_any_element()
         };
+        #[cfg(not(feature = "local-host"))]
+        let body: AnyElement = main.into_any_element();
         root.child(header).child(body)
     }
 }
@@ -3216,7 +3229,7 @@ This begins after the hard break."#;
             (active.meta.id.clone(), active.timeline.clone())
         }))
         .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(host.clone(), cx));
+        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new_local(&host, cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id, timeline);
         });
@@ -3363,7 +3376,7 @@ This begins after the hard break."#;
             (active.meta.id.clone(), active.timeline.clone())
         }))
         .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host, cx));
+        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id.clone(), timeline);
         });

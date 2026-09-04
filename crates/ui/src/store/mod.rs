@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
+use tcode_client::HostLink;
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
@@ -18,11 +19,13 @@ use tcode_core::{
 };
 use tcode_protocol::{AcpMarketplaceItem, ExternalThread, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
-    EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, HostMessage, PathEntry,
-    ProviderVersionStatus, ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent,
-    SessionStatus, Subscription, Topic,
+    EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, PathEntry, ProviderVersionStatus,
+    ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionStatus, Subscription,
+    Topic,
 };
-use tcode_runtime::pipe::HostHandle;
+#[cfg(feature = "local-host")]
+use tcode_runtime::pipe::{ImportRoutes, start_external_import};
+#[cfg(feature = "local-host")]
 use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalWorkspace};
 use tcode_services::import::ExternalImportUpdate;
 
@@ -82,13 +85,25 @@ pub(crate) fn observe_store_topics<V: 'static>(
     })
 }
 
+#[cfg(feature = "local-host")]
+pub struct LocalAffordances {
+    pub terminals: LocalTerminalRegistry,
+    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    pub import_routes: ImportRoutes,
+}
+
 /// The client-facing projection and command boundary for workspace state.
 ///
 /// Views observe this entity and use its typed accessors instead of retaining
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
-    host: HostHandle,
+    host: HostLink,
+    #[cfg(feature = "local-host")]
     terminal_registry: LocalTerminalRegistry,
+    #[cfg(feature = "local-host")]
+    preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    #[cfg(feature = "local-host")]
+    import_routes: Option<ImportRoutes>,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
     session_replica: Option<(String, Timeline)>,
@@ -167,11 +182,15 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn new(host: HostHandle, cx: &mut Context<Self>) -> Self {
-        let terminal_registry = host.terminal_registry();
+    pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
         let mut store = Self {
             host: host.clone(),
-            terminal_registry,
+            #[cfg(feature = "local-host")]
+            terminal_registry: LocalTerminalRegistry::default(),
+            #[cfg(feature = "local-host")]
+            preview_requests: None,
+            #[cfg(feature = "local-host")]
+            import_routes: None,
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
             session_replica: None,
@@ -203,7 +222,7 @@ impl WorkspaceStore {
                 log::error!("failed to subscribe to {topic:?}: {}", error.message);
             }
         }
-        let events = host.event_receiver();
+        let events = host.events();
         let mut seeded = HashSet::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
@@ -215,25 +234,23 @@ impl WorkspaceStore {
                     None
                 },
             ));
-            let Some(Ok(message)) = received else {
+            let Some(Ok(envelope)) = received else {
                 break;
             };
-            if let HostMessage::Event(envelope) = message {
-                match (&envelope.topic, &envelope.event) {
-                    (Topic::Index, ServerEvent::IndexSnapshot(_))
-                    | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
-                    | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
-                    | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
-                    | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
-                        seeded.insert(envelope.topic.clone());
-                    }
-                    _ => {}
+            match (&envelope.topic, &envelope.event) {
+                (Topic::Index, ServerEvent::IndexSnapshot(_))
+                | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
+                | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
+                | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
+                | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
+                    seeded.insert(envelope.topic.clone());
                 }
-                if let ServerEvent::Runtime(event) = &envelope.event {
-                    cx.emit(event.clone());
-                } else {
-                    store.apply_domain_event(&envelope);
-                }
+                _ => {}
+            }
+            if let ServerEvent::Runtime(event) = &envelope.event {
+                cx.emit(event.clone());
+            } else {
+                store.apply_domain_event(&envelope);
             }
         }
         if seeded.len() != seed_topics.len() {
@@ -248,10 +265,7 @@ impl WorkspaceStore {
         {
             let event_messages = events;
             cx.spawn(async move |this, cx| {
-                while let Ok(message) = event_messages.recv().await {
-                    let HostMessage::Event(envelope) = message else {
-                        continue;
-                    };
+                while let Ok(envelope) = event_messages.recv().await {
                     if this
                         .update(cx, |store, cx| {
                             if let ServerEvent::Runtime(event) = &envelope.event {
@@ -274,6 +288,24 @@ impl WorkspaceStore {
         }
 
         store
+    }
+
+    #[cfg(feature = "local-host")]
+    pub fn new_local(host: &tcode_runtime::pipe::SpawnedHost, cx: &mut Context<Self>) -> Self {
+        let mut store = Self::new(host.link(), cx);
+        store.attach_local(LocalAffordances {
+            terminals: host.terminals.clone(),
+            preview_requests: host.preview_requests.clone(),
+            import_routes: host.import_routes.clone(),
+        });
+        store
+    }
+
+    #[cfg(feature = "local-host")]
+    pub fn attach_local(&mut self, local: LocalAffordances) {
+        self.terminal_registry = local.terminals;
+        self.preview_requests = local.preview_requests;
+        self.import_routes = Some(local.import_routes);
     }
 
     pub fn sync_active_conversation_ui(&mut self) {
@@ -591,11 +623,8 @@ impl WorkspaceStore {
 
     #[cfg(test)]
     fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
-        let events = self.host.event_receiver();
-        while let Ok(message) = events.try_recv() {
-            let HostMessage::Event(envelope) = message else {
-                continue;
-            };
+        let events = self.host.events();
+        while let Ok(envelope) = events.try_recv() {
             if let ServerEvent::Runtime(event) = &envelope.event {
                 cx.emit(event.clone());
             } else {
@@ -1121,11 +1150,19 @@ impl WorkspaceStore {
     ///
     /// Commands and preview registration metadata remain typed; this
     /// receiver carries native WebView reply senders and is the deliberate
-    /// reverse-RPC affordance documented by [`HostHandle::take_preview_requests`].
+    /// reverse-RPC affordance documented by the local host seam.
+    #[cfg(feature = "local-host")]
     pub fn take_preview_requests(
         &mut self,
     ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.host.take_preview_requests()
+        self.preview_requests.take()
+    }
+
+    #[cfg(not(feature = "local-host"))]
+    pub fn take_preview_requests(
+        &mut self,
+    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
+        None
     }
 
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
@@ -1303,7 +1340,7 @@ impl WorkspaceStore {
 
     /// Starts the typed import command, then returns a client-local
     /// receiver fed by the single construction-time progress bus. See
-    /// [`HostHandle::start_external_import`] for the remote replacement
+    /// the local host import route for the remote replacement
     /// (correlated progress events).
     pub fn start_external_import(
         &self,
@@ -1311,13 +1348,25 @@ impl WorkspaceStore {
         threads: Vec<ExternalThread>,
         cx: &mut App,
     ) -> Task<Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, String>> {
-        let host = self.host.clone();
-        let project_id = project_id.to_string();
-        cx.spawn(async move |_| {
-            host.start_external_import(project_id, threads)
-                .await
-                .map_err(|error| error.message)
-        })
+        #[cfg(feature = "local-host")]
+        {
+            let host = self.host.clone();
+            let routes = self.import_routes.clone();
+            let project_id = project_id.to_string();
+            cx.spawn(async move |_| {
+                let Some(routes) = routes else {
+                    return Ok(None);
+                };
+                start_external_import(&host, &routes, project_id, threads)
+                    .await
+                    .map_err(|error| error.message)
+            })
+        }
+        #[cfg(not(feature = "local-host"))]
+        {
+            let _ = (project_id, threads);
+            cx.spawn(async move |_| Ok(None))
+        }
     }
 
     pub(crate) fn commit_dialog_state(&self) -> CommitDialogState {
@@ -1615,6 +1664,7 @@ impl WorkspaceStore {
     /// crossing accesses the `PtyHandle`/`GridEmulator`-backed live terminal
     /// objects and is documented by `LocalTerminalRegistry`; a remote
     /// transport must substitute raw byte streams, never terminal JSON.
+    #[cfg(feature = "local-host")]
     pub fn with_terminal_workspace<R>(
         &self,
         read: impl FnOnce(&TerminalWorkspace) -> R,
@@ -1792,12 +1842,12 @@ mod tests {
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
     use tcode_runtime::host::HostEvent;
-    use tcode_runtime::pipe::{HostHandle, HostServices, spawn_host};
+    use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
 
     use super::WorkspaceStore;
 
-    fn test_host(store: SessionStore) -> HostHandle {
+    fn test_host(store: SessionStore) -> SpawnedHost {
         spawn_host(store, HostServices::default()).expect("spawn test host")
     }
 
@@ -1807,11 +1857,11 @@ mod tests {
         };
     }
 
-    fn command(host: &HostHandle, command: Command) {
-        smol::block_on(host.command(command)).expect("typed host command");
+    fn command(host: &SpawnedHost, command: Command) {
+        smol::block_on(host.link().command(command)).expect("typed host command");
     }
 
-    fn shutdown_test_host(host: &HostHandle) {
+    fn shutdown_test_host(host: &SpawnedHost) {
         host.shutdown_blocking()
             .expect("drain test store and stop host");
     }
@@ -1877,7 +1927,7 @@ mod tests {
         }
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2008,7 +2058,7 @@ mod tests {
             .upsert_meta(&seed_session)
             .expect("persist seed session");
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
 
         command(
             &host,
@@ -2093,7 +2143,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2182,7 +2232,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2239,7 +2289,7 @@ mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2314,7 +2364,7 @@ mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2385,7 +2435,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2453,7 +2503,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         command(
             &host,
             Command::SelectSession {
@@ -2518,7 +2568,7 @@ mod tests {
         ));
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
 
         update_host!(&host, |state, _cx| {
             state.acp_registry = Some(

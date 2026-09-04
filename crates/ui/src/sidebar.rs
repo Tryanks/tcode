@@ -2537,7 +2537,7 @@ mod tests {
             state.sessions = vec![meta];
         }))
         .expect("seed sidebar host");
-        let store = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
@@ -2637,7 +2637,7 @@ mod tests {
             state.sessions = sessions;
         }))
         .expect("seed auto-archive host");
-        let store = cx.new(|cx| WorkspaceStore::new(host.clone(), cx));
+        let store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
