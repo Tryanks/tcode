@@ -30,6 +30,8 @@ pub enum OrchestrateOp {
         parent_id: String,
         thread_id: String,
         message: String,
+        /// Switch the child's fast mode before delivering the message.
+        fast: Option<bool>,
     },
     Result {
         parent_id: String,

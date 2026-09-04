@@ -57,6 +57,11 @@ struct StatusParams {
 struct SendParams {
     thread_id: String,
     message: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Switch the child's fast mode (true = on, false = off) before delivering this message. Takes effect from the child's next turn: a turn already running keeps its speed, so to speed up work in progress cancel the child first, then send with fast set — it resumes its transcript on a fresh process. Pass it only when the user explicitly asks; omit it to leave the setting alone."
+    )]
+    fast: Option<bool>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct ThreadParams {
@@ -142,6 +147,7 @@ impl OrchestrateTools {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
                 message: p.message,
+                fast: p.fast,
             })
             .await)
     }

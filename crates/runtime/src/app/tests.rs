@@ -2680,6 +2680,7 @@ fn orchestrate_send_unarchives_the_child() {
                 parent_id: "parent".into(),
                 thread_id: "child".into(),
                 message: "retry with the failing test".into(),
+                fast: None,
             },
             reply,
             cx,
@@ -2689,6 +2690,72 @@ fn orchestrate_send_unarchives_the_child() {
             state.find_meta("child").unwrap().archived_at.is_none(),
             "send should revive an archived child"
         );
+    });
+}
+
+#[test]
+fn orchestrate_send_fast_switch_persists_and_schedules_restart() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orchestrate-send-fast-test");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(|_| AppState::new(store));
+    let (commands, _receiver) = smol::channel::unbounded();
+
+    state.host_update(cx, |state, cx| {
+        let mut child = live_session(ProviderKind::Codex, commands);
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        child.turn_in_flight = true;
+        state.sessions.push(child.meta.clone());
+        state.residents.parked.insert(child.meta.id.clone(), child);
+
+        let send = |state: &mut AppState, cx: &mut HostCx, fast: Option<bool>| {
+            let (reply, response) = smol::channel::bounded(1);
+            state.handle_orchestrate_op(
+                orchestrate_mcp::OrchestrateOp::Send {
+                    parent_id: "parent".into(),
+                    thread_id: "child".into(),
+                    message: "carry on".into(),
+                    fast,
+                },
+                reply,
+                cx,
+            );
+            assert!(response.try_recv().unwrap().is_ok());
+        };
+        let is_fast = |state: &AppState| {
+            let selected = |selections: &[OptionSelection]| {
+                selections
+                    .iter()
+                    .any(|selection| selection.id == "serviceTier" && selection.value == "fast")
+            };
+            let resident = selected(&state.resident("child").unwrap().meta.option_selections);
+            let indexed = selected(&state.find_meta("child").unwrap().option_selections);
+            assert_eq!(resident, indexed, "resident and index must agree");
+            resident
+        };
+
+        send(state, cx, None);
+        assert!(!is_fast(state), "omitted: unchanged");
+        assert!(
+            !state
+                .resident("child")
+                .unwrap()
+                .options_changed_while_live()
+        );
+
+        send(state, cx, Some(true));
+        assert!(is_fast(state), "fast on");
+        assert!(
+            state
+                .resident("child")
+                .unwrap()
+                .options_changed_while_live(),
+            "a live child must restart before its next turn"
+        );
+
+        send(state, cx, Some(false));
+        assert!(!is_fast(state), "fast off");
     });
 }
 
