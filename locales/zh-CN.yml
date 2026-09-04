@@ -348,6 +348,8 @@ orchestrate:
     disable: "暂停派发，但保留这个模型的定义"
     effort_label: "派发推理强度"
     effort_default: "模型默认"
+    fast_label: "快速模式"
+    fast_hint: "派发时启用提供方的快速模式（Claude fastMode、Codex fast 服务档位）"
     description_placeholder: "定义该模型的评分、优势、适合任务、注意事项、推荐 effort 和升级定位…"
     remove: "删除这个子模型配置"
   no_more_models: "所有可用的提供商模型都已配置。可先在“提供商”中添加自定义模型标识。"

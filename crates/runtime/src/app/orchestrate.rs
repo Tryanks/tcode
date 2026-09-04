@@ -231,6 +231,7 @@ impl AppState {
         provider: ProviderKind,
         model: Option<String>,
         effort: Option<String>,
+        fast: bool,
         profile_id: Option<String>,
         approval_mode: ApprovalMode,
         title: String,
@@ -249,6 +250,7 @@ impl AppState {
             provider,
             model,
             effort,
+            fast,
             profile_id,
             approval_mode,
             cwd,
@@ -334,7 +336,7 @@ impl AppState {
                 result_max_chars,
             } => {
                 let resolved = (|| {
-                    let (provider, model, effort, profile_id) = resolve_orchestrate_dispatch(
+                    let (provider, model, effort, fast, profile_id) = resolve_orchestrate_dispatch(
                         &self.settings.orchestrate,
                         &provider,
                         model.as_deref(),
@@ -347,9 +349,9 @@ impl AppState {
                         return Err(format!("unknown profile: {id}"));
                     }
                     let approval_mode = resolve_dispatch_access(access.as_deref())?;
-                    Ok((provider, model, effort, profile_id, approval_mode))
+                    Ok((provider, model, effort, fast, profile_id, approval_mode))
                 })();
-                let (provider, model, effort, profile_id, approval_mode) = match resolved {
+                let (provider, model, effort, fast, profile_id, approval_mode) = match resolved {
                     Ok(resolved) => resolved,
                     Err(err) => {
                         let _ = reply.try_send(Err(err));
@@ -366,6 +368,7 @@ impl AppState {
                             provider,
                             Some(model),
                             effort,
+                            fast,
                             profile_id,
                             approval_mode,
                             title,
@@ -396,6 +399,7 @@ impl AppState {
                     provider,
                     Some(model),
                     effort,
+                    fast,
                     profile_id,
                     approval_mode,
                     path.clone(),
@@ -1133,21 +1137,24 @@ pub(super) fn render_orchestrate_configuration(
     for child in settings.child_models.iter().filter(|child| child.enabled) {
         let provider = provider_name(child.provider);
         let effort = child.effort.as_deref().unwrap_or("provider default");
+        let fast = if child.fast { " — fast mode" } else { "" };
         if let Some(profile_id) = child.profile_id.as_deref() {
             text.push_str(&format!(
-                "\n#### `{}` / `{}` — effort `{}` — profile `{}`\n\n{}\n",
+                "\n#### `{}` / `{}` — effort `{}`{} — profile `{}`\n\n{}\n",
                 escape_markdown_inline(provider),
                 escape_markdown_inline(&child.model),
                 escape_markdown_inline(effort),
+                fast,
                 escape_markdown_inline(profile_id),
                 child.description.trim(),
             ));
         } else {
             text.push_str(&format!(
-                "\n#### `{}` / `{}` — effort `{}`\n\n{}\n",
+                "\n#### `{}` / `{}` — effort `{}`{}\n\n{}\n",
                 escape_markdown_inline(provider),
                 escape_markdown_inline(&child.model),
                 escape_markdown_inline(effort),
+                fast,
                 child.description.trim(),
             ));
         }
@@ -1159,6 +1166,10 @@ pub(super) fn escape_markdown_inline(value: &str) -> String {
     value.replace('`', "\\`").replace(['\r', '\n'], " ")
 }
 
+/// `(provider, model, effort, fast, profile_id)` of the child profile a
+/// dispatch resolved to.
+pub(super) type ResolvedDispatch = (ProviderKind, String, Option<String>, bool, Option<String>);
+
 /// Validate an MCP dispatch against the configured child-model allow list and
 /// fill in its model/default effort. The main model is unrestricted; this gate
 /// applies only to newly-created child sessions.
@@ -1168,7 +1179,7 @@ pub(super) fn resolve_orchestrate_dispatch(
     model: Option<&str>,
     effort: Option<&str>,
     profile: Option<&str>,
-) -> Result<(ProviderKind, String, Option<String>, Option<String>), String> {
+) -> Result<ResolvedDispatch, String> {
     let provider = match provider.trim().to_ascii_lowercase().as_str() {
         "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
         "codex" => ProviderKind::Codex,
@@ -1240,6 +1251,7 @@ pub(super) fn resolve_orchestrate_dispatch(
         provider,
         child.model.clone(),
         child.effort.clone(),
+        child.fast,
         child.profile_id.clone(),
     ))
 }
@@ -1315,6 +1327,7 @@ pub(super) fn build_child_meta(
     provider: ProviderKind,
     model: Option<String>,
     effort: Option<String>,
+    fast: bool,
     profile_id: Option<String>,
     approval_mode: ApprovalMode,
     cwd: PathBuf,
@@ -1334,7 +1347,24 @@ pub(super) fn build_child_meta(
             value: serde_json::Value::String(effort),
         });
     }
+    if fast && let Some((id, value)) = fast_selection(provider) {
+        meta.option_selections.push(OptionSelection {
+            id: id.into(),
+            value,
+        });
+    }
     meta
+}
+
+/// The option selection that turns on a provider's fast mode: Claude's
+/// `fastMode` launch setting, Codex's `fast` service tier. `None` for
+/// providers without one.
+fn fast_selection(provider: ProviderKind) -> Option<(&'static str, serde_json::Value)> {
+    match provider {
+        ProviderKind::ClaudeCode => Some(("fastMode", serde_json::Value::Bool(true))),
+        ProviderKind::Codex => Some(("serviceTier", serde_json::Value::String("fast".into()))),
+        _ => None,
+    }
 }
 
 pub(super) fn final_assistant_message(timeline: &Timeline) -> String {

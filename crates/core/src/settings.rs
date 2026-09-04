@@ -264,6 +264,10 @@ pub struct OrchestrateChildModel {
         alias = "default_effort"
     )]
     pub effort: Option<String>,
+    /// Dispatch with the provider's fast mode (Claude `fastMode`, Codex `fast`
+    /// service tier). Ignored by providers without one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fast: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
 }
@@ -361,6 +365,7 @@ impl Default for OrchestrateSettings {
                     profile_id: None,
                     enabled: true,
                     effort: Some("medium".into()),
+                    fast: false,
                     description: DEFAULT_GPT_MEDIUM_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
@@ -369,6 +374,7 @@ impl Default for OrchestrateSettings {
                     profile_id: None,
                     enabled: true,
                     effort: Some("max".into()),
+                    fast: false,
                     description: DEFAULT_GPT_MAX_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
@@ -377,6 +383,7 @@ impl Default for OrchestrateSettings {
                     profile_id: None,
                     enabled: true,
                     effort: Some("high".into()),
+                    fast: false,
                     description: DEFAULT_SONNET_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
@@ -385,6 +392,7 @@ impl Default for OrchestrateSettings {
                     profile_id: None,
                     enabled: true,
                     effort: Some("high".into()),
+                    fast: false,
                     description: DEFAULT_OPUS_CHILD_DEFINITION.into(),
                 },
                 OrchestrateChildModel {
@@ -393,6 +401,7 @@ impl Default for OrchestrateSettings {
                     profile_id: None,
                     enabled: true,
                     effort: Some("high".into()),
+                    fast: false,
                     description: DEFAULT_FABLE_CHILD_DEFINITION.into(),
                 },
             ],
@@ -1407,6 +1416,7 @@ mod tests {
             profile_id: None,
             enabled: true,
             effort: Some("High".into()),
+            fast: false,
             description: String::new(),
         };
         assert!(profile.matches_effort(Some("high")));
@@ -1452,6 +1462,7 @@ mod tests {
         let child: OrchestrateChildModel =
             serde_json::from_str(r#"{"provider":"codex","model":"m","enabled":true}"#).unwrap();
         assert_eq!(child.profile_id, None);
+        assert!(!child.fast, "legacy profiles dispatch without fast mode");
 
         let title: TitleGenerationSettings =
             serde_json::from_str(r#"{"provider":"codex","model":"m"}"#).unwrap();
@@ -1459,6 +1470,7 @@ mod tests {
 
         let child = OrchestrateChildModel {
             profile_id: Some("kimi".into()),
+            fast: true,
             ..child
         };
         let child_back: OrchestrateChildModel =
