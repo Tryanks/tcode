@@ -126,7 +126,7 @@ impl AndroidWindow {
         let logical_size = logical_size(physical_size, scale_factor);
         let bounds = Bounds::new(point(px(0.0), px(0.0)), logical_size);
         display.set_bounds(bounds);
-        let mut renderer = WgpuRenderer::new(
+        let renderer = WgpuRenderer::new(
             gpu_context.clone(),
             &surface,
             WgpuSurfaceConfig {
@@ -136,7 +136,6 @@ impl AndroidWindow {
             },
             None,
         )?;
-        renderer.set_scale_factor(scale_factor);
 
         Ok(Self(Rc::new(AndroidWindowInner {
             app,
@@ -186,8 +185,6 @@ impl AndroidWindow {
                     log::error!("failed to recreate Android Vulkan surface: {error:#}");
                     return;
                 }
-                let scale_factor = state.scale_factor;
-                state.renderer.set_scale_factor(scale_factor);
                 state.native_surface = Some(surface);
                 drop(state);
                 self.resize_from_native_window();
@@ -226,7 +223,6 @@ impl AndroidWindow {
                 false
             } else {
                 state.scale_factor = scale_factor;
-                state.renderer.set_scale_factor(scale_factor);
                 true
             }
         };

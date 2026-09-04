@@ -3545,8 +3545,6 @@ name = "gpui-pre-platform"
 version = "0.3.3"
 dependencies = [
  "console_error_panic_hook",
- "gpui-android",
- "gpui-ios",
  "gpui-pre",
  "gpui-pre-linux",
  "gpui-pre-macos",
@@ -3678,6 +3676,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre-web"
 version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27728bd9180d1a10516d719fed446adf85872cedf0e262ad0738f4edc9deaf33"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3700,6 +3700,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "695c613099863bbf434ff896d196e3f55d4d5f59769dac99596e79dbb18a8aff"
 dependencies = [
  "anyhow",
  "bytemuck",

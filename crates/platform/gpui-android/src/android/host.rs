@@ -1,9 +1,8 @@
 use android_activity::AndroidApp;
 use gpui::TextInputConfiguration;
-use gpui_wgpu::ColorGlyphRaster;
 use jni::{
     JavaVM,
-    objects::{JByteArray, JObject, JString, JValue},
+    objects::{JObject, JString, JValue},
 };
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -135,55 +134,6 @@ pub(crate) fn read_clipboard() -> Option<String> {
         return None;
     }
     env.get_string(&JString::from(object)).ok().map(Into::into)
-}
-
-pub(crate) fn rasterize_color_emoji(glyph_id: u32, pixel_size: f32) -> Option<ColorGlyphRaster> {
-    let app = APP.lock().clone()?;
-    // SAFETY: Android owns this VM for the duration of the process.
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread().ok()?;
-    // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    let glyph_id = i32::try_from(glyph_id).ok()?;
-    let object = match env.call_method(
-        &activity,
-        "gpuiRasterizeColorEmoji",
-        "(IF)[B",
-        &[JValue::Int(glyph_id), JValue::Float(pixel_size)],
-    ) {
-        Ok(value) => value.l().ok()?,
-        Err(error) => {
-            log::error!("JNI gpuiRasterizeColorEmoji failed: {error}");
-            let _ = env.exception_clear();
-            return None;
-        }
-    };
-    if object.is_null() {
-        return None;
-    }
-
-    let bytes = env.convert_byte_array(JByteArray::from(object)).ok()?;
-    let header: [u8; 16] = bytes.get(..16)?.try_into().ok()?;
-    let left = i32::from_le_bytes(header[0..4].try_into().ok()?);
-    let top = i32::from_le_bytes(header[4..8].try_into().ok()?);
-    let width = u32::try_from(i32::from_le_bytes(header[8..12].try_into().ok()?)).ok()?;
-    let height = u32::try_from(i32::from_le_bytes(header[12..16].try_into().ok()?)).ok()?;
-    let expected = usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?
-        .checked_mul(4)?;
-    let data = bytes.get(16..)?;
-    if width == 0 || height == 0 || data.len() != expected {
-        return None;
-    }
-
-    Some(ColorGlyphRaster {
-        left,
-        top,
-        width,
-        height,
-        data: data.to_vec(),
-    })
 }
 
 pub(crate) fn write_clipboard(text: String) {

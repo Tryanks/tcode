@@ -7,11 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.fonts.Font;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.Editable;
@@ -29,14 +25,9 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 
-import java.io.File;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
     private GpuiInputView inputView;
-    private Font colorEmojiFont;
 
     private native void nativeCommitText(String text);
     private native void nativeSetComposingText(String text);
@@ -164,63 +155,6 @@ public final class GpuiActivity extends NativeActivity {
         ClipboardManager clipboard =
                 (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         clipboard.setPrimaryClip(ClipData.newPlainText("tcode", text));
-    }
-
-    public byte[] gpuiRasterizeColorEmoji(int glyphId, float pixelSize) {
-        if (Build.VERSION.SDK_INT < 29 || pixelSize <= 0.0f) return null;
-        Bitmap bitmap = null;
-        try {
-            Font font = getColorEmojiFont();
-            int side = Math.max(16, (int) Math.ceil(pixelSize * 3.0f) + 8);
-            float originX = pixelSize;
-            float baseline = pixelSize * 2.0f;
-            bitmap = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(bitmap);
-            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-            paint.setColor(Color.WHITE);
-            paint.setTextSize(pixelSize);
-            canvas.drawGlyphs(new int[] {glyphId}, 0, new float[] {originX, baseline},
-                    0, 1, font, paint);
-
-            int[] pixels = new int[side * side];
-            bitmap.getPixels(pixels, 0, side, 0, 0, side, side);
-            int minX = side, minY = side, maxX = -1, maxY = -1;
-            for (int y = 0; y < side; y++) {
-                for (int x = 0; x < side; x++) {
-                    if (Color.alpha(pixels[y * side + x]) == 0) continue;
-                    minX = Math.min(minX, x); minY = Math.min(minY, y);
-                    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
-                }
-            }
-            if (maxX < minX || maxY < minY) return null;
-            int width = maxX - minX + 1;
-            int height = maxY - minY + 1;
-            ByteBuffer result = ByteBuffer.allocate(16 + width * height * 4)
-                    .order(ByteOrder.LITTLE_ENDIAN);
-            result.putInt(minX - Math.round(originX));
-            result.putInt(Math.round(baseline) - minY);
-            result.putInt(width); result.putInt(height);
-            for (int y = minY; y <= maxY; y++) {
-                for (int x = minX; x <= maxX; x++) {
-                    int color = pixels[y * side + x];
-                    result.put((byte) Color.red(color)); result.put((byte) Color.green(color));
-                    result.put((byte) Color.blue(color)); result.put((byte) Color.alpha(color));
-                }
-            }
-            return result.array();
-        } catch (Exception error) {
-            android.util.Log.w("Tcode-Emoji", "Unable to rasterize emoji glyph", error);
-            return null;
-        } finally {
-            if (bitmap != null) bitmap.recycle();
-        }
-    }
-
-    private synchronized Font getColorEmojiFont() throws Exception {
-        if (colorEmojiFont == null) {
-            colorEmojiFont = new Font.Builder(new File("/system/fonts/NotoColorEmoji.ttf")).build();
-        }
-        return colorEmojiFont;
     }
 
     private final class GpuiInputView extends View {

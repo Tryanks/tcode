@@ -69,9 +69,12 @@ Constraints from the brief:
    through the existing relaunch marker. "Back to local" relaunches without it.
 9. **Mobile shell** is a new crate `tcode-mobile` (stack navigation: Hosts →
    Sessions → Chat) reusing `tcode-ui`'s markdown, chat timeline, composer,
-   theme. Platform backends (`gpui-ios`, `gpui-android`,
-   `gpui-platform-mobile`, `gpui-wgpu`, `gpui-apple`, `gpui-web`) are vendored
-   from Eauth under `crates/platform/` and applied via `[patch.crates-io]`.
+   theme. The vendored set is our own `gpui-ios` and `gpui-android` backends plus
+   `gpui-platform-shim`. The shim exists only because `gpui-base` unconditionally
+   depends on `gpui-pre-platform` on non-wasm targets; it adds a fallback arm to
+   the published crate. Delete it when gpui-pre gains that arm or gpui-kit makes
+   the dependency optional. Published `gpui-pre-wgpu` and `gpui-pre-web` are used
+   directly.
 10. **Remote parity gaps deferred to P4**: terminal byte streams
     (`Topic::Terminal` exists, unused), preview reverse RPC, remote directory
     browser for Add Project, attachment upload. Until then the terminal drawer
@@ -136,6 +139,14 @@ P2a vendors the mobile GPUI backends and adds native shells with a safe-area-awa
 placeholder view. The checked-in smoke-test captures are
 `docs/images/mobile/ios-p2a-hello.png` and
 `docs/images/mobile/android-p2a-hello.png`.
+
+The only patched upstream crate is `gpui-platform-shim`, a source-identical copy
+of published `gpui-pre-platform` plus a fallback `current_platform` arm for
+targets without an upstream default backend. It exists for `gpui-base`'s
+unconditional non-wasm dependency. Upstream follow-ups are a gpui-pre fallback
+arm and making the gpui-kit dependency optional; delete the shim when either
+lands. `gpui-ios` and `gpui-android` are our backends, not upstream patches, and
+both compile against the published `gpui-pre-wgpu`.
 
 The iOS host was built and run against the installed iOS 26.5 runtime on the
 booted iPhone 17 simulator with:

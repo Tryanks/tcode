@@ -135,7 +135,7 @@ impl IosWindow {
             DevicePixels((f32::from(logical_size.width) * scale_factor).round() as i32),
             DevicePixels((f32::from(logical_size.height) * scale_factor).round() as i32),
         );
-        let mut renderer = WgpuRenderer::new(
+        let renderer = WgpuRenderer::new(
             gpu_context.clone(),
             &raw_handles,
             WgpuSurfaceConfig {
@@ -145,7 +145,6 @@ impl IosWindow {
             },
             None,
         )?;
-        renderer.set_scale_factor(scale_factor);
         log::info!(
             "GPUI iOS Metal surface format selected: {surface_format:?}; scale factor: \
              {scale_factor:.2}; glass enabled: {glass_enabled}"
@@ -228,7 +227,6 @@ impl IosWindow {
             },
             &instance,
         )?;
-        renderer.set_scale_factor(scale_factor);
         drop(renderer);
 
         self.view.set(view);
@@ -294,7 +292,6 @@ impl IosWindow {
     pub(crate) fn resize_from_host(&self, width: f32, height: f32, scale_factor: f32) {
         let size = size(px(width.max(1.0)), px(height.max(1.0)));
         let scale_factor = scale_factor.max(1.0);
-        self.renderer.borrow_mut().set_scale_factor(scale_factor);
         if self.bounds.get().size == size
             && (self.scale_factor.get() - scale_factor).abs() < f32::EPSILON
         {

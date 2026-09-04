@@ -267,8 +267,8 @@ impl AndroidPlatform {
 
 fn load_android_text_system() -> Arc<dyn PlatformTextSystem> {
     let text_system = Arc::new(CosmicTextSystem::new_without_system_fonts("Roboto"));
-    text_system.set_default_font_fallbacks(vec!["Noto Color Emoji".to_string()]);
-    text_system.set_color_emoji_rasterizer(host::rasterize_color_emoji);
+    // ponytail: Color emoji currently render as tofu. Bundle a Noto Color Emoji
+    // font in the APK to fix this instead of patching gpui-pre-wgpu.
     let mut font_paths = fs::read_dir("/system/fonts")
         .into_iter()
         .flatten()
