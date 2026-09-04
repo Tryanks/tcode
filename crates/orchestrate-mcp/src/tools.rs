@@ -42,6 +42,11 @@ struct DispatchParams {
         description = "Character cap for the inline result text in the completion callback (default 1200; 0 = unlimited). Raise it or pass 0 when you will need the full report anyway — cheaper than a follow-up result call."
     )]
     result_max_chars: Option<u32>,
+    #[serde(default)]
+    #[schemars(
+        description = "Override the child profile's fast-mode setting for this dispatch (true = on, false = off). Pass it only when the user explicitly asked for fast mode on or off; otherwise omit it and the profile decides. Ignored by providers without a fast mode."
+    )]
+    fast: Option<bool>,
 }
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StatusParams {
@@ -87,7 +92,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries."
+        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
     )]
     async fn dispatch(
         &self,
@@ -107,6 +112,7 @@ impl OrchestrateTools {
                 worktree: p.worktree,
                 archive_on_complete: p.archive_on_complete,
                 result_max_chars: p.result_max_chars,
+                fast: p.fast,
             })
             .await)
     }

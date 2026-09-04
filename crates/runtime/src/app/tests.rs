@@ -5795,6 +5795,69 @@ fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<
 }
 
 #[test]
+fn orchestrate_dispatch_fast_override_beats_profile_setting() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-dispatch-fast-data");
+    let store = (*test_store).clone();
+    let state = cx.new_entity(|_| AppState::new(store));
+    let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
+    let parent_id = parent.id.clone();
+
+    // Profile default: medium is plain, max is fast.
+    state.host_update(cx, |state, _| {
+        state.sessions.push(parent);
+        let max = state
+            .settings
+            .orchestrate
+            .child_models
+            .iter_mut()
+            .find(|child| child.effort.as_deref() == Some("max"))
+            .unwrap();
+        max.fast = true;
+    });
+
+    let dispatch = |state: &mut AppState, cx: &mut HostCx, effort: &str, fast: Option<bool>| {
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Dispatch {
+                parent_id: parent_id.clone(),
+                provider: "codex".into(),
+                model: Some("gpt-5.6-sol".into()),
+                effort: Some(effort.into()),
+                profile: None,
+                access: None,
+                title: "Child".into(),
+                brief: "Inspect the workspace".into(),
+                cwd: None,
+                worktree: None,
+                archive_on_complete: None,
+                result_max_chars: None,
+                fast,
+            },
+            reply,
+            cx,
+        );
+        let id = response.try_recv().unwrap().unwrap()["thread_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        state
+            .find_meta(&id)
+            .unwrap()
+            .option_selections
+            .iter()
+            .any(|selection| selection.id == "serviceTier" && selection.value == "fast")
+    };
+
+    state.host_update(cx, |state, cx| {
+        assert!(!dispatch(state, cx, "medium", None), "profile default: off");
+        assert!(dispatch(state, cx, "medium", Some(true)), "override on");
+        assert!(dispatch(state, cx, "max", None), "profile default: on");
+        assert!(!dispatch(state, cx, "max", Some(false)), "override off");
+    });
+}
+
+#[test]
 fn orchestrate_dispatch_resolves_cwd_before_reply() {
     let cx = &mut TestAppContext::default();
     let root = std::env::temp_dir().join(format!("tcode-dispatch-cwd-{}", uuid::Uuid::new_v4()));
@@ -5823,6 +5886,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 worktree: None,
                 archive_on_complete: None,
                 result_max_chars: None,
+                fast: None,
             },
             reply,
             cx,
@@ -5881,6 +5945,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
                 worktree: Some(true),
                 archive_on_complete: None,
                 result_max_chars: None,
+                fast: None,
             },
             reply,
             cx,

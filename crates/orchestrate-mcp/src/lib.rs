@@ -19,6 +19,8 @@ pub enum OrchestrateOp {
         worktree: Option<bool>,
         archive_on_complete: Option<bool>,
         result_max_chars: Option<u32>,
+        /// Per-dispatch override of the profile's fast-mode setting.
+        fast: Option<bool>,
     },
     Status {
         parent_id: String,

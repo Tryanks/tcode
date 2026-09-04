@@ -334,6 +334,7 @@ impl AppState {
                 worktree,
                 archive_on_complete,
                 result_max_chars,
+                fast: fast_override,
             } => {
                 let resolved = (|| {
                     let (provider, model, effort, fast, profile_id) = resolve_orchestrate_dispatch(
@@ -349,6 +350,9 @@ impl AppState {
                         return Err(format!("unknown profile: {id}"));
                     }
                     let approval_mode = resolve_dispatch_access(access.as_deref())?;
+                    // The profile's fast setting is the default; a dispatch may
+                    // override it either way on the user's explicit instruction.
+                    let fast = fast_override.unwrap_or(fast);
                     Ok((provider, model, effort, fast, profile_id, approval_mode))
                 })();
                 let (provider, model, effort, fast, profile_id, approval_mode) = match resolved {
@@ -1128,7 +1132,7 @@ pub(super) fn render_orchestrate_configuration(
         text.push_str(identity);
     }
     text.push_str(
-        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. When an entry names a `profile`, pass it exactly as listed. The definitions below are user-configured routing guidance.\n",
+        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. When an entry names a `profile`, pass it exactly as listed. A profile marked `fast mode` dispatches with the provider's fast mode; pass `fast: true|false` on a dispatch to override that only when the user explicitly asks. The definitions below are user-configured routing guidance.\n",
     );
     if !settings.child_models.iter().any(|child| child.enabled) {
         text.push_str("No child models are enabled. Work without dispatching until the user enables one in Settings → Orchestrate.");
