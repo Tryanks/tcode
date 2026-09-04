@@ -16,6 +16,16 @@ members = [
     "crates/ui",
     "crates/voice",
     "crates/app",
+    "crates/mobile",
+    "crates/ios",
+    "crates/android",
+]
+exclude = [
+    "crates/platform/gpui-platform-mobile",
+    "crates/platform/gpui-ios",
+    "crates/platform/gpui-android",
+    "crates/platform/gpui-web",
+    "crates/platform/gpui-wgpu",
 ]
 resolver = "3"
 default-members = ["crates/app"]
@@ -26,3 +36,8 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+[patch.crates-io]
+gpui-pre-platform = { path = "crates/platform/gpui-platform-mobile" }
+gpui-pre-wgpu = { path = "crates/platform/gpui-wgpu" }
+gpui-pre-web = { path = "crates/platform/gpui-web" }

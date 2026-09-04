@@ -1,0 +1,17 @@
+[package]
+name = "tcode-mobile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "tcode_mobile"
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui-ios = { path = "../platform/gpui-ios" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+gpui-android = { path = "../platform/gpui-android" }

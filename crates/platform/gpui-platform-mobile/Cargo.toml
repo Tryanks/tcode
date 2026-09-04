@@ -1,0 +1,46 @@
+# Patched copy of gpui-pre-platform 0.3.3 (Zed's gpui_platform, Apache-2.0).
+# Adds iOS and Android arms to `current_platform` so gpui-base and friends link
+# on mobile. Applied through `[patch.crates-io]` in the workspace root.
+[package]
+name = "gpui-pre-platform"
+version = "0.3.3"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "gpui_platform"
+path = "src/gpui_platform.rs"
+
+[features]
+default = []
+bench-support = ["gpui/bench-support", "gpui_macos/bench-support"]
+font-kit = ["gpui_macos/font-kit"]
+runtime_shaders = ["gpui_macos/runtime_shaders"]
+screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture", "gpui_windows/screen-capture", "gpui_linux/screen-capture"]
+test-support = ["gpui/test-support", "gpui_macos/test-support", "gpui_windows/test-support"]
+wayland = ["gpui_linux/wayland"]
+x11 = ["gpui_linux/x11"]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_macos = { package = "gpui-pre-macos", version = "=0.3.3", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.3", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false, features = ["windows-manifest"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gpui_linux = { package = "gpui-pre-linux", version = "=0.3.3", default-features = false }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+gpui_web = { package = "gpui-pre-web", version = "=0.3.3" }
+console_error_panic_hook = "0.1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui_ios = { package = "gpui-ios", path = "../gpui-ios" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+gpui_android = { package = "gpui-android", path = "../gpui-android" }
