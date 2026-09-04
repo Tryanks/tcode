@@ -1,4 +1,8 @@
 mod acp_panel;
+#[cfg(feature = "desktop")]
+mod add_project_dialog;
+#[cfg(not(feature = "desktop"))]
+#[path = "add_project_dialog_portable.rs"]
 mod add_project_dialog;
 mod app_activation;
 pub mod assets;
@@ -23,6 +27,10 @@ pub mod overlay;
 mod palette;
 mod pasteboard;
 mod plan_panel;
+#[cfg(feature = "desktop")]
+mod preview_panel;
+#[cfg(not(feature = "desktop"))]
+#[path = "preview_panel_portable.rs"]
 mod preview_panel;
 pub(crate) mod provider_card;
 mod provider_dialog;
@@ -34,16 +42,25 @@ pub mod remote;
 pub(crate) mod runtime_event;
 mod scroll;
 pub mod settings;
+#[cfg(feature = "desktop")]
+mod settings_page;
+#[cfg(not(feature = "desktop"))]
+#[path = "settings_page_portable.rs"]
 mod settings_page;
 mod shell;
 mod shortcut;
 mod sidebar;
 pub mod sizing;
 pub mod store;
+#[cfg(feature = "terminal")]
 mod terminal_drawer;
 pub mod theme;
+#[cfg(feature = "desktop")]
 mod thread_export;
-pub(crate) mod time;
+#[cfg(not(feature = "desktop"))]
+#[path = "thread_export_portable.rs"]
+mod thread_export;
+pub mod time;
 pub(crate) mod toast;
 pub(crate) mod usage;
 pub mod widgets;

@@ -1,4 +1,4 @@
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 pub(crate) fn read_pasteboard_image() -> Option<(String, Vec<u8>)> {
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::ns_string;
@@ -16,7 +16,7 @@ pub(crate) fn read_pasteboard_image() -> Option<(String, Vec<u8>)> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(feature = "desktop", target_os = "macos")))]
 pub(crate) fn read_pasteboard_image() -> Option<(String, Vec<u8>)> {
     None
 }

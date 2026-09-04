@@ -3,23 +3,36 @@ name = "tcode-remote"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["server", "client"]
+server = [
+    "dep:tcode-protocol",
+    "dep:base64",
+    "dep:getrandom",
+    "dep:if-addrs",
+    "dep:sha1",
+    "dep:sha2",
+    "dep:uuid",
+]
+client = ["dep:socket2", "dep:ureq", "dep:url"]
+
 [dependencies]
-tcode-protocol = { path = "../protocol" }
+tcode-protocol = { path = "../protocol", optional = true }
 async-channel = "2"
 async-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-base64 = "0.23"
+base64 = { version = "0.23", optional = true }
 futures-lite = "2"
 futures-util = { version = "0.3", features = ["sink"] }
-getrandom = "0.3"
-if-addrs = "0.13"
+getrandom = { version = "0.3", optional = true }
+if-addrs = { version = "0.13", optional = true }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = { version = "0.10", optional = true }
+sha2 = { version = "0.10", optional = true }
 smol = "2"
-socket2 = "0.6"
+socket2 = { version = "0.6", optional = true }
 tungstenite = "0.27"
-ureq = { version = "2", default-features = false, features = [] }
-url = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+ureq = { version = "2", default-features = false, features = [], optional = true }
+url = { version = "2", optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }

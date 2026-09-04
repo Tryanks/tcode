@@ -36,7 +36,7 @@ impl Composer {
         if has_scheduled && self.scheduled_countdown_tick.is_none() {
             self.scheduled_countdown_tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_secs(1)).await;
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }

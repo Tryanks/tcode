@@ -165,6 +165,57 @@ currently also pulls its desktop-only runtime, terminal, webview, voice, and
 services dependency graph; the shared mobile screens and theme remain P2 work
 once that crate's ongoing portability changes land.
 
+#### P2b notes
+
+P2b splits the shared crates at their platform boundaries. `tcode-remote` now
+has default-on `server` and `client` features; native phone clients select only
+`client`. `tcode-ui` keeps the desktop experience in its default feature set,
+while `remote-client`, `terminal`, and `desktop` independently gate the native
+WebSocket client, PTY/grid UI, and native integrations. `agent`, `tcode-core`,
+and `tcode-protocol` similarly use a default-on `process` feature so their
+portable serde model remains available without ACP/process dependencies.
+
+The UI's production timers and channels no longer depend on `smol`. A portable
+`WorkspaceStore` subscribes and returns immediately, allowing its GPUI task to
+apply the initial snapshots without blocking a single-threaded executor. Builds
+with `local-host` retain the bounded synchronous seed needed by desktop startup,
+which reads settings immediately after constructing the store. Native dialogs,
+webviews, voice, terminal-grid rendering, and filesystem-backed content search
+have portable fallbacks or compile out; theme, markdown, timeline/composer, and
+the replicated store remain available.
+
+The portability checks used for the native targets were:
+
+```sh
+IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo check -p tcode-ui --no-default-features \
+  --target aarch64-apple-ios-sim
+IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo check -p tcode-ui --no-default-features \
+  --features remote-client --target aarch64-apple-ios-sim
+IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo check -p tcode-remote --no-default-features \
+  --features client --target aarch64-apple-ios-sim
+
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+ANDROID_NDK_HOME=/opt/homebrew/share/android-commandlinetools/ndk/27.1.12297006 \
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 CARGO_NDK_PLATFORM=26 \
+  cargo ndk -t arm64-v8a check -p tcode-ui --no-default-features
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+ANDROID_NDK_HOME=/opt/homebrew/share/android-commandlinetools/ndk/27.1.12297006 \
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 CARGO_NDK_PLATFORM=26 \
+  cargo ndk -t arm64-v8a check -p tcode-ui --no-default-features \
+    --features remote-client
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+ANDROID_NDK_HOME=/opt/homebrew/share/android-commandlinetools/ndk/27.1.12297006 \
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 CARGO_NDK_PLATFORM=26 \
+  cargo ndk -t arm64-v8a check -p tcode-remote --no-default-features \
+    --features client
+```
+
+The P3 compile boundary is also clear: both
+`cargo check -p tcode-ui --no-default-features --target wasm32-unknown-unknown`
+and `cargo check -p tcode-client --target wasm32-unknown-unknown` pass. The web
+shell, WebSocket implementation, and bundle/serve work remain P3; no deeper
+`term` or `syntect` blocker remains in the shared UI graph.
+
 ### P3 — Browser client
 
 - `agent`, `core`, `protocol`, `ui`, `client` compile for

@@ -229,7 +229,7 @@ struct GridGeometry {
 
 #[cfg(feature = "local-host")]
 struct TerminalEventSubscription {
-    receiver: smol::channel::Receiver<TermEvent>,
+    receiver: async_channel::Receiver<TermEvent>,
     _task: Task<()>,
 }
 
@@ -440,7 +440,9 @@ impl TerminalDrawer {
         #[cfg(not(test))]
         let blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                smol::Timer::after(Duration::from_millis(500)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
                 if this
                     .update(cx, |this, cx| {
                         this.cursor_phase = !this.cursor_phase;
@@ -667,9 +669,11 @@ impl TerminalDrawer {
                     let mut saw_batched_event = false;
                     let mut non_wakeup_events = 0;
                     loop {
-                        let next = smol::future::or(
+                        let next = futures_lite::future::race(
                             async {
-                                smol::Timer::at(deadline).await;
+                                cx.background_executor()
+                                    .timer(deadline.saturating_duration_since(Instant::now()))
+                                    .await;
                                 None
                             },
                             async { Some(task_receiver.recv().await) },

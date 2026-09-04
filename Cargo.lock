@@ -8671,9 +8671,21 @@ dependencies = [
 name = "tcode-mobile"
 version = "0.1.0"
 dependencies = [
+ "agent",
+ "dirs 6.0.0",
+ "env_logger",
  "gpui-android",
+ "gpui-base",
  "gpui-ios",
  "gpui-pre",
+ "gpui-pre-platform",
+ "log",
+ "serde",
+ "serde_json",
+ "tcode-client",
+ "tcode-core",
+ "tcode-remote",
+ "tcode-ui",
 ]
 
 [[package]]
@@ -8761,11 +8773,13 @@ version = "0.1.0"
 dependencies = [
  "agent",
  "async-channel",
+ "async-lock",
  "base64 0.23.1",
  "block2 0.6.2",
  "chrono",
  "computer-use-mcp",
  "criterion",
+ "futures-lite",
  "gpui-base",
  "gpui-component-macros",
  "gpui-kit-assets",

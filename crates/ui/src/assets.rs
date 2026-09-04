@@ -99,11 +99,21 @@ impl AssetSource for Assets {
         if let Some((_, bytes)) = EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
-        ComponentAssets.load(path)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ComponentAssets.load(path)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            component_assets().load(path)
+        }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        #[cfg(not(target_arch = "wasm32"))]
         let mut paths = ComponentAssets.list(path)?;
+        #[cfg(target_arch = "wasm32")]
+        let mut paths = component_assets().list(path)?;
         if DM_SANS_PATH.starts_with(path) {
             paths.push(DM_SANS_PATH.into());
         }
@@ -114,6 +124,12 @@ impl AssetSource for Assets {
         }
         Ok(paths)
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn component_assets() -> &'static ComponentAssets {
+    static ASSETS: std::sync::OnceLock<ComponentAssets> = std::sync::OnceLock::new();
+    ASSETS.get_or_init(ComponentAssets::default)
 }
 
 #[cfg(test)]

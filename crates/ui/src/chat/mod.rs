@@ -38,7 +38,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
-#[cfg(feature = "local-host")]
+#[cfg(all(feature = "local-host", feature = "terminal"))]
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_secs;
 use crate::window_caption;
@@ -322,7 +322,7 @@ pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
-    #[cfg(feature = "local-host")]
+    #[cfg(all(feature = "local-host", feature = "terminal"))]
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
@@ -387,14 +387,14 @@ impl ChatView {
                 cx.notify();
             }),
         ];
-        #[cfg(feature = "local-host")]
+        #[cfg(all(feature = "local-host", feature = "terminal"))]
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
 
         let mut this = Self {
             workspace_store,
             window_state,
             composer,
-            #[cfg(feature = "local-host")]
+            #[cfg(all(feature = "local-host", feature = "terminal"))]
             terminal_drawer,
             list_state,
             turn_items: Vec::new(),
@@ -533,7 +533,9 @@ impl ChatView {
         if running && self._tick.is_none() {
             self._tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_millis(100)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -1521,7 +1523,7 @@ impl ChatView {
     fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
         self.copied = Some(key.clone());
         self._copied_task = Some(cx.spawn(async move |this, cx| {
-            smol::Timer::after(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.copied.as_deref() == Some(key.as_str()) {
                     this.copied = None;
@@ -1654,22 +1656,25 @@ impl ChatView {
                             .gap_1()
                             // Terminal bytes and the preview reverse RPC are
                             // local-only until P4 of the remote plan.
-                            .when(cfg!(feature = "local-host") && !remote, |this| {
-                                this.child(
-                                    Button::new("panel-layout")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .icon(IconName::PanelBottom)
-                                        .selected(terminal_open)
-                                        .tooltip(crate::tr!("chat.toggle_terminal"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.workspace_store.update(cx, |store, cx| {
-                                                store.toggle_terminal_panel(cx)
-                                            })
-                                        })),
-                                )
-                            })
+                            .when(
+                                cfg!(all(feature = "local-host", feature = "terminal")) && !remote,
+                                |this| {
+                                    this.child(
+                                        Button::new("panel-layout")
+                                            .ghost()
+                                            .small()
+                                            .compact()
+                                            .icon(IconName::PanelBottom)
+                                            .selected(terminal_open)
+                                            .tooltip(crate::tr!("chat.toggle_terminal"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.workspace_store.update(cx, |store, cx| {
+                                                    store.toggle_terminal_panel(cx)
+                                                })
+                                            })),
+                                    )
+                                },
+                            )
                             .child(
                                 Button::new("plan-panel")
                                     .ghost()
@@ -1683,7 +1688,7 @@ impl ChatView {
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
-                            .when(!remote, |this| {
+                            .when(cfg!(feature = "desktop") && !remote, |this| {
                                 this.child(
                                     Button::new("preview-panel")
                                         .ghost()
@@ -2254,11 +2259,11 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
-        #[cfg(feature = "local-host")]
+        #[cfg(all(feature = "local-host", feature = "terminal"))]
         let panel = self.workspace_store.read(cx).chat_panel_state();
-        #[cfg(feature = "local-host")]
+        #[cfg(all(feature = "local-host", feature = "terminal"))]
         let terminal_open = panel.terminal_open;
-        #[cfg(feature = "local-host")]
+        #[cfg(all(feature = "local-host", feature = "terminal"))]
         let terminal_height = panel.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
@@ -2365,7 +2370,7 @@ impl Render for ChatView {
             )
             .child(composer);
 
-        #[cfg(feature = "local-host")]
+        #[cfg(all(feature = "local-host", feature = "terminal"))]
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
             let drawer_resize = self.terminal_drawer.clone();
@@ -2393,7 +2398,7 @@ impl Render for ChatView {
         } else {
             main.into_any_element()
         };
-        #[cfg(not(feature = "local-host"))]
+        #[cfg(not(all(feature = "local-host", feature = "terminal")))]
         let body: AnyElement = main.into_any_element();
         root.child(header).child(body)
     }
@@ -2450,6 +2455,7 @@ fn render_commit_footer(
         .into_any_element()
 }
 
+#[cfg(feature = "desktop")]
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     if tcode_services::desktop::open_in_zed(cwd).is_err() {
         window.push_notification(
@@ -2457,6 +2463,14 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
             cx,
         );
     }
+}
+
+#[cfg(not(feature = "desktop"))]
+fn open_in_zed(_cwd: &Path, window: &mut Window, cx: &mut App) {
+    window.push_notification(
+        Notification::error(crate::tr!("errors.zed_cli_missing")),
+        cx,
+    );
 }
 
 #[cfg(test)]

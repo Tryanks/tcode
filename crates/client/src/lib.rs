@@ -57,6 +57,7 @@ impl HostEventReceiver {
         self.receiver.recv().await.map_err(transport_error)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn recv_blocking(&self) -> Result<EventEnvelope, ProtocolError> {
         self.receiver.recv_blocking().map_err(transport_error)
     }
@@ -170,6 +171,7 @@ impl HostLink {
         (id, Box::pin(future))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn command_blocking(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
         let id = self.next_id();
         match self
@@ -239,6 +241,7 @@ impl HostLink {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
         let result = self.command_blocking(Command::ShutdownAllAndFlush);
         self.inner.to_host.close();

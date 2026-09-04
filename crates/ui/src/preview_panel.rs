@@ -72,7 +72,7 @@ fn preview_key_for_session(
 }
 
 /// The reply channel a broker request is answered on.
-type ReplyTx = smol::channel::Sender<Result<PreviewReply, String>>;
+type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod lifecycle;
@@ -571,7 +571,7 @@ mod native {
                     })
                 })
                 .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
-            let (status_reply, status_result) = smol::channel::bounded(1);
+            let (status_reply, status_result) = async_channel::bounded(1);
             cx.spawn(async move |_, _| {
                 let result = match status_result.recv().await {
                     Ok(Ok(PreviewReply::Json(mut value))) => {
@@ -666,7 +666,7 @@ mod native {
                         let _ = reply.send(Err(wait_timeout_message(&pending))).await;
                         return;
                     }
-                    let (probe_reply, probe_result) = smol::channel::bounded(1);
+                    let (probe_reply, probe_result) = async_channel::bounded(1);
                     if this
                         .update(cx, |panel, cx| {
                             panel.lifecycle.update(cx, |lifecycle, cx| {

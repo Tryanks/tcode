@@ -11,7 +11,9 @@
 //!
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
 
+#[cfg(feature = "desktop")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "desktop")]
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -28,8 +30,18 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_protocol::ThreadExportFormat;
+#[cfg(feature = "desktop")]
 use tcode_services::session_search::{SessionSearch, SessionSearchHit};
+#[cfg(feature = "desktop")]
 use tcode_services::store::SessionStore;
+
+#[cfg(not(feature = "desktop"))]
+struct SessionSearchHit {
+    session_id: String,
+    session_title: String,
+    snippet: String,
+    turn: usize,
+}
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
@@ -117,6 +129,7 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
+    #[cfg(feature = "desktop")]
     content_search: Option<Arc<Mutex<SessionSearch>>>,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
@@ -159,6 +172,7 @@ impl CommandPalette {
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
+            #[cfg(feature = "desktop")]
             content_search: SessionStore::open_default()
                 .ok()
                 .map(SessionSearch::new)
@@ -180,6 +194,7 @@ impl CommandPalette {
         self.content_hits.clear();
     }
 
+    #[cfg(feature = "desktop")]
     fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
@@ -216,6 +231,13 @@ impl CommandPalette {
                 }
             });
         }));
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    fn schedule_content_search(&mut self, _cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.content_hits.clear();
+        self._search_task = None;
     }
 
     fn close(&self, cx: &mut Context<Self>) {

@@ -31,7 +31,7 @@ impl WorkspaceStore {
         let host = self.host.clone();
         #[cfg(test)]
         {
-            let result = smol::block_on(host.command(command));
+            let result = futures_lite::future::block_on(host.command(command));
             cx.spawn(async move |_| result)
         }
         #[cfg(not(test))]

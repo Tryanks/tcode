@@ -19,7 +19,7 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(feature = "desktop", not(target_os = "linux")))]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastDisposition, apply_runtime_effect, present_runtime_event,
@@ -193,7 +193,9 @@ impl AppShell {
         // Pump preview automation requests from the MCP server into the live
         // WebView. The receiver is taken once; requests are resolved on the gpui
         // main thread (WKWebView `evaluate_script` must run there).
+        #[cfg(all(feature = "local-host", feature = "desktop"))]
         let requests = workspace_store.update(cx, |store, _cx| store.take_preview_requests());
+        #[cfg(all(feature = "local-host", feature = "desktop"))]
         if let Some(requests) = requests {
             let preview = preview.clone();
             cx.spawn_in(window, async move |_, cx| {
@@ -245,7 +247,7 @@ impl AppShell {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Entity<BrowserLifecycle> {

@@ -17,16 +17,19 @@ use tcode_core::{
     },
     ui::{ConversationDestination, RightTab},
 };
-use tcode_protocol::{AcpMarketplaceItem, ExternalThread, RuntimeNotification as RuntimeEvent};
+#[cfg(feature = "desktop")]
+use tcode_protocol::ExternalThread;
+use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
     EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, PathEntry, ProviderVersionStatus,
     ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionStatus, Subscription,
     Topic,
 };
-#[cfg(feature = "local-host")]
+#[cfg(all(feature = "local-host", feature = "desktop"))]
 use tcode_runtime::pipe::{ImportRoutes, start_external_import};
-#[cfg(feature = "local-host")]
+#[cfg(all(feature = "local-host", feature = "terminal"))]
 use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalWorkspace};
+#[cfg(feature = "desktop")]
 use tcode_services::import::ExternalImportUpdate;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
@@ -87,8 +90,11 @@ pub(crate) fn observe_store_topics<V: 'static>(
 
 #[cfg(feature = "local-host")]
 pub struct LocalAffordances {
+    #[cfg(feature = "terminal")]
     pub terminals: LocalTerminalRegistry,
+    #[cfg(feature = "desktop")]
     pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    #[cfg(feature = "desktop")]
     pub import_routes: ImportRoutes,
 }
 
@@ -98,11 +104,11 @@ pub struct LocalAffordances {
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     host: HostLink,
-    #[cfg(feature = "local-host")]
+    #[cfg(all(feature = "local-host", feature = "terminal"))]
     terminal_registry: LocalTerminalRegistry,
-    #[cfg(feature = "local-host")]
+    #[cfg(all(feature = "local-host", feature = "desktop"))]
     preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
-    #[cfg(feature = "local-host")]
+    #[cfg(all(feature = "local-host", feature = "desktop"))]
     import_routes: Option<ImportRoutes>,
     /// Name of the remote host this store is a client of. `None` means the host
     /// runs in this process, so local affordances are available.
@@ -187,13 +193,13 @@ impl WorkspaceStore {
     }
 
     pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
-        let mut store = Self {
+        let store = Self {
             host: host.clone(),
-            #[cfg(feature = "local-host")]
+            #[cfg(all(feature = "local-host", feature = "terminal"))]
             terminal_registry: LocalTerminalRegistry::default(),
-            #[cfg(feature = "local-host")]
+            #[cfg(all(feature = "local-host", feature = "desktop"))]
             preview_requests: None,
-            #[cfg(feature = "local-host")]
+            #[cfg(all(feature = "local-host", feature = "desktop"))]
             import_routes: None,
             remote_host: None,
             connection_state: ConnectionState::Connected,
@@ -211,6 +217,8 @@ impl WorkspaceStore {
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
         };
+        #[cfg(feature = "local-host")]
+        let mut store = store;
 
         // Construction seeding is itself protocol traffic: subscribe, then
         // apply each snapshot event. No live AppState read exists here.
@@ -229,42 +237,48 @@ impl WorkspaceStore {
             }
         }
         let events = host.events();
-        let mut seeded = HashSet::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let received = smol::block_on(smol::future::race(
-                async { Some(events.recv().await) },
-                async {
-                    smol::Timer::after(remaining).await;
-                    None
-                },
-            ));
-            let Some(Ok(envelope)) = received else {
-                break;
-            };
-            match (&envelope.topic, &envelope.event) {
-                (Topic::Index, ServerEvent::IndexSnapshot(_))
-                | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
-                | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
-                | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
-                | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
-                    seeded.insert(envelope.topic.clone());
+        // A desktop build constructs its in-process or remote host before the
+        // first window and reads settings immediately afterwards. Preserve
+        // that synchronous seed contract only when local-host support is in
+        // the build. Portable clients return immediately and let the task
+        // below apply snapshots as they arrive, which is essential on a
+        // single-threaded wasm executor.
+        #[cfg(feature = "local-host")]
+        {
+            let mut seeded = HashSet::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
+                match events.try_recv() {
+                    Ok(envelope) => {
+                        match (&envelope.topic, &envelope.event) {
+                            (Topic::Index, ServerEvent::IndexSnapshot(_))
+                            | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
+                            | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
+                            | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
+                            | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
+                                seeded.insert(envelope.topic.clone());
+                            }
+                            _ => {}
+                        }
+                        if let ServerEvent::Runtime(event) = &envelope.event {
+                            cx.emit(event.clone());
+                        } else {
+                            store.apply_domain_event(&envelope);
+                        }
+                    }
+                    Err(tcode_client::HostEventTryRecvError::Empty) => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Err(tcode_client::HostEventTryRecvError::Closed) => break,
                 }
-                _ => {}
             }
-            if let ServerEvent::Runtime(event) = &envelope.event {
-                cx.emit(event.clone());
-            } else {
-                store.apply_domain_event(&envelope);
+            if seeded.len() != seed_topics.len() {
+                log::error!(
+                    "host snapshot seeding timed out: received {}/{} domains",
+                    seeded.len(),
+                    seed_topics.len()
+                );
             }
-        }
-        if seeded.len() != seed_topics.len() {
-            log::error!(
-                "host snapshot seeding timed out: received {}/{} domains",
-                seeded.len(),
-                seed_topics.len()
-            );
         }
 
         #[cfg(not(test))]
@@ -300,8 +314,11 @@ impl WorkspaceStore {
     pub fn new_local(host: &tcode_runtime::pipe::SpawnedHost, cx: &mut Context<Self>) -> Self {
         let mut store = Self::new(host.link(), cx);
         store.attach_local(LocalAffordances {
+            #[cfg(feature = "terminal")]
             terminals: host.terminals.clone(),
+            #[cfg(feature = "desktop")]
             preview_requests: host.preview_requests.clone(),
+            #[cfg(feature = "desktop")]
             import_routes: host.import_routes.clone(),
         });
         store
@@ -309,9 +326,17 @@ impl WorkspaceStore {
 
     #[cfg(feature = "local-host")]
     pub fn attach_local(&mut self, local: LocalAffordances) {
-        self.terminal_registry = local.terminals;
-        self.preview_requests = local.preview_requests;
-        self.import_routes = Some(local.import_routes);
+        #[cfg(not(any(feature = "terminal", feature = "desktop")))]
+        let _ = local;
+        #[cfg(feature = "terminal")]
+        {
+            self.terminal_registry = local.terminals;
+        }
+        #[cfg(feature = "desktop")]
+        {
+            self.preview_requests = local.preview_requests;
+            self.import_routes = Some(local.import_routes);
+        }
     }
 
     /// Mark this store as a client of a remote host and start tracking the
@@ -1194,18 +1219,11 @@ impl WorkspaceStore {
     /// Commands and preview registration metadata remain typed; this
     /// receiver carries native WebView reply senders and is the deliberate
     /// reverse-RPC affordance documented by the local host seam.
-    #[cfg(feature = "local-host")]
-    pub fn take_preview_requests(
-        &mut self,
-    ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.preview_requests.take()
-    }
-
-    #[cfg(not(feature = "local-host"))]
+    #[cfg(all(feature = "local-host", feature = "desktop"))]
     pub fn take_preview_requests(
         &mut self,
     ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
-        None
+        self.preview_requests.take()
     }
 
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
@@ -1385,12 +1403,13 @@ impl WorkspaceStore {
     /// receiver fed by the single construction-time progress bus. See
     /// the local host import route for the remote replacement
     /// (correlated progress events).
+    #[cfg(feature = "desktop")]
     pub fn start_external_import(
         &self,
         project_id: &str,
         threads: Vec<ExternalThread>,
         cx: &mut App,
-    ) -> Task<Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, String>> {
+    ) -> Task<Result<Option<async_channel::Receiver<ExternalImportUpdate>>, String>> {
         #[cfg(feature = "local-host")]
         {
             let host = self.host.clone();
@@ -1707,7 +1726,7 @@ impl WorkspaceStore {
     /// crossing accesses the `PtyHandle`/`GridEmulator`-backed live terminal
     /// objects and is documented by `LocalTerminalRegistry`; a remote
     /// transport must substitute raw byte streams, never terminal JSON.
-    #[cfg(feature = "local-host")]
+    #[cfg(all(feature = "local-host", feature = "terminal"))]
     pub fn with_terminal_workspace<R>(
         &self,
         read: impl FnOnce(&TerminalWorkspace) -> R,

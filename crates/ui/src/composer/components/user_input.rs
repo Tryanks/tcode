@@ -453,7 +453,9 @@ impl Composer {
         let questions = questions.to_vec();
         let at = self.ui_question_index;
         cx.spawn_in(window, async move |this, cx| {
-            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 // A newer request or manual navigation invalidates this hop.
                 if this.ui_question_index != at

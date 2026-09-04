@@ -1,16 +1,31 @@
+#[cfg(feature = "client")]
 use std::collections::HashMap;
+#[cfg(feature = "client")]
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+#[cfg(feature = "client")]
+use std::net::SocketAddr;
+#[cfg(any(feature = "server", feature = "client"))]
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+#[cfg(feature = "server")]
 use std::sync::Arc;
+#[cfg(feature = "server")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "server")]
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+#[cfg(any(feature = "server", feature = "client"))]
+use std::time::Duration;
+#[cfg(feature = "client")]
+use std::time::Instant;
 
+#[cfg(any(feature = "server", feature = "client"))]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "client")]
 use socket2::{Domain, Protocol, Socket, Type};
 
+#[cfg(any(feature = "server", feature = "client"))]
 const BEACON_PORT: u16 = 47_421;
 
+#[cfg(feature = "client")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Beacon {
     pub host_id: String,
@@ -19,6 +34,7 @@ pub struct Beacon {
     pub addr: String,
 }
 
+#[cfg(any(feature = "server", feature = "client"))]
 #[derive(Serialize, Deserialize)]
 struct BeaconWire {
     tcode: u8,
@@ -27,11 +43,13 @@ struct BeaconWire {
     port: u16,
 }
 
+#[cfg(feature = "server")]
 pub struct BeaconHandle {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(feature = "server")]
 impl BeaconHandle {
     pub fn shutdown(mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -41,12 +59,14 @@ impl BeaconHandle {
     }
 }
 
+#[cfg(feature = "server")]
 impl Drop for BeaconHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 }
 
+#[cfg(feature = "server")]
 pub fn start_beacon(
     host_id: impl Into<String>,
     name: impl Into<String>,
@@ -91,6 +111,7 @@ pub fn start_beacon(
     BeaconHandle { stop, thread }
 }
 
+#[cfg(feature = "client")]
 pub fn browse(timeout: Duration) -> Vec<Beacon> {
     match browse_inner(timeout) {
         Ok(beacons) => beacons,
@@ -101,6 +122,7 @@ pub fn browse(timeout: Duration) -> Vec<Beacon> {
     }
 }
 
+#[cfg(feature = "client")]
 fn browse_inner(timeout: Duration) -> io::Result<Vec<Beacon>> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;

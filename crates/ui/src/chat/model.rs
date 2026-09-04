@@ -559,7 +559,7 @@ pub(crate) fn live_edit_rows(changes: &[FileChange], cwd: &Path) -> Vec<LiveEdit
     changes
         .iter()
         .map(|change| LiveEditRow {
-            path: tcode_services::user_files::relativize_to_workspace(&change.path, cwd),
+            path: crate::workspace_walk::relativize_to_workspace(&change.path, cwd),
             kind: change.kind,
             counts: live_edit_counts(change.diff.as_deref()),
             diff: change.diff.clone(),

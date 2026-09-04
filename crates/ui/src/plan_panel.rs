@@ -73,7 +73,7 @@ impl PlanPanel {
     fn mark_copied(&mut self, cx: &mut Context<Self>) {
         self.copied = true;
         self._copied_task = Some(cx.spawn(async move |this, cx| {
-            smol::Timer::after(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
                 this.copied = false;
                 cx.notify();
