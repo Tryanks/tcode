@@ -1,0 +1,10 @@
+[package]
+name = "tcode-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tcode-protocol = { path = "../protocol" }
+async-channel = "2"
+log = "0.4"
+serde_json = "1"

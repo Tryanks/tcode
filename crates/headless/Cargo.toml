@@ -1,0 +1,11 @@
+[package]
+name = "tcode-headless"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "tcode-headless"
+path = "src/main.rs"
+
+[dependencies]
+tcode-remote = { path = "../remote" }

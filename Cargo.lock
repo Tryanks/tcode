@@ -8417,6 +8417,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcode-client"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "log",
+ "serde_json",
+ "tcode-protocol",
+]
+
+[[package]]
 name = "tcode-core"
 version = "0.1.0"
 dependencies = [
@@ -8428,6 +8438,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcode-headless"
+version = "0.1.0"
+dependencies = [
+ "tcode-remote",
+]
+
+[[package]]
 name = "tcode-protocol"
 version = "0.1.0"
 dependencies = [
@@ -8436,6 +8453,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tcode-core",
+]
+
+[[package]]
+name = "tcode-remote"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "tcode-protocol",
 ]
 
 [[package]]
