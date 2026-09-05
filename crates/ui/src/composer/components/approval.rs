@@ -225,110 +225,112 @@ impl Composer {
                 this.child(row)
             })
             .when(request.options.is_empty(), |this| {
-                this.child(
-                    // T3 order (S2 §4): Cancel turn, Decline, Always allow this
-                    // session, Approve once.
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .flex_wrap()
-                        .child(
-                            Button::new("approval-cancel")
-                                .ghost()
-                                .small()
-                                .h(px(28.))
-                                .when(self.compact, |button| {
-                                    button
-                                        .min_h(px(44.))
-                                        .min_w(px(44.))
-                                        .w(gpui::relative(0.48))
-                                        .flex_none()
-                                })
-                                .disabled(!self.interactive(cx))
-                                .rounded(crate::material::radius_input())
-                                .label(crate::tr!("approval.cancel_turn"))
-                                .text_color(cx.theme().muted_foreground)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
-                                })),
-                        )
-                        .when(!self.compact, |row| row.child(div().flex_1()))
-                        .child(
-                            Button::new("approval-deny")
-                                .ghost()
-                                .small()
-                                .h(px(28.))
-                                .when(self.compact, |button| {
-                                    button
-                                        .min_h(px(44.))
-                                        .min_w(px(44.))
-                                        .w(gpui::relative(0.48))
-                                        .flex_none()
-                                })
-                                .disabled(!self.interactive(cx))
-                                .rounded(crate::material::radius_input())
-                                .label(if self.compact {
-                                    crate::tr!("mobile.deny")
-                                } else {
-                                    crate::tr!("approval.decline")
-                                })
-                                .text_color(cx.theme().danger)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("approval-always")
-                                .ghost()
-                                .small()
-                                .h(px(28.))
-                                .when(self.compact, |button| {
-                                    button
-                                        .min_h(px(44.))
-                                        .min_w(px(44.))
-                                        .w(gpui::relative(0.48))
-                                        .flex_none()
-                                })
-                                .disabled(!self.interactive(cx))
-                                .rounded(crate::material::radius_input())
-                                .label(if self.compact {
-                                    crate::tr!("mobile.always_allow")
-                                } else {
-                                    crate::tr!("approval.always_allow_session")
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.respond(
-                                        always_id.clone(),
-                                        ApprovalDecision::ApproveForSession,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            Button::new("approval-approve")
-                                .primary()
-                                .small()
-                                .h(px(28.))
-                                .when(self.compact, |button| {
-                                    button
-                                        .min_h(px(44.))
-                                        .min_w(px(44.))
-                                        .w(gpui::relative(0.48))
-                                        .flex_none()
-                                })
-                                .disabled(!self.interactive(cx))
-                                .rounded(crate::material::radius_input())
-                                .label(if self.compact {
-                                    crate::tr!("mobile.allow")
-                                } else {
-                                    crate::tr!("approval.approve_once")
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
-                                })),
-                        ),
-                )
+                // T3 order (S2 §4): Cancel turn, Decline, Always allow this
+                // session, Approve once. Compact (docs/mobile-design.md §3.4):
+                // [Deny][Allow] on one row, then "Always allow" and "Cancel
+                // turn" as full-width rows so long localized labels never
+                // overlap a neighbour.
+                let compact = self.compact;
+                let interactive = self.interactive(cx);
+                let half = |button: Button| {
+                    if compact {
+                        button
+                            .min_h(px(44.))
+                            .min_w(px(44.))
+                            .w(gpui::relative(0.48))
+                            .flex_none()
+                    } else {
+                        button
+                    }
+                };
+                let full = |button: Button| {
+                    if compact {
+                        button.min_h(px(44.)).w_full().flex_none()
+                    } else {
+                        button
+                    }
+                };
+                let cancel = full(
+                    Button::new("approval-cancel")
+                        .ghost()
+                        .small()
+                        .h(px(28.))
+                        .disabled(!interactive)
+                        .rounded(crate::material::radius_input())
+                        .label(crate::tr!("approval.cancel_turn"))
+                        .text_color(cx.theme().muted_foreground)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.respond(cancel_id.clone(), ApprovalDecision::Cancel, cx);
+                        })),
+                );
+                let deny = half(
+                    Button::new("approval-deny")
+                        .ghost()
+                        .small()
+                        .h(px(28.))
+                        .disabled(!interactive)
+                        .rounded(crate::material::radius_input())
+                        .label(if compact {
+                            crate::tr!("mobile.deny")
+                        } else {
+                            crate::tr!("approval.decline")
+                        })
+                        .text_color(cx.theme().danger)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.respond(deny_id.clone(), ApprovalDecision::Deny, cx);
+                        })),
+                );
+                let always = full(
+                    Button::new("approval-always")
+                        .ghost()
+                        .small()
+                        .h(px(28.))
+                        .disabled(!interactive)
+                        .rounded(crate::material::radius_input())
+                        .label(if compact {
+                            crate::tr!("mobile.always_allow")
+                        } else {
+                            crate::tr!("approval.always_allow_session")
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.respond(
+                                always_id.clone(),
+                                ApprovalDecision::ApproveForSession,
+                                cx,
+                            );
+                        })),
+                );
+                let approve = half(
+                    Button::new("approval-approve")
+                        .primary()
+                        .small()
+                        .h(px(28.))
+                        .disabled(!interactive)
+                        .rounded(crate::material::radius_input())
+                        .label(if compact {
+                            crate::tr!("mobile.allow")
+                        } else {
+                            crate::tr!("approval.approve_once")
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.respond(approve_id.clone(), ApprovalDecision::Approve, cx);
+                        })),
+                );
+                let row = h_flex().w_full().gap_2().items_center().flex_wrap();
+                let row = if compact {
+                    row.child(deny)
+                        .child(div().flex_1())
+                        .child(approve)
+                        .child(always)
+                        .child(cancel)
+                } else {
+                    row.child(cancel)
+                        .child(div().flex_1())
+                        .child(deny)
+                        .child(always)
+                        .child(approve)
+                };
+                this.child(row)
             })
             .into_any_element()
     }
