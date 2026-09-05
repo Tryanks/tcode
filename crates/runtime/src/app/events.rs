@@ -198,6 +198,7 @@ impl AppState {
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
+                self.clear_native_subagent_work(session_id, cx);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
