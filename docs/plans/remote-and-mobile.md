@@ -74,9 +74,9 @@ Constraints from the brief:
    depends on `gpui-pre-platform` on non-wasm targets; it adds a fallback arm to
    the published crate. `gpui::Platform` is the intended extension point, so our
    iOS/Android backends stay in this repo and nothing is proposed to Zed. The
-   fix is upstream in gpui-kit only: PR "base: stop depending
-   on gpui_platform from the library" (branch `base-no-platform-dep`, patch and
-   body in the P2 notes) moves the dependency to dev-dependencies; verified
+   fix is upstream in gpui-kit only: issue longbridge/gpui-kit#2962 and PR
+   #2963 move the native examples into their own package so `gpui-base` no
+   longer declares `gpui_platform`; verified
    locally that with it tcode builds for macOS, iOS, Android and wasm with no
    `[patch.crates-io]` at all. `tcode-web` constructs its platform directly from
    `gpui-pre-web` (default features off) instead of via `gpui-pre-platform`.
