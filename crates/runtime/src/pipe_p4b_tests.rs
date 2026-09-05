@@ -53,6 +53,9 @@ fn next(events: &HostEventReceiver, predicate: impl Fn(&ServerEvent) -> bool) ->
     super::tests::next_event(events, |event| predicate(&event.event)).event
 }
 
+// Drives a real PTY through `/bin/sh` and `stty`; the term crate's own PTY
+// tests are gated the same way.
+#[cfg(unix)]
 #[test]
 fn terminal_mux_replays_bounded_raw_output_then_streams_input_and_resize() {
     let (host, mux, link, session_id) = fixture();
