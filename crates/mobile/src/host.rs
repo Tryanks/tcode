@@ -75,9 +75,10 @@ pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
             })
         })
         .collect();
-    // One row per host, preferring a routable IPv4 address over link-local IPv6.
+    // One row per host. Native mDNS already ranks by the receiving interface;
+    // JSON platform browsers preserve their first, platform-ranked address.
     found.retain(|h| !h.addr.starts_with("127.") && h.addr != "::1");
-    found.sort_by_key(|h| (h.host_id.clone(), h.addr.contains(':'), h.addr.clone()));
+    found.sort_by_key(|h| (h.host_id.clone(), h.addr.contains(':')));
     found.dedup_by(|a, b| a.host_id == b.host_id);
     found
 }
@@ -345,7 +346,8 @@ mod native {
             #[cfg(not(target_os = "ios"))]
             {
                 let lock = self.multicast_lock.clone();
-                let task = cx.background_executor().spawn(async move {
+                let (sender, receiver) = async_channel::bounded(1);
+                let browse = move || {
                     struct Guard(Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>);
                     impl Drop for Guard {
                         fn drop(&mut self) {
@@ -358,7 +360,7 @@ mod native {
                         lock(true);
                     }
                     let _guard = Guard(lock);
-                    tcode_remote::discovery::browse(std::time::Duration::from_secs(3))
+                    let hosts = tcode_remote::discovery::browse(std::time::Duration::from_secs(3))
                         .into_iter()
                         .map(|b| DiscoveredHost {
                             host_id: b.host_id,
@@ -367,10 +369,19 @@ mod native {
                             port: b.port,
                             fp: b.fp,
                         })
-                        .collect()
-                });
+                        .collect();
+                    let _ = sender.send_blocking(hosts);
+                };
+                if std::thread::Builder::new()
+                    .name("tcode-mdns-browse".into())
+                    .spawn(browse)
+                    .is_err()
+                {
+                    cx.defer(move |cx| done(Vec::new(), cx));
+                    return;
+                }
                 cx.spawn(async move |cx| {
-                    let hosts = task.await;
+                    let hosts = receiver.recv().await.unwrap_or_default();
                     cx.update(|cx| done(hosts, cx));
                 })
                 .detach();

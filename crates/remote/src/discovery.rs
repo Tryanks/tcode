@@ -1,15 +1,68 @@
 //! DNS-SD discovery is an address hint, never authorization to connect.
 use mdns_sd::ServiceDaemon;
-#[cfg(feature = "client")]
-use mdns_sd::ServiceEvent;
 #[cfg(any(feature = "server", test))]
 use mdns_sd::ServiceInfo;
+#[cfg(feature = "client")]
+use mdns_sd::{ScopedIp, ServiceEvent};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::time::Duration;
 #[cfg(feature = "client")]
 use std::time::Instant;
 
 pub const SERVICE_TYPE: &str = "_tcode._tcp.local.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalInterface {
+    pub name: String,
+    pub addr: IpAddr,
+}
+
+/// Lower values are better. A private IPv4 address on the receiving LAN wins
+/// over addresses advertised for virtual bridges on the execution host.
+fn address_preference(address: &str, local_interfaces: &[LocalInterface]) -> u8 {
+    let Ok(address) = address.parse::<IpAddr>() else {
+        return 5;
+    };
+    if address.is_loopback() || is_link_local(address) {
+        return 4;
+    }
+    match address {
+        IpAddr::V4(address) => {
+            let same_lan = local_interfaces.iter().any(|interface| {
+                !is_virtual_bridge(&interface.name)
+                    && !interface.addr.is_loopback()
+                    && !is_link_local(interface.addr)
+                    && matches!(interface.addr, IpAddr::V4(local) if local.octets()[..3] == address.octets()[..3])
+            });
+            if same_lan {
+                0
+            } else if address.is_private() {
+                1
+            } else {
+                2
+            }
+        }
+        IpAddr::V6(_) => 3,
+    }
+}
+
+fn is_link_local(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_link_local(),
+        IpAddr::V6(address) => address.is_unicast_link_local(),
+    }
+}
+
+fn is_virtual_bridge(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("bridge")
+        || name.contains("vmnet")
+        || name.contains("vboxnet")
+        || name.contains("docker")
+        || name.starts_with("virbr")
+        || name.starts_with("br-")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Beacon {
@@ -106,20 +159,25 @@ pub fn browse(timeout: Duration) -> Vec<Beacon> {
                 break;
             };
             if let ServiceEvent::ServiceResolved(info) = event {
-                for address in info.get_addresses() {
-                    if address.to_string().starts_with("127.") || address.to_string() == "::1" {
-                        continue;
-                    }
-                    if let Some(beacon) =
+                let local_interfaces = receiving_interfaces(info.get_addresses());
+                let preferred = info
+                    .get_addresses()
+                    .iter()
+                    .filter(|address| !address.is_loopback())
+                    .min_by_key(|address| {
+                        address_preference(&address.to_string(), &local_interfaces)
+                    });
+                if let Some(address) = preferred
+                    && let Some(beacon) =
                         parse_txt(info.get_properties(), info.get_port(), address.to_string())
-                        && found.len() < 128
-                    {
-                        let prefer = found
-                            .get(&beacon.host_id)
-                            .is_none_or(|old| old.addr.contains(':') && !beacon.addr.contains(':'));
-                        if prefer {
-                            found.insert(beacon.host_id.clone(), beacon);
-                        }
+                    && (found.len() < 128 || found.contains_key(&beacon.host_id))
+                {
+                    let prefer = found.get(&beacon.host_id).is_none_or(|old| {
+                        address_preference(&beacon.addr, &local_interfaces)
+                            < address_preference(&old.addr, &local_interfaces)
+                    });
+                    if prefer {
+                        found.insert(beacon.host_id.clone(), beacon);
                     }
                 }
             }
@@ -128,6 +186,27 @@ pub fn browse(timeout: Duration) -> Vec<Beacon> {
     }
     let _ = daemon.shutdown();
     found.into_values().collect()
+}
+
+#[cfg(feature = "client")]
+fn receiving_interfaces(addresses: &std::collections::HashSet<ScopedIp>) -> Vec<LocalInterface> {
+    let mut interfaces = Vec::new();
+    for address in addresses {
+        let ids: Vec<_> = match address {
+            ScopedIp::V4(address) => address.interface_ids().iter().collect(),
+            ScopedIp::V6(address) => vec![address.scope_id()],
+            _ => Vec::new(),
+        };
+        for id in ids {
+            interfaces.extend(id.get_addrs().into_iter().map(|addr| LocalInterface {
+                name: id.name.clone(),
+                addr,
+            }));
+        }
+    }
+    interfaces.sort_by(|a, b| (&a.name, a.addr).cmp(&(&b.name, b.addr)));
+    interfaces.dedup();
+    interfaces
 }
 
 #[cfg(feature = "client")]
@@ -249,5 +328,26 @@ mod tests {
         )
         .unwrap();
         assert!(parse_txt(info.get_properties(), 47420, "127.0.0.1".into()).is_none());
+    }
+
+    #[test]
+    fn address_ranking_ignores_virtual_bridges_and_prefers_the_receiving_lan() {
+        let local_interfaces = [
+            LocalInterface {
+                name: "bridge100".into(),
+                addr: "192.168.139.1".parse().unwrap(),
+            },
+            LocalInterface {
+                name: "vmnet8".into(),
+                addr: "192.168.215.1".parse().unwrap(),
+            },
+            LocalInterface {
+                name: "en0".into(),
+                addr: "192.168.1.22".parse().unwrap(),
+            },
+        ];
+        let mut addresses = ["192.168.139.3", "192.168.215.0", "192.168.1.6"];
+        addresses.sort_by_key(|address| address_preference(address, &local_interfaces));
+        assert_eq!(addresses[0], "192.168.1.6");
     }
 }

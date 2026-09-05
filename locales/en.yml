@@ -922,7 +922,7 @@ mobile:
   fingerprint_compare: "Compare with the fingerprint shown in Settings → Remote on the host"
   nearby_hosts: "Nearby hosts"
   fingerprint: "Fingerprint: %{fingerprint}"
-  certificate_changed: "The host’s certificate changed"
+  certificate_changed: "Certificate changed"
   certificate_changed_help: "It no longer matches the certificate pinned when you paired."
   pair_again: "Pair again"
   connect_host: "Connect to host"

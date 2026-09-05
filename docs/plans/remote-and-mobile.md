@@ -655,3 +655,16 @@ composer focus/paste and provider-driven preview were not verified. No manual
 parity or screenshot-completion claim is made. The capture-selection-to-composer
 command carries optional client-selected text, preserving local fallback while
 letting the remote drawer upload its own selection.
+
+#### P4d notes
+
+Discovery now ranks resolved addresses against the interfaces which received
+the mDNS answer, ignoring virtual bridge interfaces for same-/24 preference.
+Native browsing creates a fresh daemon for every request on a dedicated thread.
+The reported late-beacon miss did not reproduce with the long-lived phone
+preview; it found a host started later after the three-second browse, while also
+reproducing the bad bridge-address choice. The admin pairing curl completed with
+HTTP 200 and OpenSSL negotiated TLS 1.3, so the TLS accept path was unchanged.
+The terminal replay test uses a mux-delivered readiness marker after suppressing
+the shell prompt, eliminating startup-output races without relaxing its exact
+256 KiB replay assertion.

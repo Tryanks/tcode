@@ -1,6 +1,6 @@
 //! P4b acceptance through serialized links and the production fan-out mux.
 use super::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tcode_remote::HostMux;
 
 fn linked(mux: &HostMux) -> HostLink {
@@ -68,21 +68,33 @@ fn terminal_mux_replays_bounded_raw_output_then_streams_input_and_resize() {
         unreachable!()
     };
     let terminal_id = status.terminals[0].id;
-    // Wait for the initial shell prompt before fixing the deterministic ring tail.
-    link.command_blocking(Command::TerminalInput {
-        terminal_id,
-        bytes: b"printf 'p4b-pty-ready\\n'\r".to_vec(),
+    link.subscribe(Subscription {
+        topic: Topic::Terminal { terminal_id },
+        after: None,
     })
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let terminal = host.terminals.terminal(terminal_id).unwrap();
-        if terminal.snapshot().text().contains("p4b-pty-ready") {
-            break;
+    // Replace the user's configured login shell (whose startup hooks may print
+    // asynchronously) with plain sh, clear its prompt, then use the live mux
+    // event as a barrier proving all startup output reached the ring.
+    link.command_blocking(Command::TerminalInput {
+        terminal_id,
+        bytes: b"exec /bin/sh\rPS1=; printf '\\160\\064\\142-pty-ready\\n'\r".to_vec(),
+    })
+    .unwrap();
+    let mut startup = Vec::new();
+    while !String::from_utf8_lossy(&startup).contains("p4b-pty-ready") {
+        if let ServerEvent::TerminalOutput { bytes, reset, .. } = next(&events, |event| {
+            matches!(event, ServerEvent::TerminalOutput { .. })
+        }) {
+            assert!(!reset || startup.is_empty());
+            startup.extend(bytes);
         }
-        assert!(Instant::now() < deadline, "input never reached PTY");
-        std::thread::sleep(Duration::from_millis(10));
     }
+    link.unsubscribe(Subscription {
+        topic: Topic::Terminal { terminal_id },
+        after: None,
+    })
+    .unwrap();
     // Inject through the same mailbox callback as the output bridge, testing
     // byte-exact eviction without flooding the user's shell with 300 KiB.
     let replay = vec![b'x'; 300 * 1024];
@@ -118,12 +130,13 @@ fn terminal_mux_replays_bounded_raw_output_then_streams_input_and_resize() {
     );
     link.command_blocking(Command::TerminalInput {
         terminal_id,
-        bytes: b"printf '\\160\\064\\142-STREAM\\n'; stty size\r".to_vec(),
+        bytes: b"printf '\\160\\064\\142-STREAM\\n'; stty size; printf '\\160\\064\\142-live-done\\n'\r".to_vec(),
     })
     .unwrap();
     let mut live = Vec::new();
     while !String::from_utf8_lossy(&live).contains("p4b-STREAM")
         || !String::from_utf8_lossy(&live).contains("17 93")
+        || !String::from_utf8_lossy(&live).contains("p4b-live-done")
     {
         if let ServerEvent::TerminalOutput { bytes, reset, .. } = next(&events, |event| {
             matches!(event, ServerEvent::TerminalOutput { .. })
