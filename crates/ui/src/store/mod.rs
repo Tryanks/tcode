@@ -2697,6 +2697,12 @@ mod tests {
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
 
         workspace.update(cx, |store, _| store.select_session("git-replica".into()));
+        // Subscribing adopts the session and spawns a real git probe of the
+        // (non-repo) cwd. Let that probe land before injecting the fixture
+        // status, or its late result overwrites the injected one.
+        wait_until(cx, &workspace, "initial git probe", |cx| {
+            workspace.read_with(cx, |store, _| store.git_status_replica.status.is_some())
+        });
         command(&host, Command::ClearRelaunchMarker);
         update_host!(&host, |state, _cx| {
             state.acp_registry = Some(
