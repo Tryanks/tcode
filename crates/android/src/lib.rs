@@ -19,8 +19,12 @@ pub fn android_main(app: android_activity::AndroidApp) {
             let _ = back_sender.unbounded_send(());
         });
         cx.spawn(async move |cx| {
-            if back_receiver.next().await.is_some() {
-                cx.update(|cx| cx.quit());
+            while back_receiver.next().await.is_some() {
+                cx.update(|cx| {
+                    if !tcode_mobile::handle_back(cx) {
+                        cx.quit();
+                    }
+                });
             }
         })
         .detach();

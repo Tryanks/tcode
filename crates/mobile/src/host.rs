@@ -36,9 +36,22 @@ pub type PairDone = Box<dyn FnOnce(Result<PairedHost, String>, &mut App) + 'stat
 /// Delivered on the main thread with the decoded QR text.
 pub type ScanDone = Box<dyn FnOnce(Result<String, String>, &mut App) + 'static>;
 
+/// Phone-only preferences; never forwarded to the execution host.
+#[derive(Debug, Clone, Default)]
+pub struct MobilePreferences {
+    pub appearance: Option<String>,
+    pub language: Option<String>,
+    pub device_name: Option<String>,
+}
+
 pub trait MobileHost: 'static {
     /// Name this device presents to hosts while pairing and connecting.
     fn device_name(&self) -> String;
+
+    fn preferences(&self) -> MobilePreferences {
+        MobilePreferences::default()
+    }
+    fn save_preferences(&self, _preferences: &MobilePreferences) {}
 
     fn load_hosts(&self) -> Vec<PairedHost>;
     fn save_hosts(&self, hosts: &[PairedHost]);
@@ -87,7 +100,7 @@ mod native {
 
     use gpui::{App, Edges, Pixels};
 
-    use super::{MobileHost, PairDone, PairRequest, PairedHost, Transport};
+    use super::{MobileHost, MobilePreferences, PairDone, PairRequest, PairedHost, Transport};
 
     /// iOS, Android, and the desktop preview: `tcode-remote`'s WebSocket
     /// client, `hosts.json` and `mobile.json` under the platform data dir.
@@ -142,7 +155,28 @@ mod native {
 
     impl MobileHost for NativeHost {
         fn device_name(&self) -> String {
-            self.device_name.clone()
+            self.preferences()
+                .device_name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| self.device_name.clone())
+        }
+
+        fn preferences(&self) -> MobilePreferences {
+            let prefs = self.prefs();
+            let value = |key: &str| prefs.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+            MobilePreferences {
+                appearance: value("appearance"),
+                language: value("language"),
+                device_name: value("device_name"),
+            }
+        }
+
+        fn save_preferences(&self, preferences: &MobilePreferences) {
+            let mut prefs = self.prefs();
+            prefs["appearance"] = serde_json::json!(preferences.appearance);
+            prefs["language"] = serde_json::json!(preferences.language);
+            prefs["device_name"] = serde_json::json!(preferences.device_name);
+            self.write_prefs(&prefs);
         }
 
         fn load_hosts(&self) -> Vec<PairedHost> {
@@ -175,7 +209,7 @@ mod native {
         }
 
         fn pair(&self, request: PairRequest, cx: &mut App, done: PairDone) {
-            let device_name = self.device_name.clone();
+            let device_name = self.device_name();
             let task = cx.background_executor().spawn(async move {
                 tcode_remote::client::pair(&request.addr, request.port, &request.code, &device_name)
             });
@@ -187,7 +221,7 @@ mod native {
         }
 
         fn connect(&self, host: &PairedHost) -> Transport {
-            let client = tcode_remote::client::connect(host.clone(), self.device_name.clone());
+            let client = tcode_remote::client::connect(host.clone(), self.device_name());
             Transport {
                 to_host: client.to_host,
                 from_host: client.from_host,

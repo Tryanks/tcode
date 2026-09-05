@@ -168,13 +168,14 @@ impl CommandPalette {
 
         Self {
             store,
-            window_state,
+            window_state: window_state.clone(),
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
             #[cfg(feature = "desktop")]
-            content_search: SessionStore::open_default()
-                .ok()
+            content_search: (!window_state.read(cx).compact)
+                .then(SessionStore::open_default)
+                .and_then(Result::ok)
                 .map(SessionSearch::new)
                 .map(|search| Arc::new(Mutex::new(search))),
             content_hits: Vec::new(),
@@ -515,6 +516,8 @@ impl CommandPalette {
                     }
                 });
                 self.close(cx);
+                self.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
             }
         }
     }
@@ -544,7 +547,7 @@ impl CommandPalette {
 }
 
 impl Render for CommandPalette {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.groups(cx);
         let total: usize = groups.iter().map(|g| g.items.len()).sum();
         if total > 0 && self.selected >= total {
@@ -580,7 +583,11 @@ impl Render for CommandPalette {
                         .when(is_sel, |row| row.aria_active_descendant())
                         .flex_none()
                         .w_full()
-                        .h(px(38.))
+                        .h(px(if self.window_state.read(cx).compact {
+                            48.
+                        } else {
+                            38.
+                        }))
                         .px_2()
                         .gap_2()
                         .items_center()
@@ -658,7 +665,11 @@ impl Render for CommandPalette {
         // Centered modal card, anchored ~15% from the top over a dim backdrop.
         let card = crate::material::overlay_contour(
             v_flex()
-                .w(px(640.))
+                .w(if self.window_state.read(cx).compact {
+                    window.viewport_size().width - px(32.)
+                } else {
+                    px(640.)
+                })
                 .max_h(px(440.))
                 .rounded(crate::material::radius_overlay())
                 .overflow_hidden(),

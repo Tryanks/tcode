@@ -42,7 +42,7 @@ pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, Shell
 /// Payload-free topic discriminant used by views to subscribe only to the
 /// store projections they render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TopicKind {
+pub enum TopicKind {
     SessionEvents,
     SessionStatus,
     Index,
@@ -71,8 +71,8 @@ impl From<&Topic> for TopicKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct StoreChange {
-    pub(crate) topic: TopicKind,
+pub struct StoreChange {
+    pub topic: TopicKind,
 }
 
 /// Observe selected store domains while keeping topic filtering out of views.

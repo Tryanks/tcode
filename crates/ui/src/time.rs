@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) use tcode_core::project::now_secs;
 
 /// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
-pub(crate) fn humanize_ago(secs: u64) -> String {
+pub fn humanize_ago(secs: u64) -> String {
     if secs < 60 {
         crate::tr!("time.just_now").into_owned()
     } else if secs < 3600 {

@@ -111,11 +111,12 @@ impl Composer {
                         Button::new(("queue-steer", id as usize))
                             .ghost()
                             .xsmall()
+                            .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
                             .icon(IconName::ArrowUp)
                             // Scheduled rows always support send-now: the
                             // runtime removes the deadline and uses the normal
                             // send/queue path even when native steering is absent.
-                            .disabled(!scheduled && !can_steer)
+                            .disabled(!self.interactive(cx) || (!scheduled && !can_steer))
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace_store
@@ -126,7 +127,9 @@ impl Composer {
                         Button::new(("queue-drop", id as usize))
                             .ghost()
                             .xsmall()
+                            .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
                             .icon(IconName::Close)
+                            .disabled(!self.interactive(cx))
                             .tooltip(crate::tr!("composer.drop_queued"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.drop_queued_and_refill(id, text.clone(), window, cx);

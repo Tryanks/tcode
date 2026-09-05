@@ -38,6 +38,7 @@ enum MenuItem {
 }
 
 pub struct PopupMenu {
+    touch: bool,
     focus: FocusHandle,
     items: Vec<MenuItem>,
     selected: Option<usize>,
@@ -47,6 +48,7 @@ impl FluentBuilder for PopupMenu {}
 impl PopupMenu {
     fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            touch: false,
             focus: cx.focus_handle(),
             items: Vec::new(),
             selected: None,
@@ -238,6 +240,7 @@ impl Render for PopupMenu {
                             .gap_2()
                             .px_2()
                             .py_1()
+                            .when(self.touch, |el| el.min_h(px(44.)))
                             .rounded(crate::material::radius_button())
                             .text_sm()
                             .when(selected, |el| el.bg(cx.theme().muted))
@@ -333,6 +336,7 @@ pub trait ContextMenuExt:
             id,
             trigger: self,
             builder: Rc::new(builder),
+            touch: false,
         }
     }
 }
@@ -343,6 +347,14 @@ pub struct ContextMenu<T: InteractiveElement + ParentElement + Styled + IntoElem
     id: ElementId,
     trigger: T,
     builder: MenuBuilder,
+    touch: bool,
+}
+
+impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> ContextMenu<T> {
+    pub fn touch(mut self, touch: bool) -> Self {
+        self.touch = touch;
+        self
+    }
 }
 
 #[derive(Default)]
@@ -361,19 +373,21 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
             ContextMenuState::default()
         });
         let builder = self.builder;
-        let mut trigger = self.trigger.on_mouse_down(MouseButton::Right, {
-            let state = state.clone();
-            move |event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                let position = event.position;
+        let touch = self.touch;
+        let open = Rc::new(
+            move |position: Point<Pixels>,
+                  state: Entity<ContextMenuState>,
+                  window: &mut Window,
+                  cx: &mut App| {
                 let builder = builder.clone();
-                let state = state.clone();
                 // Deeper bubble handlers have already run, but entity updates
                 // they queued may not be applied yet; build after this event
                 // settles so the builder reads their state.
                 window.defer(cx, move |window, cx| {
-                    let menu =
-                        PopupMenu::build(window, cx, |menu, window, cx| builder(menu, window, cx));
+                    let menu = PopupMenu::build(window, cx, |mut menu, window, cx| {
+                        menu.touch = touch;
+                        builder(menu, window, cx)
+                    });
                     // A builder can decide there is nothing to offer (e.g. a
                     // right-click on non-link Markdown text): open nothing.
                     if menu.read(cx).is_empty() {
@@ -407,8 +421,41 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                     });
                     window.refresh();
                 });
+            },
+        );
+        let mut trigger = self.trigger.on_mouse_down(MouseButton::Right, {
+            let state = state.clone();
+            let open = open.clone();
+            move |event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                open(event.position, state.clone(), window, cx);
             }
         });
+        if touch {
+            let state = state.clone();
+            trigger = trigger.child(
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        window.on_mouse_event(
+                            move |event: &gpui::LongPressEvent, phase, window, cx| {
+                                if phase == gpui::DispatchPhase::Bubble
+                                    && event.phase == gpui::TouchPhase::Started
+                                    && bounds.contains(&event.position)
+                                {
+                                    window.capture_long_press(&state);
+                                    window.prevent_default();
+                                    cx.stop_propagation();
+                                    open(event.position, state.clone(), window, cx);
+                                }
+                            },
+                        );
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
         let (menu, position) = {
             let state = state.read(cx);
             (state.menu.clone(), state.position)

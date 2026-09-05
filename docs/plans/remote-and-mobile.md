@@ -121,9 +121,11 @@ Constraints from the brief:
 ### P2 — iOS and Android clients
 
 - Vendor Eauth platform crates into `crates/platform/`; `[patch.crates-io]`.
-- `crates/mobile` (`tcode-mobile`): Hosts screen (paired list, pair by
-  code/QR, discovered), Sessions screen (projects grouped, status glyphs),
-  Chat screen (timeline, approvals, composer, model picker, connection banner).
+- `crates/mobile` (`tcode-mobile`): Hosts and pairing screens (phone-only), then
+  the desktop `SessionsSidebar`, `ChatView` and `Composer` hosted full-screen in
+  a compact mode (docs/mobile-design.md §0.1). P2c **done** on the macOS phone
+  preview (screenshots `docs/images/mobile/p2c-*.png`); native runtime
+  (asset source, IME insets, camera QR, emulator runs) is P2d.
 - `crates/ios` (staticlib + xcodegen host, camera QR via AVFoundation) and
   `crates/android` (cdylib + gradle host, QR via the same pattern as Eauth's
   `QrScannerActivity`).

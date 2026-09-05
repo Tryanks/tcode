@@ -7,7 +7,7 @@ mod add_project_dialog;
 mod app_activation;
 pub mod assets;
 mod attachments;
-mod chat;
+pub mod chat;
 mod commit_dialog;
 mod composer;
 mod composer_trigger;
@@ -24,7 +24,7 @@ pub mod markdown;
 pub(crate) mod material;
 mod orchestrate_settings;
 pub mod overlay;
-mod palette;
+pub mod palette;
 mod pasteboard;
 mod plan_panel;
 #[cfg(feature = "desktop")]
@@ -49,7 +49,7 @@ mod settings_page;
 mod settings_page;
 mod shell;
 mod shortcut;
-mod sidebar;
+pub mod sidebar;
 pub mod sizing;
 pub mod store;
 #[cfg(feature = "terminal")]
@@ -74,4 +74,4 @@ pub use i18n::{
 };
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, TogglePalette};
-pub use window_state::WindowState;
+pub use window_state::{OpenThread, WindowState};

@@ -109,7 +109,7 @@ impl Composer {
                     .id(("ui-opt", opt_index))
                     .flex_none()
                     .w_full()
-                    .min_h(px(28.))
+                    .min_h(px(if self.compact { 48. } else { 28. }))
                     .px_2()
                     .py_1()
                     .gap_2()
@@ -196,7 +196,7 @@ impl Composer {
                     crate::tr!("userinput.submit_custom"),
                     cx,
                 )
-                .size(px(28.))
+                .size(px(if self.compact { 44. } else { 28. }))
                 .rounded(crate::material::radius_input())
                 .flex()
                 .items_center()
@@ -238,6 +238,7 @@ impl Composer {
                     .ghost()
                     .small()
                     .h(px(28.))
+                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
                     .rounded(crate::material::radius_input())
                     .label(crate::tr!("userinput.previous"))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -253,6 +254,7 @@ impl Composer {
                     .outline()
                     .small()
                     .h(px(28.))
+                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
                     .rounded(crate::material::radius_input())
                     .label(crate::tr!("userinput.next_question"))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -266,6 +268,7 @@ impl Composer {
                     .primary()
                     .small()
                     .h(px(28.))
+                    .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
                     .rounded(crate::material::radius_input())
                     .label(crate::tr!("userinput.done"))
                     .on_click(cx.listener(move |this, _, window, cx| {

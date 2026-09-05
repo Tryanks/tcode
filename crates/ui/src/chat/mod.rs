@@ -353,13 +353,24 @@ pub struct ChatView {
 }
 
 impl ChatView {
+    pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
+    }
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let composer = cx.new(|cx| Composer::new(workspace_store.clone(), window, cx));
+        let compact = window_state.read(cx).compact;
+        let composer = cx.new(|cx| {
+            if compact {
+                Composer::new_with_layout(workspace_store.clone(), true, window, cx)
+            } else {
+                Composer::new(workspace_store.clone(), window, cx)
+            }
+        });
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -967,6 +978,7 @@ impl ChatView {
                             text,
                             cwd,
                             markdown,
+                            compact: self.window_state.read(cx).compact,
                             pinned: pinned.1 == Some(entry.id.as_str()),
                             show_actions: !turn.running
                                 && last_assistant_segment == Some(segment_index),
@@ -1133,7 +1145,10 @@ impl ChatView {
                 };
                 components::bubble::native_rewind_button(
                     turn,
-                    self.workspace_store.read(cx).chat_native_rewind_state(turn),
+                    (
+                        self.workspace_store.read(cx).chat_native_rewind_state(turn),
+                        self.window_state.read(cx).compact,
+                    ),
                     components::bubble::RewindHandlers {
                         files_and_conversation: rewind_handler(RewindMode::FilesAndConversation),
                         conversation: rewind_handler(RewindMode::Conversation),
@@ -1173,6 +1188,7 @@ impl ChatView {
                 cwd,
                 attachments,
                 steering,
+                compact: self.window_state.read(cx).compact,
                 pinned,
                 copied,
                 markdown,
@@ -1290,6 +1306,7 @@ impl ChatView {
             let toggle_section_key = section_key;
             flow = flow.child(components::work_log::work_log(
                 components::work_log::WorkLogData {
+                    compact: self.window_state.read(cx).compact,
                     index,
                     segment_id: segment_id.to_string(),
                     capsule_label,
@@ -1641,7 +1658,7 @@ impl ChatView {
         let right_tab = panel.right_tab;
         let plan_showing = panel.plan_showing;
         let preview_showing = panel.preview_showing;
-        let terminal_open = panel.terminal_open;
+        let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let remote = self.workspace_store.read(cx).is_remote();
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
@@ -2244,7 +2261,9 @@ impl Render for ChatView {
 
         let Some((title, cwd, is_draft)) = active else {
             return root
-                .child(self.render_header(None, false, None, window, cx))
+                .when(!self.window_state.read(cx).compact, |el| {
+                    el.child(self.render_header(None, false, None, window, cx))
+                })
                 .child(self.render_empty_state(window, cx));
         };
 
@@ -2262,7 +2281,7 @@ impl Render for ChatView {
         #[cfg(all(feature = "local-host", feature = "terminal"))]
         let panel = self.workspace_store.read(cx).chat_panel_state();
         #[cfg(all(feature = "local-host", feature = "terminal"))]
-        let terminal_open = panel.terminal_open;
+        let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         #[cfg(all(feature = "local-host", feature = "terminal"))]
         let terminal_height = panel.terminal_height;
 
@@ -2324,7 +2343,11 @@ impl Render for ChatView {
                 h_flex()
                     .w_full()
                     .justify_center()
-                    .px(px(CONTENT_MIN_PADDING))
+                    .px(px(if this.window_state.read(cx).compact {
+                        16.
+                    } else {
+                        CONTENT_MIN_PADDING
+                    }))
                     .when(this.highlighted_turn == Some(index), |item| {
                         item.rounded(crate::material::radius_card())
                             .bg(cx.theme().list_active)
@@ -2400,7 +2423,8 @@ impl Render for ChatView {
         };
         #[cfg(not(all(feature = "local-host", feature = "terminal")))]
         let body: AnyElement = main.into_any_element();
-        root.child(header).child(body)
+        root.when(!self.window_state.read(cx).compact, |el| el.child(header))
+            .child(body)
     }
 }
 
