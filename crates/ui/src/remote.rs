@@ -17,7 +17,7 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use tcode_remote::client::{PairInvite, PairedHost, pair, pair_url};
+use tcode_remote::client::{PairInvite, PairedHost, pair_pinned, pair_url, parse_pair_url};
 use tcode_remote::discovery::{Beacon, BeaconHandle, browse, start_beacon};
 use tcode_remote::{DeviceInfo, HostMux, PairingCode, RemoteConfig, RemoteServer, serve};
 
@@ -120,6 +120,7 @@ impl RemoteController {
             pairing.host_id.clone(),
             pairing.host_name.clone(),
             server.local_addr().port(),
+            pairing.fp.clone(),
         ));
         self.pairing = Some((pairing, Instant::now()));
         self.server = Some(server);
@@ -295,6 +296,8 @@ pub struct RemotePanel {
     pair_code_input: Entity<InputState>,
     discovery: Discovery,
     pairing_busy: bool,
+    pair_pin: Option<(String, u16, String)>,
+    paired_fingerprint: String,
     /// One-second repaint while a pairing code is counting down.
     ticker: Option<Task<()>>,
 }
@@ -332,6 +335,8 @@ impl RemotePanel {
             pair_code_input,
             discovery: Discovery::Idle,
             pairing_busy: false,
+            pair_pin: None,
+            paired_fingerprint: String::new(),
             ticker: None,
         };
         panel.sync_ticker(cx);
@@ -449,6 +454,18 @@ impl RemotePanel {
         if self.pairing_busy {
             return;
         }
+        let (addr, port, code, fingerprint) =
+            if let Some(invite) = parse_pair_url(&addr).or_else(|| parse_pair_url(&code)) {
+                (invite.addrs[0].clone(), invite.port, invite.code, invite.fp)
+            } else {
+                let fp = self
+                    .pair_pin
+                    .as_ref()
+                    .filter(|(a, p, _)| a == &addr && *p == port)
+                    .map(|(_, _, fp)| fp.clone())
+                    .unwrap_or_default();
+                (addr, port, code, fp)
+            };
         if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
             window.push_notification(
                 Notification::error(crate::tr!("remote.pair.bad_code").into_owned()),
@@ -462,12 +479,13 @@ impl RemotePanel {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { pair(&addr, port, &code, &device) })
+                .spawn(async move { pair_pinned(&addr, port, &code, &device, &fingerprint) })
                 .await;
             let _ = this.update_in(cx, |panel, window, cx| {
                 panel.pairing_busy = false;
                 match result {
                     Ok(host) => {
+                        panel.paired_fingerprint = host.fingerprint.clone();
                         let name = host.name.clone();
                         cx.update_global::<RemoteController, _>(|controller, _| {
                             controller.save_host(host);
@@ -685,6 +703,7 @@ impl RemotePanel {
             },
             port: code.port,
             code: code.code.clone(),
+            fp: code.fp.clone(),
         });
         let addresses = if code.addrs.is_empty() {
             crate::tr!("remote.code.no_addresses").into_owned()
@@ -719,6 +738,10 @@ impl RemotePanel {
                                     .font_semibold()
                                     .child(digits),
                             )
+                            .child(div().text_size(px(11.)).child(crate::tr!(
+                                "mobile.fingerprint",
+                                fingerprint = tcode_client::pairing::display_fingerprint(&code.fp)
+                            )))
                             .child(
                                 div()
                                     .text_size(px(13.))
@@ -823,6 +846,15 @@ impl RemotePanel {
         let mut column = v_flex().w_full().gap_3().child(
             self.section_caption(crate::tr!("remote.connect.section").into_owned().into(), cx),
         );
+        if let RemoteMode::Connected { host_id, .. } = &mode
+            && tcode_remote::client::certificate_changed(host_id)
+        {
+            column = column.child(
+                div()
+                    .text_color(cx.theme().danger_foreground)
+                    .child(crate::tr!("mobile.certificate_changed")),
+            );
+        }
         if let RemoteMode::Connected { name, .. } = &mode {
             column = column.child(
                 crate::material::group(cx).child(
@@ -877,11 +909,23 @@ impl RemotePanel {
                 .unwrap_or_else(|| "?".to_owned());
             group = group.child(
                 self.row()
-                    .child(self.labels(
-                        host.name.clone().into(),
-                        format!("{address}:{}", host.port).into(),
-                        cx,
-                    ))
+                    .child(
+                        self.labels(
+                            host.name.clone().into(),
+                            format!(
+                                "{address}:{} · {}",
+                                host.port,
+                                crate::tr!(
+                                    "mobile.fingerprint",
+                                    fingerprint = tcode_client::pairing::display_fingerprint(
+                                        &host.fingerprint
+                                    )
+                                )
+                            )
+                            .into(),
+                            cx,
+                        ),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("connect-{}", host.host_id)))
                             .ghost()
@@ -948,6 +992,7 @@ impl RemotePanel {
                 for beacon in found {
                     let addr = beacon.addr.clone();
                     let port = beacon.port;
+                    let fingerprint = beacon.fp.clone();
                     group =
                         group.child(
                             self.row()
@@ -969,12 +1014,16 @@ impl RemotePanel {
                                         // Discovery carries no code: prefill the form
                                         // so the user only types the six digits.
                                         let addr = addr.clone();
+                                        this.pair_pin =
+                                            Some((addr.clone(), port, fingerprint.clone()));
                                         this.pair_addr_input.update(cx, |input, cx| {
                                             input.set_value(addr, window, cx)
                                         });
                                         this.pair_port_input.update(cx, |input, cx| {
                                             input.set_value(port.to_string(), window, cx)
                                         });
+                                        this.pair_code_input
+                                            .update(cx, |input, cx| input.focus(window, cx));
                                         cx.notify();
                                     })),
                                 ),
@@ -1001,6 +1050,10 @@ impl RemotePanel {
         };
         v_flex()
             .child(self.section_caption(crate::tr!("remote.pair.section").into_owned().into(), cx))
+            .child(div().text_size(px(12.)).child(crate::tr!(
+                "mobile.fingerprint",
+                fingerprint = tcode_client::pairing::display_fingerprint(&self.paired_fingerprint)
+            )))
             .child(
                 crate::material::group(cx).child(
                     v_flex()

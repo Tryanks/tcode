@@ -71,7 +71,11 @@ impl MobileHost for WebHost {
                 .port()
                 .ok()
                 .and_then(|port| port.parse().ok())
-                .unwrap_or(80),
+                .unwrap_or(if location.protocol().ok().as_deref() == Some("https:") {
+                    443
+                } else {
+                    80
+                }),
         ))
     }
 
@@ -126,6 +130,7 @@ async fn pair(code: &str, device_name: &str) -> Result<PairedHost, String> {
             host_id: field("host_id")?,
             name: field("host_name")?,
             token: field("token")?,
+            fingerprint: field("fp")?,
             addrs: vec![addr],
             port,
             last_connected_unix: None,

@@ -22,6 +22,10 @@
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSBonjourServices</key>
+    <array><string>_tcode._tcp</string></array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>查找同一网络中的 tcode 执行端以进行配对。</string>
     <key>NSCameraUsageDescription</key>
     <string>Scan a QR code to pair with a tcode host.</string>
     <key>UIApplicationSceneManifest</key>

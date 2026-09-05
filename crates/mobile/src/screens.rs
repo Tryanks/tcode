@@ -87,6 +87,18 @@ impl MobileRoot {
                         .text_color(cx.theme().muted_foreground)
                         .truncate(),
                     )
+                    .child(
+                        text(
+                            tr!(
+                                "mobile.fingerprint",
+                                fingerprint =
+                                    tcode_client::pairing::display_fingerprint(&host.fingerprint)
+                            )
+                            .into_owned(),
+                            12.,
+                        )
+                        .text_color(cx.theme().muted_foreground),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| this.connect(connect.clone(), cx)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -139,7 +151,17 @@ impl MobileRoot {
             .into_any_element()
     }
     pub(super) fn connection_badge(&self, cx: &App) -> Div {
-        let (caption, color, spinning) = if self.offline() {
+        let changed = self
+            .connected_host
+            .as_ref()
+            .is_some_and(|h| self.host.certificate_changed(&h.host_id));
+        let (caption, color, spinning) = if changed {
+            (
+                label("certificate_changed"),
+                cx.theme().danger_foreground,
+                false,
+            )
+        } else if self.offline() {
             (label("offline"), cx.theme().danger_foreground, false)
         } else if !self.index_ready {
             (label("connecting"), cx.theme().muted_foreground, true)
@@ -173,7 +195,7 @@ impl MobileRoot {
                     })
                     .into_any_element()
             })
-            .child(text(caption, 13.).truncate())
+            .child(text(caption, 13.).when(!changed, |text| text.truncate()))
     }
     pub(super) fn render_threads(&self, cx: &mut Context<Self>) -> AnyElement {
         let heading = h_flex()
@@ -525,8 +547,15 @@ impl MobileRoot {
                         14.,
                     ))
                     .child(
-                        text(tr!("mobile.protocol", version = 1).into_owned(), 14.)
-                            .text_color(cx.theme().muted_foreground),
+                        text(
+                            tr!(
+                                "mobile.protocol",
+                                version = tcode_protocol::PROTOCOL_VERSION
+                            )
+                            .into_owned(),
+                            14.,
+                        )
+                        .text_color(cx.theme().muted_foreground),
                     ),
             )
             .child(

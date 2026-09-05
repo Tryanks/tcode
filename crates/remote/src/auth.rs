@@ -81,6 +81,9 @@ impl AuthStore {
     }
 
     pub fn token_is_valid(&self, token: &str) -> bool {
+        if token.len() != 43 {
+            return false;
+        }
         let candidate = Sha256::digest(token.as_bytes());
         self.devices.iter().any(|device| {
             let Some(expected) = decode_hex(&device.token_sha256_hex) else {
@@ -114,7 +117,7 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-fn hex_hash(bytes: &[u8]) -> String {
+pub(crate) fn hex_hash(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -135,7 +138,7 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
@@ -145,4 +148,52 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
             difference | (left ^ right)
         })
         == 0
+}
+
+impl AuthStore {
+    /// Certificate and PKCS#8 key live beside remote.json. Never silently rotate
+    /// a partial or corrupt identity: existing clients must keep their pins.
+    pub fn tls_config(&self) -> io::Result<(rustls::ServerConfig, String)> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        let cert_path = self.path.with_file_name("remote-cert.der");
+        let key_path = self.path.with_file_name("remote-key.der");
+        if !cert_path.exists() && !key_path.exists() {
+            let certified =
+                rcgen::generate_simple_self_signed(vec![format!("{}.local", self.host_id)])
+                    .map_err(io::Error::other)?;
+            private_file(&key_path, &certified.signing_key.serialize_der())?;
+            private_file(&cert_path, certified.cert.der().as_ref())?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+            fs::set_permissions(&cert_path, fs::Permissions::from_mode(0o600))?;
+        }
+        let cert = fs::read(cert_path)?;
+        let fp = hex_hash(&cert);
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(fs::read(key_path)?));
+        let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(io::Error::other)?
+        .with_no_client_auth()
+        .with_single_cert(vec![CertificateDer::from(cert)], key)
+        .map_err(io::Error::other)?;
+        Ok((config, fp))
+    }
+}
+
+fn private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }

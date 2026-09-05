@@ -11,14 +11,14 @@ server = [
     "dep:getrandom",
     "dep:if-addrs",
     "dep:sha1",
-    "dep:sha2",
+    "dep:rcgen",
     "dep:uuid",
 ]
-client = ["dep:socket2", "dep:ureq"]
+client = ["dep:tcode-protocol"]
 
 [dependencies]
 tcode-client = { path = "../client" }
-tcode-protocol = { path = "../protocol", optional = true }
+tcode-protocol = { path = "../protocol", optional = true, default-features = false }
 async-channel = "2"
 async-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 base64 = { version = "0.23", optional = true }
@@ -30,9 +30,12 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = { version = "0.10", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = "0.10"
 smol = "2"
-socket2 = { version = "0.6", optional = true }
 tungstenite = "0.27"
-ureq = { version = "2", default-features = false, features = [], optional = true }
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
+
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"], optional = true }
+mdns-sd = "0.20"

@@ -19,6 +19,25 @@ pub fn android_main(app: android_activity::AndroidApp) {
     gpui::Application::with_platform(gpui_android::platform())
         .with_assets(tcode_ui::assets::Assets)
         .run(move |cx| {
+            // cosmic-text's Android fallback scans registered faces when
+            // the primary lacks a glyph. Register before shaping; loading as a
+            // primary family would trigger upstream's ASCII-m font filter.
+            use std::io::Read as _;
+            let font_path = std::ffi::CString::new("fonts/NotoColorEmoji.ttf").unwrap();
+            if let Some(mut asset) = app.asset_manager().open(&font_path) {
+                let mut font = Vec::new();
+                if asset.read_to_end(&mut font).is_ok() {
+                    if let Err(error) = cx
+                        .text_system()
+                        .add_fonts(vec![std::borrow::Cow::Owned(font)])
+                    {
+                        log::error!("failed registering emoji fallback: {error}");
+                    }
+                }
+            } else {
+                log::error!("bundled Noto Color Emoji font is missing");
+            }
+
             let mobile_host = host::native_host(app.clone(), cx)
                 .expect("failed to initialize Android host services");
             tcode_mobile::run_with_host(cx, Rc::new(mobile_host));

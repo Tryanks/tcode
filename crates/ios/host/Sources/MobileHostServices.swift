@@ -251,3 +251,69 @@ private final class QRScannerViewController: UIViewController,
         dismiss(animated: true) { [completion] in completion(result) }
     }
 }
+
+
+@_silgen_name("tcode_ios_browse_completed")
+private func browseCompleted(_ requestID: UInt64, _ bytes: UnsafePointer<UInt8>?, _ length: Int)
+
+/// Bonjour uses the system daemon; no raw multicast entitlement is required.
+private final class HostBrowse: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    static var pending: [UInt64: HostBrowse] = [:]
+    let requestID: UInt64
+    let browser = NetServiceBrowser()
+    var services: [NetService] = []
+    var results: [[String: Any]] = []
+    init(_ id: UInt64) { requestID = id; super.init() }
+    func start() {
+        browser.delegate = self
+        browser.searchForServices(ofType: "_tcode._tcp.", inDomain: "local.")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { self.finish() }
+    }
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        guard services.count < 128 else { return }
+        services.append(service)
+        service.delegate = self
+        service.resolve(withTimeout: 3)
+    }
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard let data = sender.txtRecordData(), data.count <= 4096 else { return }
+        let txt = NetService.dictionary(fromTXTRecord: data)
+        func field(_ key: String) -> String? {
+            guard let bytes = txt[key], bytes.count <= 256 else { return nil }
+            return String(data: bytes, encoding: .utf8)
+        }
+        guard let id = field("host_id"), let name = field("name"), let fp = field("fp"),
+              let port = field("port"), Int(port) == sender.port, sender.port > 0 else { return }
+        for data in sender.addresses ?? [] {
+            let address: String? = data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress, raw.count >= MemoryLayout<sockaddr>.size else { return nil }
+                let sa = base.assumingMemoryBound(to: sockaddr.self)
+                guard Int(sa.pointee.sa_len) <= raw.count else { return nil }
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                guard getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { return nil }
+                return String(cString: host)
+            }
+            if let address, results.count < 128 {
+                results.append(["host_id": id, "name": name, "fp": fp, "port": sender.port, "addr": address])
+            }
+        }
+    }
+    func finish() {
+        guard Self.pending.removeValue(forKey: requestID) != nil else { return }
+        browser.stop()
+        services.forEach { $0.stop() }
+        let data = (try? JSONSerialization.data(withJSONObject: results)) ?? Data("[]".utf8)
+        data.withUnsafeBytes { raw in
+            browseCompleted(requestID, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+        }
+    }
+}
+
+@_cdecl("tcode_ios_host_browse")
+func startHostBrowse(_ requestID: UInt64) {
+    DispatchQueue.main.async {
+        let browse = HostBrowse(requestID)
+        HostBrowse.pending[requestID] = browse
+        browse.start()
+    }
+}

@@ -36,6 +36,7 @@ pub struct RemoteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingCode {
     pub code: String,
+    pub fp: String,
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
@@ -58,6 +59,8 @@ struct ActiveCode {
 }
 
 struct Shared {
+    fingerprint: String,
+    tls: futures_rustls::TlsAcceptor,
     mux: HostMux,
     auth: Mutex<AuthStore>,
     pairing: Mutex<Option<ActiveCode>>,
@@ -121,11 +124,14 @@ impl Drop for RemoteServer {
 
 pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
     let auth = AuthStore::open(&config.data_dir, &config.host_name)?;
+    let (tls, fingerprint) = auth.tls_config()?;
     let listener = TcpListener::bind(config.listen)?;
     listener.set_nonblocking(true)?;
     let local_addr = listener.local_addr()?;
     let (shutdown, shutdown_rx) = async_channel::bounded::<()>(1);
     let shared = Arc::new(Shared {
+        fingerprint,
+        tls: futures_rustls::TlsAcceptor::from(Arc::new(tls)),
         mux,
         auth: Mutex::new(auth),
         pairing: Mutex::new(None),
@@ -185,11 +191,27 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
 }
 
 async fn handle_connection(
-    mut stream: Async<std::net::TcpStream>,
+    stream: Async<std::net::TcpStream>,
     peer: SocketAddr,
     shared: Arc<Shared>,
 ) -> io::Result<()> {
-    let request = match read_request(&mut stream).await {
+    let mut stream = futures_lite::future::race(shared.tls.accept(stream), async {
+        smol::Timer::after(Duration::from_secs(5)).await;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "TLS handshake timed out",
+        ))
+    })
+    .await?;
+    let request = match futures_lite::future::race(read_request(&mut stream), async {
+        smol::Timer::after(Duration::from_secs(5)).await;
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "HTTP request timed out",
+        ))
+    })
+    .await
+    {
         Ok(request) => request,
         Err(error) => {
             let _ = response(
@@ -245,6 +267,7 @@ struct PairResponse {
     host_id: String,
     host_name: String,
     token: String,
+    fp: String,
 }
 
 async fn pair<S>(stream: &mut S, request: Request, shared: &Shared) -> io::Result<()>
@@ -252,7 +275,13 @@ where
     S: futures_lite::io::AsyncWrite + Unpin,
 {
     let request: PairRequest = match serde_json::from_slice::<PairRequest>(&request.body) {
-        Ok(request) if !request.device_name.trim().is_empty() => request,
+        Ok(request)
+            if !request.device_name.trim().is_empty()
+                && request.device_name.len() <= 256
+                && request.code.len() <= 64 =>
+        {
+            request
+        }
         _ => {
             return response(
                 stream,
@@ -276,6 +305,7 @@ where
         let mut auth = shared.auth.lock().unwrap();
         let token = auth.issue_token(request.device_name)?;
         PairResponse {
+            fp: shared.fingerprint.clone(),
             host_id: auth.host_id.to_string(),
             host_name: auth.host_name.clone(),
             token,
@@ -293,7 +323,7 @@ fn consume_pairing_code(shared: &Shared, candidate: &str) -> bool {
         *active = None;
         return false;
     }
-    if code.code == candidate {
+    if crate::auth::constant_time_eq(code.code.as_bytes(), candidate.as_bytes()) {
         *active = None;
         return true;
     }
@@ -317,6 +347,7 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
     });
     let auth = shared.auth.lock().unwrap();
     PairingCode {
+        fp: shared.fingerprint.clone(),
         code,
         expires_in_secs: PAIRING_LIFETIME.as_secs(),
         host_id: auth.host_id.to_string(),
@@ -403,12 +434,12 @@ fn is_websocket_upgrade(request: &Request) -> bool {
 struct Hello {
     #[serde(rename = "type")]
     kind: String,
-    protocol_version: u8,
+    protocol_version: u32,
     token: String,
 }
 
 async fn websocket(
-    mut stream: Async<std::net::TcpStream>,
+    mut stream: futures_rustls::server::TlsStream<Async<std::net::TcpStream>>,
     request: Request,
     shared: Arc<Shared>,
 ) -> io::Result<()> {
@@ -423,20 +454,39 @@ async fn websocket(
     stream.write_all(handshake.as_bytes()).await?;
     stream.flush().await?;
     let mut websocket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
-    let first = websocket.next().await;
+    let first = futures_lite::future::race(websocket.next(), async {
+        smol::Timer::after(Duration::from_secs(5)).await;
+        None
+    })
+    .await;
     let hello = match first {
         Some(Ok(Message::Text(text))) => serde_json::from_str::<Hello>(&text).ok(),
         _ => None,
     };
+    if let Some(hello) = &hello
+        && hello.protocol_version != tcode_protocol::PROTOCOL_VERSION
+    {
+        let rejected = serde_json::json!({
+            "type": "hello_rejected",
+            "reason": "protocol version mismatch",
+            "expected": tcode_protocol::PROTOCOL_VERSION,
+            "received": hello.protocol_version
+        });
+        let _ = websocket
+            .send(Message::Text(rejected.to_string().into()))
+            .await;
+        let _ = websocket.close(None).await;
+        return Ok(());
+    }
     let token = hello.filter(|hello| {
         hello.kind == "hello"
-            && hello.protocol_version == 1
+            && hello.protocol_version == tcode_protocol::PROTOCOL_VERSION
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
     let Some(token) = token.map(|hello| hello.token) else {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
-            "reason": "invalid token or protocol version"
+            "reason": "invalid hello or token"
         });
         let _ = websocket
             .send(Message::Text(rejected.to_string().into()))
@@ -450,7 +500,7 @@ async fn websocket(
             "type": "hello_ok",
             "host_id": auth.host_id,
             "host_name": auth.host_name,
-            "protocol_version": 1
+            "protocol_version": tcode_protocol::PROTOCOL_VERSION
         })
     };
     websocket

@@ -127,7 +127,12 @@ pub async fn debug_pair_and_connect(code: String) -> String {
         application.update(|cx| {
             let (addr, port) = WebHost.fixed_pairing_endpoint().unwrap();
             WebHost.pair(
-                PairRequest { addr, port, code },
+                PairRequest {
+                    addr,
+                    port,
+                    code,
+                    fingerprint: String::new(),
+                },
                 cx,
                 Box::new(move |result, _cx| {
                     let _ = tx.try_send(result);

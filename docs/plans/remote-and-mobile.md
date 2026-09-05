@@ -512,7 +512,7 @@ interstitial once, paired over HTTPS, displayed the pin and connected over WSS.
 is registered, but `/system/fonts/NotoColorEmoji.ttf` has the same family and
 PostScript name and is loaded first by
 `crates/platform/gpui-android/src/android/platform.rs:272`. On this AVD it is
-COLR/CPAL (not CBDT/CBLC). Direct Android GPUI diagnostics selected system glyph
+COLR v1/CPAL (not CBDT/CBLC). Direct Android GPUI diagnostics selected system glyph
 IDs 1754/213/2500/1951 with `is_emoji=true`, then returned 0×0 raster bounds. An
 independent probe using the exact Swash 0.2.9 rendering sources used by
 `gpui-pre-wgpu` reproduced empty masks for those system glyphs. With the bundled

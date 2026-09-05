@@ -14,6 +14,8 @@ pub struct PairedHost {
     pub addrs: Vec<String>,
     pub port: u16,
     pub token: String,
+    #[serde(default)]
+    pub fingerprint: String,
     /// Unix seconds of the last successful connection; absent until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_unix: Option<u64>,
@@ -27,9 +29,13 @@ pub struct PairInvite {
     pub addrs: Vec<String>,
     pub port: u16,
     pub code: String,
+    pub fp: String,
 }
 
 pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
+    if value.len() > 4096 {
+        return None;
+    }
     let url = Url::parse(value.trim()).ok()?;
     if url.scheme() != "tcode" || url.host_str() != Some("pair") {
         return None;
@@ -52,7 +58,12 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
     if !is_pairing_code(&code) {
         return None;
     }
+    let fp = fields.get("fp")?.to_ascii_lowercase();
+    if !valid_fingerprint(&fp) || port == 0 {
+        return None;
+    }
     Some(PairInvite {
+        fp,
         host_id: fields.get("host")?.clone(),
         name: fields.get("name")?.clone(),
         addrs,
@@ -69,13 +80,36 @@ pub fn pair_url(invite: &PairInvite) -> String {
         .append_pair("name", &invite.name)
         .append_pair("addrs", &invite.addrs.join(","))
         .append_pair("port", &invite.port.to_string())
-        .append_pair("code", &invite.code);
+        .append_pair("code", &invite.code)
+        .append_pair("fp", &invite.fp);
     url.into()
 }
 
 /// A pairing code is exactly six ASCII digits.
 pub fn is_pairing_code(code: &str) -> bool {
     code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Canonical SHA-256 certificate fingerprint (32 bytes, lowercase hex).
+pub fn valid_fingerprint(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// First eight 16-bit hex groups for human comparison; full digest is pinned.
+pub fn display_fingerprint(value: &str) -> String {
+    if !valid_fingerprint(value) {
+        return String::new();
+    }
+    value
+        .as_bytes()
+        .chunks_exact(4)
+        .take(8)
+        .map(|group| std::str::from_utf8(group).expect("hex is ASCII"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -90,6 +124,7 @@ mod tests {
             addrs: vec!["192.168.1.2".into(), "fd00::1".into()],
             port: 47_420,
             code: "123456".into(),
+            fp: "ab".repeat(32),
         };
         assert_eq!(parse_pair_url(&pair_url(&invite)), Some(invite));
         assert!(parse_pair_url("https://example.com").is_none());

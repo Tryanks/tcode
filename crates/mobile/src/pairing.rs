@@ -2,6 +2,10 @@ use super::*;
 use host::{PairRequest, is_pairing_code, parse_pair_url};
 
 pub(super) struct PairForm {
+    pub fingerprint: String,
+    pin_endpoint: Option<(String, u16)>,
+    discovered: Vec<host::DiscoveredHost>,
+    paired: Option<host::PairedHost>,
     pub address: Entity<InputState>,
     pub port: Entity<InputState>,
     pub code: Entity<InputState>,
@@ -15,6 +19,10 @@ impl PairForm {
     pub fn new(host: &SharedHost, window: &mut Window, cx: &mut Context<MobileRoot>) -> Self {
         let fixed = host.fixed_pairing_endpoint();
         Self {
+            fingerprint: String::new(),
+            pin_endpoint: None,
+            discovered: Vec::new(),
+            paired: None,
             address: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(label("address_placeholder"))
@@ -45,11 +53,27 @@ impl PairForm {
         if addr.is_empty() || addr.contains(char::is_whitespace) || !is_pairing_code(&code) {
             return None;
         }
-        Some(PairRequest { addr, port, code })
+        Some(PairRequest {
+            addr: addr.clone(),
+            port,
+            code,
+            fingerprint: if self
+                .pin_endpoint
+                .as_ref()
+                .is_some_and(|(a, p)| a == &addr && *p == port)
+            {
+                self.fingerprint.clone()
+            } else {
+                String::new()
+            },
+        })
     }
 }
 impl MobileRoot {
     pub(super) fn open_pair(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pair.paired = None;
+        self.pair.fingerprint.clear();
+        self.pair.pin_endpoint = None;
         self.pair.error = None;
         self.pair.filled = false;
         self.pair.busy = false;
@@ -73,11 +97,26 @@ impl MobileRoot {
                 ));
             }
         }
+        let weak = cx.weak_entity();
+        let generation = self.pair.generation;
+        self.host.browse_hosts(
+            Box::new(move |hosts, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    if this.pair.generation == generation {
+                        this.pair.discovered = hosts;
+                        cx.notify();
+                    }
+                });
+            }),
+            cx,
+        );
         self.sheet = Some(Sheet::Pair);
         cx.notify();
     }
     fn fill_invite(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(invite) = parse_pair_url(value) {
+            self.pair.fingerprint = invite.fp;
+            self.pair.pin_endpoint = Some((invite.addrs[0].clone(), invite.port));
             if self.host.fixed_pairing_endpoint().is_none() {
                 self.pair
                     .address
@@ -94,6 +133,11 @@ impl MobileRoot {
         }
     }
     fn submit_pair(&mut self, cx: &mut Context<Self>) {
+        if let Some(host) = self.pair.paired.take() {
+            self.sheet = None;
+            self.connect(host, cx);
+            return;
+        }
         if self.pair.busy {
             return;
         }
@@ -121,8 +165,8 @@ impl MobileRoot {
                             this.hosts.retain(|h| h.host_id != host.host_id);
                             this.hosts.push(host.clone());
                             this.host.save_hosts(&this.hosts);
-                            this.sheet = None;
-                            this.connect(host, cx);
+                            this.pair.fingerprint = host.fingerprint.clone();
+                            this.pair.paired = Some(host);
                         }
                         Err(error) => this.pair.error = Some(pair_error(&error, &address)),
                     }
@@ -133,8 +177,77 @@ impl MobileRoot {
         cx.notify();
     }
     pub(super) fn render_pair(&mut self, cx: &mut Context<Self>) -> Div {
+        if self.pair.paired.is_some() {
+            return v_flex()
+                .gap(px(16.))
+                .child(text(
+                    tr!(
+                        "mobile.fingerprint",
+                        fingerprint =
+                            tcode_client::pairing::display_fingerprint(&self.pair.fingerprint)
+                    )
+                    .into_owned(),
+                    14.,
+                ))
+                .child(
+                    text(label("fingerprint_compare"), 14.).text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    button("pair-connect", label("connect_host"), true, true, cx)
+                        .h(px(50.))
+                        .w_full()
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_pair(cx))),
+                );
+        }
         let busy = self.pair.busy;
         let mut form = v_flex().gap(px(16.));
+        if self.pair.paired.is_none() && self.host.fixed_pairing_endpoint().is_none() {
+            form = form
+                .child(text(label("nearby_hosts"), 13.).text_color(cx.theme().muted_foreground));
+            for (index, found) in self.pair.discovered.iter().enumerate() {
+                let addr = found.addr.clone();
+                let port = found.port;
+                let fp = found.fp.clone();
+                form = form.child(
+                    button(
+                        SharedString::from(format!("nearby-{index}")),
+                        format!("{} · {}:{}", found.name, addr, port),
+                        false,
+                        !busy,
+                        cx,
+                    )
+                    .min_h(px(48.))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.pair
+                            .address
+                            .update(cx, |s, cx| s.set_value(addr.clone(), window, cx));
+                        this.pair
+                            .port
+                            .update(cx, |s, cx| s.set_value(port.to_string(), window, cx));
+                        this.pair.fingerprint = fp.clone();
+                        this.pair.code.update(cx, |s, cx| {
+                            s.set_value("", window, cx);
+                            s.focus(window, cx);
+                        });
+                        cx.notify();
+                    })),
+                );
+            }
+        }
+        if !self.pair.fingerprint.is_empty() {
+            form = form.child(
+                text(
+                    tr!(
+                        "mobile.fingerprint",
+                        fingerprint =
+                            tcode_client::pairing::display_fingerprint(&self.pair.fingerprint)
+                    )
+                    .into_owned(),
+                    13.,
+                )
+                .text_color(cx.theme().muted_foreground),
+            );
+        }
         if self.host.supports_qr() {
             form = form
                 .child(
@@ -192,9 +305,15 @@ impl MobileRoot {
         form.child(
             button(
                 "pair-submit",
-                label(if busy { "pairing" } else { "pair" }),
+                label(if self.pair.paired.is_some() {
+                    "connect_host"
+                } else if busy {
+                    "pairing"
+                } else {
+                    "pair"
+                }),
                 true,
-                !busy && self.pair.request(cx).is_some(),
+                !busy && (self.pair.paired.is_some() || self.pair.request(cx).is_some()),
                 cx,
             )
             .h(px(50.))

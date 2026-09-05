@@ -14,7 +14,9 @@
 </head>
 <body>
   <canvas id="tcode-canvas"></canvas>
-  <p id="loading" role="status">Loading tcode…</p>
+  <p id="loading" role="status">Loading tcode…
+首次打开 HTTPS 执行端时，浏览器会显示自签名证书提示。核对执行端地址后，在高级选项中继续；同一浏览器通常只需接受一次。
+On first HTTPS access, your browser shows a self-signed certificate warning. Check the host address, then continue in Advanced; acceptance is normally needed once.</p>
   <noscript>Enable JavaScript to use tcode.</noscript>
   <script type="module">
     import init, { start } from './tcode_web.js';

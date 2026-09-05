@@ -157,14 +157,30 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeHost, S
     })
     .detach();
 
+    let multicast = bridge.object.clone();
     let camera = bridge.clone();
-    Ok(
-        NativeHost::new(data_dir, device_name).with_qr_scanner(move |done, _cx| {
+    Ok(NativeHost::new(data_dir, device_name)
+        .with_multicast_lock(move |acquire| {
+            if multicast
+                .with_env(|env, activity| {
+                    env.call_method(
+                        activity,
+                        "gpuiMulticastLock",
+                        "(Z)V",
+                        &[JValue::Bool(acquire.into())],
+                    )?;
+                    Ok(())
+                })
+                .is_err()
+            {
+                log::warn!("Android multicast lock unavailable");
+            }
+        })
+        .with_qr_scanner(move |done, _cx| {
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
             callbacks.borrow_mut().insert(request_id, done);
             camera.start_camera(request_id);
-        }),
-    )
+        }))
 }
 
 pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {

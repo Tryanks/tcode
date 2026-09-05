@@ -36,6 +36,23 @@ public final class GpuiActivity extends NativeActivity {
 
     private GpuiInputView inputView;
     private long cameraRequest;
+    private android.net.wifi.WifiManager.MulticastLock multicastLock;
+
+    /** Called by the Rust browse worker; reference counting allows overlapping browses. */
+    public synchronized void gpuiMulticastLock(boolean acquire) {
+        if (acquire) {
+            if (multicastLock == null) {
+                android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager)
+                    getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                multicastLock = wifi.createMulticastLock("tcode-discovery");
+                multicastLock.setReferenceCounted(true);
+            }
+            multicastLock.acquire();
+        } else if (multicastLock != null && multicastLock.isHeld()) {
+            multicastLock.release();
+        }
+    }
+
 
     private native void nativeCommitText(String text);
     private native void nativeSetComposingText(String text);

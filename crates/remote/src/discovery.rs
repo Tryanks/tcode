@@ -1,68 +1,45 @@
+//! DNS-SD discovery is an address hint, never authorization to connect.
+use mdns_sd::ServiceDaemon;
 #[cfg(feature = "client")]
-use std::collections::HashMap;
-#[cfg(feature = "client")]
-use std::io;
-#[cfg(feature = "client")]
-use std::net::SocketAddr;
-#[cfg(any(feature = "server", feature = "client"))]
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-#[cfg(feature = "server")]
-use std::sync::Arc;
-#[cfg(feature = "server")]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "server")]
-use std::thread::JoinHandle;
-#[cfg(any(feature = "server", feature = "client"))]
+use mdns_sd::ServiceEvent;
+#[cfg(any(feature = "server", test))]
+use mdns_sd::ServiceInfo;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 #[cfg(feature = "client")]
 use std::time::Instant;
 
-#[cfg(any(feature = "server", feature = "client"))]
-use serde::{Deserialize, Serialize};
-#[cfg(feature = "client")]
-use socket2::{Domain, Protocol, Socket, Type};
+pub const SERVICE_TYPE: &str = "_tcode._tcp.local.";
 
-#[cfg(any(feature = "server", feature = "client"))]
-const BEACON_PORT: u16 = 47_421;
-
-#[cfg(feature = "client")]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Beacon {
     pub host_id: String,
     pub name: String,
     pub port: u16,
     pub addr: String,
-}
-
-#[cfg(any(feature = "server", feature = "client"))]
-#[derive(Serialize, Deserialize)]
-struct BeaconWire {
-    tcode: u8,
-    host_id: String,
-    name: String,
-    port: u16,
+    pub fp: String,
 }
 
 #[cfg(feature = "server")]
 pub struct BeaconHandle {
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    daemon: Option<ServiceDaemon>,
+    fullname: String,
 }
-
 #[cfg(feature = "server")]
 impl BeaconHandle {
-    pub fn shutdown(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+    pub fn shutdown(self) {
+        drop(self);
     }
 }
-
 #[cfg(feature = "server")]
 impl Drop for BeaconHandle {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        if let Some(daemon) = &self.daemon {
+            if let Ok(done) = daemon.unregister(&self.fullname) {
+                let _ = done.recv_timeout(Duration::from_secs(1));
+            }
+            let _ = daemon.shutdown();
+        }
     }
 }
 
@@ -71,97 +48,206 @@ pub fn start_beacon(
     host_id: impl Into<String>,
     name: impl Into<String>,
     port: u16,
+    fp: impl Into<String>,
 ) -> BeaconHandle {
-    let stop = Arc::new(AtomicBool::new(false));
-    let thread_stop = stop.clone();
-    let wire = BeaconWire {
-        tcode: 1,
-        host_id: host_id.into(),
-        name: name.into(),
-        port,
+    let host_id = host_id.into();
+    let name = name.into();
+    let fp = fp.into();
+    let mut handle = BeaconHandle {
+        daemon: None,
+        fullname: String::new(),
     };
-    let thread = std::thread::Builder::new()
-        .name("tcode-beacon".into())
-        .spawn(move || {
-            let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) else {
-                log::warn!("unable to bind remote discovery beacon socket");
-                return;
-            };
-            if let Err(error) = socket.set_broadcast(true) {
-                log::warn!("unable to enable remote discovery broadcast: {error}");
-                return;
-            }
-            let Ok(payload) = serde_json::to_vec(&wire) else {
-                return;
-            };
-            let destination = SocketAddrV4::new(Ipv4Addr::BROADCAST, BEACON_PORT);
-            while !thread_stop.load(Ordering::Relaxed) {
-                if let Err(error) = socket.send_to(&payload, destination) {
-                    log::warn!("remote discovery beacon send failed: {error}");
-                }
-                for _ in 0..20 {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-            }
-        })
-        .ok();
-    BeaconHandle { stop, thread }
+    let start = || -> Result<(ServiceDaemon, String), mdns_sd::Error> {
+        let props = [
+            ("host_id", host_id.as_str()),
+            ("name", name.as_str()),
+            ("port", &port.to_string()),
+            ("fp", fp.as_str()),
+        ];
+        let service = ServiceInfo::new(
+            SERVICE_TYPE,
+            &host_id,
+            &format!("{host_id}.local."),
+            "",
+            port,
+            &props[..],
+        )?
+        .enable_addr_auto();
+        let fullname = service.get_fullname().to_owned();
+        let daemon = ServiceDaemon::new()?;
+        daemon.disable_interface(mdns_sd::IfKind::LoopbackV4)?;
+        daemon.disable_interface(mdns_sd::IfKind::LoopbackV6)?;
+        if let Err(error) = daemon.register(service) {
+            let _ = daemon.shutdown();
+            return Err(error);
+        }
+        Ok((daemon, fullname))
+    };
+    match start() {
+        Ok((daemon, fullname)) => {
+            handle.daemon = Some(daemon);
+            handle.fullname = fullname;
+        }
+        Err(_) => log::warn!("mDNS advertising unavailable"),
+    }
+    handle
 }
 
 #[cfg(feature = "client")]
 pub fn browse(timeout: Duration) -> Vec<Beacon> {
-    match browse_inner(timeout) {
-        Ok(beacons) => beacons,
-        Err(error) => {
-            log::warn!("remote discovery browse unavailable: {error}");
-            Vec::new()
+    let Ok(daemon) = ServiceDaemon::new() else {
+        return Vec::new();
+    };
+    let mut found = std::collections::BTreeMap::<String, Beacon>::new();
+    if let Ok(events) = daemon.browse(SERVICE_TYPE) {
+        let deadline = Instant::now() + timeout.min(Duration::from_secs(30));
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(event) = events.recv_timeout(left) else {
+                break;
+            };
+            if let ServiceEvent::ServiceResolved(info) = event {
+                for address in info.get_addresses() {
+                    if address.to_string().starts_with("127.") || address.to_string() == "::1" {
+                        continue;
+                    }
+                    if let Some(beacon) =
+                        parse_txt(info.get_properties(), info.get_port(), address.to_string())
+                        && found.len() < 128
+                    {
+                        let prefer = found
+                            .get(&beacon.host_id)
+                            .is_none_or(|old| old.addr.contains(':') && !beacon.addr.contains(':'));
+                        if prefer {
+                            found.insert(beacon.host_id.clone(), beacon);
+                        }
+                    }
+                }
+            }
         }
+        let _ = daemon.stop_browse(SERVICE_TYPE);
     }
+    let _ = daemon.shutdown();
+    found.into_values().collect()
 }
 
 #[cfg(feature = "client")]
-fn browse_inner(timeout: Duration) -> io::Result<Vec<Beacon>> {
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, BEACON_PORT).into())?;
-    let socket: UdpSocket = socket.into();
-    socket.set_read_timeout(Some(Duration::from_millis(200)))?;
-    let deadline = Instant::now() + timeout;
-    let mut found = HashMap::new();
-    let mut buffer = [0_u8; 2048];
-    while Instant::now() < deadline {
-        match socket.recv_from(&mut buffer) {
-            Ok((length, peer)) => {
-                let Ok(wire) = serde_json::from_slice::<BeaconWire>(&buffer[..length]) else {
-                    continue;
-                };
-                if wire.tcode != 1 {
-                    continue;
-                }
-                let addr = match peer {
-                    SocketAddr::V4(addr) => addr.ip().to_string(),
-                    SocketAddr::V6(addr) => addr.ip().to_string(),
-                };
-                found.insert(
-                    (wire.host_id.clone(), addr.clone()),
-                    Beacon {
-                        host_id: wire.host_id,
-                        name: wire.name,
-                        port: wire.port,
-                        addr,
-                    },
-                );
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => return Err(error),
-        }
+fn parse_txt(txt: &mdns_sd::TxtProperties, port: u16, addr: String) -> Option<Beacon> {
+    let field = |key| {
+        txt.get_property_val_str(key)
+            .filter(|v| !v.is_empty() && v.len() <= 256 && !v.chars().any(char::is_control))
+            .map(str::to_owned)
+    };
+    let host_id = field("host_id")?;
+    let name = field("name")?;
+    let fp = field("fp")?;
+    if port == 0
+        || field("port")?.parse::<u16>().ok()? != port
+        || !tcode_client::pairing::valid_fingerprint(&fp)
+    {
+        return None;
     }
-    Ok(found.into_values().collect())
+    Some(Beacon {
+        host_id,
+        name,
+        fp,
+        addr,
+        port,
+    })
+}
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires local multicast; run explicitly during native acceptance"]
+    fn mdns_loopback_round_trip() {
+        let advertise = ServiceDaemon::new().unwrap();
+        let browser = ServiceDaemon::new().unwrap();
+        for daemon in [&advertise, &browser] {
+            daemon.disable_interface(mdns_sd::IfKind::All).unwrap();
+            daemon
+                .enable_interface(mdns_sd::IfKind::LoopbackV4)
+                .unwrap();
+            daemon.set_multicast_loop_v4(true).unwrap();
+        }
+        let name = format!("p4c-{}", std::process::id());
+        let props = [
+            ("host_id", name.as_str()),
+            ("name", "Loopback"),
+            ("port", "47420"),
+            ("fp", &"ab".repeat(32)),
+        ];
+        let mut info = ServiceInfo::new(
+            SERVICE_TYPE,
+            &name,
+            &format!("{name}.local."),
+            "127.0.0.1",
+            47420,
+            &props[..],
+        )
+        .unwrap();
+        info.set_requires_probe(false);
+        let fullname = info.get_fullname().to_owned();
+        let events = browser.browse(SERVICE_TYPE).unwrap();
+        advertise.register(info).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut found = false;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(event) = events.recv_timeout(left) else {
+                break;
+            };
+            if let ServiceEvent::ServiceResolved(info) = event
+                && info.get_fullname() == fullname
+            {
+                found =
+                    parse_txt(info.get_properties(), info.get_port(), "127.0.0.1".into()).is_some();
+                break;
+            }
+        }
+        let _ = advertise.unregister(&fullname);
+        let _ = browser.stop_browse(SERVICE_TYPE);
+        let _ = advertise.shutdown();
+        let _ = browser.shutdown();
+        assert!(
+            found,
+            "loopback multicast unavailable; TXT validation remains the portable test"
+        );
+    }
+
+    #[test]
+    fn txt_records_are_bounded_and_consistent() {
+        let props = [
+            ("host_id", "test"),
+            ("name", "Test host"),
+            ("port", "47420"),
+            ("fp", &"ab".repeat(32)),
+        ];
+        let info = ServiceInfo::new(
+            SERVICE_TYPE,
+            "test",
+            "test.local.",
+            "127.0.0.1",
+            47420,
+            &props[..],
+        )
+        .unwrap();
+        assert!(parse_txt(info.get_properties(), 47420, "127.0.0.1".into()).is_some());
+        assert!(parse_txt(info.get_properties(), 1, "127.0.0.1".into()).is_none());
+        let malformed = [
+            ("host_id", "test"),
+            ("name", "Test"),
+            ("port", "47420"),
+            ("fp", "invalid"),
+        ];
+        let info = ServiceInfo::new(
+            SERVICE_TYPE,
+            "test",
+            "test.local.",
+            "127.0.0.1",
+            47420,
+            &malformed[..],
+        )
+        .unwrap();
+        assert!(parse_txt(info.get_properties(), 47420, "127.0.0.1".into()).is_none());
+    }
 }

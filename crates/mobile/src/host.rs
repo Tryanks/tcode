@@ -29,7 +29,59 @@ pub struct PairRequest {
     pub addr: String,
     pub port: u16,
     pub code: String,
+    pub fingerprint: String,
 }
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredHost {
+    pub host_id: String,
+    pub name: String,
+    pub addr: String,
+    pub port: u16,
+    pub fp: String,
+}
+pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
+    if json.len() > 65536 {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(hosts) = value.as_array() else {
+        return Vec::new();
+    };
+    let mut found: Vec<_> = hosts
+        .iter()
+        .take(128)
+        .filter_map(|value| {
+            let field = |name| {
+                value
+                    .get(name)?
+                    .as_str()
+                    .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+                    .map(str::to_owned)
+            };
+            let fp = field("fp")?;
+            let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
+            if port == 0 || !tcode_client::pairing::valid_fingerprint(&fp) {
+                return None;
+            }
+            Some(DiscoveredHost {
+                host_id: field("host_id")?,
+                name: field("name")?,
+                addr: field("addr")?,
+                fp,
+                port,
+            })
+        })
+        .collect();
+    // One row per host, preferring a routable IPv4 address over link-local IPv6.
+    found.retain(|h| !h.addr.starts_with("127.") && h.addr != "::1");
+    found.sort_by_key(|h| (h.host_id.clone(), h.addr.contains(':'), h.addr.clone()));
+    found.dedup_by(|a, b| a.host_id == b.host_id);
+    found
+}
+pub type BrowseDone = Box<dyn FnOnce(Vec<DiscoveredHost>, &mut App) + 'static>;
 
 /// Delivered on the main thread once pairing finished.
 pub type PairDone = Box<dyn FnOnce(Result<PairedHost, String>, &mut App) + 'static>;
@@ -74,6 +126,14 @@ pub trait MobileHost: 'static {
     /// channels ends the link.
     fn connect(&self, host: &PairedHost) -> Transport;
 
+    fn browse_hosts(&self, done: BrowseDone, cx: &mut App) {
+        cx.defer(move |cx| done(Vec::new(), cx));
+    }
+
+    fn certificate_changed(&self, _host_id: &str) -> bool {
+        false
+    }
+
     fn supports_qr(&self) -> bool {
         false
     }
@@ -110,10 +170,15 @@ mod native {
     use gpui::{App, Edges, Pixels, WindowInsets};
 
     use super::{
-        MobileHost, MobilePreferences, PairDone, PairRequest, PairedHost, ScanDone, Transport,
+        BrowseDone, MobileHost, MobilePreferences, PairDone, PairRequest, PairedHost, ScanDone,
+        Transport,
     };
 
+    #[cfg(not(target_os = "ios"))]
+    use super::DiscoveredHost;
+
     type QrScanner = dyn Fn(ScanDone, &mut App);
+    type HostBrowser = dyn Fn(BrowseDone, &mut App);
 
     /// iOS, Android, and the desktop preview: `tcode-remote`'s WebSocket
     /// client, `hosts.json` and `mobile.json` under the platform data dir.
@@ -121,6 +186,8 @@ mod native {
         data_dir: PathBuf,
         device_name: String,
         qr_scanner: Option<Box<QrScanner>>,
+        browser: Option<Box<HostBrowser>>,
+        multicast_lock: Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>,
     }
 
     impl NativeHost {
@@ -129,6 +196,8 @@ mod native {
                 data_dir,
                 device_name,
                 qr_scanner: None,
+                browser: None,
+                multicast_lock: None,
             }
         }
 
@@ -151,6 +220,16 @@ mod native {
         /// Installs the native camera scanner supplied by the app host.
         pub fn with_qr_scanner(mut self, scanner: impl Fn(ScanDone, &mut App) + 'static) -> Self {
             self.qr_scanner = Some(Box::new(scanner));
+            self
+        }
+
+        pub fn with_multicast_lock(mut self, lock: impl Fn(bool) + Send + Sync + 'static) -> Self {
+            self.multicast_lock = Some(std::sync::Arc::new(lock));
+            self
+        }
+
+        pub fn with_browser(mut self, browser: impl Fn(BrowseDone, &mut App) + 'static) -> Self {
+            self.browser = Some(Box::new(browser));
             self
         }
 
@@ -231,7 +310,13 @@ mod native {
         fn pair(&self, request: PairRequest, cx: &mut App, done: PairDone) {
             let device_name = self.device_name();
             let task = cx.background_executor().spawn(async move {
-                tcode_remote::client::pair(&request.addr, request.port, &request.code, &device_name)
+                tcode_remote::client::pair_pinned(
+                    &request.addr,
+                    request.port,
+                    &request.code,
+                    &device_name,
+                    &request.fingerprint,
+                )
             });
             cx.spawn(async move |cx| {
                 let result = task.await;
@@ -247,6 +332,52 @@ mod native {
                 from_host: client.from_host,
                 state: client.state,
             }
+        }
+
+        fn browse_hosts(&self, done: BrowseDone, cx: &mut App) {
+            if let Some(browser) = &self.browser {
+                browser(done, cx);
+                return;
+            }
+            // iOS uses Bonjour through the app host, never raw multicast.
+            #[cfg(target_os = "ios")]
+            cx.defer(move |cx| done(Vec::new(), cx));
+            #[cfg(not(target_os = "ios"))]
+            {
+                let lock = self.multicast_lock.clone();
+                let task = cx.background_executor().spawn(async move {
+                    struct Guard(Option<std::sync::Arc<dyn Fn(bool) + Send + Sync>>);
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            if let Some(lock) = &self.0 {
+                                lock(false);
+                            }
+                        }
+                    }
+                    if let Some(lock) = &lock {
+                        lock(true);
+                    }
+                    let _guard = Guard(lock);
+                    tcode_remote::discovery::browse(std::time::Duration::from_secs(3))
+                        .into_iter()
+                        .map(|b| DiscoveredHost {
+                            host_id: b.host_id,
+                            name: b.name,
+                            addr: b.addr,
+                            port: b.port,
+                            fp: b.fp,
+                        })
+                        .collect()
+                });
+                cx.spawn(async move |cx| {
+                    let hosts = task.await;
+                    cx.update(|cx| done(hosts, cx));
+                })
+                .detach();
+            }
+        }
+        fn certificate_changed(&self, host_id: &str) -> bool {
+            tcode_remote::client::certificate_changed(host_id)
         }
 
         fn supports_qr(&self) -> bool {

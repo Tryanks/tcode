@@ -104,18 +104,19 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             for addr in addrs {
                 if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
                     if ip.is_ipv4() == bound.is_ipv4() {
-                        println!("Browser: http://{}/", SocketAddr::new(ip, bound.port()));
+                        println!("Browser: https://{}/", SocketAddr::new(ip, bound.port()));
                     }
                 }
             }
         } else {
-            println!("Browser: http://{bound}/");
+            println!("Browser: https://{bound}/");
         }
     }
     let beacon = start_beacon(
         pairing.host_id.clone(),
         pairing.host_name.clone(),
         server.local_addr().port(),
+        pairing.fp.clone(),
     );
     println!(
         "Listening on {} (press Ctrl-C to stop)",
@@ -159,16 +160,13 @@ fn pair_command(args: &[String]) -> Result<(), String> {
         .parse()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
     let loopback = if address.is_ipv6() {
-        format!("[::1]:{}", address.port())
+        "::1"
     } else {
-        format!("127.0.0.1:{}", address.port())
+        "127.0.0.1"
     };
-    let endpoint = format!("http://{loopback}/admin/pair");
-    let response = ureq::get(&endpoint)
-        .call()
-        .map_err(|error| format!("could not ask the local host for a pairing code: {error}"))?;
-    let pairing: PairingCode = serde_json::from_reader(response.into_reader())
-        .map_err(|error| format!("invalid response from local host: {error}"))?;
+    let (bytes, _) =
+        tcode_remote::client::tls_http(loopback, address.port(), "GET", "/admin/pair", "", "")?;
+    let pairing: PairingCode = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     print_pairing(&pairing)
 }
 
@@ -184,9 +182,11 @@ fn print_pairing(pairing: &PairingCode) -> Result<(), String> {
         addrs,
         port: pairing.port,
         code: pairing.code.clone(),
+        fp: pairing.fp.clone(),
     });
     let qr = QrCode::new(url.as_bytes()).map_err(|error| error.to_string())?;
     println!("Pairing code: {}", pairing.code);
+    println!("Fingerprint: {}", pairing.fp);
     println!("Expires in: {} seconds", pairing.expires_in_secs);
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
