@@ -938,7 +938,7 @@ mobile:
   port: "端口"
   code: "配对码"
   code_placeholder: "六位数字"
-  pair_help: "配对码在执行端的“设置 → 远程”里，5 分钟内有效。"
+  pair_help: "配对码 5 分钟内有效。"
   pair_filled: "已从配对链接填入"
   pair: "配对"
   pairing: "正在配对…"

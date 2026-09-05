@@ -4,7 +4,11 @@ mod pairing;
 mod screens;
 
 use gpui::{prelude::*, *};
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{
+    NavMotion, NavOperation, NavStack, NavStackState, StyledExt as _, h_flex,
+    motion::{Presence, PresencePhase, Transition},
+    v_flex,
+};
 use host::{MobilePreferences, PairedHost, SharedHost};
 use std::{
     cell::{Cell, RefCell},
@@ -18,6 +22,7 @@ use tcode_ui::{
     OpenThread, WindowState,
     chat::ChatView,
     icon::{Icon, IconName},
+    material,
     overlay::OverlayHost,
     palette::CommandPalette,
     sidebar::SessionsSidebar,
@@ -32,6 +37,48 @@ enum Page {
     Hosts,
     Threads,
     Thread,
+}
+impl Page {
+    /// Position in the three-level stack (docs/mobile-design.md §2).
+    fn depth(self) -> usize {
+        match self {
+            Page::Hosts => 1,
+            Page::Threads => 2,
+            Page::Thread => 3,
+        }
+    }
+}
+
+/// One level of the [`NavStack`]. It owns no state: it renders whichever
+/// `MobileRoot` screen it stands for, so the stack can keep all three mounted
+/// while a push or pop animates.
+struct PageView {
+    root: WeakEntity<MobileRoot>,
+    page: Page,
+}
+impl PageView {
+    fn new(root: &Entity<MobileRoot>, page: Page, cx: &mut Context<Self>) -> Self {
+        cx.observe(root, |_, _, cx| cx.notify()).detach();
+        Self {
+            root: root.downgrade(),
+            page,
+        }
+    }
+}
+impl Render for PageView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = self.page;
+        self.root
+            .upgrade()
+            .map(|root| {
+                root.update(cx, |root, cx| match page {
+                    Page::Hosts => root.render_hosts(cx),
+                    Page::Threads => root.render_threads(cx),
+                    Page::Thread => root.render_thread(cx),
+                })
+            })
+            .unwrap_or_else(|| div().into_any_element())
+    }
 }
 #[derive(Clone)]
 enum Sheet {
@@ -73,7 +120,11 @@ struct MobileRoot {
     hosts: Vec<PairedHost>,
     preferences: MobilePreferences,
     page: Page,
+    nav: Entity<NavStackState>,
+    pages: Vec<AnyView>,
     sheet: Option<Sheet>,
+    /// The sheet still on screen, kept mounted through its exit transition.
+    mounted_sheet: Option<Sheet>,
     connected_host: Option<PairedHost>,
     connection: Option<Connection>,
     store: Option<Entity<WorkspaceStore>>,
@@ -130,7 +181,10 @@ impl MobileRoot {
             host,
             preferences,
             page: Page::Hosts,
+            nav: cx.new(|_| NavStackState::new()),
+            pages: Vec::new(),
             sheet: None,
+            mounted_sheet: None,
             connected_host: None,
             connection: None,
             store: None,
@@ -179,7 +233,7 @@ impl MobileRoot {
         self.disconnect(false, cx);
         self.host.set_last_host_id(Some(&host.host_id));
         self.connected_host = Some(host.clone());
-        self.page = Page::Threads;
+        self.set_page(Page::Threads, cx);
         self.index_ready = false;
         self.disconnected_since = Some((self.elapsed)());
         self.state = ConnectionState::Reconnecting { attempt: 1 };
@@ -377,7 +431,7 @@ impl MobileRoot {
         self.store_subscriptions.clear();
         self.connected_host = None;
         self.sheet = None;
-        self.page = Page::Hosts;
+        self.set_page(Page::Hosts, cx);
         self.window_state = None;
         self.sidebar = None;
         self.chat = None;
@@ -394,8 +448,7 @@ impl MobileRoot {
         }
         match self.page {
             Page::Thread => {
-                self.page = Page::Threads;
-                cx.notify();
+                self.set_page(Page::Threads, cx);
                 true
             }
             Page::Threads => {
@@ -414,11 +467,59 @@ impl MobileRoot {
                 s.start_draft(project.id.clone(), project.root.clone(), cx)
             });
         }
-        self.page = Page::Thread;
+        self.set_page(Page::Thread, cx);
         self.sheet = None;
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
         }
+        cx.notify();
+    }
+
+    /// The three pages, built once the root entity exists. Whatever page the
+    /// launch path already chose (a remembered host goes straight to the thread
+    /// list, §2) is restored without animating.
+    fn ensure_pages(&mut self, cx: &mut Context<Self>) {
+        if !self.pages.is_empty() {
+            return;
+        }
+        let root = cx.entity();
+        self.pages = [Page::Hosts, Page::Threads, Page::Thread]
+            .map(|page| AnyView::from(cx.new(|cx| PageView::new(&root, page, cx))))
+            .to_vec();
+        let restore = self.pages[..self.page.depth()].to_vec();
+        self.nav.update(cx, |nav, cx| {
+            for view in restore {
+                nav.push(view, NavMotion::Immediate, cx);
+            }
+        });
+    }
+
+    /// Move to `page`, driving the `NavStack` by the difference in depth so a
+    /// step in either direction animates (docs/mobile-design.md §3.0).
+    fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == page {
+            return;
+        }
+        let (from, to) = (self.page.depth(), page.depth());
+        self.page = page;
+        // Before the first render the stack does not exist yet; `ensure_pages`
+        // restores it to whatever page the launch path landed on.
+        if self.pages.is_empty() {
+            cx.notify();
+            return;
+        }
+        let pages = self.pages.clone();
+        self.nav.update(cx, |nav, cx| {
+            if to > from {
+                for level in from + 1..=to {
+                    nav.push(pages[level - 1].clone(), NavMotion::Animated, cx);
+                }
+            } else {
+                for _ in to..from {
+                    nav.pop(NavMotion::Animated, cx);
+                }
+            }
+        });
         cx.notify();
     }
 
@@ -441,7 +542,7 @@ impl MobileRoot {
             &state,
             window,
             |this, _, _: &OpenThread, window, cx| {
-                this.page = Page::Thread;
+                this.set_page(Page::Thread, cx);
                 if let Some(chat) = &this.chat {
                     chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
                 }
@@ -485,10 +586,7 @@ fn button(
 ) -> Stateful<Div> {
     let theme = cx.theme();
     let title = title.into();
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(title.clone())
+    material::accessible_clickable(div(), id, Role::Button, title.clone(), cx)
         .min_w(px(44.))
         .min_h(px(44.))
         .px(px(10.))
@@ -503,9 +601,9 @@ fn button(
         .text_color(if primary {
             theme.primary_foreground
         } else {
-            theme.primary
+            theme.foreground
         })
-        .when(primary, |d| d.bg(theme.primary))
+        .when(primary, |d| d.bg(theme.primary).font_medium())
         .when(!enabled, |d| {
             d.text_color(theme.muted_foreground)
                 .when(primary, |d| d.bg(theme.secondary))
@@ -513,6 +611,8 @@ fn button(
         .active(|s| s.bg(theme.foreground.opacity(0.08)))
         .child(div().min_w_0().truncate().child(title))
 }
+/// A nav-bar icon button (§3.0): 44×44, a 20pt stroke icon in `foreground`.
+/// Blue is reserved for primary actions and live state.
 fn icon_button(
     id: impl Into<ElementId>,
     aria_label: impl Into<SharedString>,
@@ -521,10 +621,7 @@ fn icon_button(
     cx: &App,
 ) -> Stateful<Div> {
     let theme = cx.theme();
-    div()
-        .id(id)
-        .role(Role::Button)
-        .aria_label(aria_label.into())
+    material::accessible_clickable(div(), id, Role::Button, aria_label.into(), cx)
         .size(px(44.))
         .flex_none()
         .flex()
@@ -533,12 +630,12 @@ fn icon_button(
         .rounded(px(12.))
         .cursor_pointer()
         .text_color(if enabled {
-            theme.primary
+            theme.foreground
         } else {
             theme.muted_foreground
         })
         .active(|s| s.bg(theme.foreground.opacity(0.08)))
-        .child(Icon::new(icon).size(px(18.)))
+        .child(Icon::new(icon).size(px(20.)))
 }
 fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     div()
@@ -591,26 +688,49 @@ fn spinner(diameter: f32, color: Hsla) -> impl IntoElement {
 
 impl Render for MobileRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_pages(cx);
         self.ensure_workspace(window, cx);
         let insets = self.host.insets();
         let safe = insets.safe_area;
         let bottom = safe.bottom.max(insets.ime.bottom);
-        let page = match self.page {
-            Page::Hosts => self.render_hosts(cx),
-            Page::Threads => self.render_threads(cx),
-            Page::Thread => self.render_thread(cx),
-        };
+        let width = window.viewport_size().width;
+        // 200ms lateral push/pop (§3.0). GPUI has no paint transform, so each
+        // page is offset by its own insets; setting `left` and `right` in
+        // opposite directions slides it without resizing it.
+        let stack = NavStack::new(&self.nav)
+            .size_full()
+            .overflow_hidden()
+            .transition(Transition::new(Duration::from_millis(200)))
+            .item(move |page, _, _| {
+                let rest = 1. - page.progress();
+                let (offset, opacity) = match (page.phase(), page.operation()) {
+                    (PresencePhase::Entering, Some(NavOperation::Pop)) => {
+                        (width * -0.25 * rest, 1.)
+                    }
+                    (PresencePhase::Entering, Some(_)) => (width * rest, page.progress()),
+                    (PresencePhase::Exiting, Some(NavOperation::Pop)) => {
+                        (width * page.progress(), 1.)
+                    }
+                    (PresencePhase::Exiting, Some(_)) => (width * -0.25 * page.progress(), 1.),
+                    _ => (px(0.), 1.),
+                };
+                page.left(offset)
+                    .right(px(0.) - offset)
+                    .opacity(opacity)
+                    .into_any_element()
+            });
         let content = v_flex()
             .size_full()
             .pt(safe.top)
             .pb(bottom)
             .pl(safe.left)
             .pr(safe.right)
-            .child(page);
+            .child(stack);
         v_flex()
             .relative()
             .size_full()
-            .bg(cx.theme().background)
+            // T1 paper under every page, up into the status bar (§3.0).
+            .bg(material::content_surface(cx))
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
             .text_size(px(16.))
@@ -622,9 +742,7 @@ impl Render for MobileRoot {
                     .is_some_and(|state| state.read(cx).palette_open),
                 |el| el.children(self.palette.clone()),
             )
-            .when_some(self.sheet.clone(), |d, s| {
-                d.child(self.render_sheet(s, window, cx))
-            })
+            .children(self.render_sheet(window, cx))
     }
 }
 

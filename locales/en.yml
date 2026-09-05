@@ -944,7 +944,7 @@ mobile:
   port: "Port"
   code: "Pairing code"
   code_placeholder: "Six digits"
-  pair_help: "Find the code in Settings → Remote on the host. It expires in 5 minutes."
+  pair_help: "The code expires in 5 minutes."
   pair_filled: "Filled from pairing link"
   pair: "Pair"
   pairing: "Pairing…"

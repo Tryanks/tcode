@@ -176,6 +176,8 @@ impl MobileRoot {
         );
         cx.notify();
     }
+    /// The pairing sheet's body (§3.2). The sheet chrome — grabber, title,
+    /// Cancel — belongs to `render_sheet`; this is scan, form, error, submit.
     pub(super) fn render_pair(&mut self, cx: &mut Context<Self>) -> Div {
         if self.pair.paired.is_some() {
             return v_flex()
@@ -252,9 +254,11 @@ impl MobileRoot {
             form = form
                 .child(
                     button("scan", label("scan"), false, !busy, cx)
+                        .w_full()
                         .h(px(50.))
                         .border_1()
                         .border_color(cx.theme().primary)
+                        .text_color(cx.theme().primary)
                         .on_click(cx.listener(|this, _, window, cx| {
                             if this.pair.busy {
                                 return;
@@ -283,13 +287,19 @@ impl MobileRoot {
                         })),
                 )
                 .child(
-                    text(label("manual"), 14.)
+                    text(label("manual"), 13.)
                         .text_center()
                         .text_color(cx.theme().muted_foreground),
                 );
         }
+        // nearby hosts (P4c): the discovered-host section goes here, between the
+        // scanner and the manual form.
         if let Some(error) = &self.pair.error {
-            form = form.child(text(error.clone(), 14.).text_color(cx.theme().danger_foreground));
+            form = form.child(
+                text(error.clone(), 13.)
+                    .line_height(px(18.))
+                    .text_color(cx.theme().danger_foreground),
+            );
         }
         if self.host.fixed_pairing_endpoint().is_none() {
             form = form
@@ -298,9 +308,17 @@ impl MobileRoot {
         }
         form = form
             .child(field("code", &self.pair.code, busy, true, cx))
-            .child(text(label("pair_help"), 14.).text_color(cx.theme().muted_foreground));
+            .child(
+                text(label("pair_help"), 13.)
+                    .line_height(px(18.))
+                    .text_color(cx.theme().muted_foreground),
+            );
         if self.pair.filled {
-            form = form.child(text(label("pair_filled"), 14.).text_color(cx.theme().primary));
+            form = form.child(
+                text(label("pair_filled"), 13.)
+                    .line_height(px(18.))
+                    .text_color(cx.theme().muted_foreground),
+            );
         }
         form.child(
             button(
@@ -333,12 +351,14 @@ fn field(title: &str, state: &Entity<InputState>, busy: bool, code: bool, cx: &A
                 .min_h(px(48.))
                 .max_h(px(48.))
                 .rounded(px(12.))
+                .bg(cx.theme().secondary)
                 .text_size(px(if code { 24. } else { 16. }))
                 .when(code, |input| {
                     input.font_family(cx.theme().mono_font_family.clone())
                 }),
         )
 }
+
 fn pair_error(error: &str, address: &str) -> String {
     let lower = error.to_ascii_lowercase();
     if lower.contains("403")
