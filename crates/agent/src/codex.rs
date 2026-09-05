@@ -1439,8 +1439,36 @@ impl Actor {
     }
 
     async fn handle_notification(&mut self, method: &str, params: &Value) {
+        let thread_id = params.get("threadId").and_then(Value::as_str);
+        let is_child = thread_id.is_some_and(|id| id != self.thread_id);
         if let Some(activity) = find_subagent_activity(params) {
             self.handle_subagent_activity(activity).await;
+            return;
+        }
+        if is_child {
+            // Child snapshots belong in the subagent mirror. Keep their lifecycle,
+            // deltas and usage out of the parent turn and its item cache.
+            if matches!(method, "item/started" | "item/updated" | "item/completed")
+                && let Some(value) = params.get("item")
+                && !matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some("plan" | "contextCompaction")
+                )
+                && let Some(mut item) = map_item(value)
+            {
+                let thread_id = thread_id.expect("child notification has a thread id");
+                let parent_id = self
+                    .subagent_parent_by_thread
+                    .entry(thread_id.to_owned())
+                    .or_insert_with(|| format!("codex-subagent:{thread_id}"));
+                item.parent_item_id = Some(parent_id.clone());
+                let event = match method {
+                    "item/started" => AgentEvent::ItemStarted(item),
+                    "item/updated" => AgentEvent::ItemUpdated(item),
+                    _ => AgentEvent::ItemCompleted(item),
+                };
+                self.events.emit(event).await;
+            }
             return;
         }
         match method {
@@ -2508,6 +2536,213 @@ mod tests {
             },
             event_rx,
         )
+    }
+
+    #[test]
+    fn child_thread_lifecycle_preserves_parent_steer_and_interrupt() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (thread, turn) in [("thread-1", "T1"), ("thread_child", "T2")] {
+                actor
+                    .handle_line(
+                        &json!({"method":"turn/started", "params":{
+                            "threadId":thread, "turn":{"id":turn}
+                        }})
+                        .to_string(),
+                    )
+                    .await;
+            }
+            assert_eq!(actor.active_turn.as_deref(), Some("T1"));
+            assert!(
+                matches!(events.try_recv().unwrap(), AgentEvent::TurnStarted { turn_id } if turn_id == "T1")
+            );
+            assert!(events.try_recv().is_err());
+            for (command, method, field) in [
+                (
+                    SessionCommand::Steer {
+                        request_id: "steer".into(),
+                        text: "redirect".into(),
+                        attachments: Vec::new(),
+                    },
+                    "turn/steer",
+                    "expectedTurnId",
+                ),
+                (SessionCommand::Interrupt, "turn/interrupt", "turnId"),
+            ] {
+                actor.handle_command(command).await.unwrap();
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], method);
+                assert_eq!(request["params"]["threadId"], "thread-1");
+                assert_eq!(request["params"][field], "T1");
+            }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn child_thread_completion_preserves_active_turn_and_usage() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("T1".into());
+            actor
+                .usage_by_turn
+                .insert("T2".into(), TokenUsage::default());
+            actor
+                .handle_line(
+                    &json!({"method":"turn/completed", "params":{
+                        "threadId":"thread_child", "turn":{"id":"T2", "status":"completed"}
+                    }})
+                    .to_string(),
+                )
+                .await;
+            assert_eq!(actor.active_turn.as_deref(), Some("T1"));
+            assert!(actor.usage_by_turn.contains_key("T2"));
+            assert!(events.try_recv().is_err());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn child_thread_items_route_to_known_or_synthetic_parent() {
+        smol::block_on(async {
+            for known in [true, false] {
+                let (mut actor, events) = test_actor();
+                if known {
+                    actor.handle_line(&json!({"method":"item/started", "params":{
+                        "threadId":"thread_child", "item":{"type":"subAgentActivity", "id":"spawn",
+                        "agentThreadId":"thread_child", "kind":"started"}
+                    }}).to_string()).await;
+                    while events.try_recv().is_ok() {}
+                }
+                let parent = if known {
+                    "spawn"
+                } else {
+                    "codex-subagent:thread_child"
+                };
+                let previous = actor.items.get("spawn").cloned();
+                for method in ["item/started", "item/updated", "item/completed"] {
+                    // A colliding id must not overwrite or acquire the parent's Subagent content.
+                    actor.handle_line(&json!({"method":method, "params":{
+                        "threadId":"thread_child", "item":{"type":"agentMessage", "id":"spawn", "text":"child reply"}
+                    }}).to_string()).await;
+                    let event = events.try_recv().unwrap();
+                    let item = match (method, event) {
+                        ("item/started", AgentEvent::ItemStarted(item))
+                        | ("item/updated", AgentEvent::ItemUpdated(item))
+                        | ("item/completed", AgentEvent::ItemCompleted(item)) => item,
+                        (_, event) => panic!("unexpected event: {event:?}"),
+                    };
+                    assert_eq!(item.parent_item_id.as_deref(), Some(parent));
+                    assert!(
+                        matches!(item.content, ItemContent::AssistantMessage { text } if text == "child reply")
+                    );
+                    assert_eq!(actor.items.get("spawn"), previous.as_ref());
+                    assert!(events.try_recv().is_err());
+                }
+                assert_eq!(
+                    actor
+                        .subagent_parent_by_thread
+                        .get("thread_child")
+                        .map(String::as_str),
+                    Some(parent)
+                );
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
+    }
+
+    #[test]
+    fn child_thread_deltas_and_parent_only_updates_are_ignored() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for method in [
+                "item/agentMessage/delta",
+                "item/reasoning/summaryTextDelta",
+                "item/reasoning/textDelta",
+                "item/commandExecution/outputDelta",
+                "command/exec/outputDelta",
+                "item/plan/delta",
+                "turn/diff/updated",
+                "turn/plan/updated",
+                "thread/tokenUsage/updated",
+            ] {
+                actor.handle_line(&json!({"method":method, "params":{
+                    "threadId":"thread_child", "turnId":"T2", "itemId":"message", "delta":"child text",
+                    "diff":"", "plan":[], "tokenUsage":{"last":{"inputTokens":12,"outputTokens":3}}
+                }}).to_string()).await;
+                assert!(events.try_recv().is_err(), "unexpected event for {method}");
+            }
+            for kind in ["plan", "contextCompaction"] {
+                for method in ["item/started", "item/updated", "item/completed"] {
+                    actor.handle_line(&json!({"method":method, "params":{
+                        "threadId":"thread_child", "item":{"type":kind,"id":"special","text":"child plan"}
+                    }}).to_string()).await;
+                    assert!(events.try_recv().is_err());
+                }
+            }
+            assert!(actor.usage_by_turn.is_empty());
+            assert!(actor.items.is_empty());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn notifications_without_thread_id_keep_parent_behavior() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (method, params) in [
+                ("turn/started", json!({"turn":{"id":"T1"}})),
+                (
+                    "item/completed",
+                    json!({"item":{"type":"agentMessage","id":"message","text":"parent"}}),
+                ),
+                (
+                    "item/agentMessage/delta",
+                    json!({"itemId":"message","delta":"more"}),
+                ),
+                (
+                    "turn/completed",
+                    json!({"turn":{"id":"T1","status":"completed"}}),
+                ),
+            ] {
+                actor
+                    .handle_line(&json!({"method":method,"params":params}).to_string())
+                    .await;
+                let event = events.try_recv().unwrap();
+                match method {
+                    "turn/started" => {
+                        assert!(
+                            matches!(event, AgentEvent::TurnStarted { turn_id } if turn_id == "T1")
+                        );
+                        assert_eq!(actor.active_turn.as_deref(), Some("T1"));
+                    }
+                    "item/completed" => assert!(matches!(
+                        event,
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            parent_item_id: None,
+                            ..
+                        })
+                    )),
+                    "item/agentMessage/delta" => assert!(matches!(event, AgentEvent::Delta { .. })),
+                    _ => {
+                        assert!(
+                            matches!(event, AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "T1")
+                        );
+                        assert!(actor.active_turn.is_none());
+                    }
+                }
+            }
+            assert!(events.try_recv().is_err());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
     }
 
     #[test]
