@@ -364,6 +364,7 @@ fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
 enum PendingRequest {
     TurnStart,
     Interrupt,
+    ChildInterrupt,
     Steer(String),
 }
 
@@ -424,6 +425,7 @@ struct Actor {
     seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
+    child_turns: HashMap<String, String>,
 }
 
 struct CodexSessionActor {
@@ -492,6 +494,7 @@ async fn run_actor(
         seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
         active_turn: None,
+        child_turns: HashMap::new(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -1061,7 +1064,15 @@ impl Actor {
                     "turn/interrupt",
                     json!({ "threadId": thread_id, "turnId": turn_id }),
                     PendingRequest::Interrupt,
-                )
+                )?;
+                for (thread_id, turn_id) in self.child_turns.clone() {
+                    self.request(
+                        "turn/interrupt",
+                        json!({ "threadId": thread_id, "turnId": turn_id }),
+                        PendingRequest::ChildInterrupt,
+                    )?;
+                }
+                Ok(())
             }
             SessionCommand::RespondApproval {
                 request_id,
@@ -1235,6 +1246,15 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            if matches!(pending, Some(PendingRequest::ChildInterrupt)) {
+                if let Some(error) = value.get("error") {
+                    log::debug!(
+                        "Codex child turn/interrupt failed: {}",
+                        describe_rpc_error(error)
+                    );
+                }
+                return;
+            }
             if let Some(error) = value.get("error") {
                 self.events
                     .emit(AgentEvent::Error {
@@ -1448,6 +1468,23 @@ impl Actor {
         if is_child {
             // Child snapshots belong in the subagent mirror. Keep their lifecycle,
             // deltas and usage out of the parent turn and its item cache.
+            match method {
+                "turn/started" => {
+                    if let (Some(thread_id), Some(turn_id)) = (
+                        thread_id,
+                        params.pointer("/turn/id").and_then(Value::as_str),
+                    ) {
+                        self.child_turns
+                            .insert(thread_id.to_owned(), turn_id.to_owned());
+                    }
+                }
+                "turn/completed" => {
+                    if let Some(thread_id) = thread_id {
+                        self.child_turns.remove(thread_id);
+                    }
+                }
+                _ => {}
+            }
             if matches!(method, "item/started" | "item/updated" | "item/completed")
                 && let Some(value) = params.get("item")
                 && !matches!(
@@ -1493,6 +1530,7 @@ impl Actor {
                     _ => TurnStatus::Completed,
                 };
                 self.active_turn = None;
+                self.child_turns.clear();
                 let usage = self.usage_by_turn.remove(&id);
                 self.events
                     .emit(AgentEvent::TurnCompleted {
@@ -1870,6 +1908,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart) => "turn/start",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
+        Some(PendingRequest::ChildInterrupt) => "child turn/interrupt",
         Some(PendingRequest::Steer(_)) => "turn/steer",
         None => "unknown",
     }
@@ -2533,6 +2572,7 @@ mod tests {
                 seen_subagent_activities: HashSet::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
+                child_turns: HashMap::new(),
             },
             event_rx,
         )
@@ -2578,6 +2618,140 @@ mod tests {
                 assert_eq!(request["params"]["threadId"], "thread-1");
                 assert_eq!(request["params"][field], "T1");
             }
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn interrupt_targets_parent_then_all_active_child_turns() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (thread_id, turn_id) in [("thread-1", "T1"), ("thread_a", "TA"), ("thread_b", "TB")]
+            {
+                actor
+                    .handle_line(
+                        &json!({"method":"turn/started", "params":{
+                            "threadId":thread_id, "turn":{"id":turn_id}
+                        }})
+                        .to_string(),
+                    )
+                    .await;
+            }
+            let _ = events.try_recv().unwrap();
+
+            actor
+                .handle_command(SessionCommand::Interrupt)
+                .await
+                .unwrap();
+            let mut requests = Vec::new();
+            for _ in 0..3 {
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                requests.push(serde_json::from_str::<Value>(&request).unwrap());
+            }
+            assert_eq!(requests[0]["method"], "turn/interrupt");
+            assert_eq!(requests[0]["params"]["threadId"], "thread-1");
+            assert_eq!(requests[0]["params"]["turnId"], "T1");
+            let children: HashMap<_, _> = requests[1..]
+                .iter()
+                .map(|request| {
+                    (
+                        request["params"]["threadId"].as_str().unwrap(),
+                        request["params"]["turnId"].as_str().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(children.get("thread_a"), Some(&"TA"));
+            assert_eq!(children.get("thread_b"), Some(&"TB"));
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn completed_child_turn_is_not_interrupted() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            for (thread_id, turn_id) in [("thread-1", "T1"), ("thread_a", "TA"), ("thread_b", "TB")]
+            {
+                actor
+                    .handle_line(
+                        &json!({"method":"turn/started", "params":{
+                            "threadId":thread_id, "turn":{"id":turn_id}
+                        }})
+                        .to_string(),
+                    )
+                    .await;
+            }
+            let _ = events.try_recv().unwrap();
+            actor
+                .handle_line(
+                    &json!({"method":"turn/completed", "params":{
+                        "threadId":"thread_a", "turn":{"id":"TA", "status":"completed"}
+                    }})
+                    .to_string(),
+                )
+                .await;
+
+            actor
+                .handle_command(SessionCommand::Interrupt)
+                .await
+                .unwrap();
+            for (thread_id, turn_id) in [("thread-1", "T1"), ("thread_b", "TB")] {
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["params"]["threadId"], thread_id);
+                assert_eq!(request["params"]["turnId"], turn_id);
+            }
+            assert!(actor.lines.try_recv().is_err());
+
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
+        });
+    }
+
+    #[test]
+    fn child_interrupt_responses_emit_no_events() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            actor.active_turn = Some("T1".into());
+            actor.child_turns.insert("thread_a".into(), "TA".into());
+            actor.child_turns.insert("thread_b".into(), "TB".into());
+            actor
+                .handle_command(SessionCommand::Interrupt)
+                .await
+                .unwrap();
+
+            let mut child_request_ids = Vec::new();
+            for _ in 0..3 {
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected echoed request")
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                if request["params"]["threadId"] != "thread-1" {
+                    child_request_ids.push(request["id"].as_i64().unwrap());
+                }
+            }
+            assert_eq!(child_request_ids.len(), 2);
+
+            actor
+                .handle_line(
+                    &json!({"id":child_request_ids[0], "error":{
+                        "code":-32600, "message":"no active turn"
+                    }})
+                    .to_string(),
+                )
+                .await;
+            actor
+                .handle_line(&json!({"id":child_request_ids[1], "result":{}}).to_string())
+                .await;
+            assert!(events.try_recv().is_err());
+
             let _ = actor.child.kill();
             let _ = actor.child.wait();
         });
