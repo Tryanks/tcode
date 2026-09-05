@@ -184,14 +184,16 @@ impl MobileRoot {
     /// "Nearby hosts" (§3.2): what DNS-SD found, at most three rows. Tapping a
     /// row fills the endpoint and its advertised fingerprint and drops the
     /// caret in the code field, which is all that is left to type.
-    fn nearby_hosts(&self, mut form: Div, cx: &mut Context<Self>) -> Div {
+    fn nearby_hosts(&self, form: Div, cx: &mut Context<Self>) -> Div {
         if self.host.fixed_pairing_endpoint().is_some()
             || (!self.pair.browsing && self.pair.discovered.is_empty())
         {
             return form;
         }
         let busy = self.pair.busy;
-        form = form.child(
+        // The heading and its rows are one group at 8, not three form fields
+        // at 16 (§3.2).
+        let mut nearby = v_flex().gap(px(8.)).child(
             h_flex()
                 .gap(px(6.))
                 .items_center()
@@ -204,7 +206,7 @@ impl MobileRoot {
         for (index, found) in self.pair.discovered.iter().take(3).enumerate() {
             let (addr, port, fp) = (found.addr.clone(), found.port, found.fp.clone());
             let endpoint = format!("{addr}:{port}");
-            form = form.child(
+            nearby = nearby.child(
                 material::accessible_clickable(
                     material::group(cx),
                     ("nearby", index),
@@ -246,7 +248,7 @@ impl MobileRoot {
                 ),
             );
         }
-        form
+        form.child(nearby)
     }
 
     /// Paired, not yet connected (§3.2): the pinned fingerprint next to the one
