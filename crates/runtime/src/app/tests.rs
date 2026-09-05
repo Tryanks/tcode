@@ -150,6 +150,196 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     });
 }
 
+// Exercise provider routing and disk replay, including residency changes between events.
+fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool, reload: bool) {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let mirror_id = state.update(cx, |state, cx| {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
+        meta.id = "parent".into();
+        state.sessions.push(meta.clone());
+        state.residents.active = Some(ActiveSession::new(meta, false, Vec::new()));
+        state.on_event(
+            "parent",
+            AgentEvent::TurnStarted {
+                turn_id: "parent-turn".into(),
+            },
+            cx,
+        );
+        state.on_event(
+            "parent",
+            native_mirror_parent_item(ItemStatus::InProgress),
+            cx,
+        );
+        let id = state
+            .sessions
+            .iter()
+            .find(|m| m.native_subagent.is_some())
+            .unwrap()
+            .id
+            .clone();
+        for i in 0..3 {
+            if evict && i == 1 {
+                assert!(state.residents.evict(&id).is_some());
+                assert!(state.resident(&id).is_none());
+                if reload {
+                    // Force metadata lookup and its asynchronous timeline load.
+                    state.native_subagent_sessions.clear();
+                }
+            }
+            state.on_event("parent", native_mirror_child_item(i), cx);
+        }
+        if parent_end {
+            state.on_event(
+                "parent",
+                AgentEvent::TurnCompleted {
+                    turn_id: "parent-turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+                cx,
+            );
+        } else {
+            state.on_event(
+                "parent",
+                native_mirror_parent_item(ItemStatus::Completed),
+                cx,
+            );
+        }
+        if late {
+            state.on_event("parent", native_mirror_child_item(3), cx);
+        }
+        id
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, cx| {
+        let events = state.store.read_events(&mirror_id);
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e.event, AgentEvent::TurnStarted { .. }))
+            .count();
+        let completions = events
+            .iter()
+            .filter(|e| matches!(e.event, AgentEvent::TurnCompleted { .. }))
+            .count();
+        assert_eq!(
+            starts, completions,
+            "persisted mirror boundaries must balance"
+        );
+        assert_eq!(starts, if late { 2 } else { 1 });
+        let mut open = false;
+        let mut items = 0;
+        for stored in &events {
+            match &stored.event {
+                AgentEvent::TurnStarted { .. } => {
+                    assert!(!open);
+                    open = true;
+                }
+                AgentEvent::TurnCompleted { .. } => {
+                    assert!(open);
+                    open = false;
+                }
+                AgentEvent::ItemCompleted(_) => {
+                    assert!(open, "child must render inside a turn");
+                    items += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(!open);
+        assert_eq!(items, if late { 4 } else { 3 });
+        assert!(!state.turn_running_for(&mirror_id));
+        if state.resident(&mirror_id).is_none() {
+            let meta = state.find_meta(&mirror_id).unwrap().clone();
+            state.load_background_session(meta, cx);
+        }
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        let mirror = state.resident(&mirror_id).unwrap();
+        assert!(!mirror.timeline.turn_running);
+        assert_eq!(mirror.timeline.turns.len(), if late { 2 } else { 1 });
+        assert!(
+            mirror
+                .timeline
+                .turns
+                .iter()
+                .all(|turn| { !turn.running && turn.start_ts.is_some() && turn.end_ts.is_some() })
+        );
+        assert!(!mirror.turn_in_flight);
+        assert!(!mirror.has_work());
+        assert!(!state.session_status_snapshot(&mirror_id).unwrap().working);
+        assert_eq!(
+            mirror
+                .timeline
+                .entries
+                .iter()
+                .filter(|entry| matches!(
+                    entry.content,
+                    EntryContent::Item(ItemContent::AssistantMessage { .. })
+                ))
+                .count(),
+            if late { 4 } else { 3 }
+        );
+    });
+}
+
+fn native_mirror_parent_item(status: ItemStatus) -> AgentEvent {
+    let item = ThreadItem {
+        id: "spawn-1".into(),
+        parent_item_id: None,
+        content: ItemContent::Subagent {
+            agent_type: "explorer".into(),
+            description: "Inspect routing".into(),
+            status,
+            summary: None,
+        },
+    };
+    if status == ItemStatus::InProgress {
+        AgentEvent::ItemStarted(item)
+    } else {
+        AgentEvent::ItemCompleted(item)
+    }
+}
+
+fn native_mirror_child_item(i: usize) -> AgentEvent {
+    AgentEvent::ItemCompleted(ThreadItem {
+        id: format!("child-{i}"),
+        parent_item_id: Some("spawn-1".into()),
+        content: ItemContent::AssistantMessage {
+            text: format!("answer {i}"),
+        },
+    })
+}
+
+#[test]
+fn native_mirror_turn_lifecycle_resident() {
+    assert_native_mirror_turn_lifecycle(false, false, false, false);
+}
+
+#[test]
+fn native_mirror_turn_lifecycle_evicted() {
+    assert_native_mirror_turn_lifecycle(true, false, false, false);
+}
+
+#[test]
+fn native_mirror_turn_lifecycle_async_reload() {
+    assert_native_mirror_turn_lifecycle(true, false, false, true);
+}
+
+#[test]
+fn native_mirror_turn_lifecycle_late_item() {
+    assert_native_mirror_turn_lifecycle(false, true, false, false);
+    assert_native_mirror_turn_lifecycle(true, true, false, false);
+}
+
+#[test]
+fn native_mirror_turn_lifecycle_parent_end() {
+    assert_native_mirror_turn_lifecycle(false, true, true, false);
+    assert_native_mirror_turn_lifecycle(true, true, true, false);
+}
+
 #[test]
 fn settings_patch_preserves_concurrently_changed_other_field() {
     let cx = &mut TestAppContext::default();

@@ -27,8 +27,14 @@ impl AppState {
                 );
                 return true;
             };
+            // Late transcript items still need a turn for the chat view, but
+            // a finished child has no future lifecycle event to close it.
+            let finished = self.native_subagent_turns.get(&mirror_id) == Some(&false);
             self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
+            if finished {
+                self.sync_mirror_turn(&mirror_id, false, parent_item_id, TurnStatus::Completed, cx);
+            }
             return true;
         }
 
@@ -48,7 +54,6 @@ impl AppState {
             let in_progress = matches!(status, ItemStatus::InProgress);
             let title = mirror_title(agent_type, description);
             let meta = self.resident_mut(&mirror_id).map(|mirror| {
-                mirror.turn_in_flight = in_progress;
                 let title_changed = mirror.meta.title == "subagent" && mirror.meta.title != title;
                 if title_changed {
                     mirror.meta.title = title;
@@ -86,8 +91,12 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         let open = self
-            .resident(mirror_id)
-            .is_some_and(|mirror| mirror.timeline.turn_running);
+            .native_subagent_turns
+            .insert(mirror_id.to_string(), running)
+            .unwrap_or(false);
+        if let Some(mirror) = self.resident_mut(mirror_id) {
+            mirror.turn_in_flight = running;
+        }
         if running && !open {
             self.record_event(
                 mirror_id,
@@ -171,7 +180,6 @@ impl AppState {
         );
         mirror.meta = meta;
         mirror.draft = false;
-        mirror.turn_in_flight = true;
         self.residents.parked.insert(id.clone(), mirror);
         self.native_subagent_sessions.insert(key, id.clone());
         Some(id)
@@ -188,6 +196,7 @@ impl AppState {
             .map(|meta| (meta.id.clone(), meta.native_subagent.clone().unwrap()))
             .collect();
         for (mirror_id, subagent_item_id) in mirror_ids {
+            let was_running = self.native_subagent_turns.get(&mirror_id) == Some(&true);
             self.sync_mirror_turn(
                 &mirror_id,
                 false,
@@ -195,13 +204,12 @@ impl AppState {
                 TurnStatus::Completed,
                 cx,
             );
-            let meta = self.resident_mut(&mirror_id).and_then(|mirror| {
-                if !mirror.turn_in_flight {
-                    return None;
-                }
-                mirror.turn_in_flight = false;
-                mirror.meta.updated_at = now_secs();
-                Some(mirror.meta.clone())
+            if !was_running {
+                continue;
+            }
+            let meta = self.meta_mut(&mirror_id).map(|meta| {
+                meta.updated_at = now_secs();
+                meta.clone()
             });
             if let Some(meta) = meta {
                 self.persist_meta(&meta, cx);
