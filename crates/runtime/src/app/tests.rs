@@ -154,12 +154,12 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
 fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool, reload: bool) {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let mirror_id = state.update(cx, |state, cx| {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
         meta.id = "parent".into();
         state.sessions.push(meta.clone());
-        state.residents.active = Some(ActiveSession::new(meta, false, Vec::new()));
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
         state.on_event(
             "parent",
             AgentEvent::TurnStarted {
@@ -3818,21 +3818,21 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
 fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-usage-limit-resume-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let resets_at = now_secs() + 3_600;
 
     state.host_update(cx, |state, cx| {
         let (commands, _) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::ClaudeCode, commands);
         active.meta.id = "resume-enabled".into();
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.on_event(
             "resume-enabled",
             AgentEvent::UsageLimitReached { resets_at },
             cx,
         );
 
-        let queue = &state.residents.active.as_ref().unwrap().queue;
+        let queue = &state.selected_session().unwrap().queue;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].text, tcode_core::session::RESUME_PROMPT);
         assert_eq!(
@@ -3843,14 +3843,14 @@ fn usage_limit_event_schedules_resume_when_enabled_only() {
         let (commands, _) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::ClaudeCode, commands);
         active.meta.id = "resume-disabled".into();
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.settings.resume_on_limit_reset = false;
         state.on_event(
             "resume-disabled",
             AgentEvent::UsageLimitReached { resets_at },
             cx,
         );
-        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.selected_session().unwrap().queue.is_empty());
     });
 }
 

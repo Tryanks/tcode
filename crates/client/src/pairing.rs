@@ -103,9 +103,9 @@ pub fn display_fingerprint(value: &str) -> String {
     if !valid_fingerprint(value) {
         return String::new();
     }
-    value
-        .as_bytes()
-        .chunks_exact(4)
+    let (groups, _) = value.as_bytes().as_chunks::<4>();
+    groups
+        .iter()
         .take(8)
         .map(|group| std::str::from_utf8(group).expect("hex is ASCII"))
         .collect::<Vec<_>>()

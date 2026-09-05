@@ -589,7 +589,7 @@ impl ChatView {
         if scheduled_limit_resume && self._limit_tick.is_none() {
             self._limit_tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_secs(1)).await;
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
