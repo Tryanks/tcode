@@ -2133,7 +2133,14 @@ mod tests {
             assert_eq!(subscription.after, Some(3));
         });
         shutdown_test_host(&host);
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows keeps the just-flushed JSONL handle briefly after shutdown;
+        // the directory is a temp dir, so retry and then give up quietly.
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(&root).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[gpui::test]
