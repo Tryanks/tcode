@@ -112,7 +112,21 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../../../assets/icons/sparkles.svg"),
     ),
     ("icons/mic.svg", MIC_SVG.as_bytes()),
+    // Compact-shell icons (docs/mobile-design.md §3): the nav bar's back
+    // chevron and the two empty-state glyphs. Inlined for the same reason as
+    // `mic` — three files' worth of assets for the phone alone — and listed
+    // unconditionally so the wasm build resolves them too.
+    ("icons/chevron-left.svg", CHEVRON_LEFT_SVG.as_bytes()),
+    ("icons/message-square.svg", MESSAGE_SQUARE_SVG.as_bytes()),
+    (
+        "icons/monitor-smartphone.svg",
+        MONITOR_SMARTPHONE_SVG.as_bytes(),
+    ),
 ];
+
+const CHEVRON_LEFT_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>"#;
+const MESSAGE_SQUARE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6l-4 4V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></svg>"#;
+const MONITOR_SMARTPHONE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8"/><path d="M10 19v-3.96 3.15"/><path d="M7 19h5"/><rect width="6" height="10" x="16" y="12" rx="2"/></svg>"#;
 
 /// Lucide `mic`, inlined rather than shipped as a file: it is the composer
 /// dictation button's only asset and the feature is macOS-only.

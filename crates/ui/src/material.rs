@@ -80,6 +80,10 @@ pub fn radius_chip() -> Pixels {
 pub fn radius_composer() -> Pixels {
     px(14.)
 }
+/// The phone's bottom sheet, top corners only (docs/mobile-design.md §5).
+pub fn radius_overlay_sheet() -> Pixels {
+    px(14.)
+}
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the
 /// component library's large soft shadow.
@@ -173,6 +177,63 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
                 .text_size(px(9.))
                 .font_semibold()
                 .child("DEV"),
+        )
+}
+
+/// The bottom sheet's drag handle (docs/mobile-design.md §3.0): 36×5 at 30%
+/// muted, in its own 16pt-tall strip above the title row.
+pub fn sheet_grabber(cx: &App) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w_full()
+        .h(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(36.))
+                .h(px(5.))
+                .rounded_full()
+                .bg(cx.theme().muted_foreground.opacity(0.3)),
+        )
+}
+
+/// The phone's empty state (docs/mobile-design.md §3.0): a muted 24pt icon, a
+/// 17pt semibold title and a ≤2-line 15pt body, centered in a 280pt column.
+/// Callers append their own primary action. Compact surfaces only — the desktop
+/// keeps its own richer empty states.
+pub fn empty_state(
+    icon: crate::icon::Icon,
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    cx: &App,
+) -> Div {
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .gap(px(10.))
+        .p(px(24.))
+        .child(icon.size(px(24.)).text_color(cx.theme().muted_foreground))
+        .child(
+            div()
+                .max_w(px(280.))
+                .text_center()
+                .text_size(px(17.))
+                .line_height(px(22.))
+                .font_semibold()
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .max_w(px(280.))
+                .text_center()
+                .text_size(px(15.))
+                .line_height(px(20.))
+                .text_color(cx.theme().muted_foreground)
+                .child(body.into()),
         )
 }
 

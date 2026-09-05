@@ -182,6 +182,17 @@ impl Popover {
             }
         });
         let open = state.read(cx).is_open();
+        // 180ms bottom slide + backdrop fade (docs/mobile-design.md §3.0). The
+        // sheet stays mounted through its exit so dismissal animates too.
+        let presence = gpui_base::motion::Presence::new(
+            gpui::SharedString::from(format!("{:?}-sheet", self.id)),
+            open,
+        )
+        .transition(gpui_base::motion::Transition::new(
+            std::time::Duration::from_millis(180),
+        ))
+        .sample(window, cx);
+        let progress = presence.progress;
         let parent = window.current_view();
         let toggle = state.clone();
         let mut root = div()
@@ -194,7 +205,7 @@ impl Popover {
             .when_some(self.trigger, |el, trigger| {
                 el.child(trigger(open, window, cx))
             });
-        if open {
+        if presence.should_render() {
             let close = state.clone();
             let backdrop = state.clone();
             let focus = state.read(cx).focus_handle(cx);
@@ -213,19 +224,31 @@ impl Popover {
                     backdrop.update(cx, |state, cx| state.dismiss(window, cx));
                     cx.notify(parent);
                 })
+                // 180ms fade in step with the backdrop (§3.0). GPUI has no
+                // transform and offsetting the sheet moves its hit targets, so
+                // the presentation animates opacity rather than position.
+                .opacity(progress)
                 .w_full()
                 .max_h(window.viewport_size().height - px(64.))
-                .rounded_t(px(16.))
+                // T3: opaque fill, hairline contour and a large soft shadow.
+                .rounded_t(crate::material::radius_overlay_sheet())
                 .bg(cx.theme().popover)
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .shadow_xl()
                 .text_color(cx.theme().foreground)
+                .child(crate::material::sheet_grabber(cx))
                 .child(
                     gpui_base::h_flex()
-                        .h(px(60.))
+                        .h(px(48.))
                         .flex_none()
                         .px(px(16.))
+                        .items_center()
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
+                                .truncate()
                                 .text_size(px(17.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .children(self.sheet_title),
@@ -239,9 +262,10 @@ impl Popover {
                                 .h(px(44.))
                                 .flex()
                                 .items_center()
-                                .justify_center()
+                                .justify_end()
                                 .cursor_pointer()
-                                .text_color(cx.theme().primary)
+                                .text_size(px(15.))
+                                .text_color(cx.theme().foreground)
                                 .child(crate::tr!("mobile.cancel"))
                                 .on_click(move |_, window, cx| {
                                     close.update(cx, |state, cx| state.dismiss(window, cx));
@@ -249,6 +273,7 @@ impl Popover {
                                 }),
                         ),
                 )
+                .child(crate::material::faded_hairline(cx))
                 .child(
                     div()
                         .id("touch-picker-content")
@@ -267,7 +292,7 @@ impl Popover {
                             .occlude()
                             .w(window.viewport_size().width)
                             .h(window.viewport_size().height)
-                            .bg(cx.theme().foreground.opacity(0.3))
+                            .bg(cx.theme().foreground.opacity(0.3 * progress))
                             .flex()
                             .flex_col()
                             .justify_end()
@@ -327,6 +352,8 @@ mod tests {
         window.update(|window, cx| window.draw(cx).clear(cx));
         let trigger = window.debug_bounds("sheet-trigger").expect("trigger");
         window.simulate_click(trigger.center(), gpui::Modifiers::default());
+        // Let the 180ms present transition finish so the sheet is at its
+        // resting position before the option is hit-tested.
         window.update(|window, cx| window.draw(cx).clear(cx));
         window.update(|window, cx| window.draw(cx).clear(cx));
         let bounds = window

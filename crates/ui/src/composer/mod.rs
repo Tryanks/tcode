@@ -201,7 +201,8 @@ impl Composer {
     ) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(1, 8)
+                // The phone keeps a 2-row (44pt) minimum and caps at 5 rows (§3.4).
+                .auto_grow(if compact { 2 } else { 1 }, if compact { 5 } else { 8 })
                 .submit_on_enter(!compact || !cfg!(any(target_os = "ios", target_os = "android")))
                 .placeholder(if compact {
                     crate::tr!("mobile.message")
@@ -648,7 +649,108 @@ impl Composer {
 
     // -- send / stop --------------------------------------------------------
 
+    /// The phone's single round control (docs/mobile-design.md §3.4): send while
+    /// idle, a red stop square while a turn runs, and — running with text typed —
+    /// send again with a "Queue" caption under it. Never a spinner, a send *and*
+    /// a stop button side by side.
+    fn render_compact_primary_action(
+        &self,
+        turn_running: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let interactive = self.interactive(cx);
+        let has_text = interactive && !self.input.read(cx).value().trim().is_empty();
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .preparing_worktree
+        {
+            return div()
+                .size(px(44.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Spinner::new().small().color(cx.theme().primary))
+                .into_any_element();
+        }
+        let stopping = turn_running && !has_text;
+        let (label, id): (_, &'static str) = if stopping {
+            (crate::tr!("composer.stop"), "stop-turn")
+        } else if turn_running {
+            (crate::tr!("mobile.queue"), "steer-turn")
+        } else {
+            (crate::tr!("composer.send"), "send-message")
+        };
+        let (bg, fg) = if stopping {
+            (rgb(STOP_TINT).into(), gpui::white())
+        } else if has_text {
+            (cx.theme().primary, cx.theme().primary_foreground)
+        } else {
+            (cx.theme().muted, cx.theme().muted_foreground)
+        };
+        // 44pt hit area around the 40pt circle: the spec's touch minimum and its
+        // button size are both honored.
+        let button = crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+            .size(px(44.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(stopping && !interactive, |el| el.opacity(0.4))
+            .child(
+                div()
+                    .size(px(40.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(bg)
+                    .child(if stopping {
+                        div()
+                            .size(px(13.))
+                            .rounded(px(2.))
+                            .bg(gpui::white())
+                            .into_any_element()
+                    } else {
+                        Icon::new(IconName::ArrowUp)
+                            .size(px(18.))
+                            .text_color(fg)
+                            .into_any_element()
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if stopping {
+                    if this.interactive(cx) {
+                        this.workspace_store
+                            .update(cx, |store, _cx| store.interrupt());
+                    }
+                    return;
+                }
+                let input = this.input.clone();
+                this.submit(&input, false, window, cx);
+            }));
+        v_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(1.))
+            .child(button)
+            .when(turn_running && has_text, |el| {
+                el.child(
+                    div()
+                        .text_size(px(10.))
+                        .line_height(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!("mobile.queue")),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
+        if self.compact {
+            return self.render_compact_primary_action(turn_running, cx);
+        }
         if turn_running {
             // Providers with native mid-turn steering keep a send button active
             // beside Stop while a turn runs.
@@ -663,7 +765,7 @@ impl Composer {
                 .items_center()
                 // Blue activity spinner.
                 .child(Spinner::new().small().color(cx.theme().primary));
-            if steers || self.compact {
+            if steers {
                 let queue_hint = crate::tr!(
                     "composer.queue_hint",
                     shortcut = format_secondary_shortcut("enter")
@@ -679,14 +781,10 @@ impl Composer {
                         div(),
                         "steer-turn",
                         Role::Button,
-                        if self.compact {
-                            crate::tr!("mobile.queue")
-                        } else {
-                            crate::tr!("composer.steer_tooltip")
-                        },
+                        crate::tr!("composer.steer_tooltip"),
                         cx,
                     )
-                    .size(px(if self.compact { 44. } else { 28. }))
+                    .size(px(28.))
                     .rounded(crate::material::radius_input())
                     .flex()
                     .items_center()
@@ -714,7 +812,7 @@ impl Composer {
                         crate::tr!("composer.stop"),
                         cx,
                     )
-                    .size(px(if self.compact { 44. } else { 28. }))
+                    .size(px(28.))
                     .rounded(crate::material::radius_input())
                     .flex()
                     .items_center()
@@ -769,7 +867,7 @@ impl Composer {
             crate::tr!("composer.send"),
             cx,
         )
-        .size(px(if self.compact { 44. } else { 28. }))
+        .size(px(28.))
         .rounded(crate::material::radius_input())
         .flex()
         .items_center()
@@ -1043,7 +1141,11 @@ impl Render for Composer {
             .w_full()
             .gap_1p5()
             .p(px(6.))
-            .rounded(crate::material::radius_composer())
+            .rounded(if self.compact {
+                px(16.)
+            } else {
+                crate::material::radius_composer()
+            })
             .border_1()
             .border_color(if composer_focused {
                 cx.theme().primary

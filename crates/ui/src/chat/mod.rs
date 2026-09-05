@@ -2036,6 +2036,52 @@ impl ChatView {
             .into_any_element()
     }
 
+    /// The phone's "new thread" empty state (§3.4): which project the thread
+    /// starts in, and which provider/model the first message reaches.
+    fn render_compact_draft_empty(
+        &self,
+        cwd: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let store = self.workspace_store.read(cx);
+        let project = store
+            .projects()
+            .into_iter()
+            .find(|project| project.root == cwd)
+            .map(|project| project.name)
+            .unwrap_or_else(|| {
+                cwd.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let composer = store.composer_state();
+        let model = composer
+            .active_model
+            .as_ref()
+            .map(|active| {
+                let name = composer
+                    .active_model_spec
+                    .as_ref()
+                    .map(|spec| spec.display_name.clone())
+                    .or_else(|| active.model.clone())
+                    .unwrap_or_default();
+                let provider = crate::settings::provider_label(active.provider);
+                if name.is_empty() {
+                    provider.to_string()
+                } else {
+                    format!("{provider} · {name}")
+                }
+            })
+            .unwrap_or_default();
+        crate::material::empty_state(
+            Icon::empty().path("icons/message-square.svg"),
+            crate::tr!("mobile.draft_empty_title", project = project),
+            crate::tr!("mobile.draft_empty_body", model = model),
+            cx,
+        )
+        .into_any_element()
+    }
+
     fn render_empty_state(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let projects = self.workspace_store.read(cx).projects();
         let sessions = self.workspace_store.read(cx).sidebar_sessions();
@@ -2255,7 +2301,13 @@ impl Render for ChatView {
         self.sync_markdown_scroll_position(cx);
         let active = self.workspace_store.read(cx).chat_active_session();
 
-        let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
+        let compact = self.window_state.read(cx).compact;
+        // The phone reads on T1 paper (§3.0); the desktop keeps the glass canvas.
+        let root = v_flex().size_full().min_w_0().bg(if compact {
+            crate::material::content_surface(cx)
+        } else {
+            cx.theme().background
+        });
 
         let Some((title, cwd, is_draft)) = active else {
             return root
@@ -2360,6 +2412,14 @@ impl Render for ChatView {
         .min_h_0()
         .py_4();
 
+        // A fresh phone draft gets the spec'd empty state instead of a blank
+        // scroller (§3.4); the composer below it is already focused.
+        let timeline: AnyElement = if compact && is_draft && item_count == 0 {
+            self.render_compact_draft_empty(&cwd, cx)
+        } else {
+            timeline.into_any_element()
+        };
+
         let composer: AnyElement = if native_subagent_readonly {
             div()
                 .w_full()
@@ -2389,6 +2449,12 @@ impl Render for ChatView {
                         |this| this.child(self.render_scroll_pill(cx)),
                     ),
             )
+            // A faded hairline plus 8pt of air separates the phone's timeline
+            // from its composer (§3.4); the desktop separates by rhythm alone.
+            .when(compact, |el| {
+                el.child(crate::material::faded_hairline(cx))
+                    .child(div().h(px(8.)).flex_none())
+            })
             .child(composer);
 
         #[cfg(feature = "terminal")]
