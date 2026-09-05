@@ -48,7 +48,7 @@ pub mod graphics {
 }
 
 pub use grid_emulator::GridEmulator;
-use grid_emulator::GridEvent;
+pub use grid_emulator::GridEvent;
 use pty::{PtyEvent, PtyHandle};
 
 const DEFAULT_COLS: usize = 80;
@@ -240,7 +240,29 @@ impl Terminal {
         Self::from_parts(pty, emulator)
     }
 
+    pub fn grid(&self) -> &GridEmulator {
+        &self.emulator
+    }
+
+    /// Spawn with a single raw-output consumer, installed before any output is read.
+    pub fn spawn_with_output(
+        cwd: impl AsRef<Path>,
+    ) -> io::Result<(Self, async_channel::Receiver<Vec<u8>>)> {
+        let pty = PtyHandle::spawn(cwd)?;
+        let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
+        let (tx, rx) = async_channel::unbounded();
+        Ok((Self::from_parts_with_output(pty, emulator, Some(tx))?, rx))
+    }
+
     fn from_parts(pty: PtyHandle, emulator: GridEmulator) -> io::Result<Self> {
+        Self::from_parts_with_output(pty, emulator, None)
+    }
+
+    fn from_parts_with_output(
+        pty: PtyHandle,
+        emulator: GridEmulator,
+        output: Option<async_channel::Sender<Vec<u8>>>,
+    ) -> io::Result<Self> {
         emulator.set_fallback_title(pty.label());
         if pty.exited() {
             emulator.set_exited(pty.exit_code());
@@ -255,13 +277,21 @@ impl Terminal {
             .spawn(move || {
                 while let Ok(event) = pty_events.recv_blocking() {
                     match event {
-                        PtyEvent::Output(bytes) => output_emulator.feed(&bytes),
+                        PtyEvent::Output(bytes) => {
+                            output_emulator.feed(&bytes);
+                            if let Some(output) = &output {
+                                let _ = output.try_send(bytes);
+                            }
+                        }
                         PtyEvent::ProcessInfoChanged { name, .. } => {
                             output_emulator.set_fallback_title(name);
                             let _ = pty_notifications.try_send(TermEvent::Wakeup);
                         }
                         PtyEvent::Exited { exit_code } => {
                             output_emulator.set_exited(exit_code);
+                            if let Some(output) = &output {
+                                let _ = output.try_send(Vec::new());
+                            }
                             let _ = pty_notifications.try_send(TermEvent::Exited);
                             let _ = pty_notifications.try_send(TermEvent::Wakeup);
                         }

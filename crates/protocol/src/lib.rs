@@ -6,10 +6,12 @@
 
 mod command;
 mod event;
+mod preview;
 mod query;
+pub use preview::{PreviewRequest, PreviewResponse};
 mod wire;
 
-pub use command::{Command, CommandResponse, SettingsPatch, ThreadExportFormat};
+pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
 pub use event::{
     AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
     MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus, ProvidersStatus,

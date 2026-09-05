@@ -75,9 +75,13 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     };
     if let Ok(mut mcp_host) = mcp_host::Host::bind() {
         services.orchestrate = Some(orchestrate_mcp::start(&mut mcp_host));
+        // Preview requests travel to whichever client shows the session's
+        // preview panel (P4b reverse RPC), so the headless host serves it too.
+        services.preview = Some(preview_mcp::start(&mut mcp_host));
         if let Err(error) = mcp_host.start() {
-            eprintln!("tcode-headless: orchestrate MCP server unavailable: {error}");
+            eprintln!("tcode-headless: MCP servers unavailable: {error}");
             services.orchestrate = None;
+            services.preview = None;
         }
     }
     let host =

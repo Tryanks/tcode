@@ -1,6 +1,56 @@
 use super::*;
 
 impl AppState {
+    pub(crate) fn reap_terminal_output(&mut self) {
+        self.terminal_output
+            .retain(|id, _| self.terminal_registry.terminal(*id).is_some());
+    }
+
+    pub(crate) fn terminal_handle(&self, terminal_id: u64) -> Option<Arc<term::Terminal>> {
+        self.terminal_registry.terminal(terminal_id)
+    }
+
+    pub(crate) fn emit_terminal_output(
+        &mut self,
+        terminal_id: u64,
+        bytes: Vec<u8>,
+        reset: bool,
+        cx: &mut HostCx,
+    ) {
+        let Some(ring) = self.terminal_output.get_mut(&terminal_id) else {
+            return;
+        };
+        const CAPACITY: usize = 256 * 1024;
+        let ring = &mut ring.bytes;
+        let tail = &bytes[bytes.len().saturating_sub(CAPACITY)..];
+        let remove = (ring.len() + tail.len()).saturating_sub(CAPACITY);
+        ring.drain(..remove);
+        ring.extend(tail.iter().copied());
+        if self
+            .subscriptions
+            .contains(&Topic::Terminal { terminal_id })
+        {
+            let (cols, rows) = self
+                .terminal_handle(terminal_id)
+                .map(|terminal| {
+                    let (cols, rows) = terminal.grid().dimensions();
+                    (cols as u16, rows as u16)
+                })
+                .unwrap_or((80, 24));
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id: None,
+                topic: Topic::Terminal { terminal_id },
+                event: ServerEvent::TerminalOutput {
+                    terminal_id,
+                    bytes,
+                    reset,
+                    cols,
+                    rows,
+                },
+            }));
+        }
+    }
+
     // -- conversation-owned terminal resources -----------------------------
 
     pub(super) fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) -> bool {
@@ -125,7 +175,9 @@ impl AppState {
         let cwd = term::Terminal::resolve_spawn_cwd(cwd);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = host_cx.unblock(move || term::Terminal::spawn(cwd)).await;
+            let result = host_cx
+                .unblock(move || term::Terminal::spawn_with_output(cwd))
+                .await;
             host_cx.enqueue(move |state, cx| {
                 let pending = state
                     .pending_terminal_spawns
@@ -148,7 +200,7 @@ impl AppState {
                     return;
                 }
 
-                let terminal = match result {
+                let (terminal, output) = match result {
                     Ok(terminal) => terminal,
                     Err(error) => {
                         let runtime_error = match action {
@@ -171,10 +223,12 @@ impl AppState {
                     .unwrap()
                     .terminal_workspace;
                 let mut followup_split = None;
+                let mut output_id = None;
                 let applied = match action {
                     TerminalSpawnAction::Open { split_after } => {
                         if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
                             let first = workspace.push(terminal);
+                            output_id = Some(first);
                             followup_split = split_after.map(|direction| (first, direction));
                             true
                         } else {
@@ -188,9 +242,10 @@ impl AppState {
                             .find(|entry| Some(entry.id) == terminal_id)
                         {
                             entry.terminal = terminal.into();
+                            output_id = Some(entry.id);
                             true
                         } else if terminal_id.is_none() && workspace.terminals.is_empty() {
-                            workspace.push(terminal);
+                            output_id = Some(workspace.push(terminal));
                             true
                         } else {
                             false
@@ -198,7 +253,7 @@ impl AppState {
                     }
                     TerminalSpawnAction::New => {
                         if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
-                            workspace.push(terminal);
+                            output_id = Some(workspace.push(terminal));
                             true
                         } else {
                             false
@@ -210,6 +265,7 @@ impl AppState {
                             && workspace.split_for(first).is_none()
                         {
                             let second = workspace.push(terminal);
+                            output_id = Some(second);
                             workspace.splits.push(TerminalSplit {
                                 first,
                                 second,
@@ -221,6 +277,31 @@ impl AppState {
                         }
                     }
                 };
+                if let Some(terminal_id) = output_id {
+                    state.sync_terminal_handles();
+                    state.terminal_output.insert(
+                        terminal_id,
+                        crate::terminal::OutputReplay {
+                            generation: spawn_id,
+                            bytes: Default::default(),
+                        },
+                    );
+                    state.emit_terminal_output(terminal_id, Vec::new(), true, cx);
+                    let output_cx = cx.clone();
+                    cx.spawn_detached(async move {
+                        while let Ok(bytes) = output.recv().await {
+                            output_cx.enqueue(move |state, cx| {
+                                if state
+                                    .terminal_output
+                                    .get(&terminal_id)
+                                    .is_some_and(|replay| replay.generation == spawn_id)
+                                {
+                                    state.emit_terminal_output(terminal_id, bytes, false, cx);
+                                }
+                            });
+                        }
+                    });
+                }
                 if applied {
                     state.persist_terminal_resource_count(&session_id, cx);
                 }
@@ -419,6 +500,7 @@ impl AppState {
         &mut self,
         target_id: &str,
         terminal_id: u64,
+        selection: Option<tcode_protocol::TerminalSelection>,
         _cx: &mut HostCx,
     ) {
         let Some(active) = self.resident_mut(target_id) else {
@@ -428,7 +510,13 @@ impl AppState {
             return;
         };
         let label = entry.terminal.label();
-        let selection = entry.terminal.selected_text();
+        let selection = selection
+            .map(|selection| term::SelectedText {
+                line_start: selection.line_start,
+                line_end: selection.line_end,
+                text: selection.text,
+            })
+            .or_else(|| entry.terminal.selected_text());
         if let Some(selection) = selection {
             active.terminal_workspace.add_context(label, selection);
         }

@@ -212,6 +212,8 @@ impl WorkspaceStore {
         self.dispatch(Command::MarkSessionUnread { session_id });
     }
     pub(super) fn leave_session(&mut self) {
+        #[cfg(feature = "terminal")]
+        self.clear_terminal_topics();
         if let Some(status) = &self.session_status_replica
             && !status.draft
         {
@@ -231,6 +233,10 @@ impl WorkspaceStore {
                     session_id: session_id.clone(),
                 },
                 tcode_protocol::Topic::SessionStatus {
+                    session_id: session_id.clone(),
+                },
+                #[cfg(feature = "desktop")]
+                tcode_protocol::Topic::Preview {
                     session_id: session_id.clone(),
                 },
                 tcode_protocol::Topic::GitStatus { session_id },
@@ -271,6 +277,10 @@ impl WorkspaceStore {
             tcode_protocol::Topic::GitStatus {
                 session_id: session_id.clone(),
             },
+            #[cfg(feature = "desktop")]
+            tcode_protocol::Topic::Preview {
+                session_id: session_id.clone(),
+            },
             tcode_protocol::Topic::SessionEvents { session_id },
         ] {
             let _ = self.host.subscribe(tcode_protocol::Subscription {
@@ -282,6 +292,8 @@ impl WorkspaceStore {
                 topic,
             });
         }
+        #[cfg(feature = "terminal")]
+        self.sync_terminal_topics();
         self.sync_active_conversation_ui();
     }
     pub fn select_session_at_turn(&mut self, session_id: String, turn: usize) {
@@ -602,9 +614,21 @@ impl WorkspaceStore {
         });
     }
     pub fn capture_terminal_selection(&mut self, terminal_id: u64) {
+        #[cfg(feature = "terminal")]
+        let selection = self
+            .client_terminal(terminal_id)
+            .and_then(|terminal| terminal.selected_text())
+            .map(|selection| tcode_protocol::TerminalSelection {
+                line_start: selection.line_start,
+                line_end: selection.line_end,
+                text: selection.text,
+            });
+        #[cfg(not(feature = "terminal"))]
+        let selection = None;
         self.dispatch(Command::CaptureTerminalSelection {
             session_id: self.active_session_id().unwrap_or_default(),
             terminal_id,
+            selection,
         });
     }
     pub fn remove_terminal_context(&mut self, context_id: u64) {

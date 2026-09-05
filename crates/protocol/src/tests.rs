@@ -114,7 +114,11 @@ fn round_trips_top_level_wire_types() {
                 1,
                 2,
             )],
-            terminals: vec![TerminalStatus { id: 7 }],
+            terminals: vec![TerminalStatus {
+                id: 7,
+                title: "shell".into(),
+                exited: false,
+            }],
             active_terminal_id: Some(7),
             terminal_splits: vec![TerminalSplitStatus {
                 first: 7,
@@ -284,6 +288,9 @@ fn settings_patches_round_trip() {
 
 fn assert_command_crosses_ndjson(id: u64, command: Command) {
     match &command {
+        Command::TerminalInput { .. }
+        | Command::ResizeTerminal { .. }
+        | Command::PreviewReply { .. } => {}
         Command::ApplyPendingRelaunch => {}
         Command::OpenLatestSession => {}
         Command::ShutdownAllAndFlush => {}
@@ -494,6 +501,11 @@ fn every_command_and_query_crosses_ndjson() {
         Command::CaptureTerminalSelection {
             session_id: "session-1".into(),
             terminal_id: 7,
+            selection: Some(crate::TerminalSelection {
+                line_start: 2,
+                line_end: 3,
+                text: "remote selection".into(),
+            }),
         },
         Command::RemoveTerminalContext {
             session_id: "session-1".into(),
@@ -883,4 +895,96 @@ fn unknown_command_becomes_protocol_error_without_panicking() {
     let error = result.expect("decoder must not panic").unwrap_err();
     assert_eq!(error.code, "decode_error");
     assert!(error.message.contains("unknown variant"));
+}
+
+#[test]
+fn remote_affordance_payloads_round_trip() {
+    let bytes = vec![0, 0xff, b'\x1b', b'[', b'm'];
+    assert_command_crosses_ndjson(
+        1,
+        Command::TerminalInput {
+            terminal_id: 9,
+            bytes: bytes.clone(),
+        },
+    );
+    assert_command_crosses_ndjson(
+        2,
+        Command::ResizeTerminal {
+            terminal_id: 9,
+            cols: 120,
+            rows: 35,
+        },
+    );
+    let output = ServerEvent::TerminalOutput {
+        terminal_id: 9,
+        bytes,
+        reset: true,
+        cols: 80,
+        rows: 24,
+    };
+    round_trip(&output);
+    assert!(serde_json::to_value(output).unwrap()["content"]["bytes"].is_string());
+    round_trip(&Topic::Preview {
+        session_id: "s".into(),
+    });
+    for request in [
+        PreviewRequest::Open {
+            url: Some("http://localhost:5173".into()),
+        },
+        PreviewRequest::Navigate {
+            url: "http://127.0.0.1:5173".into(),
+        },
+        PreviewRequest::Status,
+        PreviewRequest::Evaluate { js: "1+1".into() },
+        PreviewRequest::Click {
+            selector: "button".into(),
+        },
+        PreviewRequest::Type {
+            selector: "input".into(),
+            text: "hello".into(),
+        },
+        PreviewRequest::Resize {
+            width: Some(375),
+            height: Some(667),
+        },
+        PreviewRequest::Press {
+            key: "Enter".into(),
+            modifiers: vec![],
+        },
+        PreviewRequest::Scroll {
+            delta_x: 0.,
+            delta_y: 10.,
+            selector: None,
+        },
+        PreviewRequest::WaitFor {
+            selector: None,
+            text: Some("hello".into()),
+            url_includes: None,
+            timeout_ms: 100,
+        },
+        PreviewRequest::Snapshot,
+        PreviewRequest::Screenshot,
+    ] {
+        round_trip(&ServerEvent::PreviewRequest {
+            request_id: 8,
+            session_id: "s".into(),
+            request,
+        });
+    }
+    for response in [
+        Ok(PreviewResponse::Json(serde_json::json!({"ok":true}))),
+        Ok(PreviewResponse::Image {
+            mime: "image/png".into(),
+            data_base64: "AA==".into(),
+        }),
+        Err("preview unavailable".into()),
+    ] {
+        assert_command_crosses_ndjson(
+            3,
+            Command::PreviewReply {
+                request_id: 8,
+                response,
+            },
+        );
+    }
 }

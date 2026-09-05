@@ -14,6 +14,13 @@ pub use tcode_core::settings::SettingsPatch;
 
 use crate::ExternalThread;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSelection {
+    pub line_start: usize,
+    pub line_end: usize,
+    pub text: String,
+}
+
 /// User-selectable thread export formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +39,20 @@ pub enum ThreadExportFormat {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Command {
+    TerminalInput {
+        terminal_id: u64,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+    },
+    ResizeTerminal {
+        terminal_id: u64,
+        cols: u16,
+        rows: u16,
+    },
+    PreviewReply {
+        request_id: u64,
+        response: Result<crate::PreviewResponse, String>,
+    },
     /// Consume and apply the restart-continuity marker, returning the Settings
     /// section that the client should open.
     ApplyPendingRelaunch,
@@ -140,6 +161,9 @@ pub enum Command {
     CaptureTerminalSelection {
         session_id: String,
         terminal_id: u64,
+        /// Client-grid selection; absent retains the local-handle behavior.
+        #[serde(default)]
+        selection: Option<TerminalSelection>,
     },
     RemoveTerminalContext {
         session_id: String,

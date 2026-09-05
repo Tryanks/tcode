@@ -279,7 +279,7 @@ mod native {
             window: &mut Window,
             cx: &mut Context<Self>,
         ) -> Availability {
-            let url = normalize_url(url);
+            let url = normalize_url(&self.store.read(cx).rewrite_preview_url(url));
             self.store
                 .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
             let availability = self.lifecycle.update(cx, |lifecycle, cx| {
@@ -540,7 +540,7 @@ mod native {
                     &key,
                     selector,
                     text,
-                    url_includes,
+                    url_includes.map(|url| self.store.read(cx).rewrite_preview_url(&url)),
                     timeout_ms,
                     reply,
                     window,

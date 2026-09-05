@@ -42,7 +42,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
-#[cfg(all(feature = "local-host", feature = "terminal"))]
+#[cfg(feature = "terminal")]
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_secs;
 use crate::window_caption;
@@ -326,7 +326,7 @@ pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
-    #[cfg(all(feature = "local-host", feature = "terminal"))]
+    #[cfg(feature = "terminal")]
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
@@ -402,14 +402,14 @@ impl ChatView {
                 cx.notify();
             }),
         ];
-        #[cfg(all(feature = "local-host", feature = "terminal"))]
+        #[cfg(feature = "terminal")]
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
 
         let mut this = Self {
             workspace_store,
             window_state,
             composer,
-            #[cfg(all(feature = "local-host", feature = "terminal"))]
+            #[cfg(feature = "terminal")]
             terminal_drawer,
             list_state,
             turn_items: Vec::new(),
@@ -1663,7 +1663,6 @@ impl ChatView {
         let plan_showing = panel.plan_showing;
         let preview_showing = panel.preview_showing;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
-        let remote = self.workspace_store.read(cx).is_remote();
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
@@ -1675,27 +1674,22 @@ impl ChatView {
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            // Terminal bytes and the preview reverse RPC are
-                            // local-only until P4 of the remote plan.
-                            .when(
-                                cfg!(all(feature = "local-host", feature = "terminal")) && !remote,
-                                |this| {
-                                    this.child(
-                                        Button::new("panel-layout")
-                                            .ghost()
-                                            .small()
-                                            .compact()
-                                            .icon(IconName::PanelBottom)
-                                            .selected(terminal_open)
-                                            .tooltip(crate::tr!("chat.toggle_terminal"))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.workspace_store.update(cx, |store, cx| {
-                                                    store.toggle_terminal_panel(cx)
-                                                })
-                                            })),
-                                    )
-                                },
-                            )
+                            .when(cfg!(feature = "terminal"), |this| {
+                                this.child(
+                                    Button::new("panel-layout")
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::PanelBottom)
+                                        .selected(terminal_open)
+                                        .tooltip(crate::tr!("chat.toggle_terminal"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_store.update(cx, |store, cx| {
+                                                store.toggle_terminal_panel(cx)
+                                            })
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("plan-panel")
                                     .ghost()
@@ -1709,7 +1703,7 @@ impl ChatView {
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
-                            .when(cfg!(feature = "desktop") && !remote, |this| {
+                            .when(cfg!(feature = "desktop"), |this| {
                                 this.child(
                                     Button::new("preview-panel")
                                         .ghost()
@@ -2282,11 +2276,11 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
-        #[cfg(all(feature = "local-host", feature = "terminal"))]
+        #[cfg(feature = "terminal")]
         let panel = self.workspace_store.read(cx).chat_panel_state();
-        #[cfg(all(feature = "local-host", feature = "terminal"))]
+        #[cfg(feature = "terminal")]
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
-        #[cfg(all(feature = "local-host", feature = "terminal"))]
+        #[cfg(feature = "terminal")]
         let terminal_height = panel.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
@@ -2397,7 +2391,7 @@ impl Render for ChatView {
             )
             .child(composer);
 
-        #[cfg(all(feature = "local-host", feature = "terminal"))]
+        #[cfg(feature = "terminal")]
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
             let drawer_resize = self.terminal_drawer.clone();
@@ -2425,7 +2419,7 @@ impl Render for ChatView {
         } else {
             main.into_any_element()
         };
-        #[cfg(not(all(feature = "local-host", feature = "terminal")))]
+        #[cfg(not(feature = "terminal"))]
         let body: AnyElement = main.into_any_element();
         root.when(!self.window_state.read(cx).compact, |el| el.child(header))
             .child(body)

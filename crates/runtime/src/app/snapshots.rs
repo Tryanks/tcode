@@ -196,10 +196,24 @@ impl AppState {
                 }
             }
             Topic::RuntimeEvents => return None,
-            // Raw terminal bytes never travel through JSON in the local
-            // transport. The construction-time handle registry carries the
-            // split term channels instead.
-            Topic::Terminal { .. } => return None,
+            Topic::Preview { .. } => return None,
+            Topic::Terminal { terminal_id } => {
+                let terminal = self.terminal_handle(*terminal_id)?;
+                let (cols, rows) = terminal.grid().dimensions();
+                ServerEvent::TerminalOutput {
+                    terminal_id: *terminal_id,
+                    bytes: self
+                        .terminal_output
+                        .get(terminal_id)?
+                        .bytes
+                        .iter()
+                        .copied()
+                        .collect(),
+                    reset: true,
+                    cols: cols as u16,
+                    rows: rows as u16,
+                }
+            }
         };
         Some(EventEnvelope {
             request_id: None,
@@ -273,7 +287,11 @@ impl AppState {
                 .terminal_workspace
                 .terminals
                 .iter()
-                .map(|terminal| TerminalStatus { id: terminal.id })
+                .map(|terminal| TerminalStatus {
+                    id: terminal.id,
+                    title: terminal.terminal.label(),
+                    exited: terminal.terminal.exited(),
+                })
                 .collect(),
             active_terminal_id: session.terminal_workspace.active_id,
             terminal_splits: session

@@ -218,6 +218,59 @@ impl AppShell {
             .detach();
         }
 
+        #[cfg(feature = "desktop")]
+        {
+            let requests = workspace_store.read(cx).remote_preview_requests();
+            let preview = preview.clone();
+            let store = workspace_store.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                while let Ok(envelope) = requests.recv().await {
+                    let tcode_protocol::ServerEvent::PreviewRequest {
+                        request_id,
+                        session_id,
+                        request,
+                    } = envelope.event
+                    else {
+                        continue;
+                    };
+                    let (reply, receiver) = async_channel::bounded(1);
+                    let op = serde_json::to_value(request).and_then(serde_json::from_value);
+                    match op {
+                        Ok(op) => {
+                            if preview
+                                .update_in(cx, |panel, window, cx| {
+                                    panel.handle_op(session_id, op, reply, window, cx)
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = reply.try_send(Err(error.to_string()));
+                        }
+                    }
+                    // Each operation waits independently: a slow wait_for must
+                    // not block a second client's navigation or a screenshot.
+                    let store = store.clone();
+                    cx.spawn(async move |cx| {
+                        let response = receiver
+                            .recv()
+                            .await
+                            .unwrap_or_else(|_| Err("preview panel dropped request".into()));
+                        let response = response.and_then(|value| {
+                            serde_json::to_value(value)
+                                .and_then(serde_json::from_value)
+                                .map_err(|error| error.to_string())
+                        });
+                        store.update(cx, |store, _| store.preview_reply(request_id, response));
+                    })
+                    .detach();
+                }
+            })
+            .detach();
+        }
+
         Self {
             sidebar: cx
                 .new(|cx| SessionsSidebar::new(workspace_store.clone(), window_state.clone(), cx)),

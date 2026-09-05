@@ -28,13 +28,21 @@ use tcode_protocol::{
 #[cfg(all(feature = "local-host", feature = "desktop"))]
 use tcode_runtime::pipe::{ImportRoutes, start_external_import};
 #[cfg(all(feature = "local-host", feature = "terminal"))]
-use tcode_runtime::terminal::{LocalTerminalRegistry, TerminalWorkspace};
+use tcode_runtime::terminal::LocalTerminalRegistry;
+#[cfg(feature = "terminal")]
+mod terminal;
 #[cfg(feature = "desktop")]
 use tcode_services::import::ExternalImportUpdate;
+#[cfg(feature = "terminal")]
+pub(crate) use terminal::ClientTerminal;
+#[cfg(feature = "terminal")]
+use terminal::TerminalWorkspace;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
+mod images;
 mod intents;
+pub(crate) use images::host_image;
 mod snapshots;
 
 pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, ShellPanelState};
@@ -52,6 +60,7 @@ pub enum TopicKind {
     RuntimeEvents,
     ActiveSession,
     Terminal,
+    Preview,
 }
 
 impl From<&Topic> for TopicKind {
@@ -65,6 +74,7 @@ impl From<&Topic> for TopicKind {
             Topic::GitStatus { .. } => Self::GitStatus,
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
+            Topic::Preview { .. } => Self::Preview,
         }
     }
 }
@@ -103,8 +113,16 @@ pub struct LocalAffordances {
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     host: HostLink,
+    #[cfg(feature = "terminal")]
+    remote_terminals: HashMap<u64, std::sync::Arc<ClientTerminal>>,
+    #[cfg(feature = "desktop")]
+    remote_preview: (
+        async_channel::Sender<EventEnvelope>,
+        async_channel::Receiver<EventEnvelope>,
+    ),
+    remote_address: Option<String>,
     #[cfg(all(feature = "local-host", feature = "terminal"))]
-    terminal_registry: LocalTerminalRegistry,
+    terminal_registry: Option<LocalTerminalRegistry>,
     #[cfg(all(feature = "local-host", feature = "desktop"))]
     preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     #[cfg(all(feature = "local-host", feature = "desktop"))]
@@ -191,10 +209,21 @@ impl WorkspaceStore {
     }
 
     pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
+        static NEXT_IMAGE_NAMESPACE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        cx.set_global(images::HostImages {
+            link: host.clone(),
+            namespace: NEXT_IMAGE_NAMESPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        });
         let store = Self {
             host: host.clone(),
+            #[cfg(feature = "terminal")]
+            remote_terminals: HashMap::new(),
+            #[cfg(feature = "desktop")]
+            remote_preview: async_channel::unbounded(),
+            remote_address: None,
             #[cfg(all(feature = "local-host", feature = "terminal"))]
-            terminal_registry: LocalTerminalRegistry::default(),
+            terminal_registry: None,
             #[cfg(all(feature = "local-host", feature = "desktop"))]
             preview_requests: None,
             #[cfg(all(feature = "local-host", feature = "desktop"))]
@@ -329,7 +358,7 @@ impl WorkspaceStore {
         let _ = local;
         #[cfg(feature = "terminal")]
         {
-            self.terminal_registry = local.terminals;
+            self.terminal_registry = Some(local.terminals);
         }
         #[cfg(feature = "desktop")]
         {
@@ -360,9 +389,37 @@ impl WorkspaceStore {
         .detach();
     }
 
-    /// Whether the host lives in another process. Local-only affordances
-    /// (terminals, preview, computer use, the native directory picker) are
-    /// unavailable while this is true — see P4 of docs/plans/remote-and-mobile.md.
+    /// Whether the host lives in another process. Computer use settings and
+    /// native host-directory pickers remain local-only.
+    #[cfg(feature = "desktop")]
+    pub(crate) fn preview_reply(
+        &mut self,
+        request_id: u64,
+        response: Result<tcode_protocol::PreviewResponse, String>,
+    ) {
+        self.dispatch(tcode_protocol::Command::PreviewReply {
+            request_id,
+            response,
+        });
+    }
+
+    pub fn set_remote_address(&mut self, address: String) {
+        self.remote_address = Some(address);
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn remote_preview_requests(&self) -> async_channel::Receiver<EventEnvelope> {
+        self.remote_preview.1.clone()
+    }
+
+    #[cfg(feature = "desktop")]
+    pub(crate) fn rewrite_preview_url(&self, url: &str) -> String {
+        self.remote_address.as_deref().map_or_else(
+            || url.to_string(),
+            |host| tcode_client::rewrite_preview_url(url, host),
+        )
+    }
+
     pub fn is_remote(&self) -> bool {
         self.remote_host.is_some()
     }
@@ -409,6 +466,57 @@ impl WorkspaceStore {
             return;
         }
         match (&envelope.topic, &envelope.event) {
+            #[cfg(feature = "desktop")]
+            (
+                Topic::Preview { session_id },
+                ServerEvent::PreviewRequest {
+                    session_id: requested,
+                    ..
+                },
+            ) if session_id == requested
+                && self.selected_session_id.as_ref() == Some(session_id) =>
+            {
+                let _ = self.remote_preview.0.try_send(envelope.clone());
+            }
+            #[cfg(feature = "terminal")]
+            (
+                Topic::Terminal { terminal_id },
+                ServerEvent::TerminalOutput {
+                    terminal_id: output_id,
+                    bytes,
+                    reset,
+                    cols,
+                    rows,
+                },
+            ) if terminal_id == output_id => {
+                if let Some(terminal) = self.remote_terminals.get(terminal_id) {
+                    if *reset {
+                        let terminal = std::sync::Arc::new(ClientTerminal::remote(
+                            *terminal_id,
+                            self.host.clone(),
+                            usize::from(*cols),
+                            usize::from(*rows),
+                        ));
+                        if let Some(status) =
+                            self.session_status_replica.as_ref().and_then(|status| {
+                                status
+                                    .terminals
+                                    .iter()
+                                    .find(|entry| entry.id == *terminal_id)
+                            })
+                        {
+                            terminal.set_fallback_title(status.title.clone());
+                            if status.exited {
+                                terminal.set_exited(None);
+                            }
+                        }
+                        terminal.feed(bytes);
+                        self.remote_terminals.insert(*terminal_id, terminal);
+                    } else {
+                        terminal.feed(bytes);
+                    }
+                }
+            }
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
                     .index_replica
@@ -488,6 +596,8 @@ impl WorkspaceStore {
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
+                    #[cfg(feature = "terminal")]
+                    self.sync_terminal_topics();
                     self.sync_active_conversation_ui();
                     self.background_session_flags.remove(session_id);
                 } else {
@@ -1706,20 +1816,15 @@ impl WorkspaceStore {
         .flatten()
     }
 
-    /// Borrows the live terminal workspace for terminal emulation and PTY I/O.
-    ///
-    /// Terminal lifecycle and preference mutations still cross [`Command`];
-    /// layout/context metadata comes from `SessionStatus`. This sole local
-    /// crossing accesses the `PtyHandle`/`GridEmulator`-backed live terminal
-    /// objects and is documented by `LocalTerminalRegistry`; a remote
-    /// transport must substitute raw byte streams, never terminal JSON.
-    #[cfg(all(feature = "local-host", feature = "terminal"))]
+    /// Build renderer handles from replicated layout. Local affordances keep
+    /// direct PTY/grid access; otherwise the handles wrap client emulators.
+    #[cfg(feature = "terminal")]
     pub fn with_terminal_workspace<R>(
         &self,
         read: impl FnOnce(&TerminalWorkspace) -> R,
     ) -> Option<R> {
         let status = self.session_status_replica.as_ref()?;
-        let workspace = TerminalWorkspace::from_replica(status, &self.terminal_registry);
+        let workspace = TerminalWorkspace::from_replica(status, |id| self.client_terminal(id));
         Some(read(&workspace))
     }
 

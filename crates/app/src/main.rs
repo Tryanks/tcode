@@ -208,6 +208,7 @@ struct Wiring {
     mux: Option<HostMux>,
     /// `(host_id, host_name)` in remote mode.
     remote: Option<(String, String)>,
+    remote_address: Option<String>,
     data_dir: std::path::PathBuf,
 }
 
@@ -215,6 +216,7 @@ struct Wiring {
 /// state machine's transitions onto the link so the UI can render its banner.
 fn connect_remote(host: PairedHost, data_dir: std::path::PathBuf) -> Wiring {
     let identity = (host.host_id.clone(), host.name.clone());
+    let remote_address = host.addrs.first().cloned();
     let client = tcode_remote::client::connect(host, machine_name());
     let link = HostLink::new(client.to_host, client.from_host);
     smol::spawn({
@@ -247,6 +249,7 @@ fn connect_remote(host: PairedHost, data_dir: std::path::PathBuf) -> Wiring {
         host: None,
         mux: None,
         remote: Some(identity),
+        remote_address,
         data_dir,
     }
 }
@@ -287,6 +290,7 @@ fn start_local(store: SessionStore, data_dir: std::path::PathBuf) -> Wiring {
         host: Some(host),
         mux: Some(mux),
         remote: None,
+        remote_address: None,
         data_dir,
     }
 }
@@ -360,6 +364,7 @@ fn main() {
         host,
         mux,
         remote,
+        remote_address,
         data_dir,
     } = wiring;
 
@@ -410,6 +415,9 @@ fn main() {
                     }),
                     (None, Some((_, name))) => store.attach_remote(name.clone(), cx),
                     (None, None) => {}
+                }
+                if let Some(address) = &remote_address {
+                    store.set_remote_address(address.clone());
                 }
                 store
             });

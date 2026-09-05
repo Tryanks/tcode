@@ -27,9 +27,8 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles after the first completed turn.
     pub ai_title_generation: bool,
-    /// Split at host construction: URL/tokens stay host-side and the
-    /// non-serializable WebView broker receiver moves once to `SpawnedHost`.
-    /// A remote transport replaces that receiver with reverse RPC.
+    /// URL/tokens and the broker receiver stay host-side. Requests reach
+    /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
     /// Deliberate construction-time local handle. The broker receiver stays
     /// entirely on the host executor; a remote transport must expose the same
@@ -49,6 +48,7 @@ pub struct SpawnedHost {
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
     pub terminals: LocalTerminalRegistry,
+    /// Legacy local affordance; new hosts route preview requests through the link.
     pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     pub import_routes: ImportRoutes,
     link: Arc<OnceLock<HostLink>>,
@@ -147,10 +147,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
     let terminals = LocalTerminalRegistry::default();
-    // Deliberate local-transport affordance: the WebView broker request
-    // receiver cannot cross serde. Move its single consumer exactly once into
-    // the local client; a remote transport must replace it with reverse RPC. The
-    // host retains only the URL/token registry used to register providers.
+    // The host owns the broker, including when started without a desktop.
+    // Both local and remote WebViews answer the same serialized reverse RPC.
     let (preview_registration, preview_requests) = match services.preview.take() {
         Some(preview_mcp::PreviewMcpServer {
             url,
@@ -160,6 +158,8 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
+    let broker_requests = preview_requests;
+    let preview_requests = None;
     let import_routes = ImportRoutes::default();
     let host_terminals = terminals.clone();
     let host_import_routes = import_routes.clone();
@@ -186,6 +186,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_orchestrate_requests(&mut cx);
+            state.pump_preview_requests(broker_requests, &mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);
@@ -262,6 +263,7 @@ async fn host_loop(
             },
         }
         state.sync_terminal_handles();
+        state.reap_terminal_output();
         domain_diff.emit_changes(&state, &mut cx);
     }
 }
@@ -357,6 +359,27 @@ fn dispatch_command(
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
+        Command::TerminalInput { terminal_id, bytes } => {
+            if let Some(terminal) = app.terminal_handle(terminal_id) {
+                terminal.write_input(bytes);
+            }
+        }
+        Command::ResizeTerminal {
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            if let Some(terminal) = app.terminal_handle(terminal_id) {
+                terminal.resize(
+                    usize::from(cols.clamp(2, 1000)),
+                    usize::from(rows.clamp(2, 1000)),
+                );
+            }
+        }
+        Command::PreviewReply {
+            request_id,
+            response,
+        } => app.resolve_preview(request_id, response),
         Command::ApplyPendingRelaunch => {
             let (section, session_id) = app.apply_pending_relaunch();
             response = CommandResponse::PendingRelaunchSection {
@@ -447,7 +470,8 @@ fn dispatch_command(
         Command::CaptureTerminalSelection {
             session_id,
             terminal_id,
-        } => app.capture_terminal_selection(&session_id, terminal_id, cx),
+            selection,
+        } => app.capture_terminal_selection(&session_id, terminal_id, selection, cx),
         Command::RemoveTerminalContext {
             session_id,
             context_id,
@@ -701,7 +725,7 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
 mod tests {
     use super::*;
 
-    fn next_event(
+    pub(super) fn next_event(
         events: &HostEventReceiver,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
@@ -850,3 +874,7 @@ mod tests {
         std::fs::remove_dir_all(data_root).expect("remove test data");
     }
 }
+
+#[cfg(test)]
+#[path = "pipe_p4b_tests.rs"]
+mod p4b_tests;

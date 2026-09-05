@@ -31,6 +31,7 @@ pub enum Topic {
     RuntimeEvents,
 
     Terminal { terminal_id: u64 },
+    Preview { session_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +46,20 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
+    TerminalOutput {
+        terminal_id: u64,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+        /// A replay (or restarted PTY) replaces the client emulator.
+        reset: bool,
+        cols: u16,
+        rows: u16,
+    },
+    PreviewRequest {
+        request_id: u64,
+        session_id: String,
+        request: crate::PreviewRequest,
+    },
     SessionEvent(StoredEvent),
     SessionStatusReplaced(SessionStatus),
     ProvidersReplaced(ProvidersStatus),
@@ -218,6 +233,10 @@ pub struct SessionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalStatus {
     pub id: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub exited: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

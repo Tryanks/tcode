@@ -373,6 +373,9 @@ fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     }
 }
 
+mod preview;
+pub use preview::rewrite_preview_url;
+
 #[cfg(test)]
 mod tests {
     use super::*;

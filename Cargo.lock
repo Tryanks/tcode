@@ -8788,6 +8788,7 @@ dependencies = [
  "async-channel",
  "mcp-host",
  "orchestrate-mcp",
+ "preview-mcp",
  "qrcode",
  "serde",
  "serde_json",

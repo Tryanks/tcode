@@ -213,7 +213,7 @@ pub(crate) fn user_bubble(
                         .bg(cx.theme().muted)
                         .cursor_pointer()
                         .child(
-                            img(path)
+                            img(crate::store::host_image(path))
                                 .size(px(120.))
                                 .rounded_xl()
                                 .object_fit(ObjectFit::Cover),

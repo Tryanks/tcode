@@ -21,9 +21,82 @@ pub(super) struct McpWiring {
 }
 
 impl AppState {
+    pub(crate) fn pump_preview_requests(
+        &mut self,
+        requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+        cx: &mut HostCx,
+    ) {
+        let Some(requests) = requests else {
+            return;
+        };
+        let host = cx.clone();
+        cx.spawn_detached(async move {
+            while let Ok(request) = requests.recv().await {
+                host.enqueue(move |state, cx| state.route_preview(request, cx));
+            }
+        });
+    }
+
+    pub(crate) fn route_preview(&mut self, broker: preview_mcp::BrokerRequest, cx: &mut HostCx) {
+        self.route_preview_with_timeout(broker, Duration::from_secs(60), cx);
+    }
+
+    pub(crate) fn route_preview_with_timeout(
+        &mut self,
+        broker: preview_mcp::BrokerRequest,
+        timeout: Duration,
+        cx: &mut HostCx,
+    ) {
+        self.next_preview_request += 1;
+        let request_id = self.next_preview_request;
+        let request = match serde_json::to_value(broker.op).and_then(serde_json::from_value) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = broker.reply.try_send(Err(error.to_string()));
+                return;
+            }
+        };
+        self.preview_pending.insert(request_id, broker.reply);
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic: Topic::Preview {
+                session_id: broker.session_id.clone(),
+            },
+            event: ServerEvent::PreviewRequest {
+                request_id,
+                session_id: broker.session_id,
+                request,
+            },
+        }));
+        let host = cx.clone();
+        cx.spawn_detached(async move {
+            smol::Timer::after(timeout).await;
+            host.enqueue(move |state, _| {
+                state.resolve_preview(
+                    request_id,
+                    Err("preview operation timed out (no responding client)".into()),
+                )
+            });
+        });
+    }
+
+    pub(crate) fn resolve_preview(
+        &mut self,
+        request_id: u64,
+        response: Result<tcode_protocol::PreviewResponse, String>,
+    ) {
+        if let Some(reply) = self.preview_pending.remove(&request_id) {
+            let response = response.and_then(|response| {
+                serde_json::to_value(response)
+                    .and_then(serde_json::from_value)
+                    .map_err(|error| error.to_string())
+            });
+            let _ = reply.try_send(response);
+        }
+    }
+
     /// Attach the serializable registration half of the preview MCP server.
-    /// Its non-serializable broker receiver is moved exactly once into the
-    /// client handle by `pipe::spawn_host`.
+    /// Its broker receiver is drained by the host reverse-RPC pump.
     pub fn attach_preview_mcp(&mut self, url: String, tokens: preview_mcp::TokenRegistry) {
         self.mcp.preview_url = Some(url);
         self.mcp.preview_tokens = Some(tokens);

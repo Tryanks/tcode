@@ -96,10 +96,14 @@ Constraints from the brief:
    `[patch.crates-io]` at all. `tcode-web` constructs its platform directly from
    `gpui-pre-web` (default features off) instead of via `gpui-pre-platform`.
    Published `gpui-pre-wgpu` and `gpui-pre-web` are used directly.
-10. **Remote parity gaps deferred to P4**: terminal byte streams
-    (`Topic::Terminal` exists, unused), preview reverse RPC, remote directory
-    browser for Add Project, attachment upload. Until then the terminal drawer
-    and preview panel are hidden when the link is remote.
+10. **Desktop remote affordances (P4b)**: terminal output streams on
+    `Topic::Terminal`, preview reverse RPC on per-session `Topic::Preview`, and
+    attachment byte upload/readback reach desktop clients. Terminal and preview
+    panels are visible remotely. Preview loopback URLs are rewritten to the
+    paired host address; dev servers must listen on all interfaces (`0.0.0.0`
+    or `::`) and expose their port on the LAN/overlay. `ponytail:` full terminal
+    scrollback and a full TCP tunnel multiplexed over the WebSocket. Remote
+    Add Project directory browsing remains separate P4 work.
 
 ## Phases
 
@@ -589,3 +593,65 @@ and the mobile WebAssembly check pass. The simultaneous desktop/phone GUI
 smoke test remains pending: an isolated headless host and separately paired
 clients were prepared, but Computer Use rejected access to the isolated test
 app. No claim of manual no-cross-talk verification is made.
+
+#### P4b notes
+
+Terminal PTYs optionally expose a raw-output receiver installed before their
+output bridge starts. The runtime owns a 256 KiB `VecDeque` per live terminal;
+mailbox callbacks append/evict bytes before publishing them. Subscription replay
+and live output share that mailbox, with requester-correlated replay envelopes.
+Replays and restarts set `TerminalOutput.reset`; the client replaces its parser
+and grid before feeding the retained raw bytes. Restart generations reject late
+output from the previous PTY, and destroying a terminal releases its ring.
+`cols`/`rows` accompany replay and output; terminal title/exit state remains in
+`SessionStatus`. A supplied `LocalTerminalRegistry` selects direct local handles;
+without it the drawer renders a client `GridEmulator`, uploads input and resize
+commands, and subscribes/unsubscribes terminal topics with the selected session.
+Host emulation answers PTY protocol queries once, so remote viewers do not send
+duplicate device replies. The ring is recent raw output, not a serialized screen
+or complete scrollback: truncation can begin inside an escape/UTF-8 sequence.
+`ponytail:` full scrollback and a richer checkpoint format.
+
+Preview payloads have portable protocol DTOs and serde mirrors in `preview-mcp`.
+The runtime owns the broker receiver and correlates requests with replies from
+per-session `Topic::Preview` subscribers. First response removes the pending
+request; a 60-second host timeout returns an error when no WebView responds.
+Desktop `AppShell` dispatches these requests into its existing `PreviewPanel`,
+including in-process desktop clients. The former local preview receiver remains
+an optional compatibility affordance; newly spawned hosts use the wire path.
+A missing preview service is started by the runtime, which lets the unchanged
+headless launcher register preview MCP with providers. This adds only the
+existing workspace `mcp-host` crate as a direct runtime dependency.
+
+Desktop navigation rewrites HTTP(S) loopback authorities (`localhost`,
+`127.0.0.1`, `0.0.0.0`) to the paired host's connection address while preserving
+port/path/query/fragment, including bracketed IPv6 targets. Dev servers must
+listen on all interfaces and be reachable on the LAN/overlay. `ponytail:` a full
+TCP tunnel multiplexed over the WebSocket removes that requirement. This phase
+uses the first address in the desktop's `PairedHost.addrs`; automatic selection
+of a different address by transport reconnect is not exposed to the UI yet.
+
+Image upload already used the host `SessionStatus.attachments_dir`. The missing
+piece was rendering: composer thumbnails, timeline thumbnails and lightboxes
+still opened the path on the client filesystem. They now fetch `ReadFileBytes`
+through a shared host-scoped GPUI asset cache and retain GPUI image decoding.
+Compact paste/drop suppression is unchanged. The timeline thumbnail and
+lightbox changes are each a single renderer call, needed alongside the composer
+change to complete image parity.
+
+Validation: workspace format, strict Clippy and workspace tests passed (983
+passed, 4 ignored), as did desktop/headless builds and the iOS simulator and
+mobile WebAssembly checks. Three production-mux acceptance tests cover bounded
+terminal replay/live PTY input/resize, preview first-response/timeout routing,
+and host-directory attachment save/readback. Portability checks retain existing
+warnings. A regression test also checks that reading a remote terminal tab's
+exit state preserves damage for the drawer renderer.
+
+Mac manual verification is incomplete. An isolated host was seeded and paired,
+and its remote desktop client opened the terminal drawer with the host project
+working directory. Computer Use subsequently reported missing Screen Recording
+permission, blocking visual verification and the three requested screenshots;
+composer focus/paste and provider-driven preview were not verified. No manual
+parity or screenshot-completion claim is made. The capture-selection-to-composer
+command carries optional client-selected text, preserving local fallback while
+letting the remote drawer upload its own selection.
