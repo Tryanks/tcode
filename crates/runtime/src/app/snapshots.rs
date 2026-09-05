@@ -8,8 +8,7 @@ pub(crate) struct DomainDiff {
     index: IndexSnapshot,
     settings: Settings,
     providers: ProvidersStatus,
-    git_status: GitStatusStatus,
-    active_session: Option<SessionStatus>,
+    git_status: HashMap<String, GitStatusStatus>,
     session_statuses: HashMap<String, SessionStatus>,
 }
 
@@ -19,15 +18,14 @@ impl DomainDiff {
             index: state.index_snapshot(),
             settings: state.settings_snapshot(),
             providers: state.providers_status_snapshot(),
-            git_status: state.git_status_snapshot(),
-            active_session: state.active_session_status_snapshot(),
+            git_status: HashMap::new(),
             session_statuses: state.resident_session_status_snapshots(),
         }
     }
 
     pub(crate) fn emit_changes(&mut self, state: &AppState, cx: &mut HostCx) {
-        if self.index.sessions != state.sessions || self.index.projects != state.projects {
-            let index = state.index_snapshot();
+        let index = state.index_snapshot();
+        if self.index != index {
             self.index = index.clone();
             emit_replacement(Topic::Index, ServerEvent::IndexSnapshot(index), cx);
         }
@@ -48,25 +46,23 @@ impl DomainDiff {
             );
         }
 
-        let git_status = state.git_status_snapshot();
-        if self.git_status != git_status {
-            self.git_status = git_status.clone();
-            emit_replacement(
-                Topic::GitStatus,
-                ServerEvent::GitStatusReplaced(git_status),
-                cx,
-            );
+        let git_status: HashMap<_, _> = state
+            .residents
+            .ids()
+            .map(|id| (id.to_string(), state.git_status_snapshot(id)))
+            .collect();
+        for (id, status) in &git_status {
+            if self.git_status.get(id) != Some(status) {
+                emit_replacement(
+                    Topic::GitStatus {
+                        session_id: id.clone(),
+                    },
+                    ServerEvent::GitStatusReplaced(status.clone()),
+                    cx,
+                );
+            }
         }
-
-        let active_session = state.active_session_status_snapshot();
-        if self.active_session != active_session {
-            self.active_session = active_session.clone();
-            emit_replacement(
-                Topic::ActiveSession,
-                ServerEvent::ActiveSessionReplaced(active_session),
-                cx,
-            );
-        }
+        self.git_status = git_status;
 
         let session_statuses = state.resident_session_status_snapshots();
         let mut changed_ids: Vec<_> = session_statuses
@@ -91,12 +87,34 @@ impl DomainDiff {
 }
 
 fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
-    cx.emit(HostEvent::Domain(EventEnvelope { topic, event }));
+    cx.emit(HostEvent::Domain(EventEnvelope {
+        request_id: None,
+        topic,
+        event,
+    }));
 }
 
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
         IndexSnapshot {
+            activity: self
+                .residents
+                .ids()
+                .filter_map(|id| {
+                    let session = self.resident(id)?;
+                    Some((
+                        id.to_string(),
+                        (
+                            session.has_work(),
+                            self.has_approval(id),
+                            session.timeline.pending_user_input.is_some(),
+                            session.background_task_count > 0
+                                && !session.turn_in_flight
+                                && session.queue.is_empty(),
+                        ),
+                    ))
+                })
+                .collect(),
             sessions: self.sessions.clone(),
             projects: self.projects.clone(),
         }
@@ -118,10 +136,10 @@ impl AppState {
     }
 
     /// Build the complete active-workspace Git projection.
-    pub fn git_status_snapshot(&self) -> GitStatusStatus {
+    pub fn git_status_snapshot(&self, session_id: &str) -> GitStatusStatus {
         GitStatusStatus {
-            status: self.git_status.clone(),
-            busy: self.git_busy,
+            status: self.git_status.get(session_id).cloned(),
+            busy: self.git_busy.contains(session_id),
         }
     }
 
@@ -131,8 +149,8 @@ impl AppState {
     pub(crate) fn sync_terminal_handles(&self) {
         self.terminal_registry.replace_from(
             self.residents
-                .active
-                .iter()
+                .live
+                .values()
                 .map(|session| &session.terminal_workspace)
                 .chain(
                     self.residents
@@ -145,28 +163,38 @@ impl AppState {
     }
 
     /// Build the serialized snapshot associated with one subscription.
-    pub(crate) fn subscription_snapshot(&self, topic: &Topic) -> Option<EventEnvelope> {
+    pub(crate) fn subscription_snapshot(
+        &self,
+        subscription: &tcode_protocol::Subscription,
+    ) -> Option<EventEnvelope> {
+        let topic = &subscription.topic;
         let event = match topic {
             Topic::Index => ServerEvent::IndexSnapshot(self.index_snapshot()),
             Topic::Settings => ServerEvent::SettingsSnapshot(self.settings_snapshot()),
             Topic::Providers => ServerEvent::ProvidersReplaced(self.providers_status_snapshot()),
-            Topic::GitStatus => ServerEvent::GitStatusReplaced(self.git_status_snapshot()),
-            Topic::ActiveSession => {
-                ServerEvent::ActiveSessionReplaced(self.active_session_status_snapshot())
+            Topic::GitStatus { session_id } => {
+                ServerEvent::GitStatusReplaced(self.git_status_snapshot(session_id))
             }
             Topic::SessionStatus { session_id } => {
                 ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?)
             }
-            Topic::SessionEvents { session_id } => ServerEvent::SessionSnapshot(
-                self.store
-                    .read_events(session_id)
-                    .into_iter()
-                    .map(|stored| SessionEventRecord {
-                        ts: stored.ts,
-                        event: stored.event,
-                    })
-                    .collect(),
-            ),
+            Topic::SessionEvents { session_id } => {
+                let stored;
+                let records = if let Some(records) = self.event_records.get(session_id) {
+                    records.as_slice()
+                } else {
+                    stored = self.store.read_events(session_id);
+                    &stored
+                };
+                let from = subscription
+                    .after
+                    .filter(|after| *after <= records.len() as u64)
+                    .unwrap_or(0);
+                ServerEvent::SessionSnapshot {
+                    from,
+                    records: records[from as usize..].to_vec(),
+                }
+            }
             Topic::RuntimeEvents => return None,
             // Raw terminal bytes never travel through JSON in the local
             // transport. The construction-time handle registry carries the
@@ -174,6 +202,7 @@ impl AppState {
             Topic::Terminal { .. } => return None,
         };
         Some(EventEnvelope {
+            request_id: None,
             topic: topic.clone(),
             event,
         })
@@ -299,11 +328,6 @@ impl AppState {
             approval_pending_restart: session.approval_mode_changed_while_live(),
             ultrathink_armed: session.pending_ultrathink,
         })
-    }
-
-    fn active_session_status_snapshot(&self) -> Option<SessionStatus> {
-        self.active_session_id()
-            .and_then(|id| self.session_status_snapshot(id))
     }
 
     fn resident_session_status_snapshots(&self) -> HashMap<String, SessionStatus> {

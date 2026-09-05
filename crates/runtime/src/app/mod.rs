@@ -373,20 +373,22 @@ pub struct AppState {
     /// Background-computed git state of the active session's cwd, driving the
     /// adaptive header quick-action button (`None` until the first refresh /
     /// with no active session). See [`AppState::refresh_git_status`].
-    pub git_status: Option<GitStatus>,
+    pub git_status: HashMap<String, GitStatus>,
     /// A git quick-action (commit/push/pull/…) is currently running, so the
     /// button is disabled with an in-progress hint.
-    pub git_busy: bool,
+    pub git_busy: HashSet<String>,
     /// Source of ids used to correlate semantic operation lifecycle events.
     next_operation_id: u64,
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
-    git_status_generation: u64,
+    git_status_generation: HashMap<String, u64>,
     /// Monotonic watermark for JSONL appends. Timeline loads retry when this
     /// changes while their background read is in flight.
     store_append_generation: u64,
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
+    subscriptions: HashSet<Topic>,
+    event_records: HashMap<String, Vec<SessionEventRecord>>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).
@@ -495,12 +497,14 @@ impl AppState {
             callback_approval_requests: HashSet::new(),
             child_reported_results: HashMap::new(),
             approvals: HashMap::new(),
-            git_status: None,
-            git_busy: false,
+            git_status: HashMap::new(),
+            git_busy: HashSet::new(),
             next_operation_id: 1,
-            git_status_generation: 0,
+            git_status_generation: HashMap::new(),
             store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
+            subscriptions: HashSet::new(),
+            event_records: HashMap::new(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
         }
@@ -565,6 +569,10 @@ impl AppState {
     }
 
     fn emit_domain(&self, topic: Topic, event: ServerEvent, cx: &mut HostCx) {
-        cx.emit(HostEvent::Domain(EventEnvelope { topic, event }));
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic,
+            event,
+        }));
     }
 }

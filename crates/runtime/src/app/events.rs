@@ -23,7 +23,7 @@ impl AppState {
                 return;
             }
             AgentEvent::BackgroundTasksChanged { count } => {
-                let is_active = self.active_session_id() == Some(session_id);
+                let is_active = self.residents.live.contains_key(session_id);
                 let should_mark_idle = self.resident_mut(session_id).is_some_and(|resident| {
                     resident.background_task_count = *count;
                     if !is_active && *count > 0 {
@@ -45,7 +45,7 @@ impl AppState {
                 self.clear_approvals(session_id);
                 self.clear_native_subagent_work(session_id, cx);
                 self.close_orchestrator_children(session_id, cx);
-                let is_active = self.active_session_id() == Some(session_id);
+                let is_active = self.residents.live.contains_key(session_id);
                 if !is_active {
                     // A parked session's process died on its own. Record the close,
                     // but retain any unaccepted/queued text on an Idle session so
@@ -172,7 +172,7 @@ impl AppState {
 
             // Session bookkeeping side effects.
             AgentEvent::TurnStarted { .. } => {
-                let is_active = self.active_session_id() == Some(session_id);
+                let is_active = self.residents.live.contains_key(session_id);
                 if let Some(resident) = self.resident_mut(session_id) {
                     resident.turn_in_flight = true;
                     if !is_active {
@@ -208,15 +208,15 @@ impl AppState {
                 // git quick-action status.
                 if let Some((session_id, cwd)) = self
                     .residents
-                    .active
-                    .as_ref()
+                    .live
+                    .get(session_id)
                     .filter(|active| active.meta.id == session_id)
                     .map(|active| (active.meta.id.clone(), active.meta.cwd.clone()))
                 {
                     self.refresh_session_git_branch(session_id, cwd, cx);
                 }
-                if self.active_session_id() == Some(session_id) {
-                    self.refresh_git_status(cx);
+                if self.residents.live.contains_key(session_id) {
+                    self.refresh_git_status(session_id, cx);
                 }
             }
             AgentEvent::RewindCompleted { mode, prefill, .. } => {
@@ -271,8 +271,8 @@ impl AppState {
                 if self.settings.abort_on_model_fallback {
                     let active_review = self
                         .residents
-                        .active
-                        .as_mut()
+                        .live
+                        .get_mut(session_id)
                         .filter(|active| active.meta.id == session_id)
                         .map(|active| {
                             active.queue.clear();
@@ -339,8 +339,8 @@ impl AppState {
                 if self.settings.abort_on_model_fallback {
                     let is_active = self
                         .residents
-                        .active
-                        .as_mut()
+                        .live
+                        .get_mut(session_id)
                         .filter(|active| active.meta.id == session_id)
                         .is_some_and(|active| {
                             active.queue.clear();
@@ -407,8 +407,8 @@ impl AppState {
             let mut restart_deferred = false;
             let is_active = if let Some(active) = self
                 .residents
-                .active
-                .as_mut()
+                .live
+                .get_mut(session_id)
                 .filter(|active| active.meta.id == session_id)
             {
                 active.turn_in_flight = false;
@@ -428,9 +428,9 @@ impl AppState {
             };
             if is_active && restart {
                 if !restart_deferred {
-                    self.ensure_started(cx);
+                    self.ensure_started(session_id, cx);
                 }
-            } else if is_active && self.dispatch_next_queued(cx).is_err() {
+            } else if is_active && self.dispatch_next_queued(session_id, cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
             if !is_active {
@@ -439,7 +439,7 @@ impl AppState {
         }
 
         if matches!(event, AgentEvent::RewindCompleted { .. })
-            && self.active_session_id() != Some(session_id)
+            && !self.residents.live.contains_key(session_id)
         {
             self.on_background_turn_completed(session_id, cx);
         }
@@ -449,8 +449,18 @@ impl AppState {
     /// The same wall-clock timestamp is persisted and folded exactly once so
     /// the on-disk log and the loaded timeline agree.
     pub(super) fn record_event(&mut self, session_id: &str, event: &AgentEvent, cx: &mut HostCx) {
+        self.record_event_at(session_id, now_millis(), event, cx);
+    }
+
+    fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
         self.store_append_generation += 1;
-        let ts = now_millis();
+        self.event_records
+            .entry(session_id.to_string())
+            .or_insert_with(|| self.store.read_events(session_id))
+            .push(SessionEventRecord {
+                ts: Some(ts),
+                event: event.clone(),
+            });
         self.emit_domain(
             Topic::SessionEvents {
                 session_id: session_id.to_string(),
@@ -474,6 +484,17 @@ impl AppState {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_event_for_replica_test(
+        &mut self,
+        session_id: &str,
+        ts: u64,
+        event: &AgentEvent,
+        cx: &mut HostCx,
+    ) {
+        self.record_event_at(session_id, ts, event, cx);
+    }
+
     /// Give a new session an immediate first-message fallback, then ask a fresh
     /// background provider session for a concise title. The hidden request has
     /// no resume cursor or MCP servers, so it never enters the conversation or
@@ -481,6 +502,7 @@ impl AppState {
     /// while the fallback is untouched, preserving an intervening manual rename.
     pub(super) fn maybe_generate_title(
         &mut self,
+        target_id: &str,
         first_message: &str,
         attachments: &[Attachment],
         cx: &mut HostCx,
@@ -490,7 +512,7 @@ impl AppState {
             return;
         }
 
-        let Some(fallback_meta) = self.residents.active.as_mut().and_then(|active| {
+        let Some(fallback_meta) = self.resident_mut(target_id).and_then(|active| {
             active.meta.title.starts_with("New ").then(|| {
                 active.meta.title = fallback.clone();
                 active.meta.updated_at = now_secs();

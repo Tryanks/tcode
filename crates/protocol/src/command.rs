@@ -41,6 +41,7 @@ pub enum Command {
     /// FIFO store-write barrier has drained.
     ShutdownAllAndFlush,
     OrchestrateTurn {
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
@@ -75,6 +76,7 @@ pub enum Command {
         collapsed: bool,
     },
     RunGitAction {
+        session_id: String,
         action: GitAction,
         message: Option<String>,
         included: Option<Vec<String>>,
@@ -98,39 +100,57 @@ pub enum Command {
         patch: AcpAgentPatch,
     },
     SetActiveAcpAgent {
+        session_id: String,
         id: String,
     },
     ResetSettings,
     WriteRelaunchMarker {
+        session_id: String,
         reopen_settings: String,
     },
     ClearRelaunchMarker,
     SetTerminalHeight {
+        session_id: String,
         height: f32,
     },
-    ToggleTerminalPanel,
-    CloseTerminalPanel,
-    RestartTerminal,
-    NewTerminal,
+    ToggleTerminalPanel {
+        session_id: String,
+    },
+    CloseTerminalPanel {
+        session_id: String,
+    },
+    RestartTerminal {
+        session_id: String,
+    },
+    NewTerminal {
+        session_id: String,
+    },
     SplitTerminal {
+        session_id: String,
         direction: TerminalSplitDirection,
     },
     ActivateTerminal {
+        session_id: String,
         terminal_id: u64,
     },
     CloseTerminal {
+        session_id: String,
         terminal_id: u64,
     },
     CaptureTerminalSelection {
+        session_id: String,
         terminal_id: u64,
     },
     RemoveTerminalContext {
+        session_id: String,
         context_id: u64,
     },
     AddReviewComment {
+        session_id: String,
         comment: ReviewComment,
     },
     RemoveReviewComment {
+        session_id: String,
         index: usize,
     },
     CycleProjectSort,
@@ -192,12 +212,12 @@ pub enum Command {
         cwd: PathBuf,
     },
     SetDraftWorkspace {
+        session_id: String,
         mode: WorkspaceMode,
     },
-    SelectSession {
-        session_id: String,
-    },
+
     SendTurn {
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
@@ -205,73 +225,101 @@ pub enum Command {
     /// given Unix timestamp. Scheduled turns deliberately share the ordinary
     /// queue and are not persisted as conversation events before delivery.
     ScheduleTurn {
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
         fire_at_unix_secs: u64,
     },
     ConfirmRelayAndSend {
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
     Steer {
+        session_id: String,
         text: String,
         attachment_paths: Vec<PathBuf>,
     },
     SteerQueued {
+        session_id: String,
         id: u64,
     },
     DropQueued {
+        session_id: String,
         id: u64,
     },
-    Interrupt,
+    Interrupt {
+        session_id: String,
+    },
     RespondApproval {
+        session_id: String,
         request_id: String,
         decision: ApprovalDecision,
     },
     RespondUserInput {
+        session_id: String,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
     },
     SetActiveModel {
+        session_id: String,
         provider: ProviderKind,
         model: Option<String>,
         profile_id: Option<String>,
     },
     SetActiveOption {
+        session_id: String,
         id: String,
         value: Option<serde_json::Value>,
     },
-    SelectUltrathink,
+    SelectUltrathink {
+        session_id: String,
+    },
     SetInteractionMode {
+        session_id: String,
         mode: InteractionMode,
     },
-    ToggleInteractionMode,
-    ImplementPlan,
-    DismissPlan,
+    ToggleInteractionMode {
+        session_id: String,
+    },
+    ImplementPlan {
+        session_id: String,
+    },
+    DismissPlan {
+        session_id: String,
+    },
     ImplementPlanInNewThread {
+        session_id: String,
         title: String,
     },
     CopyPlan {
         markdown: String,
     },
     SavePlanToWorkspace {
+        session_id: String,
         markdown: String,
     },
     DownloadPlan {
+        session_id: String,
         markdown: String,
         fallback_title: String,
     },
-    LoadBranches,
+    LoadBranches {
+        session_id: String,
+    },
     CheckoutBranch {
+        session_id: String,
         branch: String,
     },
     SetActiveApprovalMode {
+        session_id: String,
         mode: ApprovalMode,
     },
     ToggleFavoriteModel {
         model: String,
     },
     RewindTurn {
+        session_id: String,
         turn: usize,
         mode: RewindMode,
     },
@@ -287,7 +335,11 @@ pub enum Command {
 pub enum CommandResponse {
     Unit,
     ProjectId(Option<String>),
-    PendingRelaunchSection(Option<String>),
+    SessionId(Option<String>),
+    PendingRelaunchSection {
+        section: Option<String>,
+        session_id: Option<String>,
+    },
     ArchivedCount(usize),
     ExternalImportStarted(bool),
 }

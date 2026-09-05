@@ -54,6 +54,7 @@ impl HostCx {
             HostEvent::Domain(envelope) => envelope,
             HostEvent::Runtime(notification) => {
                 let envelope = EventEnvelope {
+                    request_id: None,
                     topic: Topic::RuntimeEvents,
                     event: ServerEvent::Runtime(notification),
                 };

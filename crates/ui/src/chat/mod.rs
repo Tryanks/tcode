@@ -2112,8 +2112,8 @@ impl ChatView {
                     .cursor_pointer()
                     .hover(|row| row.bg(cx.theme().accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.workspace_store.update(cx, |store, _cx| {
-                            store.start_draft(project_id.clone(), cwd.clone());
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.start_draft(project_id.clone(), cwd.clone(), cx);
                         });
                     }))
                     .child(
@@ -3265,8 +3265,8 @@ This begins after the hard break."#;
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
-            let active = state.residents.active.as_mut().expect("active draft");
+            let id = state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).expect("selected draft");
             active.timeline = Timeline::default();
             active.timeline.turns = vec![TurnMeta::default()];
             active.timeline.entries = vec![
@@ -3417,8 +3417,8 @@ This begins after the hard break."#;
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
-            let active = state.residents.active.as_mut().expect("active draft");
+            let id = state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).expect("selected draft");
             active.timeline = timeline;
             active.draft = false;
             (active.meta.id.clone(), active.timeline.clone())

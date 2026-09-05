@@ -192,7 +192,6 @@ impl MobileRoot {
         let active_session = Rc::new(RefCell::new(None));
         let writable = Rc::new(Cell::new(false));
         let cache = ThreadCache::default();
-        let cached = cache.clone();
         let can_write = writable.clone();
         let rejected = incoming.clone();
         let to = target.clone();
@@ -203,40 +202,6 @@ impl MobileRoot {
                         serde_json::from_str::<tcode_protocol::ClientMessage>(&line)
                     && matches!(request.payload, tcode_protocol::ClientPayload::Command(_))
                 {
-                    if let tcode_protocol::ClientPayload::Command(
-                        tcode_protocol::Command::SelectSession { session_id },
-                    ) = &request.payload
-                    {
-                        let events = cached.borrow().get(session_id).and_then(|thread| {
-                            thread.status.clone().map(|status| {
-                                vec![
-                                    tcode_protocol::EventEnvelope {
-                                        topic: tcode_protocol::Topic::ActiveSession,
-                                        event: tcode_protocol::ServerEvent::ActiveSessionReplaced(
-                                            Some(status),
-                                        ),
-                                    },
-                                    tcode_protocol::EventEnvelope {
-                                        topic: tcode_protocol::Topic::SessionEvents {
-                                            session_id: session_id.clone(),
-                                        },
-                                        event: tcode_protocol::ServerEvent::SessionSnapshot(
-                                            thread.records.clone(),
-                                        ),
-                                    },
-                                ]
-                            })
-                        });
-                        if let Some(events) = events {
-                            for event in events {
-                                if let Ok(line) = tcode_protocol::encode_line(
-                                    &tcode_protocol::HostMessage::Event(event),
-                                ) {
-                                    let _ = rejected.send(line).await;
-                                }
-                            }
-                        }
-                    }
                     let ack = tcode_protocol::HostMessage::Ack {
                         id: request.id,
                         result: Err(tcode_protocol::ProtocolError {
@@ -278,22 +243,6 @@ impl MobileRoot {
                     let active = store.read(cx).active_session_id();
                     if *connection.active_session.borrow() != active {
                         *connection.active_session.borrow_mut() = active.clone();
-                        if let Some(session_id) = active {
-                            let _ = connection.link.subscribe(tcode_protocol::Subscription {
-                                topic: tcode_protocol::Topic::SessionEvents { session_id },
-                            });
-                        }
-                    }
-                    let subscribed = connection.link.subscribed_topics();
-                    for session in store.read(cx).flat_sessions() {
-                        let topic = tcode_protocol::Topic::SessionStatus {
-                            session_id: session.id,
-                        };
-                        if !subscribed.contains(&topic) {
-                            let _ = connection
-                                .link
-                                .subscribe(tcode_protocol::Subscription { topic });
-                        }
                     }
                 }
                 cx.notify();
@@ -318,7 +267,6 @@ impl MobileRoot {
         let connection = self.connection.as_mut().expect("connection exists");
         *connection.target.borrow_mut() = transport.to_host;
         let incoming = connection.incoming.clone();
-        let active_session = connection.active_session.clone();
         let cache = connection.cache.clone();
         let receiver = transport.from_host;
         let state = transport.state;
@@ -330,17 +278,22 @@ impl MobileRoot {
                     {
                         let mut cache = cache.borrow_mut();
                         match &event.event {
-                            tcode_protocol::ServerEvent::SessionStatusReplaced(status)
-                            | tcode_protocol::ServerEvent::ActiveSessionReplaced(Some(status)) => {
+                            tcode_protocol::ServerEvent::SessionStatusReplaced(status) => {
                                 cache.entry(status.session_id.clone()).or_default().status =
                                     Some(status.clone());
                             }
-                            tcode_protocol::ServerEvent::SessionSnapshot(records) => {
+                            tcode_protocol::ServerEvent::SessionSnapshot { from, records } => {
                                 if let tcode_protocol::Topic::SessionEvents { session_id } =
                                     &event.topic
                                 {
-                                    cache.entry(session_id.clone()).or_default().records =
-                                        records.clone();
+                                    let held =
+                                        &mut cache.entry(session_id.clone()).or_default().records;
+                                    if *from == 0 {
+                                        held.clear();
+                                    }
+                                    if *from == held.len() as u64 {
+                                        held.extend(records.iter().cloned());
+                                    }
                                 }
                             }
                             tcode_protocol::ServerEvent::SessionEvent(record) => {
@@ -355,11 +308,6 @@ impl MobileRoot {
                                 }
                             }
                             _ => {}
-                        }
-                        if let tcode_protocol::Topic::SessionEvents { session_id } = &event.topic
-                            && active_session.borrow().as_ref() != Some(session_id)
-                        {
-                            continue;
                         }
                     }
                     if incoming.send(line).await.is_err() {
@@ -418,10 +366,8 @@ impl MobileRoot {
         }
         self.install_wire(self.host.connect(&host), cx);
         if let Some(connection) = &self.connection {
-            for topic in connection.link.subscribed_topics() {
-                let _ = connection
-                    .link
-                    .subscribe(tcode_protocol::Subscription { topic });
+            for subscription in connection.link.subscriptions() {
+                let _ = connection.link.subscribe(subscription);
             }
         }
     }
@@ -464,8 +410,8 @@ impl MobileRoot {
             return;
         }
         if let Some(store) = &self.store {
-            store.update(cx, |s, _| {
-                s.start_draft(project.id.clone(), project.root.clone())
+            store.update(cx, |s, cx| {
+                s.start_draft(project.id.clone(), project.root.clone(), cx)
             });
         }
         self.page = Page::Thread;

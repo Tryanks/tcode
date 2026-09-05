@@ -661,8 +661,8 @@ impl SessionsSidebar {
         else {
             return;
         };
-        self.store.update(cx, |store, _cx| {
-            store.start_draft(project.id, project.root);
+        self.store.update(cx, |store, cx| {
+            store.start_draft(project.id, project.root, cx);
         });
         self.window_state
             .update(cx, |state, cx| state.open_thread(cx));
@@ -714,8 +714,8 @@ impl SessionsSidebar {
             return;
         }
         let id = action.0.clone();
-        self.store.update(cx, |store, _cx| {
-            store.fork_thread(id);
+        self.store.update(cx, |store, cx| {
+            store.fork_thread(id, cx);
         });
     }
 
@@ -1255,8 +1255,8 @@ impl SessionsSidebar {
                 .icon(IconName::Plus)
                 .tooltip(crate::tr!("sidebar.create_thread"))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.store.update(cx, |store, _cx| {
-                        store.start_draft(project_id.clone(), cwd.clone());
+                    this.store.update(cx, |store, cx| {
+                        store.start_draft(project_id.clone(), cwd.clone(), cx);
                     });
                     this.window_state
                         .update(cx, |state, cx| state.open_thread(cx));
@@ -1445,8 +1445,8 @@ impl SessionsSidebar {
                 cx.stop_propagation();
                 let cwd = plus_cwd.clone();
                 let project_id = plus_project_id.clone();
-                this.store.update(cx, |store, _cx| {
-                    store.start_draft(project_id, cwd);
+                this.store.update(cx, |store, cx| {
+                    store.start_draft(project_id, cwd, cx);
                 });
                 this.window_state
                     .update(cx, |state, cx| state.open_thread(cx));

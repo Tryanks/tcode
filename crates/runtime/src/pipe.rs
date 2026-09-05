@@ -52,7 +52,7 @@ pub struct SpawnedHost {
     pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     pub import_routes: ImportRoutes,
     link: Arc<OnceLock<HostLink>>,
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     test_mailbox: async_channel::Sender<HostMsg>,
 }
 
@@ -71,13 +71,13 @@ impl SpawnedHost {
             .clone()
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
         self.link().shutdown_blocking()?;
         self.stopped.recv_blocking().map_err(transport_error)
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn update_state_for_test<R>(
         &self,
         update: impl FnOnce(&mut AppState, &mut HostCx) -> R + Send + 'static,
@@ -129,7 +129,7 @@ pub async fn start_external_import(
     }
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError {
         code: "transport_closed".into(),
@@ -163,7 +163,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     let import_routes = ImportRoutes::default();
     let host_terminals = terminals.clone();
     let host_import_routes = import_routes.clone();
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     let test_mailbox = mailbox_tx.clone();
 
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -221,7 +221,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         preview_requests,
         import_routes,
         link: Arc::new(OnceLock::new()),
-        #[cfg(feature = "test-support")]
+        #[cfg(any(test, feature = "test-support"))]
         test_mailbox,
     })
 }
@@ -314,9 +314,18 @@ fn handle_client_message(
             });
         }
         ClientPayload::Subscribe(subscription) => {
-            if let Some(snapshot) = state.subscription_snapshot(&subscription.topic) {
+            state.subscribe(&subscription, cx);
+            if let Some(mut snapshot) = state.subscription_snapshot(&subscription) {
+                snapshot.request_id = Some(id);
                 cx.emit(HostEvent::Domain(snapshot));
             }
+            cx.send_message(HostMessage::Ack {
+                id,
+                result: Ok(CommandResponse::Unit),
+            });
+        }
+        ClientPayload::Unsubscribe(subscription) => {
+            state.unsubscribe(&subscription, cx);
             cx.send_message(HostMessage::Ack {
                 id,
                 result: Ok(CommandResponse::Unit),
@@ -349,17 +358,24 @@ fn dispatch_command(
     let mut response = CommandResponse::Unit;
     match command {
         Command::ApplyPendingRelaunch => {
-            response = CommandResponse::PendingRelaunchSection(app.apply_pending_relaunch(cx));
+            let (section, session_id) = app.apply_pending_relaunch();
+            response = CommandResponse::PendingRelaunchSection {
+                section,
+                session_id,
+            };
         }
-        Command::OpenLatestSession => app.open_latest_session(cx),
+        Command::OpenLatestSession => {
+            response = CommandResponse::SessionId(app.sessions.first().map(|m| m.id.clone()));
+        }
         Command::ShutdownAllAndFlush => {
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));
         }
         Command::OrchestrateTurn {
+            session_id,
             text,
             attachment_paths,
-        } => app.orchestrate_turn(text, attachment_paths, cx),
+        } => app.orchestrate_turn(&session_id, text, attachment_paths, cx),
         Command::ReloadProvider => app.reload_provider(cx),
         Command::SetProfileSecret {
             profile_id,
@@ -384,11 +400,12 @@ fn dispatch_command(
         Command::UpdateProvider { provider } => app.update_provider(provider, cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
+            session_id,
             action,
             message,
             included,
             feature_branch,
-        } => app.run_git_action(action, message, included, feature_branch, cx),
+        } => app.run_git_action(&session_id, action, message, included, feature_branch, cx),
         Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
         Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
         Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
@@ -399,28 +416,49 @@ fn dispatch_command(
             env,
         } => app.add_custom_acp_agent(name, command, args, env, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
-        Command::SetActiveAcpAgent { id } => app.set_active_acp_agent(&id, cx),
+        Command::SetActiveAcpAgent { session_id, id } => {
+            app.set_active_acp_agent(&session_id, &id, cx)
+        }
         Command::ResetSettings => app.reset_settings(cx),
-        Command::WriteRelaunchMarker { reopen_settings } => {
-            app.write_relaunch_marker(&reopen_settings)
-        }
+        Command::WriteRelaunchMarker {
+            session_id,
+            reopen_settings,
+        } => app.write_relaunch_marker(&session_id, &reopen_settings),
         Command::ClearRelaunchMarker => app.clear_relaunch_marker(),
-        Command::SetTerminalHeight { height } => app.set_terminal_height(height, cx),
-        Command::ToggleTerminalPanel => app.toggle_terminal_panel(cx),
-        Command::CloseTerminalPanel => app.close_terminal_panel(cx),
-        Command::RestartTerminal => app.restart_terminal(cx),
-        Command::NewTerminal => app.new_terminal(cx),
-        Command::SplitTerminal { direction } => app.split_terminal(direction, cx),
-        Command::ActivateTerminal { terminal_id } => app.activate_terminal(terminal_id, cx),
-        Command::CloseTerminal { terminal_id } => app.close_terminal(terminal_id, cx),
-        Command::CaptureTerminalSelection { terminal_id } => {
-            app.capture_terminal_selection(terminal_id, cx)
+        Command::SetTerminalHeight { session_id, height } => {
+            app.set_terminal_height(&session_id, height, cx)
         }
-        Command::RemoveTerminalContext { context_id } => {
-            app.remove_terminal_context(context_id, cx)
+        Command::ToggleTerminalPanel { session_id } => app.toggle_terminal_panel(&session_id, cx),
+        Command::CloseTerminalPanel { session_id } => app.close_terminal_panel(&session_id, cx),
+        Command::RestartTerminal { session_id } => app.restart_terminal(&session_id, cx),
+        Command::NewTerminal { session_id } => app.new_terminal(&session_id, cx),
+        Command::SplitTerminal {
+            session_id,
+            direction,
+        } => app.split_terminal(&session_id, direction, cx),
+        Command::ActivateTerminal {
+            session_id,
+            terminal_id,
+        } => app.activate_terminal(&session_id, terminal_id, cx),
+        Command::CloseTerminal {
+            session_id,
+            terminal_id,
+        } => app.close_terminal(&session_id, terminal_id, cx),
+        Command::CaptureTerminalSelection {
+            session_id,
+            terminal_id,
+        } => app.capture_terminal_selection(&session_id, terminal_id, cx),
+        Command::RemoveTerminalContext {
+            session_id,
+            context_id,
+        } => app.remove_terminal_context(&session_id, context_id, cx),
+        Command::AddReviewComment {
+            session_id,
+            comment,
+        } => app.add_review_comment(&session_id, comment, cx),
+        Command::RemoveReviewComment { session_id, index } => {
+            app.remove_review_comment(&session_id, index, cx)
         }
-        Command::AddReviewComment { comment } => app.add_review_comment(comment, cx),
-        Command::RemoveReviewComment { index } => app.remove_review_comment(index, cx),
         Command::CycleProjectSort => app.cycle_project_sort(cx),
         Command::CreateProject { root } => {
             response = CommandResponse::ProjectId(app.create_project(root, cx));
@@ -464,7 +502,9 @@ fn dispatch_command(
             response = CommandResponse::ArchivedCount(app.auto_archive_sweep(&project_id, cx));
         }
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
-        Command::ForkThread { id } => app.fork_thread(&id, cx),
+        Command::ForkThread { id } => {
+            response = CommandResponse::SessionId(app.fork_thread(&id, cx));
+        }
         Command::MergeWorktree { session_id } => app.merge_worktree(&session_id, cx),
         Command::DeleteSession {
             session_id,
@@ -472,60 +512,96 @@ fn dispatch_command(
         } => app.delete_session(&session_id, remove_worktree, cx),
         Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
-        Command::StartDraft { project_id, cwd } => app.start_draft(project_id, cwd, cx),
-        Command::SetDraftWorkspace { mode } => app.set_draft_workspace(mode, cx),
-        Command::SelectSession { session_id } => app.select_session(&session_id, cx),
+        Command::StartDraft { project_id, cwd } => {
+            response = CommandResponse::SessionId(Some(app.start_draft(project_id, cwd, cx)));
+        }
+        Command::SetDraftWorkspace { session_id, mode } => {
+            app.set_draft_workspace(&session_id, mode, cx)
+        }
         Command::SendTurn {
+            session_id,
             text,
             attachment_paths,
-        } => app.send_turn(text, attachment_paths, cx),
+        } => app.send_turn(&session_id, text, attachment_paths, cx),
         Command::ScheduleTurn {
+            session_id,
             text,
             attachment_paths,
             fire_at_unix_secs,
-        } => app.schedule_turn(text, attachment_paths, fire_at_unix_secs, cx),
+        } => app.schedule_turn(&session_id, text, attachment_paths, fire_at_unix_secs, cx),
         Command::ConfirmRelayAndSend {
+            session_id,
             text,
             attachment_paths,
-        } => app.confirm_relay_and_send(text, attachment_paths, cx),
+        } => app.confirm_relay_and_send(&session_id, text, attachment_paths, cx),
         Command::Steer {
+            session_id,
             text,
             attachment_paths,
-        } => app.steer(text, attachment_paths, cx),
-        Command::SteerQueued { id } => app.steer_queued(id, cx),
-        Command::DropQueued { id } => app.drop_queued(id, cx),
-        Command::Interrupt => app.interrupt(cx),
+        } => app.steer(&session_id, text, attachment_paths, cx),
+        Command::SteerQueued { session_id, id } => app.steer_queued(&session_id, id, cx),
+        Command::DropQueued { session_id, id } => app.drop_queued(&session_id, id, cx),
+        Command::Interrupt { session_id } => app.interrupt(&session_id, cx),
         Command::RespondApproval {
+            session_id,
             request_id,
             decision,
-        } => app.respond_approval(request_id, decision, cx),
+        } => app.respond_approval(&session_id, request_id, decision, cx),
         Command::RespondUserInput {
+            session_id,
             request_id,
             answers,
-        } => app.respond_user_input(request_id, answers, cx),
+        } => app.respond_user_input(&session_id, request_id, answers, cx),
         Command::SetActiveModel {
+            session_id,
             provider,
             model,
             profile_id,
-        } => app.set_active_model(provider, model, profile_id, cx),
-        Command::SetActiveOption { id, value } => app.set_active_option(&id, value, cx),
-        Command::SelectUltrathink => app.select_ultrathink(cx),
-        Command::SetInteractionMode { mode } => app.set_interaction_mode(mode, cx),
-        Command::ToggleInteractionMode => app.toggle_interaction_mode(cx),
-        Command::ImplementPlan => app.implement_plan(cx),
-        Command::DismissPlan => app.dismiss_plan(cx),
-        Command::ImplementPlanInNewThread { title } => app.implement_plan_in_new_thread(title, cx),
+        } => app.set_active_model(&session_id, provider, model, profile_id, cx),
+        Command::SetActiveOption {
+            session_id,
+            id,
+            value,
+        } => app.set_active_option(&session_id, &id, value, cx),
+        Command::SelectUltrathink { session_id } => app.select_ultrathink(&session_id, cx),
+        Command::SetInteractionMode { session_id, mode } => {
+            app.set_interaction_mode(&session_id, mode, cx)
+        }
+        Command::ToggleInteractionMode { session_id } => {
+            app.toggle_interaction_mode(&session_id, cx)
+        }
+        Command::ImplementPlan { session_id } => app.implement_plan(&session_id, cx),
+        Command::DismissPlan { session_id } => app.dismiss_plan(&session_id, cx),
+        Command::ImplementPlanInNewThread { session_id, title } => {
+            response = CommandResponse::SessionId(app.implement_plan_in_new_thread(
+                &session_id,
+                title,
+                cx,
+            ));
+        }
         Command::CopyPlan { markdown } => app.copy_plan(markdown, cx),
-        Command::SavePlanToWorkspace { markdown } => app.save_plan_to_workspace(markdown, cx),
+        Command::SavePlanToWorkspace {
+            session_id,
+            markdown,
+        } => app.save_plan_to_workspace(&session_id, markdown, cx),
         Command::DownloadPlan {
+            session_id,
             markdown,
             fallback_title,
-        } => app.download_plan(markdown, fallback_title, cx),
-        Command::LoadBranches => app.load_branches(cx),
-        Command::CheckoutBranch { branch } => app.checkout_branch(branch, cx),
-        Command::SetActiveApprovalMode { mode } => app.set_active_approval_mode(mode, cx),
+        } => app.download_plan(&session_id, markdown, fallback_title, cx),
+        Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
+        Command::CheckoutBranch { session_id, branch } => {
+            app.checkout_branch(&session_id, branch, cx)
+        }
+        Command::SetActiveApprovalMode { session_id, mode } => {
+            app.set_active_approval_mode(&session_id, mode, cx)
+        }
         Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
-        Command::RewindTurn { turn, mode } => app.rewind_turn(turn, mode, cx),
+        Command::RewindTurn {
+            session_id,
+            turn,
+            mode,
+        } => app.rewind_turn(&session_id, turn, mode, cx),
     }
     CommandOutcome::Immediate(Ok(response))
 }
@@ -536,8 +612,10 @@ fn dispatch_query(
     query: Query,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
-        Query::ListActiveWorkspace => {
-            let cwd = app.active_session().map(|active| active.meta.cwd.clone());
+        Query::ListActiveWorkspace { session_id } => {
+            let cwd = app
+                .resident(&session_id)
+                .map(|active| active.meta.cwd.clone());
             let task = app.list_workspace_at(cwd, cx);
             cx.spawn_background(async move { Ok(QueryResponse::ActiveWorkspace(task.await)) })
         }
@@ -545,8 +623,11 @@ fn dispatch_query(
             let task = app.scan_external_history(cx);
             cx.spawn_background(async move { Ok(QueryResponse::ExternalHistory(task.await)) })
         }
-        Query::GenerateCommitMessage { included } => {
-            let task = app.generate_commit_message(included, cx);
+        Query::GenerateCommitMessage {
+            session_id,
+            included,
+        } => {
+            let task = app.generate_commit_message(&session_id, included, cx);
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::CommitMessage)
@@ -675,6 +756,7 @@ mod tests {
         let events = link.events();
 
         link.subscribe(Subscription {
+            after: None,
             topic: Topic::Index,
         })
         .expect("send subscription");
@@ -683,7 +765,7 @@ mod tests {
         });
         assert!(matches!(
             snapshot.event,
-            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot { activity: _,
                 ref sessions,
                 ref projects,
             }) if sessions.is_empty() && projects.is_empty()
@@ -752,8 +834,10 @@ mod tests {
             QueryResponse::IsDirectory(true)
         );
         assert_eq!(
-            smol::block_on(link.query(Query::ListActiveWorkspace))
-                .expect("query inactive workspace over pipe"),
+            smol::block_on(link.query(Query::ListActiveWorkspace {
+                session_id: "missing".into()
+            }))
+            .expect("query inactive workspace over pipe"),
             QueryResponse::ActiveWorkspace(Vec::new())
         );
 

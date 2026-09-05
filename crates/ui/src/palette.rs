@@ -442,8 +442,8 @@ impl CommandPalette {
         match action {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
-                self.store.update(cx, |store, _cx| {
-                    store.start_draft(project_id, cwd);
+                self.store.update(cx, |store, cx| {
+                    store.start_draft(project_id, cwd, cx);
                 });
             }
             Action::OpenSettings => {

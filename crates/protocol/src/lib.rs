@@ -26,7 +26,7 @@ pub use wire::{
     decode_host_line, encode_line,
 };
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[cfg(test)]
 mod tests;

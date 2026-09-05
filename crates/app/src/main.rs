@@ -451,9 +451,14 @@ fn main() {
             // Only meaningful for a host in this process: the marker lives in
             // this machine's data dir, and a remote host's marker is its own.
             if host.is_some()
-                && let Ok(CommandResponse::PendingRelaunchSection(Some(section))) =
-                    link.command_blocking(Command::ApplyPendingRelaunch)
+                && let Ok(CommandResponse::PendingRelaunchSection {
+                    section: Some(section),
+                    session_id,
+                }) = link.command_blocking(Command::ApplyPendingRelaunch)
             {
+                if let Some(id) = session_id {
+                    workspace_store.update(cx, |store, _| store.select_session(id));
+                }
                 window_state.update(cx, |state, cx| {
                     state.pending_settings_section = Some(section);
                     state.open_settings(cx);
@@ -588,7 +593,11 @@ fn main() {
                 }
 
                 if open_latest {
-                    let _ = link.dispatch(Command::OpenLatestSession);
+                    if let Ok(CommandResponse::SessionId(Some(id))) =
+                        link.command(Command::OpenLatestSession).await
+                    {
+                        workspace_store.update(cx, |store, _| store.select_session(id));
+                    }
                     for _ in 0..100 {
                         if cx.update(|cx| workspace_store.read(cx).active_session_id().is_some()) {
                             break;

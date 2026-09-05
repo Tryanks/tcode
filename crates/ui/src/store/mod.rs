@@ -62,9 +62,8 @@ impl From<&Topic> for TopicKind {
             Topic::Index => Self::Index,
             Topic::Settings => Self::Settings,
             Topic::Providers => Self::Providers,
-            Topic::GitStatus => Self::GitStatus,
+            Topic::GitStatus { .. } => Self::GitStatus,
             Topic::RuntimeEvents => Self::RuntimeEvents,
-            Topic::ActiveSession => Self::ActiveSession,
             Topic::Terminal { .. } => Self::Terminal,
         }
     }
@@ -116,6 +115,10 @@ pub struct WorkspaceStore {
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
+    selected_session_id: Option<String>,
+    session_records: HashMap<String, Vec<StoredEvent>>,
+    session_statuses: HashMap<String, SessionStatus>,
+    git_statuses: HashMap<String, GitStatusStatus>,
     session_replica: Option<(String, Timeline)>,
     session_status_replica: Option<SessionStatus>,
     providers_replica: ProvidersStatus,
@@ -181,12 +184,7 @@ fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
 impl WorkspaceStore {
     fn destination(status: &SessionStatus) -> ConversationDestination {
         if status.draft {
-            ConversationDestination::ProjectDraft(
-                status
-                    .project_id
-                    .clone()
-                    .unwrap_or_else(|| status.session_id.clone()),
-            )
+            ConversationDestination::ProjectDraft(status.session_id.clone())
         } else {
             ConversationDestination::Thread(status.session_id.clone())
         }
@@ -205,6 +203,10 @@ impl WorkspaceStore {
             connection_state: ConnectionState::Connected,
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
+            selected_session_id: None,
+            session_records: HashMap::new(),
+            session_statuses: HashMap::new(),
+            git_statuses: HashMap::new(),
             session_replica: None,
             session_status_replica: None,
             providers_replica: ProvidersStatus::default(),
@@ -222,20 +224,19 @@ impl WorkspaceStore {
 
         // Construction seeding is itself protocol traffic: subscribe, then
         // apply each snapshot event. No live AppState read exists here.
-        let seed_topics = [
-            Topic::Index,
-            Topic::Settings,
-            Topic::Providers,
-            Topic::GitStatus,
-            Topic::ActiveSession,
-        ];
+        let seed_topics = [Topic::Index, Topic::Settings, Topic::Providers];
         for topic in &seed_topics {
             if let Err(error) = host.subscribe(Subscription {
+                after: None,
                 topic: topic.clone(),
             }) {
                 log::error!("failed to subscribe to {topic:?}: {}", error.message);
             }
         }
+        let _ = host.subscribe(Subscription {
+            topic: Topic::RuntimeEvents,
+            after: None,
+        });
         let events = host.events();
         // A desktop build constructs its in-process or remote host before the
         // first window and reads settings immediately afterwards. Preserve
@@ -253,9 +254,7 @@ impl WorkspaceStore {
                         match (&envelope.topic, &envelope.event) {
                             (Topic::Index, ServerEvent::IndexSnapshot(_))
                             | (Topic::Settings, ServerEvent::SettingsSnapshot(_))
-                            | (Topic::Providers, ServerEvent::ProvidersReplaced(_))
-                            | (Topic::GitStatus, ServerEvent::GitStatusReplaced(_))
-                            | (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(_)) => {
+                            | (Topic::Providers, ServerEvent::ProvidersReplaced(_)) => {
                                 seeded.insert(envelope.topic.clone());
                             }
                             _ => {}
@@ -378,6 +377,18 @@ impl WorkspaceStore {
 
     pub fn sync_active_conversation_ui(&mut self) {
         let destination = self.session_status_replica.as_ref().map(Self::destination);
+        if let (
+            Some(tcode_core::ui::ConversationDestination::ProjectDraft(draft)),
+            Some(tcode_core::ui::ConversationDestination::Thread(thread)),
+        ) = (&self.active_destination, &destination)
+            && draft == thread
+            && let Some(ui) = self
+                .conversation_ui
+                .remove(self.active_destination.as_ref().unwrap())
+        {
+            self.conversation_ui
+                .insert(destination.clone().unwrap(), ui);
+        }
         if let Some((destination, status)) = destination
             .clone()
             .zip(self.session_status_replica.as_ref())
@@ -394,75 +405,10 @@ impl WorkspaceStore {
     }
 
     fn apply_domain_event(&mut self, envelope: &EventEnvelope) {
+        if !self.host.subscription_reply_is_current(envelope) {
+            return;
+        }
         match (&envelope.topic, &envelope.event) {
-            (Topic::ActiveSession, ServerEvent::ActiveSessionReplaced(status)) => {
-                let previous = self.active_destination.clone();
-                let previous_status = self.session_status_replica.clone();
-                let previous_session = previous_status
-                    .as_ref()
-                    .map(|status| status.session_id.clone());
-                let mut status = status.clone();
-                if let Some(status) = status.as_mut() {
-                    status.native_rewind_prefill_available =
-                        self.native_rewind_prefills.contains_key(&status.session_id);
-                }
-                let next_session = status.as_ref().map(|status| status.session_id.as_str());
-
-                // A thread switch parks the old session before ActiveSession is
-                // replaced. Its SessionStatus event therefore arrives while the
-                // client still considers it active and updates the foreground
-                // replica instead of `background_session_flags`. Preserve that
-                // final, authoritative status when the active id changes so the
-                // sidebar does not lose Working/waiting state during the handoff.
-                if let Some(previous_status) = previous_status.as_ref()
-                    && next_session != Some(previous_status.session_id.as_str())
-                    && !previous_status.draft
-                    && self.index_replica.0.iter().any(|meta| {
-                        meta.id == previous_status.session_id && meta.archived_at.is_none()
-                    })
-                {
-                    self.background_session_flags.insert(
-                        previous_status.session_id.clone(),
-                        (
-                            previous_status.working,
-                            previous_status.pending_approval,
-                            previous_status.pending_user_input,
-                            Self::status_background_only(previous_status),
-                        ),
-                    );
-                }
-                self.session_status_replica = status.clone();
-                let destination = status.as_ref().map(Self::destination);
-                if previous_session.as_deref()
-                    != status.as_ref().map(|status| status.session_id.as_str())
-                {
-                    self.session_replica = None;
-                }
-                if let Some((destination, status)) = destination.clone().zip(status.as_ref()) {
-                    if previous.as_ref().is_some_and(|previous| {
-                        previous != &destination
-                            && matches!(previous, ConversationDestination::ProjectDraft(_))
-                            && matches!(destination, ConversationDestination::Thread(_))
-                    }) && let Some(previous) = previous.as_ref()
-                        && let Some(state) = self.conversation_ui.remove(previous)
-                    {
-                        self.conversation_ui
-                            .entry(destination.clone())
-                            .or_insert(state);
-                    }
-                    self.conversation_ui
-                        .entry(destination.clone())
-                        .or_insert_with(|| {
-                            ConversationUiState::new(
-                                self.settings_replica.word_wrap_diffs,
-                                status.terminal_open,
-                                status.terminal_height,
-                            )
-                        });
-                    self.background_session_flags.remove(&status.session_id);
-                }
-                self.active_destination = destination;
-            }
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
                     .index_replica
@@ -505,6 +451,19 @@ impl WorkspaceStore {
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+                self.background_session_flags = snapshot.activity.clone();
+                if let Some(id) = &self.selected_session_id {
+                    self.background_session_flags.remove(id);
+                }
+                if self.session_status_replica.as_ref().is_some_and(|status| {
+                    !status.draft
+                        && !snapshot
+                            .sessions
+                            .iter()
+                            .any(|meta| meta.id == status.session_id && meta.archived_at.is_none())
+                }) {
+                    self.leave_session();
+                }
             }
             (Topic::Settings, ServerEvent::SettingsReplaced(settings))
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
@@ -513,21 +472,23 @@ impl WorkspaceStore {
             (Topic::Providers, ServerEvent::ProvidersReplaced(status)) => {
                 self.providers_replica = status.clone();
             }
-            (Topic::GitStatus, ServerEvent::GitStatusReplaced(status)) => {
-                self.git_status_replica = status.clone();
+            (Topic::GitStatus { session_id }, ServerEvent::GitStatusReplaced(status)) => {
+                self.git_statuses.insert(session_id.clone(), status.clone());
+                if self.selected_session_id.as_ref() == Some(session_id) {
+                    self.git_status_replica = status.clone();
+                }
             }
             (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
                 if status.session_id == *session_id =>
             {
-                if self
-                    .session_status_replica
-                    .as_ref()
-                    .is_some_and(|active| active.session_id == *session_id)
-                {
+                self.session_statuses
+                    .insert(session_id.clone(), status.clone());
+                if self.selected_session_id.as_ref() == Some(session_id) {
                     let mut status = status.clone();
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
+                    self.sync_active_conversation_ui();
                     self.background_session_flags.remove(session_id);
                 } else {
                     self.background_session_flags.insert(
@@ -541,23 +502,44 @@ impl WorkspaceStore {
                     );
                 }
             }
-            (Topic::SessionEvents { session_id }, ServerEvent::SessionSnapshot(records)) => {
-                let mut timeline =
-                    Timeline::fold_events(records.iter().map(|record| StoredEvent {
-                        ts: record.ts,
-                        event: record.event.clone(),
-                    }));
-                let live_turn_running = self
+            (
+                Topic::SessionEvents { session_id },
+                ServerEvent::SessionSnapshot { from, records },
+            ) => {
+                if self.selected_session_id.as_ref() != Some(session_id) {
+                    return;
+                }
+                let held = self.session_records.entry(session_id.clone()).or_default();
+                if *from == 0 {
+                    held.clear();
+                } else if *from != held.len() as u64 {
+                    held.clear();
+                    self.session_replica = None;
+                    let _ = self.host.subscribe(Subscription {
+                        topic: envelope.topic.clone(),
+                        after: None,
+                    });
+                    return;
+                }
+                held.extend(records.iter().cloned());
+                let mut timeline = Timeline::fold_events(held.iter().cloned());
+                if !self
                     .session_status_replica
                     .as_ref()
-                    .filter(|status| status.session_id == *session_id)
-                    .is_some_and(|status| status.turn_running);
-                if !live_turn_running {
+                    .is_some_and(|status| status.turn_running)
+                {
                     timeline.mark_idle();
                 }
                 self.session_replica = Some((session_id.clone(), timeline));
+                let _ = self.host.update_after(&envelope.topic, held.len() as u64);
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
+                if self.selected_session_id.as_ref() != Some(session_id) {
+                    return;
+                }
+                let held = self.session_records.entry(session_id.clone()).or_default();
+                held.push(record.clone());
+                let _ = self.host.update_after(&envelope.topic, held.len() as u64);
                 // A new turn means the user moved on; the recovery card for the
                 // stopped one is stale.
                 if matches!(record.event, agent::AgentEvent::TurnStarted { .. }) {
@@ -1022,9 +1004,7 @@ impl WorkspaceStore {
     }
 
     pub fn active_session_id(&self) -> Option<String> {
-        self.session_status_replica
-            .as_ref()
-            .map(|status| status.session_id.clone())
+        self.selected_session_id.clone()
     }
 
     pub fn turn_running_for(&self, session_id: &str) -> bool {
@@ -1639,6 +1619,13 @@ impl WorkspaceStore {
 
     #[cfg(test)]
     pub(crate) fn set_session_replica_for_test(&mut self, session_id: String, timeline: Timeline) {
+        self.select_session(session_id.clone());
+        self.host
+            .command_blocking(tcode_protocol::Command::ClearRelaunchMarker)
+            .expect("subscription fence");
+        while let Ok(envelope) = self.host.events().try_recv() {
+            self.apply_domain_event(&envelope);
+        }
         self.session_replica = Some((session_id, timeline));
     }
 
@@ -1737,9 +1724,10 @@ impl WorkspaceStore {
     }
 
     pub fn list_active_workspace(&self, cx: &mut App) -> Task<Vec<PathEntry>> {
+        let session_id = self.active_session_id().unwrap_or_default();
         let host = self.host.clone();
         cx.spawn(
-            async move |_| match host.query(Query::ListActiveWorkspace).await {
+            async move |_| match host.query(Query::ListActiveWorkspace { session_id }).await {
                 Ok(QueryResponse::ActiveWorkspace(entries)) => entries,
                 Ok(other) => {
                     log::error!("unexpected active-workspace response: {other:?}");
@@ -1849,14 +1837,21 @@ impl WorkspaceStore {
         included: Option<Vec<String>>,
         cx: &mut App,
     ) -> Task<Result<String, String>> {
+        let session_id = self.active_session_id().unwrap_or_default();
         let host = self.host.clone();
-        cx.spawn(
-            async move |_| match host.query(Query::GenerateCommitMessage { included }).await {
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::GenerateCommitMessage {
+                    session_id,
+                    included,
+                })
+                .await
+            {
                 Ok(QueryResponse::CommitMessage(message)) => Ok(message),
                 Ok(other) => Err(format!("unexpected commit-message response: {other:?}")),
                 Err(error) => Err(error.message),
-            },
-        )
+            }
+        })
     }
 
     pub fn plan_panel_state(&self) -> (Option<String>, Vec<agent::PlanStep>) {
@@ -1887,6 +1882,14 @@ impl WorkspaceStore {
                     .is_some_and(|other| other.branch == worktree.branch)
         });
         (!shared).then_some(worktree)
+    }
+}
+
+impl Drop for WorkspaceStore {
+    fn drop(&mut self) {
+        for subscription in self.host.subscriptions() {
+            let _ = self.host.unsubscribe(subscription);
+        }
     }
 }
 
@@ -1947,6 +1950,88 @@ mod tests {
     }
 
     #[gpui::test]
+    fn reconnect_and_mismatched_tail_preserve_exactly_one_copy_of_each_record(
+        cx: &mut TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "p4a-reconnect-{}",
+            tcode_services::store::now_millis()
+        ));
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.id = "reconnect".into();
+        disk.upsert_meta(&meta).unwrap();
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        workspace.update(cx, |store, _| store.select_session("reconnect".into()));
+        wait_until(cx, &workspace, "selected status", |cx| {
+            workspace.read_with(cx, |store, _| store.session_status_replica.is_some())
+        });
+        update_host!(&host, |state, cx| {
+            for (ts, text) in [(1, "one"), (2, "two"), (3, "three")] {
+                state.record_event_for_replica_test(
+                    "reconnect",
+                    ts,
+                    &AgentEvent::Warning {
+                        message: text.into(),
+                    },
+                    cx,
+                );
+            }
+        });
+        wait_until(cx, &workspace, "three records", |cx| {
+            workspace.read_with(cx, |store, _| store.session_records["reconnect"].len() == 3)
+        });
+        host.link()
+            .set_connection_state(tcode_client::ConnectionState::Reconnecting { attempt: 1 });
+        host.link()
+            .set_connection_state(tcode_client::ConnectionState::Connected);
+        command(&host, Command::ClearRelaunchMarker);
+        workspace.update(cx, |store, cx| {
+            store.drain_host_events_for_test(cx);
+            assert_eq!(store.session_records["reconnect"].len(), 3);
+            store.apply_domain_event(&EventEnvelope {
+                request_id: None,
+                topic: Topic::SessionEvents {
+                    session_id: "reconnect".into(),
+                },
+                event: ServerEvent::SessionSnapshot {
+                    from: 2,
+                    records: vec![],
+                },
+            });
+            assert!(
+                store.session_replica.is_none(),
+                "invalid tail must request a full replacement"
+            );
+        });
+        wait_until(
+            cx,
+            &workspace,
+            "full replacement after invalid tail",
+            |cx| workspace.read_with(cx, |store, _| store.session_records["reconnect"].len() == 3),
+        );
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(
+                store.session_records["reconnect"]
+                    .iter()
+                    .map(|record| record.ts)
+                    .collect::<Vec<_>>(),
+                vec![Some(1), Some(2), Some(3)]
+            );
+            let subscription = store
+                .host
+                .subscriptions()
+                .into_iter()
+                .find(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                .unwrap();
+            assert_eq!(subscription.after, Some(3));
+        });
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
     fn session_replica_matches_live_timeline_for_synthetic_turn(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "tcode-session-replica-consistency-test-{}",
@@ -1990,12 +2075,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: session_id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "initial session timeline replica", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2034,30 +2114,21 @@ mod tests {
         for (offset, event) in live_events.into_iter().enumerate() {
             let event_session_id = session_id.clone();
             update_host!(&host, move |state, cx| {
-                state
-                    .residents
-                    .active
-                    .as_mut()
-                    .expect("active session")
-                    .timeline
-                    .apply_at(Some(200 + offset as u64), &event);
-                cx.emit(HostEvent::Domain(EventEnvelope {
-                    topic: Topic::SessionEvents {
-                        session_id: event_session_id,
-                    },
-                    event: ServerEvent::SessionEvent(SessionEventRecord {
-                        ts: Some(200 + offset as u64),
-                        event,
-                    }),
-                }));
+                state.record_event_for_replica_test(
+                    &event_session_id,
+                    200 + offset as u64,
+                    &event,
+                    cx,
+                );
             });
         }
-        let live = update_host!(&host, |state, _| {
+        let target_id = session_id.clone();
+        let live = update_host!(&host, move |state, _| {
             let timeline = &state
                 .residents
-                .active
-                .as_ref()
-                .expect("active session")
+                .live
+                .get(&target_id)
+                .expect("selected session")
                 .timeline;
             (
                 timeline
@@ -2206,12 +2277,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: session_id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2220,18 +2286,21 @@ mod tests {
                     .is_some_and(|status| status.session_id == session_id)
             })
         });
-        update_host!(&host, |state, cx| {
-            state.queue_message_for_replica_test("queued for replication".into(), cx);
+        let target_id = session_id.clone();
+        update_host!(&host, move |state, cx| {
+            state.queue_message_for_replica_test(&target_id, "queued for replication".into(), cx);
         });
         command(
             &host,
             Command::SetInteractionMode {
+                session_id: session_id.clone(),
                 mode: agent::InteractionMode::Plan,
             },
         );
         command(
             &host,
             Command::AddReviewComment {
+                session_id: session_id.clone(),
                 comment: ReviewComment::new(
                     "src/lib.rs".into(),
                     4,
@@ -2295,12 +2364,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: session_id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2319,6 +2383,7 @@ mod tests {
             status.session_id = background_session_id.clone();
             status.pending_user_input = true;
             store.apply_domain_event(&EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionStatus {
                     session_id: background_session_id.clone(),
                 },
@@ -2352,12 +2417,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: first.id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(first.id.clone()));
         wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2375,6 +2435,7 @@ mod tests {
             parked.turn_running = true;
             parked.working = true;
             store.apply_domain_event(&EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionStatus {
                     session_id: first.id.clone(),
                 },
@@ -2387,14 +2448,19 @@ mod tests {
             next.turn_running = false;
             next.working = false;
             store.apply_domain_event(&EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionStatus {
                     session_id: second.id.clone(),
                 },
                 event: ServerEvent::SessionStatusReplaced(next.clone()),
             });
+            store.select_session(next.session_id.clone());
             store.apply_domain_event(&EventEnvelope {
-                topic: Topic::ActiveSession,
-                event: ServerEvent::ActiveSessionReplaced(Some(next)),
+                request_id: None,
+                topic: Topic::SessionStatus {
+                    session_id: next.session_id.clone(),
+                },
+                event: ServerEvent::SessionStatusReplaced(next),
             });
         });
 
@@ -2427,12 +2493,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: first.id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(first.id.clone()));
         wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2442,12 +2503,23 @@ mod tests {
             })
         });
 
+        // This replica test deliberately owns both status subscriptions. Ordinary
+        // navigation owns only its selected session; mux isolation is tested separately.
+        host.link()
+            .subscribe(tcode_protocol::Subscription {
+                topic: Topic::SessionStatus {
+                    session_id: second.id.clone(),
+                },
+                after: None,
+            })
+            .unwrap();
         for (session_id, text) in [
             (first.id.clone(), "first parked prefill".to_string()),
             (second.id.clone(), "second parked prefill".to_string()),
         ] {
             update_host!(&host, move |_state, cx| {
                 cx.emit(HostEvent::Domain(EventEnvelope {
+                    request_id: None,
                     topic: Topic::SessionStatus {
                         session_id: session_id.clone(),
                     },
@@ -2463,12 +2535,7 @@ mod tests {
             workspace.update(cx, |store, _cx| store.take_native_rewind_prefill()),
             Some("first parked prefill".into())
         );
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: second.id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(second.id.clone()));
         wait_until(cx, &workspace, "second selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2498,12 +2565,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: meta.id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
         wait_until(cx, &workspace, "selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2516,6 +2578,7 @@ mod tests {
         let session_id = meta.id.clone();
         update_host!(&host, move |_state, cx| {
             cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionStatus {
                     session_id: session_id.clone(),
                 },
@@ -2535,6 +2598,7 @@ mod tests {
         let session_id = meta.id.clone();
         update_host!(&host, move |_state, cx| {
             cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionEvents {
                     session_id: session_id.clone(),
                 },
@@ -2566,12 +2630,7 @@ mod tests {
 
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        command(
-            &host,
-            Command::SelectSession {
-                session_id: meta.id.clone(),
-            },
-        );
+        workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
         wait_until(cx, &workspace, "selected session", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2584,6 +2643,7 @@ mod tests {
         let session_id = meta.id.clone();
         update_host!(&host, move |_state, cx| {
             cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionStatus {
                     session_id: session_id.clone(),
                 },
@@ -2601,6 +2661,7 @@ mod tests {
         let session_id = meta.id.clone();
         update_host!(&host, move |_state, cx| {
             cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionEvents {
                     session_id: session_id.clone(),
                 },
@@ -2629,9 +2690,14 @@ mod tests {
             tcode_services::store::now_millis()
         ));
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
+        meta.id = "git-replica".into();
+        session_store.upsert_meta(&meta).unwrap();
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
 
+        workspace.update(cx, |store, _| store.select_session("git-replica".into()));
+        command(&host, Command::ClearRelaunchMarker);
         update_host!(&host, |state, _cx| {
             state.acp_registry = Some(
                 serde_json::from_value(serde_json::json!({
@@ -2653,18 +2719,21 @@ mod tests {
                 .entry(ProviderKind::Codex)
                 .or_default()
                 .checking = true;
-            state.git_status = Some(GitStatus {
-                is_repo: true,
-                branch: Some("feature/replica".into()),
-                has_working_tree_changes: true,
-                changed_files: vec![GitFileEntry {
-                    path: "src/replica.rs".into(),
-                    insertions: 4,
-                    deletions: 2,
-                }],
-                ..Default::default()
-            });
-            state.git_busy = true;
+            state.git_status.insert(
+                "git-replica".into(),
+                GitStatus {
+                    is_repo: true,
+                    branch: Some("feature/replica".into()),
+                    has_working_tree_changes: true,
+                    changed_files: vec![GitFileEntry {
+                        path: "src/replica.rs".into(),
+                        insertions: 4,
+                        deletions: 2,
+                    }],
+                    ..Default::default()
+                },
+            );
+            state.git_busy.insert("git-replica".into());
         });
         wait_until(cx, &workspace, "provider and git replicas", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2680,7 +2749,7 @@ mod tests {
         let (live_providers, live_git) = update_host!(&host, |state, _| {
             (
                 state.providers_status_snapshot(),
-                state.git_status_snapshot(),
+                state.git_status_snapshot("git-replica"),
             )
         });
         let (replica_providers, replica_git) = workspace.read_with(cx, |store, _| {

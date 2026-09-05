@@ -38,6 +38,7 @@ fn round_trip_client_payload(id: u64, payload: ClientPayload) {
 #[test]
 fn round_trips_top_level_wire_types() {
     let command = Command::SendTurn {
+        session_id: "session-1".into(),
         text: "hello".into(),
         attachment_paths: vec![PathBuf::from("/tmp/image.png")],
     };
@@ -53,6 +54,7 @@ fn round_trips_top_level_wire_types() {
     round_trip(&response);
 
     let subscription = Subscription {
+        after: None,
         topic: Topic::SessionEvents {
             session_id: "session-1".into(),
         },
@@ -67,6 +69,7 @@ fn round_trips_top_level_wire_types() {
     round_trip(&ClientPayload::Subscribe(subscription));
 
     let event = EventEnvelope {
+        request_id: None,
         topic: Topic::RuntimeEvents,
         event: ServerEvent::Runtime(RuntimeNotification::Notice(
             RuntimeNotice::UpdateAvailable {
@@ -78,6 +81,7 @@ fn round_trips_top_level_wire_types() {
     round_trip(&event);
     round_trip(&HostMessage::Event(event));
     round_trip(&EventEnvelope {
+        request_id: None,
         topic: Topic::SessionStatus {
             session_id: "session-1".into(),
         },
@@ -158,6 +162,7 @@ fn round_trips_top_level_wire_types() {
         }),
     });
     round_trip(&EventEnvelope {
+        request_id: None,
         topic: Topic::Providers,
         event: ServerEvent::ProvidersReplaced(ProvidersStatus {
             models_loading: HashMap::from([(ProviderKind::Codex, true)]),
@@ -208,7 +213,10 @@ fn round_trips_top_level_wire_types() {
         }),
     });
     round_trip(&EventEnvelope {
-        topic: Topic::GitStatus,
+        request_id: None,
+        topic: Topic::GitStatus {
+            session_id: "session-1".into(),
+        },
         event: ServerEvent::GitStatusReplaced(GitStatusStatus {
             status: Some(tcode_core::git::GitStatus {
                 is_repo: true,
@@ -301,10 +309,10 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::WriteRelaunchMarker { .. } => {}
         Command::ClearRelaunchMarker => {}
         Command::SetTerminalHeight { .. } => {}
-        Command::ToggleTerminalPanel => {}
-        Command::CloseTerminalPanel => {}
-        Command::RestartTerminal => {}
-        Command::NewTerminal => {}
+        Command::ToggleTerminalPanel { .. } => {}
+        Command::CloseTerminalPanel { .. } => {}
+        Command::RestartTerminal { .. } => {}
+        Command::NewTerminal { .. } => {}
         Command::SplitTerminal { .. } => {}
         Command::ActivateTerminal { .. } => {}
         Command::CloseTerminal { .. } => {}
@@ -330,28 +338,27 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
         Command::MarkSessionUnread { .. } => {}
         Command::StartDraft { .. } => {}
         Command::SetDraftWorkspace { .. } => {}
-        Command::SelectSession { .. } => {}
         Command::SendTurn { .. } => {}
         Command::ScheduleTurn { .. } => {}
         Command::ConfirmRelayAndSend { .. } => {}
         Command::Steer { .. } => {}
         Command::SteerQueued { .. } => {}
         Command::DropQueued { .. } => {}
-        Command::Interrupt => {}
+        Command::Interrupt { .. } => {}
         Command::RespondApproval { .. } => {}
         Command::RespondUserInput { .. } => {}
         Command::SetActiveModel { .. } => {}
         Command::SetActiveOption { .. } => {}
-        Command::SelectUltrathink => {}
+        Command::SelectUltrathink { .. } => {}
         Command::SetInteractionMode { .. } => {}
-        Command::ToggleInteractionMode => {}
-        Command::ImplementPlan => {}
-        Command::DismissPlan => {}
+        Command::ToggleInteractionMode { .. } => {}
+        Command::ImplementPlan { .. } => {}
+        Command::DismissPlan { .. } => {}
         Command::ImplementPlanInNewThread { .. } => {}
         Command::CopyPlan { .. } => {}
         Command::SavePlanToWorkspace { .. } => {}
         Command::DownloadPlan { .. } => {}
-        Command::LoadBranches => {}
+        Command::LoadBranches { .. } => {}
         Command::CheckoutBranch { .. } => {}
         Command::SetActiveApprovalMode { .. } => {}
         Command::ToggleFavoriteModel { .. } => {}
@@ -362,7 +369,7 @@ fn assert_command_crosses_ndjson(id: u64, command: Command) {
 
 fn assert_query_crosses_ndjson(id: u64, query: Query) {
     match &query {
-        Query::ListActiveWorkspace => {}
+        Query::ListActiveWorkspace { .. } => {}
         Query::ScanExternalHistory => {}
         Query::GenerateCommitMessage { .. } => {}
         Query::LoadGitDiff { .. } => {}
@@ -393,6 +400,7 @@ fn every_command_and_query_crosses_ndjson() {
         Command::OpenLatestSession,
         Command::ShutdownAllAndFlush,
         Command::OrchestrateTurn {
+            session_id: "session-1".into(),
             text: "coordinate".into(),
             attachment_paths: vec![PathBuf::from("/tmp/input.png")],
         },
@@ -423,6 +431,7 @@ fn every_command_and_query_crosses_ndjson() {
         },
         Command::SetSidebarCollapsed { collapsed: true },
         Command::RunGitAction {
+            session_id: "session-1".into(),
             action: tcode_core::git::GitAction::Commit,
             message: Some("message".into()),
             included: Some(vec!["src/lib.rs".into()]),
@@ -444,26 +453,60 @@ fn every_command_and_query_crosses_ndjson() {
                 launch_args: Some("--flag".into()),
             },
         },
-        Command::SetActiveAcpAgent { id: "agent".into() },
+        Command::SetActiveAcpAgent {
+            session_id: "session-1".into(),
+            id: "agent".into(),
+        },
         Command::ResetSettings,
         Command::WriteRelaunchMarker {
+            session_id: "session-1".into(),
             reopen_settings: "providers".into(),
         },
         Command::ClearRelaunchMarker,
-        Command::SetTerminalHeight { height: 260.0 },
-        Command::ToggleTerminalPanel,
-        Command::CloseTerminalPanel,
-        Command::RestartTerminal,
-        Command::NewTerminal,
+        Command::SetTerminalHeight {
+            session_id: "session-1".into(),
+            height: 260.0,
+        },
+        Command::ToggleTerminalPanel {
+            session_id: "session-1".into(),
+        },
+        Command::CloseTerminalPanel {
+            session_id: "session-1".into(),
+        },
+        Command::RestartTerminal {
+            session_id: "session-1".into(),
+        },
+        Command::NewTerminal {
+            session_id: "session-1".into(),
+        },
         Command::SplitTerminal {
+            session_id: "session-1".into(),
             direction: TerminalSplitDirection::Vertical,
         },
-        Command::ActivateTerminal { terminal_id: 7 },
-        Command::CloseTerminal { terminal_id: 7 },
-        Command::CaptureTerminalSelection { terminal_id: 7 },
-        Command::RemoveTerminalContext { context_id: 8 },
-        Command::AddReviewComment { comment: review },
-        Command::RemoveReviewComment { index: 0 },
+        Command::ActivateTerminal {
+            session_id: "session-1".into(),
+            terminal_id: 7,
+        },
+        Command::CloseTerminal {
+            session_id: "session-1".into(),
+            terminal_id: 7,
+        },
+        Command::CaptureTerminalSelection {
+            session_id: "session-1".into(),
+            terminal_id: 7,
+        },
+        Command::RemoveTerminalContext {
+            session_id: "session-1".into(),
+            context_id: 8,
+        },
+        Command::AddReviewComment {
+            session_id: "session-1".into(),
+            comment: review,
+        },
+        Command::RemoveReviewComment {
+            session_id: "session-1".into(),
+            index: 0,
+        },
         Command::CycleProjectSort,
         Command::CreateProject {
             root: PathBuf::from("/tmp/project"),
@@ -523,81 +566,112 @@ fn every_command_and_query_crosses_ndjson() {
             cwd: PathBuf::from("/tmp/project"),
         },
         Command::SetDraftWorkspace {
+            session_id: "session-1".into(),
             mode: WorkspaceMode::NewWorktree {
                 base: "main".into(),
             },
         },
-        Command::SelectSession {
-            session_id: "session-1".into(),
-        },
         Command::SendTurn {
+            session_id: "session-1".into(),
             text: "hello".into(),
             attachment_paths: vec![PathBuf::from("/tmp/input.png")],
         },
         Command::ScheduleTurn {
+            session_id: "session-1".into(),
             text: "later".into(),
             attachment_paths: Vec::new(),
             fire_at_unix_secs: 123,
         },
         Command::ConfirmRelayAndSend {
+            session_id: "session-1".into(),
             text: "confirmed".into(),
             attachment_paths: Vec::new(),
         },
         Command::Steer {
+            session_id: "session-1".into(),
             text: "adjust".into(),
             attachment_paths: Vec::new(),
         },
-        Command::SteerQueued { id: 7 },
-        Command::DropQueued { id: 8 },
-        Command::Interrupt,
+        Command::SteerQueued {
+            session_id: "session-1".into(),
+            id: 7,
+        },
+        Command::DropQueued {
+            session_id: "session-1".into(),
+            id: 8,
+        },
+        Command::Interrupt {
+            session_id: "session-1".into(),
+        },
         Command::RespondApproval {
+            session_id: "session-1".into(),
             request_id: "approval-1".into(),
             decision: agent::ApprovalDecision::ApproveForSession,
         },
         Command::RespondUserInput {
+            session_id: "session-1".into(),
             request_id: "input-1".into(),
             answers: serde_json::Map::from_iter([("choice".into(), json!("yes"))]),
         },
         Command::SetActiveOption {
+            session_id: "session-1".into(),
             id: "reasoning_effort".into(),
             value: Some(json!("high")),
         },
         Command::SetActiveModel {
+            session_id: "session-1".into(),
             provider: ProviderKind::Codex,
             model: Some("gpt-5".into()),
             profile_id: Some("codex".into()),
         },
-        Command::SelectUltrathink,
+        Command::SelectUltrathink {
+            session_id: "session-1".into(),
+        },
         Command::SetInteractionMode {
+            session_id: "session-1".into(),
             mode: agent::InteractionMode::Plan,
         },
-        Command::ToggleInteractionMode,
-        Command::ImplementPlan,
-        Command::DismissPlan,
+        Command::ToggleInteractionMode {
+            session_id: "session-1".into(),
+        },
+        Command::ImplementPlan {
+            session_id: "session-1".into(),
+        },
+        Command::DismissPlan {
+            session_id: "session-1".into(),
+        },
         Command::ImplementPlanInNewThread {
+            session_id: "session-1".into(),
             title: "Implementation".into(),
         },
         Command::CopyPlan {
             markdown: "# Plan".into(),
         },
         Command::SavePlanToWorkspace {
+            session_id: "session-1".into(),
             markdown: "# Plan".into(),
         },
         Command::DownloadPlan {
+            session_id: "session-1".into(),
             markdown: "# Plan".into(),
             fallback_title: "Plan".into(),
         },
-        Command::LoadBranches,
+        Command::LoadBranches {
+            session_id: "session-1".into(),
+        },
         Command::CheckoutBranch {
+            session_id: "session-1".into(),
             branch: "feature".into(),
         },
         Command::SetActiveApprovalMode {
+            session_id: "session-1".into(),
             mode: agent::ApprovalMode::Supervised,
         },
         Command::ToggleFavoriteModel {
             model: "gpt-5".into(),
         },
         Command::RewindTurn {
+            session_id: "session-1".into(),
             turn: 2,
             mode: agent::RewindMode::FilesAndConversation,
         },
@@ -607,9 +681,12 @@ fn every_command_and_query_crosses_ndjson() {
     }
 
     let queries = vec![
-        Query::ListActiveWorkspace,
+        Query::ListActiveWorkspace {
+            session_id: "session-1".into(),
+        },
         Query::ScanExternalHistory,
         Query::GenerateCommitMessage {
+            session_id: "session-1".into(),
             included: Some(vec!["src/lib.rs".into()]),
         },
         Query::ReadFileBytes {
@@ -643,7 +720,10 @@ fn every_correlated_response_crosses_ndjson() {
     let command_responses = [
         CommandResponse::Unit,
         CommandResponse::ProjectId(Some("project-1".into())),
-        CommandResponse::PendingRelaunchSection(Some("computer_use".into())),
+        CommandResponse::PendingRelaunchSection {
+            section: Some("computer_use".into()),
+            session_id: None,
+        },
         CommandResponse::ArchivedCount(4),
         CommandResponse::ExternalImportStarted(true),
     ];
@@ -708,7 +788,10 @@ fn round_trips_event_and_snapshot_families() {
     );
     round_trip(&stored);
     round_trip(&ServerEvent::SessionEvent(stored.clone()));
-    round_trip(&ServerEvent::SessionSnapshot(vec![stored]));
+    round_trip(&ServerEvent::SessionSnapshot {
+        from: 0,
+        records: vec![stored],
+    });
 
     let project = Project {
         id: "project-1".into(),
@@ -718,11 +801,15 @@ fn round_trips_event_and_snapshot_families() {
     };
     round_trip(&ServerEvent::IndexUpsertProject(project.clone()));
     round_trip(&IndexSnapshot {
+        activity: Default::default(),
         sessions: Vec::new(),
         projects: vec![project],
     });
     round_trip(&ServerEvent::SettingsSnapshot(Settings::default()));
-    round_trip(&ServerEvent::ActiveSessionReplaced(None));
+    round_trip(&ClientPayload::Unsubscribe(Subscription {
+        topic: Topic::Index,
+        after: None,
+    }));
     round_trip(&ServerEvent::NativeRewindPrefill {
         session_id: "session-1".into(),
         text: "restore this prompt".into(),
@@ -732,6 +819,7 @@ fn round_trips_event_and_snapshot_families() {
         reason: Some("done".into()),
     });
     round_trip(&GitActionRequest {
+        session_id: "session-1".into(),
         action: tcode_core::git::GitAction::Commit,
         message: Some("message".into()),
         included: Some(vec!["src/lib.rs".into()]),

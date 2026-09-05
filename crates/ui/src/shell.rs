@@ -305,12 +305,7 @@ impl AppShell {
                     window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
                     let request = request.clone();
                     store.update(cx, |store, _cx| {
-                        store.run_git_action(
-                            request.action,
-                            request.message,
-                            request.included,
-                            request.feature_branch,
-                        );
+                        store.retry_git_action(request);
                     });
                 }),
             }

@@ -28,35 +28,50 @@ Constraints from the brief:
    per text frame. Works from browsers, through overlay VPNs, and reuses WS
    ping/pong for liveness. Native clients use `async-tungstenite` over
    `smol::Async<TcpStream>`; the browser uses `web-sys` WebSocket.
-2. **Auth = bearer device token issued at pairing; plaintext transport.**
-   `ponytail:` no TLS in v1. The brief scopes this to LAN/WireGuard overlays,
-   and browsers cannot pin a self-signed cert anyway. Upgrade path: wrap the
-   accepted stream in `futures-rustls` with a cert fingerprint carried in the
-   pairing payload; the listener already accepts any `AsyncRead + AsyncWrite`.
-   Never an unauthenticated port: every WS connection must present a valid
-   token in its first frame or is closed.
+2. **Auth = bearer device token issued at pairing; TLS on every connection.**
+   P4c wraps the smol listener in futures-rustls/rustls with the ring provider.
+   First start creates a persistent rcgen self-signed certificate for the host
+   id; `remote-cert.der` and PKCS#8 `remote-key.der` live beside `remote.json`
+   with mode 0600. Partial/corrupt identities fail startup instead of rotating.
+   Native clients pin SHA-256 of the entire DER certificate before sending a
+   code or token. QR links carry the pin; manual pairing records the certificate
+   through TOFU. Legacy empty pins migrate once on first connect, persist, and
+   warn without logging tokens or fingerprints. Changed pins fail hard with
+   Offline / “执行端证书已变化，请重新配对”. Browsers use HTTPS and browser trust:
+   the self-signed interstitial must be accepted on first visit; browser `fp`
+   is a display value, not JavaScript certificate verification.
 3. **Pairing**: host mints a 6-digit code valid 5 minutes, at most 5 wrong
    attempts. Client `POST /pair {code, device_name}` → `{host_id, host_name,
    token}`. QR payload = `tcode://pair?v=1&host=<id>&name=<n>&addrs=<a,b,c>&port=<p>&code=<c>`.
    Host stores `remote.json` (`host_id`, `host_name`, `port`, `devices[]`
    with sha256(token)); client stores `hosts.json` (paired hosts with tokens).
-4. **Discovery**: stdlib UDP beacon (broadcast to 255.255.255.255:47421 every
-   2 s: `{"tcode":1,"host_id","name","port"}`). Desktop clients listen.
-   Mobile v1 pairs by QR or manual entry only (iOS broadcast needs an Apple
-   entitlement; overlay networks never carry broadcast). Discovery is a
-   convenience layer over pairing, never a trust source.
-5. **Multi-client = mux in front of one host loop.** Each connection gets a
-   `conn_id`; the mux rewrites request ids to `(conn_id, local_id)` pairs,
-   routes `Ack`/`QueryResult` back to the issuing connection, broadcasts
-   `Event`s to all. The host loop is unchanged. `ponytail:` "active session"
-   stays host-global, so two clients share the selected session; per-client
-   selection is the upgrade path (commands would carry session ids).
+4. **Discovery = mDNS/DNS-SD `_tcode._tcp.local.`**, with TXT `host_id`,
+   `name`, `port`, `fp`. Hosts, desktop and Android use `mdns-sd`; Android holds
+   a WifiManager.MulticastLock for each bounded browse. iOS uses the system
+   NetServiceBrowser/NetService resolver through the Swift host bridge, with
+   Bonjour service and local-network usage declarations. Every phone pairing
+   sheet lists nearby hosts; selecting one fills address, port and fingerprint
+   and focuses the still-required code. Discovery is only an address hint,
+   never a trust source. Overlay networks generally do not forward mDNS.
+5. **Multi-client = mux in front of one host loop; selection is client-local.**
+   Every formerly implicit session mutation/query carries `session_id`, including
+   drafts. `StartDraft`, fork and plan handoff return an id to their requesting
+   client. Stores select by subscribing to that session's `SessionStatus`,
+   `SessionEvents` and `GitStatus`, and unsubscribe on navigation. There is no
+   host-global active session or `Topic::ActiveSession`. The mux tracks each
+   connection's subscriptions and filters events, retaining request-id routing
+   for acknowledgements, queries and subscription snapshots. A final unsubscribe
+   or disconnect releases the host subscription; another client's subscription
+   keeps the session resident. Sidebar activity flags travel with `Index`.
 6. **Reconnect**: the client-side `HostLink` outlives connections. Outgoing
-   lines buffer in its channel while offline and flush on reconnect; the link
-   re-sends every `Subscribe` it has seen, so snapshots replace the replicas.
-   Backoff 1 s → 30 s, immediate retry on app foreground. `ponytail:` session
-   snapshot on resubscribe is the full log; incremental tail (`after_seq`) is
-   the upgrade if LAN reconnects ever feel slow.
+   lines buffer while offline. `Subscription.after` is the number of stored
+   records already applied by the store. Session snapshots contain `from` and
+   only the remaining `records`; `from: 0` replaces, a matching offset appends,
+   and a mismatched nonzero offset requests a full replacement. The store calls
+   `HostLink::update_after` after applying records, sending the latest subscribe
+   line so transport replay caches retain its cursor. The link also replays its
+   current subscriptions on Connected and replays retired-topic unsubscriptions.
+   Backoff remains 1 s → 30 s with immediate retry on app foreground.
 7. **Client crate**: `tcode-client` owns `HostLink` (id correlation, pending
    map, event stream, subscribed-topic memory, connection state). It takes a
    `(Sender<String>, Receiver<String>)` pair, so in-process, native WS, and
@@ -428,3 +443,149 @@ buttons in `crates/mobile/src/screens.rs` with `tcode_ui::icon::Icon` children
 (`IconName::Plus` and an asset-backed settings icon), retaining the existing
 44-pixel hit targets and listeners. The sidebar's asset-backed controls render
 correctly.
+
+
+#### P4c notes
+
+P4c upgrades the earlier P1 plaintext transport / UDP notes and the P2 manual-only
+mobile discovery limitation. TLS serves both HTTP pairing/static content and
+WebSockets on the same port; plaintext is no longer served. The browser loading
+page explains the one-time self-signed HTTPS warning; WebSockets follow the page
+scheme (`wss` on HTTPS). `/admin/pair`, headless output, URLs and QR codes all
+include the full SHA-256 `fp`. The browser saves `/pair`'s `fp` for display only.
+
+Native pairing compares `/pair`'s `fp` to the actual TLS certificate. A pin verifier
+also verifies TLS 1.2/1.3 handshake signatures with ring. UI cards display the first
+eight four-hex-digit groups; all 32 digest bytes are pinned using constant-time
+comparison. Manual pairing shows a comparison page before connecting. Saved
+legacy records gain a persistent pin on first connect; later last-used saves
+cannot erase it. RemoteClient exposes a typed `OfflineReason::CertificateChanged`
+and the existing transport-neutral state stays `Offline`. The protocol-2 integration
+also reports expected/received hello versions and caches both subscribe and
+unsubscribe lines for reconnect replay. Native screens read
+that reason through the host accessor, avoiding changes to shared client state.
+
+Discovery has a three-second desktop/Android browse and four-second Bonjour
+browse. TXT parsing bounds all strings and result counts, validates the fingerprint
+and checks the TXT/SRV port agrees. Android's JNI bridge reference-counts the
+multicast lock and releases it when the browse completes. iOS resolves numeric
+addresses through NetService and returns bounded JSON through the existing GPUI
+main-thread dispatch bridge. No Apple raw multicast entitlement is needed.
+
+Android bundles the upstream CBDT/CBLC `NotoColorEmoji.ttf` and OFL license in
+APK assets, and registers the font database face before any text is shaped.
+cosmic-text 0.19's Android fallback eventually scans registered faces; GPUI 0.3.3
+recognizes the `NotoColorEmoji` PostScript name, selects Swash ColorBitmap BestFit,
+and uploads color BGRA pixels. Do not explicitly load this family as a primary
+font: upstream `load_family` removes faces without ASCII `m`; automatic fallback
+uses `get_or_insert_font` and bypasses that filter. No gpui-pre-wgpu patch is used.
+Font SHA-256: `72a635cb3d2f3524c51620cdde406b217204e8a6a06c6a096ff8ed4b5fd6e27b`.
+Upstream: https://github.com/googlefonts/noto-emoji (fonts/LICENSE, OFL 1.1).
+
+P4c acceptance (2026-09-05): workspace formatting and strict Clippy pass. Two
+full workspace runs passed (977 tests, 4 ignored), but the latest integrated
+reruns fail `store::tests::providers_and_git_replicas_match_live_after_representative_mutations`
+in the concurrently owned `crates/ui/src/store/mod.rs`: timeout waiting for
+provider/Git replicas at line 1949; an isolated rerun instead found differing
+GitStatusStatus values at line 2763. A reduced-concurrency full rerun reproduces
+the timeout (309 UI tests pass, 1 fails). No shared store code was changed.
+The latest workspace suite therefore is **not all green**. TLS integration tests
+cover correct pin, different certificate rejection, pairing TOFU, legacy pin
+persistence, 0600 identity files, restart identity stability, and plaintext
+refusal (9 integration tests pass). The real mDNS loopback advertise/browse test
+also passes; this was not reduced to TXT-only testing. Ring client checks pass
+for aarch64-apple-ios-sim and Android arm64-v8a; both native host build scripts
+pass and the apps install and launch.
+
+Bonjour on iPhone 17 / iOS 26.5 Simulator, Android AVD `tcode-p2d`, and the macOS
+phone preview all discover the Mac. The sheet de-duplicates each host and avoids
+loopback addresses. Both devices pair by code, display the certificate pin,
+connect over TLS and send a turn. The default Claude provider hit its session
+limit; the existing configured Codex provider completed the retry (iOS: `iOS TLS
+works.`; Android: `Hello 😀 🎉 🦀 🚀`). The sidebar initially showed its stale
+empty-project text while the new-conversation picker correctly listed projects;
+after creating a conversation the sidebar updated. This belongs to the shared
+store/sidebar work and was not modified in P4c. Chrome accepted the self-signed
+interstitial once, paired over HTTPS, displayed the pin and connected over WSS.
+
+**Android emoji limitation remains at font selection.** The bundled CBDT font
+is registered, but `/system/fonts/NotoColorEmoji.ttf` has the same family and
+PostScript name and is loaded first by
+`crates/platform/gpui-android/src/android/platform.rs:272`. On this AVD it is
+COLR/CPAL (not CBDT/CBLC). Direct Android GPUI diagnostics selected system glyph
+IDs 1754/213/2500/1951 with `is_emoji=true`, then returned 0×0 raster bounds. An
+independent probe using the exact Swash 0.2.9 rendering sources used by
+`gpui-pre-wgpu` reproduced empty masks for those system glyphs. With the bundled
+font, the same probe produced `Content::Color`, 59×56 pixels, 13,216 RGBA bytes
+for each of 😀 🎉 🦀 🚀. Thus CBDT rendering works; automatic fallback chooses the
+incompatible system face. Explicit family fallback is not a workaround because
+GPUI's `load_family` removes fonts lacking ASCII `m`.
+
+The smallest viable follow-up is to exclude the system `NotoColorEmoji.ttf`
+from that Android platform font-loader list, allowing the registered bundled
+CBDT face to win. This does not require a gpui-pre-wgpu patch, but
+`crates/platform/**` is outside this task's allowed files, so it was not changed.
+Temporary diagnostic instrumentation was removed. `android-p4c-emoji.png`
+records the real failure: the completed response contains emoji on the host,
+but Android paints only `Hello`. No color-chat success is claimed.
+
+Measured debug APK baseline: 251,731,281 bytes. The final integrated P4c APK:
+260,195,576 bytes (+8,464,295 bytes / 8.072 MiB; concurrent native
+refactoring also contributes). The font itself is 10,673,480 bytes and occupies
+9,956,367 compressed APK bytes; OFL adds 1,986 compressed bytes. The attributable
+font+license payload is 9,958,353 bytes (9.50 MiB). The raw APK delta is smaller than that payload because concurrent native
+refactoring changed the library size.
+
+Screenshots: `docs/images/mobile/{ios,android}-p4c-{pair,discovery,fingerprint}.png`,
+`ios-p4c-turn.png`, `preview-p4c-discovery.png`, `android-p4c-emoji.png`, and
+`web-p4c-https.png`.
+
+#### P4a notes
+
+P4a replaces `ResidentSessions.active: Option<_>` with a map of viewed resident
+sessions. The parked map and provider generation checks, retained queues,
+background task accounting, idle grace/LRU reaper, terminal restoration and
+shutdown store barrier remain. Re-adoption moves only the requested session;
+opening a second session never removes the first. Commands and detached
+completions carry the target id independently of subsequent client navigation.
+Draft resource/UI keys use the draft's id so two drafts in one project cannot
+share a provider, terminal workspace or composer state.
+
+The protocol is version 2. It removes `SelectSession`, `ActiveSession` and its
+replacement event; adds `Unsubscribe`, subscription `after`, per-session Git
+status and targeted command/query fields; and changes session snapshots to
+`{from, records}`. Subscription reply envelopes carry an optional `request_id`,
+which the mux maps back to the requester before the corresponding ack removes
+its route. This prevents a second client's snapshot cursor from replacing the
+first client's replica. The runtime keeps canonical record vectors alongside
+pending FIFO writes so an immediate resubscribe cannot read behind a live event.
+Background timeline re-adoption no longer broadcasts redundant full snapshots.
+The store advances the remembered subscription after applying each record. The
+link sends that latest cursor to update transport replay memory and replays it
+on reconnect. The store rejects superseded subscription replies when applying
+its event queue, including replies already queued before a newer live record.
+This prevents stale empty tails from resetting an up-to-date replica.
+
+The test-only single-client lifecycle fixture owns its selection and forwards
+explicit ids into AppState. Existing lifecycle scenarios remain, alongside
+real HostLink/HostMux tests with independent scripted providers and store
+reconnect/mismatched-tail coverage.
+
+Transport-owner integration: the concurrently owned native/server hello paths
+now use `tcode_protocol::PROTOCOL_VERSION` and reject unequal versions. The
+server's current rejection reason is "invalid token or protocol version"; the
+owner should split its version check to report expected and received versions
+explicitly in `hello_rejected` (the constant bump is included here). Those hello
+implementations remain owned by the other engineer in
+`crates/remote/src/{client,server}.rs`. The native subscription replay key
+should recognize both `subscribe` and `unsubscribe` (as the browser now does),
+so the latest line per topic also preserves a retired topic. HostLink's retired
+subscription replay and inbound topic filter preserve selection isolation even
+with an older transport cache.
+
+P4a validation on the integrated branch: workspace format, strict Clippy,
+workspace tests, desktop/headless build, the iOS simulator remote-client check
+and the mobile WebAssembly check pass. The simultaneous desktop/phone GUI
+smoke test remains pending: an isolated headless host and separately paired
+clients were prepared, but Computer Use rejected access to the isolated test
+app. No claim of manual no-cross-talk verification is made.

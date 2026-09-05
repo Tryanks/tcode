@@ -30,6 +30,7 @@ pub enum ClientPayload {
     Command(Command),
     Query(Query),
     Subscribe(Subscription),
+    Unsubscribe(Subscription),
 }
 
 #[allow(clippy::large_enum_variant)] // Wire messages favor a direct typed API.
@@ -50,6 +51,8 @@ pub enum HostMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Subscription {
     pub topic: Topic,
+    #[serde(default)]
+    pub after: Option<u64>,
 }
 
 /// Encode one NDJSON record, including its trailing newline.

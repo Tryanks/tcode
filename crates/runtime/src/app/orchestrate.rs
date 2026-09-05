@@ -87,22 +87,24 @@ impl AppState {
     /// present, and submit the provider-specific guidance plus the user's text.
     pub fn orchestrate_turn(
         &mut self,
+        target_id: &str,
         text: String,
         attachment_paths: Vec<PathBuf>,
         cx: &mut HostCx,
     ) {
-        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
-        self.orchestrate_turn_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context(cx);
+        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        self.orchestrate_turn_assembled(target_id, text, attachments, cx);
+        self.clear_consumed_draft_context(target_id, cx);
     }
 
     pub(super) fn orchestrate_turn_assembled(
         &mut self,
+        target_id: &str,
         text: String,
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.residents.active.as_ref() else {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         let provider = active.meta.provider;
@@ -129,7 +131,7 @@ impl AppState {
                 self.report_error(RuntimeError::External(message), cx);
                 return;
             }
-            if let Some(active) = self.residents.active.as_mut() {
+            if let Some(active) = self.resident_mut(target_id) {
                 active.shutdown_to_idle();
             }
         }
@@ -137,14 +139,14 @@ impl AppState {
         // Stage the split so the next `push_queued` records it on the user
         // message. (A mid-turn steer clears it instead — see `steer` — so the
         // annotation never leaks onto an unrelated later message.)
-        if let Some(active) = self.residents.active.as_mut() {
+        if let Some(active) = self.resident_mut(target_id) {
             active.pending_context_len = Some(context_len);
         }
 
         // `steer` sends ordinarily when idle and injects into a live turn. On
         // first enable the restart above intentionally makes this an ordinary
         // queued send for the resumed, MCP-enabled process.
-        self.steer_assembled(text, attachments, cx);
+        self.steer_assembled(target_id, text, attachments, cx);
     }
 
     pub(super) fn orchestrate_registration_for(
@@ -522,15 +524,15 @@ impl AppState {
                         // Provider channel gone: fall through so the text survives
                         // in the queue for the wake-up path.
                     }
-                    if self.active_session_id() == Some(&thread_id) {
-                        let child = self.residents.active.as_mut().unwrap();
+                    if self.residents.live.contains_key(&thread_id) {
+                        let child = self.resident_mut(&thread_id).unwrap();
                         child.push_queued(message, Vec::new());
                         let idle = matches!(child.runtime, Runtime::Idle);
-                        if self.dispatch_next_queued(cx).is_err() {
+                        if self.dispatch_next_queued(&thread_id, cx).is_err() {
                             return Err("child provider is unavailable".into());
                         }
                         if idle {
-                            self.ensure_started(cx);
+                            self.ensure_started(&thread_id, cx);
                         }
                         return Ok(serde_json::json!({ "ok": true, "delivery": "queued" }));
                     }
@@ -555,8 +557,8 @@ impl AppState {
                 let result = (|| {
                     self.require_child(&parent_id, &thread_id)?;
                     self.clear_approvals(&thread_id);
-                    if self.active_session_id() == Some(&thread_id) {
-                        if let Some(child) = self.residents.active.as_mut() {
+                    if self.residents.live.contains_key(&thread_id) {
+                        if let Some(child) = self.resident_mut(&thread_id) {
                             child.queue.clear();
                             child.timeline.mark_idle();
                             child.shutdown_to_idle();
@@ -681,7 +683,7 @@ impl AppState {
             .find(|meta| meta.id == thread_id)
             .cloned()
             .ok_or_else(|| "unknown thread".to_string())?;
-        if self.active_session_id() == Some(thread_id) {
+        if self.residents.live.contains_key(thread_id) {
             return Err("child thread is currently open in the foreground".into());
         }
         self.load_background_session(meta, cx);
@@ -1061,8 +1063,8 @@ impl AppState {
             return;
         }
 
-        if self.active_session_id() == Some(parent_id) {
-            let parent = self.residents.active.as_mut().unwrap();
+        if self.residents.live.contains_key(parent_id) {
+            let parent = self.resident_mut(parent_id).unwrap();
             parent.push_or_merge_orchestrate_callback(text);
 
             // Match ordinary sends when a launch-time selection changed while
@@ -1074,11 +1076,11 @@ impl AppState {
                 parent.shutdown_to_idle();
             }
             let should_start = matches!(parent.runtime, Runtime::Idle);
-            if !restart_deferred && self.dispatch_next_queued(cx).is_err() {
+            if !restart_deferred && self.dispatch_next_queued(parent_id, cx).is_err() {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
             if should_start {
-                self.ensure_started(cx);
+                self.ensure_started(parent_id, cx);
             }
             return;
         }

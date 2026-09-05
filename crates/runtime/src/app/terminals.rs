@@ -50,25 +50,26 @@ impl AppState {
 
     pub(super) fn reopen_persisted_terminals(
         &mut self,
+        target_id: &str,
         preferences: Option<TerminalPreferences>,
         cx: &mut HostCx,
     ) {
         if !preferences.is_some_and(|preferences| preferences.open) {
             return;
         }
-        self.open_terminal_panel(cx);
+        self.open_terminal_panel(target_id, cx);
         let count = preferences
             .map(|preferences| preferences.count.clamp(1, MAX_TERMINALS_PER_SESSION))
             .unwrap_or(1);
         for _ in 1..count {
-            self.new_terminal(cx);
+            self.new_terminal(target_id, cx);
         }
     }
 
     // -- terminal drawer ---------------------------------------------------
 
-    pub(super) fn persist_terminal_resource_count(&mut self, cx: &mut HostCx) {
-        if let Some(active) = self.residents.active.as_ref() {
+    pub(super) fn persist_terminal_resource_count(&mut self, target_id: &str, cx: &mut HostCx) {
+        if let Some(active) = self.resident(target_id) {
             let key = conversation_destination(active).preference_key();
             let count = active.terminal_workspace.terminals.len();
             self.terminal_prefs_mut(key, count).count = count;
@@ -76,8 +77,8 @@ impl AppState {
         self.write_terminal_preferences(cx);
     }
 
-    pub fn set_terminal_height(&mut self, height: f32, cx: &mut HostCx) {
-        if let Some((key, count)) = self.residents.active.as_ref().map(|active| {
+    pub fn set_terminal_height(&mut self, target_id: &str, height: f32, cx: &mut HostCx) {
+        if let Some((key, count)) = self.resident(target_id).map(|active| {
             (
                 conversation_destination(active).preference_key(),
                 active.terminal_workspace.terminals.len(),
@@ -88,19 +89,17 @@ impl AppState {
         }
     }
 
-    pub(crate) fn terminal_panel_open(&self) -> bool {
-        self.residents
-            .active
-            .as_ref()
+    pub(crate) fn terminal_panel_open(&self, target_id: &str) -> bool {
+        self.resident(target_id)
             .and_then(|active| self.terminal_preferences_for(active))
             .is_some_and(|preferences| preferences.open)
     }
 
-    pub fn toggle_terminal_panel(&mut self, cx: &mut HostCx) {
-        if self.terminal_panel_open() {
-            self.close_terminal_panel(cx);
+    pub fn toggle_terminal_panel(&mut self, target_id: &str, cx: &mut HostCx) {
+        if self.terminal_panel_open(target_id) {
+            self.close_terminal_panel(target_id, cx);
         } else {
-            self.open_terminal_panel(cx);
+            self.open_terminal_panel(target_id, cx);
         }
     }
 
@@ -143,9 +142,7 @@ impl AppState {
                     return;
                 };
                 let active_matches = state
-                    .residents
-                    .active
-                    .as_ref()
+                    .resident(&session_id)
                     .is_some_and(|active| active.meta.id == session_id);
                 if !active_matches {
                     return;
@@ -167,7 +164,12 @@ impl AppState {
                     }
                 };
 
-                let workspace = &mut state.residents.active.as_mut().unwrap().terminal_workspace;
+                let workspace = &mut state
+                    .residents
+                    .live
+                    .get_mut(&session_id)
+                    .unwrap()
+                    .terminal_workspace;
                 let mut followup_split = None;
                 let applied = match action {
                     TerminalSpawnAction::Open { split_after } => {
@@ -220,10 +222,17 @@ impl AppState {
                     }
                 };
                 if applied {
-                    state.persist_terminal_resource_count(cx);
+                    state.persist_terminal_resource_count(&session_id, cx);
                 }
                 if let Some((first, direction)) = followup_split {
-                    let cwd = state.residents.active.as_ref().unwrap().meta.cwd.clone();
+                    let cwd = state
+                        .residents
+                        .live
+                        .get(&session_id)
+                        .unwrap()
+                        .meta
+                        .cwd
+                        .clone();
                     state.schedule_terminal_spawn(
                         session_id,
                         cwd,
@@ -239,9 +248,9 @@ impl AppState {
         self.pending_terminal_spawns.remove(session_id);
     }
 
-    pub(crate) fn open_terminal_panel(&mut self, cx: &mut HostCx) {
+    pub(crate) fn open_terminal_panel(&mut self, target_id: &str, cx: &mut HostCx) {
         let Some((session_id, cwd, destination, count, terminals_empty)) =
-            self.residents.active.as_ref().map(|active| {
+            self.resident(target_id).map(|active| {
                 (
                     active.meta.id.clone(),
                     active.meta.cwd.clone(),
@@ -276,16 +285,14 @@ impl AppState {
         }
     }
 
-    pub fn close_terminal_panel(&mut self, cx: &mut HostCx) {
+    pub fn close_terminal_panel(&mut self, target_id: &str, cx: &mut HostCx) {
         let session_id = self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .map(|active| active.meta.id.clone());
         if let Some(session_id) = session_id.as_deref() {
             self.cancel_pending_terminal_spawns(session_id);
         }
-        if let Some(active) = self.residents.active.as_ref() {
+        if let Some(active) = self.resident(target_id) {
             let key = conversation_destination(active).preference_key();
             let count = active.terminal_workspace.terminals.len();
             self.terminal_prefs_mut(key, count).open = false;
@@ -293,8 +300,8 @@ impl AppState {
         }
     }
 
-    pub fn restart_terminal(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub fn restart_terminal(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         let session_id = active.meta.id.clone();
@@ -311,8 +318,8 @@ impl AppState {
         );
     }
 
-    pub fn new_terminal(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub fn new_terminal(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         let pending = self
@@ -330,8 +337,8 @@ impl AppState {
         );
     }
 
-    pub fn activate_terminal(&mut self, terminal_id: u64, _cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub fn activate_terminal(&mut self, target_id: &str, terminal_id: u64, _cx: &mut HostCx) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         if active.terminal_workspace.terminal(terminal_id).is_some() {
@@ -339,16 +346,14 @@ impl AppState {
         }
     }
 
-    pub fn close_terminal(&mut self, terminal_id: u64, cx: &mut HostCx) {
+    pub fn close_terminal(&mut self, target_id: &str, terminal_id: u64, cx: &mut HostCx) {
         let session_id = self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .map(|active| active.meta.id.clone());
         if let Some(session_id) = session_id.as_deref() {
             self.cancel_pending_terminal_spawns(session_id);
         }
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         let workspace = &mut active.terminal_workspace;
@@ -360,14 +365,19 @@ impl AppState {
             workspace.active_id = workspace.terminals.last().map(|entry| entry.id);
         }
         let empty = workspace.terminals.is_empty();
-        self.persist_terminal_resource_count(cx);
+        self.persist_terminal_resource_count(target_id, cx);
         if empty {
-            self.close_terminal_panel(cx);
+            self.close_terminal_panel(target_id, cx);
         }
     }
 
-    pub fn split_terminal(&mut self, direction: TerminalSplitDirection, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub fn split_terminal(
+        &mut self,
+        target_id: &str,
+        direction: TerminalSplitDirection,
+        cx: &mut HostCx,
+    ) {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         let workspace = &active.terminal_workspace;
@@ -405,8 +415,13 @@ impl AppState {
         );
     }
 
-    pub fn capture_terminal_selection(&mut self, terminal_id: u64, _cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub fn capture_terminal_selection(
+        &mut self,
+        target_id: &str,
+        terminal_id: u64,
+        _cx: &mut HostCx,
+    ) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         let Some(entry) = active.terminal_workspace.terminal(terminal_id) else {
@@ -419,8 +434,8 @@ impl AppState {
         }
     }
 
-    pub fn remove_terminal_context(&mut self, context_id: u64, _cx: &mut HostCx) {
-        if let Some(active) = self.residents.active.as_mut() {
+    pub fn remove_terminal_context(&mut self, target_id: &str, context_id: u64, _cx: &mut HostCx) {
+        if let Some(active) = self.resident_mut(target_id) {
             active
                 .terminal_workspace
                 .contexts
@@ -428,11 +443,9 @@ impl AppState {
         }
     }
 
-    pub(crate) fn review_comments(&self) -> &[ReviewComment] {
+    pub(crate) fn review_comments(&self, target_id: &str) -> &[ReviewComment] {
         let Some(id) = self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .map(|active| active.meta.id.as_str())
         else {
             return &[];
@@ -443,11 +456,14 @@ impl AppState {
             .unwrap_or(&[])
     }
 
-    pub fn add_review_comment(&mut self, comment: ReviewComment, _cx: &mut HostCx) {
+    pub fn add_review_comment(
+        &mut self,
+        target_id: &str,
+        comment: ReviewComment,
+        _cx: &mut HostCx,
+    ) {
         if let Some(id) = self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .map(|active| active.meta.id.clone())
         {
             self.review_comment_drafts
@@ -457,11 +473,9 @@ impl AppState {
         }
     }
 
-    pub fn remove_review_comment(&mut self, index: usize, _cx: &mut HostCx) {
+    pub fn remove_review_comment(&mut self, target_id: &str, index: usize, _cx: &mut HostCx) {
         let Some(id) = self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .map(|active| active.meta.id.clone())
         else {
             return;
@@ -473,11 +487,9 @@ impl AppState {
         }
     }
 
-    pub(super) fn clear_review_comments(&mut self, _cx: &mut HostCx) {
+    pub(super) fn clear_review_comments(&mut self, target_id: &str, _cx: &mut HostCx) {
         if let Some(id) = self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .map(|active| active.meta.id.clone())
         {
             self.review_comment_drafts.remove(&id);
@@ -485,8 +497,8 @@ impl AppState {
     }
 
     /// Drop the attached terminal contexts once a message consuming them is sent.
-    pub(super) fn clear_terminal_contexts(&mut self) {
-        if let Some(active) = self.residents.active.as_mut() {
+    pub(super) fn clear_terminal_contexts(&mut self, target_id: &str) {
+        if let Some(active) = self.resident_mut(target_id) {
             active.terminal_workspace.contexts.clear();
         }
     }

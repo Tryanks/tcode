@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +70,7 @@ impl HostMux {
 
 async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Receiver<Ingress>) {
     let mut clients = HashMap::<u64, Sender<String>>::new();
+    let mut subscriptions = HashMap::<u64, HashSet<String>>::new();
     let routes = Arc::new(Mutex::new(HashMap::<u64, (u64, u64)>::new()));
     let mut next_global_id = 1_u64;
 
@@ -86,12 +87,46 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
         match input {
             Input::Client(Ok(Ingress::Add(id, sender))) => {
                 clients.insert(id, sender);
+                subscriptions.insert(id, HashSet::new());
             }
             Input::Client(Ok(Ingress::Closed(id))) => {
                 clients.remove(&id);
+                if let Some(topics) = subscriptions.remove(&id) {
+                    for topic in topics {
+                        if !subscriptions.values().any(|topics| topics.contains(&topic)) {
+                            let line = format!(
+                                "{{\"id\":0,\"payload\":{{\"type\":\"unsubscribe\",\"content\":{{\"topic\":{topic}}}}}}}\n"
+                            );
+                            if to_host.send(line).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
                 routes.lock().unwrap().retain(|_, route| route.0 != id);
             }
             Input::Client(Ok(Ingress::Line(connection_id, line))) => {
+                if let Some((kind, topic)) = subscription_change(&line) {
+                    let topics = subscriptions.entry(connection_id).or_default();
+                    if kind == "subscribe" {
+                        topics.insert(topic.clone());
+                    } else {
+                        topics.remove(&topic);
+                        if subscriptions.values().any(|topics| topics.contains(&topic)) {
+                            if let Some((_, local_id)) = rewrite_client_id(&line, 0) {
+                                let ack = tcode_protocol::HostMessage::Ack {
+                                    id: local_id,
+                                    result: Ok(tcode_protocol::CommandResponse::Unit),
+                                };
+                                if let Some(sender) = clients.get(&connection_id) {
+                                    let _ =
+                                        sender.try_send(tcode_protocol::encode_line(&ack).unwrap());
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
                 let Some((rewritten, local_id)) = rewrite_client_id(&line, next_global_id) else {
                     continue;
                 };
@@ -112,7 +147,40 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 };
                 match value.get("type").and_then(serde_json::Value::as_str) {
                     Some("event") => {
-                        clients.retain(|_, sender| sender.try_send(line.clone()).is_ok());
+                        let Some(content) = value.get("content") else {
+                            continue;
+                        };
+                        let Some(topic) = content
+                            .get("topic")
+                            .and_then(|topic| serde_json::to_string(topic).ok())
+                        else {
+                            continue;
+                        };
+                        if let Some(request_id) = content
+                            .get("request_id")
+                            .and_then(serde_json::Value::as_u64)
+                        {
+                            if let Some((connection_id, local_id)) =
+                                routes.lock().unwrap().get(&request_id).copied()
+                                && subscriptions
+                                    .get(&connection_id)
+                                    .is_some_and(|topics| topics.contains(&topic))
+                                && let Some(sender) = clients.get(&connection_id)
+                                && let Some(line) =
+                                    replace_field(&line, &["content", "request_id"], local_id)
+                            {
+                                let _ = sender.try_send(line);
+                            }
+                        } else {
+                            for (id, sender) in &clients {
+                                if subscriptions
+                                    .get(id)
+                                    .is_some_and(|topics| topics.contains(&topic))
+                                {
+                                    let _ = sender.try_send(line.clone());
+                                }
+                            }
+                        }
                     }
                     Some("ack" | "query_result") => {
                         let Some(global_id) = value
@@ -143,6 +211,19 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
         }
     }
     clients.clear();
+}
+
+fn subscription_change(line: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let payload = value.get("payload")?;
+    let kind = payload.get("type")?.as_str()?;
+    if !matches!(kind, "subscribe" | "unsubscribe") {
+        return None;
+    }
+    Some((
+        kind.to_string(),
+        serde_json::to_string(payload.get("content")?.get("topic")?).ok()?,
+    ))
 }
 
 fn rewrite_client_id(line: &str, id: u64) -> Option<(String, u64)> {
@@ -318,6 +399,40 @@ mod tests {
             serde_json::from_str(two.from_host.recv_blocking().unwrap().trim_end()).unwrap();
         assert_eq!(reply["content"]["id"], 7);
         assert!(one.from_host.try_recv().is_err());
+    }
+
+    #[test]
+    fn only_subscribers_receive_events_and_last_unsubscribe_releases_topic() {
+        let (to_host, host_rx) = async_channel::unbounded();
+        let (host_tx, from_host) = async_channel::unbounded();
+        let mux = HostMux::new(to_host, from_host);
+        let one = mux.attach();
+        let two = mux.attach();
+        let send = |connection: &Connection, kind: &str, id: u64| {
+            connection.to_host.send_blocking(format!(r#"{{"id":{id},"payload":{{"type":"{kind}","content":{{"topic":{{"type":"session_events","content":{{"session_id":"one"}}}}}}}}}}"#)).unwrap();
+        };
+        send(&one, "subscribe", 1);
+        let _: String = host_rx.recv_blocking().unwrap();
+        let event = r#"{"type":"event","content":{"topic":{"type":"session_events","content":{"session_id":"one"}},"event":{"type":"session_snapshot","content":{"from":0,"records":[]}}}}"#;
+        host_tx.send_blocking(event.into()).unwrap();
+        assert_eq!(one.from_host.recv_blocking().unwrap(), event);
+        assert!(two.from_host.try_recv().is_err());
+        send(&two, "subscribe", 2);
+        let _: String = host_rx.recv_blocking().unwrap();
+        send(&one, "unsubscribe", 3);
+        let ack = one.from_host.recv_blocking().unwrap();
+        assert!(ack.contains("ack"));
+        assert!(
+            host_rx.try_recv().is_err(),
+            "another client still owns this subscription"
+        );
+        host_tx.send_blocking(event.into()).unwrap();
+        assert_eq!(two.from_host.recv_blocking().unwrap(), event);
+        assert!(one.from_host.try_recv().is_err());
+        drop(two.to_host);
+        let unsubscribe: serde_json::Value =
+            serde_json::from_str(&host_rx.recv_blocking().unwrap()).unwrap();
+        assert_eq!(unsubscribe["payload"]["type"], "unsubscribe");
     }
 
     #[test]

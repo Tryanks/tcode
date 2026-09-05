@@ -172,7 +172,7 @@ async fn next(outgoing: &Receiver<String>, events: &Receiver<Event>) -> Input {
 fn subscription_key(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
     let payload = value.get("payload")?;
-    if payload.get("type")?.as_str()? != "subscribe" {
+    if !matches!(payload.get("type")?.as_str()?, "subscribe" | "unsubscribe") {
         return None;
     }
     serde_json::to_string(payload.get("content")?.get("topic")?).ok()
@@ -241,7 +241,7 @@ async fn connection_loop(
                         }
                     }
                     Input::Event(Event::Open) => {
-                        let hello = serde_json::json!({"type":"hello", "protocol_version":1, "token":token, "device_name":device_name});
+                        let hello = serde_json::json!({"type":"hello", "protocol_version":tcode_protocol::PROTOCOL_VERSION, "token":token, "device_name":device_name});
                         if socket.send(&hello.to_string()).is_err() {
                             break;
                         }
@@ -249,7 +249,10 @@ async fn connection_loop(
                     Input::Event(Event::Text(line)) if !ready => {
                         let hello: serde_json::Value =
                             serde_json::from_str(&line).unwrap_or_default();
-                        if hello["type"].as_str() != Some("hello_ok") {
+                        if hello["type"].as_str() != Some("hello_ok")
+                            || hello["protocol_version"].as_u64()
+                                != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                        {
                             break;
                         }
                         handshake_timer.take();

@@ -139,8 +139,8 @@ impl AddProjectDialog {
                 return;
             };
             let _ = this.update_in(cx, |dialog, window, cx| {
-                dialog.store.update(cx, |store, _cx| {
-                    store.start_draft(project_id, path);
+                dialog.store.update(cx, |store, cx| {
+                    store.start_draft(project_id, path, cx);
                 });
                 window.close_dialog(cx);
             });

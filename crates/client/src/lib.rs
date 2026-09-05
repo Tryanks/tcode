@@ -27,7 +27,9 @@ struct HostLinkInner {
     events_tx: async_channel::Sender<EventEnvelope>,
     events_rx: async_channel::Receiver<EventEnvelope>,
     next_id: AtomicU64,
-    subscribed_topics: Mutex<HashSet<Topic>>,
+    subscribed_topics: Mutex<HashMap<Topic, Subscription>>,
+    retired_topics: Mutex<HashSet<Topic>>,
+    subscription_requests: Mutex<HashMap<Topic, u64>>,
     connection_state: Mutex<ConnectionState>,
     connection_state_tx: async_channel::Sender<ConnectionState>,
     connection_state_rx: async_channel::Receiver<ConnectionState>,
@@ -87,7 +89,9 @@ impl HostLink {
                 events_tx,
                 events_rx,
                 next_id: AtomicU64::new(1),
-                subscribed_topics: Mutex::new(HashSet::new()),
+                subscribed_topics: Mutex::new(HashMap::new()),
+                retired_topics: Mutex::new(HashSet::new()),
+                subscription_requests: Mutex::new(HashMap::new()),
                 connection_state: Mutex::new(ConnectionState::Connected),
                 connection_state_tx,
                 connection_state_rx,
@@ -102,7 +106,15 @@ impl HostLink {
         while let Ok(line) = self.inner.from_host.recv().await {
             match decode_host_line(&line) {
                 Ok(HostMessage::Event(envelope)) => {
-                    let _ = self.inner.events_tx.send(envelope).await;
+                    if self
+                        .inner
+                        .subscribed_topics
+                        .lock()
+                        .unwrap()
+                        .contains_key(&envelope.topic)
+                    {
+                        let _ = self.inner.events_tx.send(envelope).await;
+                    }
                 }
                 Ok(
                     message @ (HostMessage::Ack { id, .. } | HostMessage::QueryResult { id, .. }),
@@ -195,11 +207,82 @@ impl HostLink {
 
     pub fn subscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
         self.inner
+            .retired_topics
+            .lock()
+            .unwrap()
+            .remove(&subscription.topic);
+        self.inner
             .subscribed_topics
             .lock()
             .unwrap()
+            .insert(subscription.topic.clone(), subscription.clone());
+        self.send_subscription(subscription)
+    }
+
+    fn send_subscription(&self, subscription: Subscription) -> Result<(), ProtocolError> {
+        let id = self.next_id();
+        self.inner
+            .subscription_requests
+            .lock()
+            .unwrap()
+            .insert(subscription.topic.clone(), id);
+        self.send_payload(id, ClientPayload::Subscribe(subscription))
+    }
+
+    /// A newer cursor supersedes an older subscription reply, including replies
+    /// already queued for the UI when it advanced its replica. Check on application,
+    /// not just in the transport pump, to avoid a stale tail resetting live records.
+    pub fn subscription_reply_is_current(&self, envelope: &EventEnvelope) -> bool {
+        envelope.request_id.is_none_or(|id| {
+            self.inner
+                .subscription_requests
+                .lock()
+                .unwrap()
+                .get(&envelope.topic)
+                == Some(&id)
+        })
+    }
+
+    pub fn unsubscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
+        self.inner
+            .subscribed_topics
+            .lock()
+            .unwrap()
+            .remove(&subscription.topic);
+        self.inner
+            .retired_topics
+            .lock()
+            .unwrap()
             .insert(subscription.topic.clone());
-        self.send_payload(self.next_id(), ClientPayload::Subscribe(subscription))
+        self.send_payload(self.next_id(), ClientPayload::Unsubscribe(subscription))
+    }
+
+    /// Advance replay memory only after the store has applied these records. Sending
+    /// the latest subscription also updates native/browser transport replay caches.
+    /// The host returns an empty tail when the store is already up to date.
+    pub fn update_after(&self, topic: &Topic, after: u64) -> Result<(), ProtocolError> {
+        let subscription = {
+            let mut topics = self.inner.subscribed_topics.lock().unwrap();
+            let Some(subscription) = topics.get_mut(topic) else {
+                return Ok(());
+            };
+            if subscription.after == Some(after) {
+                return Ok(());
+            }
+            subscription.after = Some(after);
+            subscription.clone()
+        };
+        self.send_subscription(subscription)
+    }
+
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        self.inner
+            .subscribed_topics
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub fn events(&self) -> HostEventReceiver {
@@ -213,7 +296,7 @@ impl HostLink {
             .subscribed_topics
             .lock()
             .unwrap()
-            .iter()
+            .keys()
             .cloned()
             .collect()
     }
@@ -223,7 +306,26 @@ impl HostLink {
     }
 
     pub fn set_connection_state(&self, state: ConnectionState) {
-        *self.inner.connection_state.lock().unwrap() = state.clone();
+        let previous = std::mem::replace(
+            &mut *self.inner.connection_state.lock().unwrap(),
+            state.clone(),
+        );
+        if state == ConnectionState::Connected && previous != ConnectionState::Connected {
+            // The store's acknowledged cursor is authoritative even when a transport
+            // has already replayed an older line during its own handshake.
+            for topic in self.inner.retired_topics.lock().unwrap().iter() {
+                let _ = self.send_payload(
+                    self.next_id(),
+                    ClientPayload::Unsubscribe(Subscription {
+                        topic: topic.clone(),
+                        after: None,
+                    }),
+                );
+            }
+            for subscription in self.subscriptions() {
+                let _ = self.send_subscription(subscription);
+            }
+        }
         let _ = self.inner.connection_state_tx.try_send(state);
     }
 
@@ -277,6 +379,44 @@ mod tests {
     use tcode_protocol::{IndexSnapshot, ServerEvent};
 
     #[test]
+    fn reconnect_replays_the_cursor_applied_by_the_store_and_retired_topics() {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let topic = Topic::SessionEvents {
+            session_id: "one".into(),
+        };
+        link.subscribe(Subscription {
+            topic: topic.clone(),
+            after: None,
+        })
+        .unwrap();
+        outgoing.try_recv().unwrap();
+        link.update_after(&topic, 7).unwrap();
+        let updated = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            updated.payload,
+            ClientPayload::Subscribe(Subscription { after: Some(7), .. })
+        ));
+        link.set_connection_state(ConnectionState::Reconnecting { attempt: 1 });
+        link.set_connection_state(ConnectionState::Connected);
+        let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert_eq!(updated.payload, replay.payload);
+        link.unsubscribe(Subscription { topic, after: None })
+            .unwrap();
+        outgoing.try_recv().unwrap();
+        link.set_connection_state(ConnectionState::Reconnecting { attempt: 2 });
+        link.set_connection_state(ConnectionState::Connected);
+        assert!(matches!(
+            tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap())
+                .unwrap()
+                .payload,
+            ClientPayload::Unsubscribe(_)
+        ));
+        assert!(link.subscribed_topics().is_empty());
+    }
+
+    #[test]
     fn correlates_responses_forwards_events_and_remembers_topics() {
         let (to_host, client_lines) = async_channel::unbounded();
         let (host_lines, from_host) = async_channel::unbounded();
@@ -305,8 +445,10 @@ mod tests {
             host_lines
                 .send_blocking(
                     encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
                         topic: Topic::Index,
                         event: ServerEvent::IndexSnapshot(IndexSnapshot {
+                            activity: Default::default(),
                             sessions: Vec::new(),
                             projects: Vec::new(),
                         }),
@@ -327,10 +469,12 @@ mod tests {
         });
 
         link.subscribe(Subscription {
+            after: None,
             topic: Topic::Index,
         })
         .unwrap();
         link.subscribe(Subscription {
+            after: None,
             topic: Topic::Index,
         })
         .unwrap();
