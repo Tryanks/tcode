@@ -22,7 +22,6 @@ members = [
     "crates/android",
 ]
 exclude = [
-    "crates/platform/gpui-platform-shim",
     "crates/platform/gpui-ios",
     "crates/platform/gpui-android",
 ]
@@ -37,4 +36,7 @@ strip = "symbols"
 panic = "unwind"
 
 [patch.crates-io]
-gpui-pre-platform = { path = "crates/platform/gpui-platform-shim" }
+# gpui-base 0.6.0 on crates.io declares gpui-pre-platform as a dependency it
+# never uses, which does not compile for iOS/Android. Fixed on gpui-kit main
+# (merged 2026-09-05); drop this patch once a gpui-base release includes it.
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" }

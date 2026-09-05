@@ -3253,8 +3253,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2caaf00ebe0482774dd370a82a936edf4bf19a18a0d1a39353d20ecf61f70330"
+source = "git+https://github.com/longbridge/gpui-kit?rev=9d9bd9bfa9b4c3af25475078458b3e3c7abd2981#9d9bd9bfa9b4c3af25475078458b3e3c7abd2981"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3263,7 +3262,6 @@ dependencies = [
  "futures",
  "gpui-pre",
  "gpui-pre-macros",
- "gpui-pre-platform",
  "gpui-pre-sum-tree",
  "html5ever 0.27.0",
  "instant",
@@ -3281,7 +3279,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "smol",
- "syntect",
  "tracing",
  "unicode-segmentation",
  "web-time",
@@ -3610,6 +3607,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre-platform"
 version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35131851444188e573d21d3e8020a51af16bf08b177e25b1120815edbd448c80"
 dependencies = [
  "console_error_panic_hook",
  "gpui-pre",
@@ -3691,6 +3690,7 @@ dependencies = [
  "futures",
  "parking_lot",
  "rand 0.9.4",
+ "wasm_thread",
  "web-time",
 ]
 
@@ -3760,6 +3760,7 @@ dependencies = [
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm_thread",
  "web-sys",
  "web-time",
 ]
@@ -9962,6 +9963,18 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "wasm_thread"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7516db7f32decdadb1c3b8deb1b7d78b9df7606c5cc2f6241737c2ab3a0258e"
+dependencies = [
+ "futures",
+ "js-sys",
+ "wasm-bindgen",
  "web-sys",
 ]
 
