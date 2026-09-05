@@ -6,7 +6,7 @@ mod components;
 pub(crate) mod model;
 
 use components::images::PendingImage;
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 use components::voice::Voice;
 use model::*;
 
@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
@@ -95,6 +95,8 @@ pub enum ComposerEvent {
 }
 
 pub struct Composer {
+    compact: bool,
+    placeholder_online: Option<bool>,
     workspace_store: Entity<WorkspaceStore>,
     input: Entity<TextareaState>,
     /// Dedicated free-form answer field shown inside an agent question card.
@@ -166,7 +168,7 @@ pub struct Composer {
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
     /// Mic button + live dictation session (see `components::voice`).
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
     voice: Voice,
     _subscriptions: Vec<Subscription>,
 }
@@ -174,16 +176,39 @@ pub struct Composer {
 impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
+    fn interactive(&self, cx: &App) -> bool {
+        !self.compact
+            || *self.workspace_store.read(cx).connection_state()
+                == tcode_client::ConnectionState::Connected
+    }
+
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| input.focus(window, cx));
+    }
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_layout(workspace_store, false, window, cx)
+    }
+
+    pub fn new_with_layout(
+        workspace_store: Entity<WorkspaceStore>,
+        compact: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(1, 8)
-                .submit_on_enter(true)
-                .placeholder(crate::tr!("composer.placeholder"))
+                // The phone keeps a 2-row (44pt) minimum and caps at 5 rows (§3.4).
+                .auto_grow(if compact { 2 } else { 1 }, if compact { 5 } else { 8 })
+                .submit_on_enter(!compact || !cfg!(any(target_os = "ios", target_os = "android")))
+                .placeholder(if compact {
+                    crate::tr!("mobile.message")
+                } else {
+                    crate::tr!("composer.placeholder")
+                })
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
@@ -244,7 +269,7 @@ impl Composer {
                     InputEvent::Change => {
                         // An edit that did not come from the transcript writer
                         // ends dictation (see `components::voice`).
-                        #[cfg(target_os = "macos")]
+                        #[cfg(all(feature = "desktop", target_os = "macos"))]
                         this.stop_dictation_on_user_edit(cx);
                         this.recompute_trigger(cx);
                         cx.notify();
@@ -310,6 +335,8 @@ impl Composer {
         ];
 
         Self {
+            compact,
+            placeholder_online: None,
             workspace_store,
             input,
             user_input_custom,
@@ -321,7 +348,7 @@ impl Composer {
             context_window_custom_error: false,
             traits_popover: None,
             picker_rail: None,
-            approval_expanded: false,
+            approval_expanded: compact,
             ui_request_id: None,
             ui_question_index: 0,
             ui_selections: std::collections::HashMap::new(),
@@ -341,7 +368,7 @@ impl Composer {
             image_load_generation: 0,
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
             voice: Voice::new(),
             _subscriptions: subscriptions,
         }
@@ -362,7 +389,7 @@ impl Composer {
             return;
         };
         // The dictation anchor belongs to the text we are about to swap out.
-        #[cfg(target_os = "macos")]
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
         self.abort_dictation(cx);
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
@@ -443,6 +470,12 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.compact
+            && *self.workspace_store.read(cx).connection_state()
+                != tcode_client::ConnectionState::Connected
+        {
+            return;
+        }
         // While a user-input question is pending, normal send is suppressed
         // (S1 §7). Typed text becomes the current question's custom answer and
         // flows through the same advance-or-submit path as clicking an option.
@@ -460,7 +493,8 @@ impl Composer {
             window.push_notification(Notification::info(crate::tr!("composer.no_session")), cx);
             return;
         }
-        if terminal_contexts.is_empty()
+        if !self.compact
+            && terminal_contexts.is_empty()
             && let Some(later) = parse_later(&text, Local::now())
         {
             let Ok((fire_at_unix_secs, message)) = later else {
@@ -583,7 +617,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
         self.abort_dictation(cx);
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -615,7 +649,108 @@ impl Composer {
 
     // -- send / stop --------------------------------------------------------
 
+    /// The phone's single round control (docs/mobile-design.md §3.4): send while
+    /// idle, a red stop square while a turn runs, and — running with text typed —
+    /// send again with a "Queue" caption under it. Never a spinner, a send *and*
+    /// a stop button side by side.
+    fn render_compact_primary_action(
+        &self,
+        turn_running: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let interactive = self.interactive(cx);
+        let has_text = interactive && !self.input.read(cx).value().trim().is_empty();
+        if self
+            .workspace_store
+            .read(cx)
+            .composer_state()
+            .preparing_worktree
+        {
+            return div()
+                .size(px(44.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Spinner::new().small().color(cx.theme().primary))
+                .into_any_element();
+        }
+        let stopping = turn_running && !has_text;
+        let (label, id): (_, &'static str) = if stopping {
+            (crate::tr!("composer.stop"), "stop-turn")
+        } else if turn_running {
+            (crate::tr!("mobile.queue"), "steer-turn")
+        } else {
+            (crate::tr!("composer.send"), "send-message")
+        };
+        let (bg, fg) = if stopping {
+            (rgb(STOP_TINT).into(), gpui::white())
+        } else if has_text {
+            (cx.theme().primary, cx.theme().primary_foreground)
+        } else {
+            (cx.theme().muted, cx.theme().muted_foreground)
+        };
+        // 44pt hit area around the 40pt circle: the spec's touch minimum and its
+        // button size are both honored.
+        let button = crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+            .size(px(44.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(stopping && !interactive, |el| el.opacity(0.4))
+            .child(
+                div()
+                    .size(px(40.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(bg)
+                    .child(if stopping {
+                        div()
+                            .size(px(13.))
+                            .rounded(px(2.))
+                            .bg(gpui::white())
+                            .into_any_element()
+                    } else {
+                        Icon::new(IconName::ArrowUp)
+                            .size(px(18.))
+                            .text_color(fg)
+                            .into_any_element()
+                    }),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if stopping {
+                    if this.interactive(cx) {
+                        this.workspace_store
+                            .update(cx, |store, _cx| store.interrupt());
+                    }
+                    return;
+                }
+                let input = this.input.clone();
+                this.submit(&input, false, window, cx);
+            }));
+        v_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(1.))
+            .child(button)
+            .when(turn_running && has_text, |el| {
+                el.child(
+                    div()
+                        .text_size(px(10.))
+                        .line_height(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!("mobile.queue")),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_send_or_stop(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
+        if self.compact {
+            return self.render_compact_primary_action(turn_running, cx);
+        }
         if turn_running {
             // Providers with native mid-turn steering keep a send button active
             // beside Stop while a turn runs.
@@ -624,7 +759,7 @@ impl Composer {
                 .read(cx)
                 .composer_state()
                 .steering_supported;
-            let has_text = !self.input.read(cx).value().trim().is_empty();
+            let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
             let mut row = h_flex()
                 .gap_2()
                 .items_center()
@@ -683,10 +818,14 @@ impl Composer {
                     .items_center()
                     .justify_center()
                     .bg(rgb(STOP_TINT))
+                    .when(!self.interactive(cx), |el| el.opacity(0.4))
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.9))
                     .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
                     .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.interactive(cx) {
+                            return;
+                        }
                         this.workspace_store
                             .update(cx, |store, _cx| store.interrupt());
                     })),
@@ -715,7 +854,7 @@ impl Composer {
                 .into_any_element();
         }
 
-        let has_text = !self.input.read(cx).value().trim().is_empty();
+        let has_text = self.interactive(cx) && !self.input.read(cx).value().trim().is_empty();
         let (bg, fg) = if has_text {
             (cx.theme().primary, cx.theme().primary_foreground)
         } else {
@@ -800,7 +939,7 @@ impl Render for Composer {
         // than the threshold. Until the first prepaint measurement lands we
         // assume the full layout (the common wide case).
         let measured = self.control_width.get();
-        let compact = measured.is_some_and(|w| w < CONTROL_ROW_COMPACT_BELOW);
+        let compact = self.compact || measured.is_some_and(|w| w < CONTROL_ROW_COMPACT_BELOW);
 
         // The control row's width is only known after layout (the paint-phase
         // callback below), one frame behind this render, and that callback
@@ -826,12 +965,31 @@ impl Render for Composer {
             .items_center();
 
         // Absent unless this machine has a dictation engine (macOS 26+).
-        #[cfg(target_os = "macos")]
-        let mic = self.render_mic_button(cx);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        let mic = if self.compact {
+            None
+        } else {
+            self.render_mic_button(cx)
+        };
+        #[cfg(not(all(feature = "desktop", target_os = "macos")))]
         let mic: Option<AnyElement> = None;
 
-        let control_row = if compact {
+        let control_row = if self.compact {
+            control_row_base
+                .flex_wrap()
+                .child(self.render_model_picker(cx))
+                .child(self.render_traits_picker(cx))
+                .child(div().flex_1())
+                .child(self.render_primary_action(turn_running, cx))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(self.render_permission_picker(cx))
+                        .child(self.render_mode_chip(cx)),
+                )
+        } else if compact {
             control_row_base
                 .child(self.render_model_picker(cx))
                 .child(self.render_overflow_menu(cx))
@@ -967,12 +1125,27 @@ impl Render for Composer {
 
         // Focus swaps the hairline to primary in one frame. Geometry stays
         // fixed: focus never changes border width, radius, or layout.
+        if self.compact && self.placeholder_online != Some(self.interactive(cx)) {
+            self.placeholder_online = Some(self.interactive(cx));
+            let placeholder = if self.interactive(cx) {
+                crate::tr!("mobile.message")
+            } else {
+                crate::tr!("mobile.offline_message")
+            };
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
         let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
             .w_full()
             .gap_1p5()
             .p(px(6.))
-            .rounded(crate::material::radius_composer())
+            .rounded(if self.compact {
+                px(16.)
+            } else {
+                crate::material::radius_composer()
+            })
             .border_1()
             .border_color(if composer_focused {
                 cx.theme().primary
@@ -988,7 +1161,7 @@ impl Render for Composer {
             // the Paste *action* in the capture phase. Swallow it only when the
             // clipboard held an image; text paste propagates to the editor.
             .capture_action(cx.listener(|this, _: &Paste, window, cx| {
-                if this.paste_clipboard_image(window, cx) {
+                if !this.compact && this.paste_clipboard_image(window, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -1002,7 +1175,7 @@ impl Render for Composer {
                 }
                 // Escape ends dictation (keeping the transcript) before it can
                 // mean anything else.
-                #[cfg(target_os = "macos")]
+                #[cfg(all(feature = "desktop", target_os = "macos"))]
                 if key == "escape" && this.stop_dictation(cx) {
                     cx.stop_propagation();
                     return;
@@ -1033,6 +1206,9 @@ impl Render for Composer {
                 move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                     let paths: Vec<PathBuf> = paths.paths().to_vec();
                     composer.update(cx, |this, cx| {
+                        if this.compact {
+                            return;
+                        }
                         for path in paths {
                             if mime_from_path(&path).starts_with("image/") {
                                 this.add_image_path(path, window, cx);
@@ -1065,7 +1241,11 @@ impl Render for Composer {
             .flex_shrink_0()
             .w_full()
             .items_center()
-            .px(px(crate::chat::CONTENT_MIN_PADDING))
+            .px(px(if self.compact {
+                16.
+            } else {
+                crate::chat::CONTENT_MIN_PADDING
+            }))
             .pt_1()
             .pb_2()
             // Shift+Tab toggles Build ↔ Plan (S1 §4).
@@ -1096,7 +1276,9 @@ impl Render for Composer {
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_queue_strip(cx))
                     .child(card)
-                    .children(self.render_checkout_row(cx)),
+                    .when(!self.compact, |el| {
+                        el.children(self.render_checkout_row(cx))
+                    }),
             )
     }
 }

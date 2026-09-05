@@ -1,9 +1,17 @@
+#[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_family = "wasm")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) use tcode_core::project::now_secs;
+pub(crate) fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
 
 /// Compact relative-time label (e.g. "5m ago") from an elapsed-seconds count.
-pub(crate) fn humanize_ago(secs: u64) -> String {
+pub fn humanize_ago(secs: u64) -> String {
     if secs < 60 {
         crate::tr!("time.just_now").into_owned()
     } else if secs < 3600 {

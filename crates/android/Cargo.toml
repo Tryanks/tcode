@@ -1,0 +1,22 @@
+[package]
+name = "tcode-android"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "tcode_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+gpui-android = { path = "../platform/gpui-android" }
+log = "0.4"
+tcode-mobile = { path = "../mobile" }
+tcode-ui = { path = "../ui", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+futures = "0.3"
+jni = "0.21"

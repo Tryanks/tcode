@@ -12,22 +12,26 @@ impl AppState {
     /// Kick off a background refresh of the active session's git status (on
     /// session open, after each turn, and after each git action). A stale result
     /// (session switched, or a newer refresh superseded it) is discarded.
-    pub(crate) fn refresh_git_status(&mut self, cx: &mut HostCx) {
-        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
-            self.git_status = None;
+    pub(crate) fn refresh_git_status(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(cwd) = self.resident(target_id).map(|a| a.meta.cwd.clone()) else {
+            self.git_status.remove(target_id);
             return;
         };
-        let session_id = self.active_session_id().map(str::to_string);
-        self.git_status_generation += 1;
-        let generation = self.git_status_generation;
+        let session_id = target_id.to_string();
+        let generation = self
+            .git_status_generation
+            .entry(target_id.to_string())
+            .or_default();
+        *generation += 1;
+        let generation = *generation;
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let status = host_cx.unblock(move || read_status(&cwd)).await;
             host_cx.enqueue(move |state, _cx| {
-                if state.git_status_generation == generation
-                    && state.active_session_id().map(str::to_string) == session_id
+                if state.git_status_generation.get(&session_id) == Some(&generation)
+                    && state.resident(&session_id).is_some()
                 {
-                    state.git_status = Some(status);
+                    state.git_status.insert(session_id, status);
                 }
             });
         });
@@ -51,8 +55,10 @@ impl AppState {
     }
 
     /// The active session's current branch (for the commit dialog header).
-    pub(crate) fn git_branch_name(&self) -> Option<String> {
-        self.git_status.as_ref().and_then(|s| s.branch.clone())
+    pub(crate) fn git_branch_name(&self, target_id: &str) -> Option<String> {
+        self.git_status
+            .get(target_id)
+            .and_then(|s| s.branch.clone())
     }
 
     /// Generate a commit message with the current provider (Claude, headless
@@ -60,10 +66,11 @@ impl AppState {
     /// a task the caller (commit dialog) awaits to fill the message field.
     pub fn generate_commit_message(
         &self,
+        target_id: &str,
         included: Option<Vec<String>>,
         cx: &HostCx,
     ) -> HostTask<Result<String, String>> {
-        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+        let Some(cwd) = self.resident(target_id).map(|a| a.meta.cwd.clone()) else {
             return HostCx::spawn_background(cx, async { Err("no active session".to_string()) });
         };
         let binary = self.settings.provider(ProviderKind::ClaudeCode).binary_path;
@@ -88,23 +95,25 @@ impl AppState {
     /// file subset (`None` = all); `feature_branch` the safeguard's new branch.
     pub fn run_git_action(
         &mut self,
+        target_id: &str,
         action: GitAction,
         message: Option<String>,
         included: Option<Vec<String>>,
         feature_branch: Option<String>,
         cx: &mut HostCx,
     ) {
-        if self.git_busy {
+        if self.git_busy.contains(target_id) {
             emit_runtime(cx, RuntimeEvent::Toast(RuntimeToast::GitBusy));
             return;
         }
-        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+        let Some(cwd) = self.resident(target_id).map(|a| a.meta.cwd.clone()) else {
             return;
         };
-        let current_branch = self.git_branch_name();
-        self.git_busy = true;
+        let current_branch = self.git_branch_name(target_id);
+        self.git_busy.insert(target_id.to_string());
         let operation = self.next_operation_id();
         let retry = GitActionRequest {
+            session_id: target_id.to_string(),
             action,
             message: message.clone(),
             included: included.clone(),
@@ -115,6 +124,7 @@ impl AppState {
             RuntimeEvent::Toast(RuntimeToast::GitStarted { operation, action }),
         );
 
+        let target_id = target_id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let (result, git_branch) = host_cx
@@ -132,7 +142,7 @@ impl AppState {
                 })
                 .await;
             host_cx.enqueue(move |state, cx| {
-                state.git_busy = false;
+                state.git_busy.remove(&target_id);
                 match &result {
                     Ok(_) => emit_runtime(
                         cx,
@@ -147,10 +157,10 @@ impl AppState {
                         }),
                     ),
                 }
-                if let Some(active) = state.residents.active.as_mut() {
+                if let Some(active) = state.resident_mut(&target_id) {
                     active.git_branch = git_branch;
                 }
-                state.refresh_git_status(cx);
+                state.refresh_git_status(&target_id, cx);
             });
         });
     }

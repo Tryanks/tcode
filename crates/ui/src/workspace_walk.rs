@@ -1,6 +1,26 @@
 //! Workspace-entry filtering for the `@`-mention popover.
 
+use std::path::Path;
+
 use tcode_protocol::PathEntry;
+
+/// Display `path` relative to the active workspace when it is nested beneath it.
+#[cfg(any(feature = "desktop", feature = "remote"))]
+pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
+    tcode_services::user_files::relativize_to_workspace(path, cwd)
+}
+
+/// Portable equivalent of the services helper. Canonicalization gracefully
+/// falls back to the supplied root on targets without a native filesystem.
+#[cfg(not(any(feature = "desktop", feature = "remote")))]
+pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let path = Path::new(path);
+    path.strip_prefix(cwd)
+        .or_else(|_| path.strip_prefix(canonical_cwd))
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+}
 
 /// A ranked filter over workspace entries (case-insensitive), capped at `limit`.
 /// Basename matches rank above path-only matches; a basename prefix match ranks

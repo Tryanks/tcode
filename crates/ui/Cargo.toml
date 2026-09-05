@@ -3,16 +3,48 @@ name = "tcode-ui"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["local-host", "remote", "terminal", "desktop"]
+local-host = ["dep:tcode-runtime"]
+# Hosting/pairing UI. Off for wasm targets, which cannot listen or advertise.
+remote = ["remote-client", "tcode-remote/server", "dep:qrcode", "dep:tcode-services"]
+# Pairing, saved hosts, and the reconnecting native WebSocket client.
+remote-client = ["dep:tcode-remote", "tcode-remote/client"]
+# PTY/grid rendering. The live drawer additionally requires `local-host`.
+terminal = ["dep:term"]
+# Native desktop integrations: embedded webview, voice, platform dialogs and
+# computer-use permissions/settings.
+desktop = [
+    "dep:async-lock",
+    "dep:tcode-services",
+    "dep:tcode-voice",
+    "dep:preview-mcp",
+    "dep:computer-use-mcp",
+    "dep:gpui-wry",
+    "dep:wry",
+    "dep:raw-window-handle",
+    "dep:block2",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-core-foundation",
+    "dep:objc2-foundation",
+    "dep:objc2-image-io",
+    "dep:objc2-web-kit",
+]
+
 [dependencies]
-agent = { path = "../agent" }
-tcode-core = { path = "../core" }
-tcode-protocol = { path = "../protocol" }
-tcode-runtime = { path = "../runtime" }
-tcode-services = { path = "../services" }
-tcode-voice = { path = "../voice" }
-term = { path = "../term" }
-preview-mcp = { path = "../preview-mcp" }
-computer-use-mcp = { path = "../computer-use-mcp" }
+agent = { path = "../agent", default-features = false }
+tcode-client = { path = "../client" }
+tcode-core = { path = "../core", default-features = false }
+tcode-protocol = { path = "../protocol", default-features = false }
+tcode-remote = { path = "../remote", default-features = false, optional = true }
+tcode-runtime = { path = "../runtime", optional = true }
+qrcode = { version = "0.14", default-features = false, optional = true }
+tcode-services = { path = "../services", optional = true }
+tcode-voice = { path = "../voice", optional = true }
+term = { path = "../term", optional = true }
+preview-mcp = { path = "../preview-mcp", optional = true }
+computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 gpui = { package = "gpui-pre", version = "0.3.1" }
 gpui-base = "0.6.0"
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }
@@ -20,35 +52,40 @@ gpui-component-macros = "0.6.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"
+async-lock = { version = "3", optional = true }
 chrono = "0.4"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-smol = "2"
+futures-lite = "2"
 rushdown = "0.18.0"
 rust-i18n = "4"
 sys-locale = "0.3"
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load"] }
 imara-diff = "0.2"
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+web-time = "1"
+
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-gpui-wry = "0.6.0"
-wry = { version = "0.53.3", package = "lb-wry" }
-raw-window-handle = { version = "0.6", features = ["std"] }
+gpui-wry = { version = "0.6.0", optional = true }
+wry = { version = "0.53.3", package = "lb-wry", optional = true }
+raw-window-handle = { version = "0.6", features = ["std"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6.2"
-objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"] }
-objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"] }
-objc2-foundation = { version = "0.3.2", features = ["NSError", "NSNotification", "NSOperation", "NSString", "block2"] }
-objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"] }
-objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKWebView"] }
+block2 = { version = "0.6.2", optional = true }
+objc2 = { version = "0.6.4", optional = true }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"], optional = true }
+objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"], optional = true }
+objc2-foundation = { version = "0.3.2", features = ["NSError", "NSNotification", "NSOperation", "NSString", "block2"], optional = true }
+objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"], optional = true }
+objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKWebView"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
 gpui = { package = "gpui-pre", version = "0.3.1", features = ["test-support"] }
 gpui_platform = { package = "gpui-pre-platform", version = "0.3.1", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+smol = "2"
 tcode-runtime = { path = "../runtime", features = ["test-support"] }
 # dump-create is only needed by examples/sanitize_syntaxes.rs and the syntax-set
 # regression test; the shipped binary keeps the lean dependency feature set.

@@ -283,7 +283,7 @@ impl Composer {
                     .bg(cx.theme().secondary)
                     .cursor_pointer()
                     .child(
-                        img(path)
+                        img(crate::store::host_image(path))
                             .size(px(18.))
                             .rounded(crate::material::radius_chip()),
                     )

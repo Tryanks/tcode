@@ -26,7 +26,7 @@ fn denied_screen_recording_drops_permission_relaunch_marker() {
 fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-subagent-mirror-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
 
     state.update(cx, |state, cx| {
         let mut parent_meta = SessionMeta::new(
@@ -37,7 +37,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         parent_meta.id = "parent".into();
         parent_meta.project_id = Some("project".into());
         state.sessions.push(parent_meta.clone());
-        state.residents.active = Some(ActiveSession::new(parent_meta, false, Vec::new()));
+        state.install_selected(ActiveSession::new(parent_meta, false, Vec::new()));
 
         state.on_event(
             "parent",
@@ -154,12 +154,12 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
 fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool, reload: bool) {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let mirror_id = state.update(cx, |state, cx| {
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
         meta.id = "parent".into();
         state.sessions.push(meta.clone());
-        state.residents.active = Some(ActiveSession::new(meta, false, Vec::new()));
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
         state.on_event(
             "parent",
             AgentEvent::TurnStarted {
@@ -344,7 +344,7 @@ fn native_mirror_turn_lifecycle_parent_end() {
 fn settings_patch_preserves_concurrently_changed_other_field() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-settings-seam-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let settings = Settings {
         sidebar_collapsed: true,
         ..Settings::default()
@@ -373,7 +373,7 @@ fn settings_patch_preserves_concurrently_changed_other_field() {
     )));
     assert!(outgoing.iter().any(|message| matches!(
         message,
-        HostMessage::Event(EventEnvelope {
+        HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::Settings,
             event: ServerEvent::SettingsReplaced(replaced),
             ..
@@ -385,7 +385,7 @@ fn settings_patch_preserves_concurrently_changed_other_field() {
 fn settings_patches_from_stale_snapshot_preserve_nested_sibling_fields() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-nested-settings-seam-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let stale = Settings::default().browser;
     let mut home_url_writer = stale.clone();
     home_url_writer.home_url = Some("https://example.com".into());
@@ -414,7 +414,7 @@ fn settings_patches_from_stale_snapshot_preserve_nested_sibling_fields() {
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
         message,
-        HostMessage::Event(EventEnvelope {
+        HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::Settings,
             event: ServerEvent::SettingsReplaced(replaced),
             ..
@@ -427,7 +427,7 @@ fn settings_patches_from_stale_snapshot_preserve_nested_sibling_fields() {
 fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_keys() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-reset-settings-scope-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
 
     // Preferences the reset must clear.
     let mut settings = Settings {
@@ -527,7 +527,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
 fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-provider-diff-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let command = Command::SetProfileSecret {
         profile_id: "codex".into(),
         name: "OPENAI_API_KEY".into(),
@@ -542,6 +542,7 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
         .iter()
         .filter_map(|message| match message {
             HostMessage::Event(EventEnvelope {
+                request_id: None,
                 topic: Topic::Providers,
                 event: ServerEvent::ProvidersReplaced(status),
             }) => Some(status),
@@ -563,6 +564,7 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
     assert!(!outgoing.iter().any(|message| matches!(
         message,
         HostMessage::Event(EventEnvelope {
+            request_id: None,
             topic: Topic::Providers,
             event: ServerEvent::ProvidersReplaced(_),
         })
@@ -573,7 +575,7 @@ fn provider_projection_diff_emits_once_then_suppresses_noop_turn() {
 fn parked_session_projection_diff_emits_session_status() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-parked-session-diff-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let parked = live_session(ProviderKind::Codex, smol::channel::unbounded().0);
     let parked_id = parked.meta.id.clone();
 
@@ -602,6 +604,7 @@ fn parked_session_projection_diff_emits_session_status() {
         .iter()
         .filter_map(|message| match message {
             HostMessage::Event(EventEnvelope {
+                request_id: None,
                 topic: Topic::SessionStatus { session_id },
                 event: ServerEvent::SessionStatusReplaced(status),
             }) if session_id == &parked_id => Some(status),
@@ -611,7 +614,7 @@ fn parked_session_projection_diff_emits_session_status() {
     assert_eq!(statuses.len(), 1);
     assert_eq!(statuses[0].title, "Renamed while parked");
     state.read_with(cx, |state, _| {
-        assert!(state.residents.active.is_none());
+        assert!(state.selected_session().is_none());
         assert!(state.residents.parked.contains_key(&parked_id));
     });
 }
@@ -620,7 +623,7 @@ fn parked_session_projection_diff_emits_session_status() {
 fn dispatched_start_draft_emits_session_status_over_ndjson() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-session-status-seam-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let cwd = test_store.root().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
 
@@ -637,7 +640,7 @@ fn dispatched_start_draft_emits_session_status_over_ndjson() {
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
         message,
-        HostMessage::Event(EventEnvelope {
+        HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::SessionStatus { session_id },
             event: ServerEvent::SessionStatusReplaced(status),
             ..
@@ -656,7 +659,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let commands = scripted.commands.clone();
     let events = scripted.events.clone();
     let state = cx.new_entity(|_| {
-        let mut state = AppState::new((*test_store).clone());
+        let mut state = TestClientState::new((*test_store).clone());
         state.set_provider_launcher_for_test(scripted.launcher);
         state
     });
@@ -671,10 +674,15 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             cwd,
         },
     );
+    let session_id = state.read_with(cx, |state, _| {
+        state.residents.live.keys().next().unwrap().clone()
+    });
+    state.host_update(cx, |state, cx| state.select_session(&session_id, cx));
     state.dispatch_command(
         cx,
         52,
         Command::SendTurn {
+            session_id,
             text: "exercise the adapter".into(),
             attachment_paths: Vec::new(),
         },
@@ -703,7 +711,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
         message,
-        HostMessage::Event(EventEnvelope {
+        HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::SessionEvents { .. },
             event: ServerEvent::SessionEvent(SessionEventRecord {
                 event: AgentEvent::TurnStarted { turn_id },
@@ -713,7 +721,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
         }) if turn_id == "scripted-turn"
     )));
     state.read_with(cx, |state, _| {
-        assert!(state.residents.active.as_ref().unwrap().turn_in_flight);
+        assert!(state.selected_session().unwrap().turn_in_flight);
     });
 }
 
@@ -733,7 +741,7 @@ fn archive_and_unarchive_apply_exact_timestamp_cascades() {
         meta.parent_session_id = parent.map(str::to_string);
         store.upsert_meta(&meta).unwrap();
     }
-    let state = cx.new_entity(|_| AppState::new(store.clone()));
+    let state = cx.new_entity(|_| TestClientState::new(store.clone()));
 
     state.host_update(cx, |state, cx| {
         state.archive_session("parent", cx);
@@ -952,7 +960,7 @@ fn late_ai_title_does_not_overwrite_a_manual_rename() {
     meta.title = "first message fallback".into();
     let id = meta.id.clone();
     store.upsert_meta(&meta).unwrap();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.apply_generated_title(&id, "first message fallback", "AI generated title", cx);
@@ -968,7 +976,7 @@ fn late_ai_title_does_not_overwrite_a_manual_rename() {
 fn marketplace_items_are_runtime_owned_views() {
     let test_store = TestStore::new("tcode-marketplace-view-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     state.acp_registry = Some(
         serde_json::from_value(serde_json::json!({
             "agents": [
@@ -1043,7 +1051,7 @@ fn marketplace_items_are_runtime_owned_views() {
 fn provider_update_command_hides_install_source() {
     let test_store = TestStore::new("tcode-provider-update-view-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     state.providers.provider_versions.insert(
         ProviderKind::ClaudeCode,
         ProviderVersionState {
@@ -1123,7 +1131,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
     let attachment_path = root.join("sample.png");
     std::fs::write(&attachment_path, [1, 2, 3]).unwrap();
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -1136,7 +1144,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
             line_end: 13,
             text: "cargo test\nok".into(),
         });
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.add_review_comment(
             ReviewComment::new(
                 "src/lib.rs".into(),
@@ -1174,10 +1182,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
             }]
         );
         assert!(
-            state
-                .residents
-                .active
-                .as_ref()
+            state.selected_session()
                 .unwrap()
                 .terminal_workspace
                 .contexts
@@ -1192,7 +1197,7 @@ fn orchestrate_turn_records_the_context_split_on_the_user_message() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-split-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
     let mut expected_full = String::new();
     let mut expected_context = 0;
@@ -1208,7 +1213,7 @@ fn orchestrate_turn_records_the_context_split_on_the_user_message() {
         // than a restart (which would flush through a different path).
         active.live_model = active.meta.model.clone();
         active.live_approval_mode = Some(active.meta.approval_mode);
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.orchestrate_turn("执行某某任务".into(), Vec::new(), cx);
         let delivery_id = match receiver.try_recv() {
@@ -1272,7 +1277,7 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
     let title_commands = scripted_title.commands.clone();
     let title_events = scripted_title.events.clone();
     let state = cx.new_entity(|_| {
-        let mut state = AppState::new((*test_store).clone());
+        let mut state = TestClientState::new((*test_store).clone());
         state.ai_title_generation_enabled = true;
         state.set_provider_launcher_for_test(scripted_title.launcher);
         state
@@ -1285,7 +1290,7 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
         active.meta.orchestrate_enabled = true;
         active.live_model = active.meta.model.clone();
         active.live_approval_mode = Some(active.meta.approval_mode);
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.orchestrate_turn("执行某某任务".into(), Vec::new(), cx);
         let delivery_id = match receiver.try_recv() {
@@ -1447,14 +1452,14 @@ fn updates_on_the_viewed_thread_do_not_mark_it_unread() {
     store.upsert_meta(&second).unwrap();
     let first_id = first.id.clone();
     let second_id = second.id.clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.select_session(&first_id, cx);
 
         // A turn finishes while the user is watching: updated_at moves past
         // the watermark stamped on entry, and the meta is persisted.
-        let active = state.residents.active.as_mut().unwrap();
+        let active = state.selected_session_mut().unwrap();
         active.meta.updated_at = now_secs() + 10;
         let meta = active.meta.clone();
         state.persist_meta(&meta, cx);
@@ -1486,7 +1491,7 @@ fn draft_send_creates_session_with_project_cwd() {
     let project = Project::from_root(PathBuf::from("/tmp/tcode-draft-proj"));
     // Persist the project so the draft's project_id survives index migration.
     store.upsert_project(&project).unwrap();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     // A draft is set up (cwd = project root) but not yet persisted.
     let draft = AppState::build_draft_session(
         project.id.clone(),
@@ -1502,14 +1507,14 @@ fn draft_send_creates_session_with_project_cwd() {
     assert!(matches!(draft.runtime, Runtime::Idle));
     let draft_id = draft.meta.id.clone();
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(draft);
+        state.install_selected(draft);
         // Not in the index until the first send materializes it.
         assert!(!state.sessions.iter().any(|m| m.id == draft_id));
 
         // The first send commits the draft: it becomes a real session whose
         // cwd is the project root and shows up in the sidebar index.
         state.commit_draft(cx).unwrap();
-        assert!(!state.residents.active.as_ref().unwrap().draft);
+        assert!(!state.selected_session().unwrap().draft);
         let created = state.sessions.iter().find(|m| m.id == draft_id).unwrap();
         assert_eq!(created.cwd, project.root);
         assert_eq!(created.project_id.as_deref(), Some(project.id.as_str()));
@@ -1521,7 +1526,7 @@ fn draft_inherits_newest_unarchived_session_from_same_project() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-draft-project-defaults-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         let mut other_project = SessionMeta::new(
@@ -1584,7 +1589,7 @@ fn draft_inherits_newest_unarchived_session_from_same_project() {
         state.sessions = vec![other_project, target_older, target_archived, target_newest];
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
-        let draft = state.residents.active.as_ref().unwrap();
+        let draft = state.selected_session().unwrap();
         assert!(draft.draft);
         assert_eq!(draft.meta.provider, ProviderKind::Codex);
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.2-codex"));
@@ -1604,7 +1609,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-draft-provider-selection-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         let mut previous = SessionMeta::new(
@@ -1620,7 +1625,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
         state.sessions = vec![previous];
         state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
 
-        let draft = state.residents.active.as_ref().unwrap();
+        let draft = state.selected_session().unwrap();
         assert_eq!(draft.meta.provider, ProviderKind::Codex);
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
 
@@ -1633,7 +1638,7 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
             cx,
         );
 
-        let draft = state.residents.active.as_ref().unwrap();
+        let draft = state.selected_session().unwrap();
         assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
         assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5"));
         assert!(draft.meta.acp_agent_id.is_none());
@@ -1647,7 +1652,7 @@ fn model_switch_restores_last_effort_used_with_that_model() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-model-switch-effort-memory-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         let mut sol = SessionMeta::new(
@@ -1675,7 +1680,7 @@ fn model_switch_restores_last_effort_used_with_that_model() {
         // not the model's default.
         state.set_active_model(ProviderKind::Codex, Some("gpt-5.6-sol".into()), None, cx);
 
-        let draft = state.residents.active.as_ref().unwrap();
+        let draft = state.selected_session().unwrap();
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(draft.meta.option_selections.len(), 1);
         assert_eq!(draft.meta.option_selections[0].id, "reasoningEffort");
@@ -1690,7 +1695,7 @@ fn model_switch_restores_last_effort_used_with_that_model() {
 fn draft_inherits_acp_agent_id_from_project_history() {
     let test_store = TestStore::new("tcode-draft-acp-defaults-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     let mut acp = SessionMeta::new(
         ProviderKind::Acp,
         PathBuf::from("/tmp/acp"),
@@ -1713,7 +1718,7 @@ fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-draft-fallback-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         let mut global = SessionMeta::new(
@@ -1732,7 +1737,7 @@ fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted() {
 
         state.start_draft("project-empty".into(), PathBuf::from("/tmp/empty"), cx);
 
-        let draft = state.residents.active.as_ref().unwrap();
+        let draft = state.selected_session().unwrap();
         let draft_id = draft.meta.id.clone();
         assert!(draft.draft);
         assert_eq!(draft.meta.provider, ProviderKind::Acp);
@@ -1753,7 +1758,7 @@ fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted() {
 fn draft_global_fallback_ignores_target_projects_archived_history() {
     let test_store = TestStore::new("tcode-draft-archived-fallback-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
 
     let mut target_archived = SessionMeta::new(
         ProviderKind::Codex,
@@ -1795,7 +1800,7 @@ fn draft_global_fallback_ignores_target_projects_archived_history() {
 fn draft_defaults_to_claude_when_all_sessions_are_archived() {
     let test_store = TestStore::new("tcode-draft-all-archived-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
 
     let mut target_archived = SessionMeta::new(
         ProviderKind::Codex,
@@ -1831,7 +1836,7 @@ fn draft_defaults_to_claude_when_all_sessions_are_archived() {
 fn draft_defaults_inherit_profile_id() {
     let test_store = TestStore::new("tcode-draft-profile-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
 
     let mut prev = SessionMeta::new(
         ProviderKind::ClaudeCode,
@@ -1867,7 +1872,7 @@ fn reopened_command_cache_seeds_a_draft_before_provider_start() {
         .save_commands(ProviderKind::ClaudeCode, None, &commands)
         .unwrap();
 
-    let state = AppState::new(SessionStore::open_at(root.clone()).unwrap());
+    let state = TestClientState::new(SessionStore::open_at(root.clone()).unwrap());
     let seeded = state.cached_provider_commands(ProviderKind::ClaudeCode, None);
     let draft = AppState::build_draft_session(
         "project".into(),
@@ -2006,7 +2011,7 @@ fn provider_env_home_and_launch_args_reach_session_options() {
 fn launch_env_merges_secrets_for_sensitive_rows() {
     let test_store = TestStore::new("tcode-env-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     let mut settings = state.settings.clone();
     settings.provider_mut(ProviderKind::ClaudeCode).env = vec![
         EnvVar {
@@ -2056,7 +2061,7 @@ fn launch_env_merges_secrets_for_sensitive_rows() {
 fn provider_snapshots_are_isolated_by_profile() {
     let test_store = TestStore::new("tcode-profile-snapshot-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     state.providers.provider_snapshots.insert(
         "claude".into(),
         ProviderSnapshot {
@@ -2096,7 +2101,7 @@ fn provider_snapshots_are_isolated_by_profile() {
 fn profile_binary_override_wins_over_path_lookup() {
     let test_store = TestStore::new("tcode-profile-binary-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     state.settings.profiles.insert(
         "kimi".into(),
         ProviderProfile {
@@ -2122,7 +2127,7 @@ fn profile_binary_override_wins_over_path_lookup() {
 fn third_party_profile_launches_in_parallel_with_builtin() {
     let test_store = TestStore::new("tcode-profile-env");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
 
     let mut settings = state.settings.clone();
     // Official Claude keeps its own key.
@@ -2663,7 +2668,7 @@ fn dispatched_brief_carries_report_contract_footer() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-brief-footer-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     state.host_update(cx, |state, cx| {
         let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
         let parent_id = parent.id.clone();
@@ -2696,7 +2701,7 @@ fn terminal_callback_archives_only_when_requested() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-callback-archive-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (parent_commands, _parent_receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -2758,7 +2763,7 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-report-result-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -2852,7 +2857,7 @@ fn orchestrate_send_unarchives_the_child() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-send-unarchive-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, _receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -2888,7 +2893,7 @@ fn orchestrate_send_fast_switch_persists_and_schedules_restart() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-send-fast-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, _receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -2954,7 +2959,7 @@ fn orchestrate_archive_is_batch_atomic_and_parent_scoped() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-archive-op-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         for (id, parent_id) in [
@@ -3016,7 +3021,7 @@ fn child_approval_request_sends_exactly_one_parent_callback() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-approval-callback-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -3073,7 +3078,7 @@ fn child_approval_always_allow_responds_without_parent_callback() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-approval-auto-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
     let (child_commands, child_receiver) = smol::channel::unbounded();
 
@@ -3127,7 +3132,7 @@ fn child_report_result_approval_is_auto_approved_in_every_mode() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-approval-report-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
     let (child_commands, child_receiver) = smol::channel::unbounded();
 
@@ -3181,7 +3186,7 @@ fn child_approval_manual_preserves_legacy_notice_without_auto_response() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-approval-manual-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (parent_commands, parent_receiver) = smol::channel::unbounded();
     let (child_commands, child_receiver) = smol::channel::unbounded();
 
@@ -3230,7 +3235,7 @@ fn orchestrate_approve_routes_decisions_and_validates_scope() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-approve-op-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -3381,7 +3386,7 @@ fn resident_background_child_result_uses_completed_live_timeline() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-resident-result-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let report = format!("Complete child report:\n{}", "full detail ".repeat(80));
 
     state.host_update(cx, |state, cx| {
@@ -3436,7 +3441,7 @@ fn steering_parked_orchestrator_callback_uses_recorded_id() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-steer-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
     let mut recorded_request_id = String::new();
 
@@ -3487,7 +3492,7 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-user-steer-id-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -3506,13 +3511,13 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
                 },
             }),
         );
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.steer("redirect".into(), Vec::new(), cx);
         let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
             panic!("user steer command missing")
         };
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(active.timeline.entries.iter().any(|entry| matches!(
             &entry.content,
             EntryContent::Steer {
@@ -3523,16 +3528,14 @@ fn steering_user_and_queue_paths_send_the_same_id_they_record() {
         )));
 
         let queued_id = state
-            .residents
-            .active
-            .as_mut()
+            .selected_session_mut()
             .unwrap()
             .push_queued("queued redirect".into(), Vec::new());
         state.steer_queued(queued_id, cx);
         let SessionCommand::Steer { request_id, .. } = receiver.try_recv().unwrap() else {
             panic!("queue-to-steer command missing")
         };
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(active.queue.is_empty());
         assert!(active.timeline.entries.iter().any(|entry| matches!(
             &entry.content,
@@ -3550,7 +3553,7 @@ fn callbacks_racing_provider_start_share_one_wakeup_turn() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-start-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         let mut parent = live_session(ProviderKind::ClaudeCode, smol::channel::unbounded().0);
@@ -3601,7 +3604,7 @@ fn shutdown_active_notifies_live_provider() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-app-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
     let active = ActiveSession {
         meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
@@ -3631,10 +3634,10 @@ fn shutdown_active_notifies_live_provider() {
     };
 
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.shutdown_active(cx);
         assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert!(state.residents.active.is_none());
+        assert!(state.selected_session().is_none());
     });
 }
 
@@ -3645,9 +3648,9 @@ fn shutdown_active_notifies_live_provider() {
 fn background_tasks_alone_count_as_working() {
     let test_store = TestStore::new("tcode-app-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     let (commands, _receiver) = smol::channel::unbounded();
-    state.residents.active = Some(ActiveSession {
+    state.install_selected(ActiveSession {
         meta: SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None),
         timeline: Timeline::default(),
         git_branch: None,
@@ -3674,15 +3677,10 @@ fn background_tasks_alone_count_as_working() {
         _pump: None,
     });
 
-    assert!(!state.residents.active.as_ref().unwrap().turn_in_flight);
+    assert!(!state.selected_session().unwrap().turn_in_flight);
     assert_eq!(state.working_sessions_count(), 1);
 
-    state
-        .residents
-        .active
-        .as_mut()
-        .unwrap()
-        .background_task_count = 0;
+    state.selected_session_mut().unwrap().background_task_count = 0;
     assert_eq!(state.working_sessions_count(), 0);
 }
 
@@ -3778,14 +3776,14 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scheduled-status-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
     let fire_at = now_secs() + 3_600;
 
     state.host_update(cx, |state, cx| {
         let mut active = live_session(ProviderKind::Codex, commands);
         active.meta.id = "scheduled-active".into();
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.schedule_turn("scheduled".into(), Vec::new(), fire_at, cx);
 
         let status = state.session_status_snapshot("scheduled-active").unwrap();
@@ -3802,7 +3800,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
             Ok(SessionCommand::SendTurn { .. })
         ));
 
-        let active = state.residents.active.as_mut().unwrap();
+        let active = state.selected_session_mut().unwrap();
         active.delivery_in_flight = None;
         active.turn_in_flight = false;
         active.queue.clear();
@@ -3812,7 +3810,7 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
             SystemTime::now() + Duration::from_secs(7_200),
         );
         state.drop_queued(drop_id, cx);
-        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.selected_session().unwrap().queue.is_empty());
     });
 }
 
@@ -3820,21 +3818,21 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
 fn usage_limit_event_schedules_resume_when_enabled_only() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-usage-limit-resume-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let resets_at = now_secs() + 3_600;
 
     state.host_update(cx, |state, cx| {
         let (commands, _) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::ClaudeCode, commands);
         active.meta.id = "resume-enabled".into();
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.on_event(
             "resume-enabled",
             AgentEvent::UsageLimitReached { resets_at },
             cx,
         );
 
-        let queue = &state.residents.active.as_ref().unwrap().queue;
+        let queue = &state.selected_session().unwrap().queue;
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].text, tcode_core::session::RESUME_PROMPT);
         assert_eq!(
@@ -3845,14 +3843,14 @@ fn usage_limit_event_schedules_resume_when_enabled_only() {
         let (commands, _) = smol::channel::unbounded();
         let mut active = live_session(ProviderKind::ClaudeCode, commands);
         active.meta.id = "resume-disabled".into();
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.settings.resume_on_limit_reset = false;
         state.on_event(
             "resume-disabled",
             AgentEvent::UsageLimitReached { resets_at },
             cx,
         );
-        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.selected_session().unwrap().queue.is_empty());
     });
 }
 
@@ -3861,7 +3859,7 @@ fn due_scheduled_message_reenters_the_ordinary_send_path() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scheduled-fire-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -3872,11 +3870,11 @@ fn due_scheduled_message_reenters_the_ordinary_send_path() {
             Vec::new(),
             SystemTime::now() - Duration::from_secs(1),
         );
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.fire_due_scheduled(cx);
 
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.queue[0].text, "due now");
         assert_eq!(active.queue[0].not_before, None);
@@ -3892,7 +3890,7 @@ fn implement_plan_waits_for_pending_relay_without_mutating_state() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-plan-relay-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -3931,11 +3929,11 @@ fn implement_plan_waits_for_pending_relay_without_mutating_state() {
                 usage: None,
             },
         );
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.implement_plan(cx);
 
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.interaction_mode, InteractionMode::Plan);
         assert!(active.timeline.plan_ready().is_some());
         assert!(receiver.try_recv().is_err());
@@ -3947,7 +3945,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-profile-relay-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, _receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -3974,7 +3972,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
                 usage: None,
             },
         );
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         // Same ProviderKind, different profile: a different backend. The
         // selection must park behind the relay confirmation and rebind the
@@ -3985,7 +3983,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
             Some("kimi".into()),
             cx,
         );
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.profile_id.as_deref(), Some("kimi"));
         assert_eq!(active.meta.model.as_deref(), Some("kimi-k3"));
         let pending = active.pending_relay.as_ref().expect("relay pending");
@@ -4004,7 +4002,7 @@ fn profile_switch_within_one_provider_requires_a_relay() {
             None,
             cx,
         );
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(active.pending_relay.is_none());
         assert_eq!(active.meta.profile_id, None);
         assert!(state.relay_confirmation().is_none());
@@ -4123,7 +4121,7 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-rewind-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -4152,19 +4150,9 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
                 },
             );
         }
-        state.residents.active = Some(active);
+        state.install_selected(active);
         state.rewind_turn(1, RewindMode::Conversation, cx);
-        assert_eq!(
-            state
-                .residents
-                .active
-                .as_ref()
-                .unwrap()
-                .timeline
-                .turns
-                .len(),
-            2
-        );
+        assert_eq!(state.selected_session().unwrap().timeline.turns.len(), 2);
         assert!(matches!(
             receiver.try_recv(),
             Ok(SessionCommand::Rewind {
@@ -4182,23 +4170,14 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
             },
             cx,
         );
-        assert_eq!(
-            state
-                .residents
-                .active
-                .as_ref()
-                .unwrap()
-                .timeline
-                .turns
-                .len(),
-            1
-        );
+        assert_eq!(state.selected_session().unwrap().timeline.turns.len(), 1);
         assert!(!state.native_rewind_pending());
     });
     let mut serialized_prefill = None;
     while let Ok(line) = cx.outgoing_rx.try_recv() {
         let output = tcode_protocol::decode_host_line(&line).expect("decode host test output");
         if let HostMessage::Event(EventEnvelope {
+            request_id: None,
             event: ServerEvent::NativeRewindPrefill { session_id, text },
             ..
         }) = output
@@ -4214,7 +4193,7 @@ fn native_rewind_waits_for_provider_confirmation_before_pruning() {
 fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enabled() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-turn-blocked-queue-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
 
     state.host_update(cx, |state, cx| {
         state.settings.abort_on_model_fallback = true;
@@ -4230,7 +4209,7 @@ fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enab
         let session_id = active.meta.id.clone();
         active.push_queued("do not auto-send".into(), Vec::new());
         assert!(!active.queue.is_empty());
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.on_event(
             &session_id,
@@ -4242,12 +4221,12 @@ fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enab
             cx,
         );
 
-        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.selected_session().unwrap().queue.is_empty());
     });
 
     assert!(cx.drain_outgoing().iter().any(|message| matches!(
         message,
-        HostMessage::Event(EventEnvelope {
+        HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::SessionStatus { .. },
             event: ServerEvent::ModelFallbackBlocked {
                 category: Some(agent::ClassifierCategory::Cyber),
@@ -4264,7 +4243,7 @@ fn turn_blocked_clears_active_session_queue_when_abort_on_model_fallback_is_enab
 fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-model-fallback-stop-test");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let (commands, receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -4280,7 +4259,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
         );
         let session_id = active.meta.id.clone();
         active.push_queued("do not auto-send".into(), Vec::new());
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         state.on_event(
             &session_id,
@@ -4294,7 +4273,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
             cx,
         );
 
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(active.queue.is_empty());
         assert!(matches!(active.runtime, Runtime::Idle));
         assert!(!active.turn_in_flight);
@@ -4304,7 +4283,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
     assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
     assert!(cx.drain_outgoing().iter().any(|message| matches!(
         message,
-        HostMessage::Event(EventEnvelope {
+        HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::SessionStatus { .. },
             event: ServerEvent::ModelFallbackBlocked {
                 model: Some(model),
@@ -4320,7 +4299,7 @@ fn shutdown_all_notifies_active_and_parked_live_providers() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-app-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     let (active_commands, active_receiver) = smol::channel::unbounded();
     let (parked_commands, parked_receiver) = smol::channel::unbounded();
@@ -4328,7 +4307,7 @@ fn shutdown_all_notifies_active_and_parked_live_providers() {
     let (other_commands, other_receiver) = smol::channel::unbounded();
     let other = live_session(ProviderKind::Acp, other_commands);
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(live_session(ProviderKind::Codex, active_commands));
+        state.install_selected(live_session(ProviderKind::Codex, active_commands));
         state
             .residents
             .parked
@@ -4348,7 +4327,7 @@ fn shutdown_all_notifies_active_and_parked_live_providers() {
             other_receiver.try_recv(),
             Ok(SessionCommand::Shutdown)
         ));
-        assert!(state.residents.active.is_none());
+        assert!(state.selected_session().is_none());
         assert!(state.residents.parked.is_empty());
     });
 }
@@ -4587,12 +4566,12 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-acked-delivery-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (session, first_actor) = fake_live_session(cwd.clone());
     let session_id = session.meta.id.clone();
 
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(session);
+        state.install_selected(session);
         // The preceding model turn has completed, but Claude still owns a
         // background process. This is the idle-send window from the repro.
         state.on_event(
@@ -4624,7 +4603,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
             }) => (delivery_id, text),
             other => panic!("expected submitted SendTurn, got {other:?}"),
         };
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.delivery_in_flight, Some(delivery_id));
         assert!(!state.store.read_events(&session_id).iter().any(|stored| {
@@ -4645,13 +4624,13 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
             },
             cx,
         );
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(matches!(active.runtime, Runtime::Idle));
         assert_eq!(active.queue.len(), 1);
         assert_eq!(active.delivery_in_flight, None);
 
         let (resumed_commands, resumed_actor) = smol::channel::unbounded();
-        state.residents.active.as_mut().unwrap().runtime = Runtime::Live(resumed_commands);
+        state.selected_session_mut().unwrap().runtime = Runtime::Live(resumed_commands);
         assert_eq!(state.dispatch_next_queued(cx), Ok(true));
         let retried_delivery = match resumed_actor.try_recv() {
             Ok(SessionCommand::SendTurn {
@@ -4678,7 +4657,7 @@ fn unaccepted_send_survives_eof_and_is_delivered_once_after_resume() {
             },
             cx,
         );
-        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+        assert!(state.selected_session().unwrap().queue.is_empty());
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
@@ -4707,13 +4686,13 @@ fn inferred_startup_model_updates_live_model_without_restart() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-live-model-sync-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "model-sync".into();
 
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.on_event(
             "model-sync",
             AgentEvent::SessionStarted {
@@ -4725,7 +4704,7 @@ fn inferred_startup_model_updates_live_model_without_restart() {
             },
             cx,
         );
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.model.as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(active.live_model, active.meta.model);
         assert!(!active.model_changed_while_live());
@@ -4744,16 +4723,16 @@ fn park_active_retains_provider_with_background_tasks() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-park-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "background-owner".into();
     session.background_task_count = 1;
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.park_active(cx);
 
-        assert!(state.residents.active.is_none());
+        assert!(state.selected_session().is_none());
         assert_eq!(
             state.residents.parked["background-owner"].background_task_count,
             1
@@ -4767,16 +4746,16 @@ fn park_active_retains_idle_live_provider() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-idle-resident-park-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
 
     state.host_update(cx, |state, cx| {
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.park_active(cx);
 
-        assert!(state.residents.active.is_none());
+        assert!(state.selected_session().is_none());
         assert!(matches!(
             state.residents.parked["idle-resident"].runtime,
             Runtime::Live(_)
@@ -4791,7 +4770,7 @@ fn select_session_readopts_idle_resident_without_shutdown() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-idle-resident-readopt-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
@@ -4799,11 +4778,11 @@ fn select_session_readopts_idle_resident_without_shutdown() {
 
     state.host_update(cx, |state, cx| {
         state.sessions.push(meta);
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.park_active(cx);
         state.select_session("idle-resident", cx);
 
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(active.idle_since.is_none());
@@ -4813,18 +4792,48 @@ fn select_session_readopts_idle_resident_without_shutdown() {
 }
 
 #[test]
+fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-draft-subscription-readopt-test");
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
+    state.host_update(cx, |state, cx| {
+        state.resident_idle_grace = Duration::from_millis(1);
+        let id = AppState::start_draft(state, "project".into(), PathBuf::from("/tmp"), cx);
+        let subscription = tcode_protocol::Subscription {
+            topic: Topic::SessionStatus {
+                session_id: id.clone(),
+            },
+            after: None,
+        };
+        state.subscribe(&subscription, cx);
+        state.unsubscribe(&subscription, cx);
+        assert!(state.residents.parked.contains_key(&id));
+        assert!(state.sessions.iter().all(|meta| meta.id != id));
+        state.subscribe(&subscription, cx);
+        assert!(state.residents.live[&id].draft);
+        assert!(state.residents.live[&id].idle_since.is_none());
+        assert!(!state.residents.parked.contains_key(&id));
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        assert_eq!(state.residents.live.len(), 1);
+        assert!(state.residents.live.values().next().unwrap().draft);
+    });
+}
+
+#[test]
 fn resident_idle_reaper_shuts_down_untouched_provider() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-idle-resident-reaper-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
 
     state.host_update(cx, |state, cx| {
         state.resident_idle_grace = Duration::from_millis(1);
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.park_active(cx);
     });
     cx.run_until_parked();
@@ -4840,7 +4849,7 @@ fn resident_idle_reaper_ignores_readopted_session() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-idle-resident-stale-timer-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
@@ -4849,14 +4858,14 @@ fn resident_idle_reaper_ignores_readopted_session() {
     state.host_update(cx, |state, cx| {
         state.resident_idle_grace = Duration::from_millis(1);
         state.sessions.push(meta);
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.park_active(cx);
         state.select_session("idle-resident", cx);
     });
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(actor.try_recv().is_err(), "stale timer sent Shutdown");
@@ -4868,7 +4877,7 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-idle-resident-lru-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let base = Instant::now();
     let mut actors = Vec::new();
 
@@ -4889,7 +4898,7 @@ fn resident_idle_lru_evicts_only_oldest_provider() {
         let (commands, newest_actor) = smol::channel::unbounded();
         let mut newest = live_session(ProviderKind::ClaudeCode, commands);
         newest.meta.id = "resident-newest".into();
-        state.residents.active = Some(newest);
+        state.install_selected(newest);
         state.park_active(cx);
         actors.push(newest_actor);
 
@@ -4908,7 +4917,7 @@ fn settings_restart_waits_for_background_follow_up() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-background-restart-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "background-restart".into();
@@ -4921,10 +4930,10 @@ fn settings_restart_waits_for_background_follow_up() {
             .settings
             .provider_mut(ProviderKind::ClaudeCode)
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.send_turn("use the new model later".into(), Vec::new(), cx);
         assert!(actor.try_recv().is_err());
-        assert_eq!(state.residents.active.as_ref().unwrap().queue.len(), 1);
+        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
 
         // Claude publishes zero immediately before its self-invoked result;
         // the restart is still deferred until that follow-up turn closes.
@@ -4951,7 +4960,7 @@ fn settings_restart_waits_for_background_follow_up() {
             cx,
         );
         assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
-        assert_eq!(state.residents.active.as_ref().unwrap().queue.len(), 1);
+        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
     });
 }
 
@@ -5012,7 +5021,7 @@ fn model_switch_restarts_live_provider() {
 fn archived_hidden_from_sidebar_and_unread_logic() {
     let test_store = TestStore::new("tcode-archive-test");
     let store = (*test_store).clone();
-    let mut state = AppState::new(store);
+    let mut state = TestClientState::new(store);
     let project = Project {
         id: "p1".into(),
         name: "Proj".into(),
@@ -5106,13 +5115,13 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
             },
         )
         .unwrap();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| state.fork_thread(&source.id, cx));
     cx.run_until_parked();
 
     state.update(cx, |state, _cx| {
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         let fork = &active.meta;
         assert_ne!(fork.id, source.id);
         assert!(fork.pending_fork);
@@ -5136,7 +5145,7 @@ fn store_writer_appends_events_in_fifo_order() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-writer-events");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store.clone()));
+    let state = cx.new_entity(|_| TestClientState::new(store.clone()));
 
     state.host_update(cx, |state, cx| {
         state.record_event("ordered", &persisted_assistant_event("first"), cx);
@@ -5164,7 +5173,7 @@ fn store_writer_upsert_is_visible_to_fresh_store() {
     let test_store = TestStore::new("tcode-writer-upsert");
     let root = test_store.root().clone();
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
     meta.title = "persisted by writer".into();
     let id = meta.id.clone();
@@ -5190,7 +5199,7 @@ fn store_writer_profile_secret_is_visible_to_fresh_store() {
     let test_store = TestStore::new("tcode-writer-secret");
     let root = test_store.root().clone();
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.set_profile_secret(
@@ -5220,10 +5229,10 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     let override_cwd = root.join("override");
     std::fs::create_dir_all(&override_cwd).unwrap();
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.update(cx, |state, _| {
-        state.residents.active = Some(AppState::build_draft_session(
+        state.install_selected(AppState::build_draft_session(
             "terminal-project".into(),
             root.clone(),
             ProviderKind::Codex,
@@ -5238,9 +5247,7 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     state.read_with(cx, |state, _| {
         assert!(
             state
-                .residents
-                .active
-                .as_ref()
+                .selected_session()
                 .unwrap()
                 .terminal_workspace
                 .terminals
@@ -5251,7 +5258,7 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     cx.run_until_parked();
 
     state.read_with(cx, |state, _| {
-        let workspace = &state.residents.active.as_ref().unwrap().terminal_workspace;
+        let workspace = &state.selected_session().unwrap().terminal_workspace;
         assert_eq!(workspace.terminals.len(), 1);
         assert!(state.terminal_panel_open());
         assert_eq!(workspace.terminals[0].terminal.cwd(), override_cwd);
@@ -5304,11 +5311,11 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
         )
         .unwrap();
     let id = meta.id.clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.select_session(&id, cx);
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, id);
         assert!(active.timeline.entries.is_empty());
     });
@@ -5316,7 +5323,7 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        assert!(state.residents.active.as_ref().unwrap().timeline.entries.iter().any(
+        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "persisted cold output")
         ));
     });
@@ -5333,12 +5340,12 @@ fn parked_readopt_refolds_events_appended_while_parked() {
         .append_event(&meta.id, 1, &persisted_assistant_event("before parking"))
         .unwrap();
     let id = meta.id.clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| state.select_session(&id, cx));
     cx.run_until_parked();
     state.host_update(cx, |state, cx| {
-        let active = state.residents.active.as_mut().unwrap();
+        let active = state.selected_session_mut().unwrap();
         active.turn_in_flight = true;
         active.runtime = Runtime::Starting { generation: 1 };
         state.start_draft("other".into(), PathBuf::from("/tmp/other"), cx);
@@ -5352,7 +5359,7 @@ fn parked_readopt_refolds_events_appended_while_parked() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        assert!(state.residents.active.as_ref().unwrap().timeline.entries.iter().any(
+        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "while parked")
         ));
     });
@@ -5374,7 +5381,7 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
         .append_event(&b.id, 1, &persisted_assistant_event("only session B"))
         .unwrap();
     let (id_a, id_b) = (a.id.clone(), b.id.clone());
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.select_session(&id_a, cx);
@@ -5385,7 +5392,7 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, id_b);
         assert!(active.timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "only session B")
@@ -5407,7 +5414,7 @@ fn timeline_load_retries_when_append_watermark_moves() {
         .append_event(&meta.id, 1, &persisted_assistant_event("before load"))
         .unwrap();
     let id = meta.id.clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.select_session(&id, cx);
@@ -5417,7 +5424,7 @@ fn timeline_load_retries_when_append_watermark_moves() {
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let timeline = &state.residents.active.as_ref().unwrap().timeline;
+        let timeline = &state.selected_session().unwrap().timeline;
         assert!(timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::AssistantMessage { text }) if text == "before load")
         ));
@@ -5443,7 +5450,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-t3-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     // Session A, live (fake provider: commands land on `commands_a`).
     let (session, commands_a) = fake_live_session(cwd.clone());
@@ -5459,9 +5466,9 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // Send → the provider command is queued, then the adapter's
         // acceptance commits the user bubble.
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.send_turn("first message".into(), Vec::new(), cx);
-        let id_a = state.residents.active.as_ref().unwrap().meta.id.clone();
+        let id_a = state.selected_session().unwrap().meta.id.clone();
         let first_delivery = match commands_a.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
             other => panic!("expected first SendTurn, got {other:?}"),
@@ -5473,7 +5480,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
             },
             cx,
         );
-        assert!(state.residents.active.as_ref().unwrap().timeline.entries.iter().any(
+        assert!(state.selected_session().unwrap().timeline.entries.iter().any(
             |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "first message")
         ));
 
@@ -5516,13 +5523,13 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
         // visible in the queue strip — never dropped).
         state.start_draft("proj-t3".into(), cwd.clone(), cx);
         state.send_turn("second message".into(), Vec::new(), cx);
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         id_b = active.meta.id.clone();
         assert_ne!(id_a, id_b);
         assert_eq!(active.queue.len(), 1);
 
         // Provider comes up (simulated — the queue flush on start).
-        state.residents.active.as_mut().unwrap().runtime = Runtime::Live(commands_b);
+        state.selected_session_mut().unwrap().runtime = Runtime::Live(commands_b);
         assert_eq!(state.dispatch_next_queued(cx), Ok(true));
         let second_delivery = match receiver_b.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
@@ -5538,7 +5545,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // THE assertion: the new thread's first message is a visible user
         // entry in a rendered turn, and session A's error did not leak in.
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         let users: Vec<&str> = active
             .timeline
             .entries
@@ -5583,14 +5590,14 @@ fn submitted_queue_head_cannot_leak_delivery_after_turn_completion() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-submitted-drop-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (session, commands) = fake_live_session(cwd.clone());
     let id = session.meta.id.clone();
 
     state.host_update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.send_turn("finish this task".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
@@ -5640,7 +5647,7 @@ fn dead_event_stream_without_close_clears_working_flags() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dead-stream-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, _receiver) = smol::channel::unbounded();
 
     let id = state.host_update(cx, |state, cx| {
@@ -5650,7 +5657,7 @@ fn dead_event_stream_without_close_clears_working_flags() {
         let id = active.meta.id.clone();
         state.store.upsert_meta(&active.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.residents.active = Some(active);
+        state.install_selected(active);
         assert!(state.turn_running_for(&id));
 
         state.on_event_stream_ended(&id, &commands, cx);
@@ -5659,7 +5666,7 @@ fn dead_event_stream_without_close_clears_working_flags() {
             !state.turn_running_for(&id),
             "a dead event stream must not pin the session at Working"
         );
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(matches!(active.runtime, Runtime::Idle));
         id
     });
@@ -5683,7 +5690,7 @@ fn dead_event_stream_clears_parked_working_flags() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dead-parked-stream-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (commands, _receiver) = smol::channel::unbounded();
 
     state.host_update(cx, |state, cx| {
@@ -5713,7 +5720,7 @@ fn stale_pump_close_leaves_successor_runtime_alone() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-stale-pump-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let (old_commands, _old_receiver) = smol::channel::unbounded();
     let (new_commands, _new_receiver) = smol::channel::unbounded();
 
@@ -5723,12 +5730,12 @@ fn stale_pump_close_leaves_successor_runtime_alone() {
         let id = active.meta.id.clone();
         state.store.upsert_meta(&active.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.residents.active = Some(active);
+        state.install_selected(active);
 
         // The old pump drains after the session moved to a new provider.
         state.on_event_stream_ended(&id, &old_commands, cx);
 
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(
             matches!(active.runtime, Runtime::Live(_)),
             "a stale pump must not tear down the successor provider"
@@ -5737,8 +5744,8 @@ fn stale_pump_close_leaves_successor_runtime_alone() {
         assert!(state.turn_running_for(&id));
 
         // And an idle session ignores stream-end noise entirely.
-        state.residents.active.as_mut().unwrap().runtime = Runtime::Idle;
-        state.residents.active.as_mut().unwrap().turn_in_flight = false;
+        state.selected_session_mut().unwrap().runtime = Runtime::Idle;
+        state.selected_session_mut().unwrap().turn_in_flight = false;
         state.on_event_stream_ended(&id, &old_commands, cx);
         assert!(!state.turn_running_for(&id));
     });
@@ -5749,7 +5756,7 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-working-location-test");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let commands = smol::channel::unbounded().0;
 
     let mut idle = live_session(ProviderKind::ClaudeCode, commands.clone());
@@ -5790,10 +5797,10 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
             ("stale timeline", stale_timeline, false),
         ] {
             let id = session.meta.id.clone();
-            state.residents.active = Some(session);
+            state.install_selected(session);
             let active_answer = state.turn_running_for(&id);
 
-            let parked = state.residents.active.take().unwrap();
+            let parked = state.take_selected().unwrap();
             state.residents.parked.insert(id.clone(), parked);
             let parked_answer = state.turn_running_for(&id);
 
@@ -5819,7 +5826,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-park-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     // A live session (fake provider: commands land on `commands_a`).
     let (session, commands_a) = fake_live_session(cwd.clone());
@@ -5834,7 +5841,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
         // A live session with a running turn (the overnight workflow).
         state.store.upsert_meta(&session.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.send_turn("run the long migration".into(), Vec::new(), cx);
         state.send_turn("queued follow-up".into(), Vec::new(), cx);
         let first_delivery = match commands_a.try_recv() {
@@ -5913,7 +5920,7 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
     cx.run_until_parked();
 
     state.host_update(cx, |state, cx| {
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, id_a);
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(active.turn_in_flight);
@@ -5955,7 +5962,7 @@ fn drained_parked_session_stays_resident() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-parkend-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     // A live session (fake provider: commands land on `commands`).
     let (session, commands) = fake_live_session(cwd.clone());
@@ -5964,7 +5971,7 @@ fn drained_parked_session_stays_resident() {
     state.host_update(cx, |state, cx| {
         state.store.upsert_meta(&session.meta).unwrap();
         state.sessions = state.store.load_index();
-        state.residents.active = Some(session);
+        state.install_selected(session);
         state.send_turn("one last thing".into(), Vec::new(), cx);
         let delivery_id = match commands.try_recv() {
             Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
@@ -6004,7 +6011,7 @@ fn failed_provider_start_keeps_the_queued_message() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-t3f-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         // A binary that cannot exist → start_session fails fast.
@@ -6014,14 +6021,14 @@ fn failed_provider_start_keeps_the_queued_message() {
             .binary_path = Some("/nonexistent/tcode-test-claude".into());
         state.start_draft("proj-fail".into(), cwd.clone(), cx);
         state.send_turn("do not lose me".into(), Vec::new(), cx);
-        assert_eq!(state.residents.active.as_ref().unwrap().queue.len(), 1);
+        assert_eq!(state.selected_session().unwrap().queue.len(), 1);
     });
 
     // Let the spawned start attempt run to its failure.
     cx.run_until_parked();
 
     state.update(cx, |state, _| {
-        let active = state.residents.active.as_ref().unwrap();
+        let active = state.selected_session().unwrap();
         assert!(
             matches!(active.runtime, Runtime::Idle),
             "failed start must return to Idle"
@@ -6052,7 +6059,7 @@ fn plan_workspace_save_completes_after_background_executor_runs() {
     std::fs::create_dir_all(&cwd).unwrap();
     let test_store = TestStore::new("tcode-plan-save-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
 
     state.host_update(cx, |state, cx| {
         state.start_draft("plan-project".into(), cwd.clone(), cx);
@@ -6096,7 +6103,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-dispatch-fast-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
     let parent_id = parent.id.clone();
 
@@ -6161,7 +6168,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
     std::fs::create_dir_all(&root).unwrap();
     let test_store = TestStore::new("tcode-dispatch-cwd-data");
     let store = (*test_store).clone();
-    let state = cx.new_entity(|_| AppState::new(store));
+    let state = cx.new_entity(|_| TestClientState::new(store));
     let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
     let parent_id = parent.id.clone();
     let missing = root.join("missing");
@@ -6221,7 +6228,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     run_git(&root, &["commit", "-m", "initial"]).unwrap();
 
     let test_store = TestStore::new("tcode-dispatch-worktree-data");
-    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
     let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
     let parent_id = parent.id.clone();
     let (reply, response) = smol::channel::bounded(1);
@@ -6274,4 +6281,160 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
         std::env::remove_var("TCODE_WORKTREES_DIR");
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
+    use crate::pipe::{HostServices, spawn_host};
+    use tcode_client::HostLink;
+    use tcode_protocol::{Subscription, Topic};
+
+    let root = TestStore::new("p4a-two-clients");
+    let first = scripted_provider(ProviderKind::ClaudeCode);
+    let second = scripted_provider(ProviderKind::ClaudeCode);
+    let first_commands = first.commands.clone();
+    let second_commands = second.commands.clone();
+    let launcher = ProviderLauncher(Arc::new(move |kind, options| {
+        let launcher = if options.cwd.ends_with("one") {
+            first.launcher.clone()
+        } else {
+            second.launcher.clone()
+        };
+        Box::pin(async move { launcher.launch(kind, options).await })
+    }));
+    let host = spawn_host((*root).clone(), HostServices::default()).unwrap();
+    smol::block_on(
+        host.update_state_for_test(move |state, _| state.set_provider_launcher_for_test(launcher)),
+    )
+    .unwrap();
+    let mux = tcode_remote::HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let connect = || {
+        let connection = mux.attach();
+        let link = HostLink::new(connection.to_host, connection.from_host);
+        smol::spawn({
+            let link = link.clone();
+            async move { link.pump().await }
+        })
+        .detach();
+        link
+    };
+    let one = connect();
+    let two = connect();
+    let draft = |link: &HostLink, name: &str| {
+        let cwd = root.root().join(name);
+        std::fs::create_dir_all(&cwd).unwrap();
+        let CommandResponse::SessionId(Some(id)) = link
+            .command_blocking(Command::StartDraft {
+                project_id: "shared-project".into(),
+                cwd,
+            })
+            .unwrap()
+        else {
+            panic!("draft id missing")
+        };
+        link.subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: id.clone(),
+            },
+            after: None,
+        })
+        .unwrap();
+        id
+    };
+    let id_one = draft(&one, "one");
+    let id_two = draft(&two, "two");
+    assert_ne!(id_one, id_two);
+    for (link, id, text) in [
+        (&one, &id_one, "from desktop"),
+        (&two, &id_two, "from phone"),
+    ] {
+        link.command_blocking(Command::SendTurn {
+            session_id: id.clone(),
+            text: text.into(),
+            attachment_paths: Vec::new(),
+        })
+        .unwrap();
+    }
+    let receive_turn = |commands: &smol::channel::Receiver<SessionCommand>, expected: &str| {
+        let command = smol::block_on(smol::future::race(
+            async { commands.recv().await.unwrap() },
+            async {
+                smol::Timer::after(Duration::from_secs(5)).await;
+                panic!("provider did not receive turn")
+            },
+        ));
+        let SessionCommand::SendTurn { text, .. } = command else {
+            panic!("expected send")
+        };
+        assert_eq!(text, expected);
+    };
+    receive_turn(&first_commands, "from desktop");
+    receive_turn(&second_commands, "from phone");
+    let ids = (id_one.clone(), id_two.clone());
+    smol::block_on(host.update_state_for_test(move |state, cx| {
+        for id in [&ids.0, &ids.1] {
+            for text in ["first", "second", "third"] {
+                state.record_event(
+                    id,
+                    &AgentEvent::Warning {
+                        message: text.into(),
+                    },
+                    cx,
+                );
+            }
+        }
+    }))
+    .unwrap();
+    for (link, id) in [(&one, &id_one), (&two, &id_two)] {
+        // An ack is a FIFO fence through both the host and mux.
+        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
+        let events = link.events();
+        let mut records = 0;
+        while let Ok(event) = events.try_recv() {
+            assert_eq!(
+                event.topic,
+                Topic::SessionEvents {
+                    session_id: id.clone()
+                }
+            );
+            records += usize::from(matches!(event.event, ServerEvent::SessionEvent(_)));
+        }
+        assert_eq!(records, 3);
+        link.subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: id.clone(),
+            },
+            after: Some(1),
+        })
+        .unwrap();
+        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
+        let snapshot = events.try_recv().unwrap();
+        let ServerEvent::SessionSnapshot { from, records } = snapshot.event else {
+            panic!("expected tail")
+        };
+        assert_eq!(from, 1);
+        assert_eq!(records.len(), 2);
+        assert!(
+            matches!(&records[0].event, AgentEvent::Warning { message } if message == "second")
+        );
+        assert!(events.try_recv().is_err());
+        link.subscribe(Subscription {
+            topic: Topic::SessionEvents {
+                session_id: id.clone(),
+            },
+            after: Some(99),
+        })
+        .unwrap();
+        link.command_blocking(Command::ClearRelaunchMarker).unwrap();
+        assert!(
+            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records } if records.len() == 3)
+        );
+    }
+    assert!(
+        one.events().try_recv().is_err(),
+        "second client's subscription leaked a snapshot"
+    );
+    one.shutdown_blocking().unwrap();
+    host.to_host.close();
+    host.stopped.recv_blocking().unwrap();
 }

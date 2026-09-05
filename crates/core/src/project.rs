@@ -22,6 +22,7 @@ pub struct Project {
 impl Project {
     /// Create a project rooted at `root`, deriving a display name from its
     /// last path component (falling back to the full path).
+    #[cfg(feature = "process")]
     pub fn from_root(root: PathBuf) -> Self {
         let name = project_name_from_root(&root);
         Self {
@@ -133,6 +134,7 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    #[cfg(feature = "process")]
     pub fn new(provider: ProviderKind, cwd: PathBuf, model: Option<String>) -> Self {
         let now = now_secs();
         Self {
@@ -436,6 +438,7 @@ pub struct IndexFile {
 
 /// Ensure every session belongs to a project, deriving implicit projects from
 /// each orphan session's cwd (deduped by root). Idempotent.
+#[cfg(feature = "process")]
 pub fn migrate_index(mut file: IndexFile) -> IndexFile {
     // Map existing project roots to their ids so derived projects dedupe.
     let mut root_to_id: std::collections::HashMap<PathBuf, String> = file
@@ -474,7 +477,7 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "process"))]
 mod tests {
     use super::*;
 

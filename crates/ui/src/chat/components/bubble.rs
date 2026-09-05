@@ -38,6 +38,7 @@ pub(crate) struct BubbleData<'a> {
     pub(crate) attachments: &'a [String],
     pub(crate) steering: Option<SteeringStatus>,
     pub(crate) pinned: bool,
+    pub(crate) compact: bool,
     pub(crate) copied: bool,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) rewind: Option<AnyElement>,
@@ -56,7 +57,7 @@ pub(crate) struct RewindHandlers {
 
 pub(crate) fn native_rewind_button(
     turn: usize,
-    state: Option<(bool, bool)>,
+    (state, compact): (Option<(bool, bool)>, bool),
     handlers: RewindHandlers,
     cx: &App,
 ) -> Option<AnyElement> {
@@ -76,10 +77,14 @@ pub(crate) fn native_rewind_button(
         },
         cx,
     )
-    .disabled(disabled);
+    .disabled(disabled)
+    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)));
     Some(
         crate::material::overlay_popover(("rewind-menu", turn))
             .anchor(Anchor::TopRight)
+            .when(compact, |popover| {
+                popover.bottom_sheet(crate::tr!("chat.rewind"))
+            })
             .trigger(trigger)
             .content(move |_state, _window, cx| {
                 let muted = cx.theme().muted_foreground;
@@ -120,6 +125,7 @@ pub(crate) fn native_rewind_button(
                             cx,
                         )
                         .w_full()
+                        .when(compact, |row| row.min_h(px(44.)))
                         .px_2()
                         .py_1p5()
                         .gap_2()
@@ -156,6 +162,7 @@ pub(crate) fn user_bubble(
         attachments,
         steering,
         pinned,
+        compact,
         copied,
         markdown,
         rewind,
@@ -179,6 +186,7 @@ pub(crate) fn user_bubble(
         actions = actions.child(assistant::copy_button(
             &format!("user:{entry_id}"),
             copied,
+            compact,
             copy,
             cx,
         ));
@@ -205,7 +213,7 @@ pub(crate) fn user_bubble(
                         .bg(cx.theme().muted)
                         .cursor_pointer()
                         .child(
-                            img(path)
+                            img(crate::store::host_image(path))
                                 .size(px(120.))
                                 .rounded_xl()
                                 .object_fit(ObjectFit::Cover),
@@ -274,7 +282,9 @@ pub(crate) fn user_bubble(
                     .child(content)
             })
         })
-        .child(assistant::reserve_action_row(actions, group_key, pinned))
+        .child(assistant::reserve_action_row(
+            actions, group_key, pinned, compact,
+        ))
         .into_any_element()
 }
 

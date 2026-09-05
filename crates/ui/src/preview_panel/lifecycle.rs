@@ -557,7 +557,7 @@ mod platform {
     const SMOKE_CREATION_PAUSE: Duration = Duration::from_millis(50);
 
     pub(super) struct Adapter {
-        web_context: Rc<smol::lock::Mutex<wry::WebContext>>,
+        web_context: Rc<async_lock::Mutex<wry::WebContext>>,
         next_creation_id: u64,
         smoke_creation_pause: bool,
     }
@@ -578,7 +578,7 @@ mod platform {
                 user_data_dir.display()
             );
             Ok(Self {
-                web_context: Rc::new(smol::lock::Mutex::new(wry::WebContext::new(Some(
+                web_context: Rc::new(async_lock::Mutex::new(wry::WebContext::new(Some(
                     user_data_dir,
                 )))),
                 next_creation_id: 0,

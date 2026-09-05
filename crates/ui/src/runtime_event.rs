@@ -454,6 +454,7 @@ mod tests {
             detail: Some("git detail".into()),
         });
         let retry = GitActionRequest {
+            session_id: "session-1".into(),
             action: GitAction::CommitPush,
             message: Some("exact message".into()),
             included: Some(vec!["a.rs".into(), "b.rs".into()]),

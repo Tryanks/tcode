@@ -1,0 +1,43 @@
+[package]
+name = "tcode-mobile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "tcode_mobile"
+
+[features]
+# Native transport (iOS, Android, the desktop preview): tcode-remote's
+# WebSocket client and hosts.json under the platform data dir. The browser
+# build turns this off and supplies its own `MobileHost`.
+default = ["native"]
+native = ["dep:tcode-remote", "dep:dirs", "tcode-ui/remote-client"]
+
+[dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+tcode-ui = { path = "../ui", default-features = false }
+tcode-core = { path = "../core", default-features = false }
+tcode-protocol = { path = "../protocol", default-features = false }
+agent = { path = "../agent", default-features = false }
+gpui-base = "0.6.0"
+chrono = "0.4"
+tcode-client = { path = "../client" }
+async-channel = "2"
+serde_json = "1"
+log = "0.4"
+tcode-remote = { path = "../remote", default-features = false, features = ["client"], optional = true }
+dirs = { version = "6", optional = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+gpui-ios = { path = "../platform/gpui-ios" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+gpui-android = { path = "../platform/gpui-android" }
+
+[dev-dependencies]
+gpui_platform = { package = "gpui-pre-platform", version = "0.3.3", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+
+[[example]]
+name = "phone"
+required-features = ["native"]

@@ -6,20 +6,36 @@
 //! types; nothing provider-shaped leaks past this crate except [`ResumeCursor`],
 //! which is intentionally opaque.
 
+#[cfg(feature = "process")]
 pub mod acp;
+#[cfg(feature = "process")]
 mod actor;
+#[cfg(feature = "process")]
 pub mod claude;
+mod claude_context;
+#[cfg(not(feature = "process"))]
+pub mod claude {
+    pub use crate::claude_context::*;
+}
+#[cfg(feature = "process")]
 pub mod codex;
+#[cfg(feature = "process")]
 mod normalize;
+#[cfg(feature = "process")]
 pub mod opencode;
+#[cfg(feature = "process")]
 mod pending;
+#[cfg(feature = "process")]
 pub mod pi;
+#[cfg(feature = "process")]
 mod process;
+#[cfg(feature = "process")]
 mod subagent_tail;
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "process")]
 use smol::channel::{Receiver, Sender};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -330,12 +346,14 @@ pub enum AcpLaunch {
 pub struct ResumeCursor(pub serde_json::Value);
 
 impl ResumeCursor {
+    #[cfg(feature = "process")]
     pub(crate) fn str_field(&self, keys: &[&str]) -> Option<&str> {
         keys.iter()
             .find_map(|key| self.0.get(*key).and_then(serde_json::Value::as_str))
     }
 }
 
+#[cfg(feature = "process")]
 pub(crate) fn processed_tokens(usage: TokenUsage) -> u64 {
     usage.used_tokens.unwrap_or_else(|| {
         usage
@@ -346,6 +364,7 @@ pub(crate) fn processed_tokens(usage: TokenUsage) -> u64 {
     })
 }
 
+#[cfg(feature = "process")]
 pub(crate) fn start_mapped_turn(
     prefix: &str,
     counter: &mut u64,
@@ -364,6 +383,7 @@ pub(crate) fn start_mapped_turn(
     vec![AgentEvent::TurnStarted { turn_id }]
 }
 
+#[cfg(feature = "process")]
 pub(crate) fn complete_mapped_turn(
     current: &mut Option<String>,
     interrupted: &mut bool,
@@ -562,6 +582,7 @@ pub struct SelectOption {
 /// working-directory change makes PATH resolution unreliable (it fails outright
 /// when PATH holds unexpanded entries such as `~/.dotnet/tools`). Resolving the
 /// binary ourselves against the parent's PATH keeps the lookup deterministic.
+#[cfg(feature = "process")]
 pub(crate) fn resolve_binary(
     binary_path: Option<&std::path::Path>,
     default_name: &str,
@@ -685,6 +706,7 @@ pub struct OptionSelection {
     pub value: serde_json::Value,
 } // string or bool
 
+#[cfg(feature = "process")]
 fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
     selections
         .iter()
@@ -692,6 +714,7 @@ fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
         .and_then(|selection| selection.value.as_str().map(str::to_owned))
 }
 
+#[cfg(feature = "process")]
 fn selection_bool(selections: &[OptionSelection], id: &str) -> Option<bool> {
     selections
         .iter()
@@ -779,6 +802,7 @@ pub struct TurnOptions {
 /// List the provider's models (spawn, query, teardown). `launch_env` carries the
 /// provider's configured environment/home so the catalog reflects the same CLI
 /// (and account) a session would actually run against.
+#[cfg(feature = "process")]
 pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
@@ -927,12 +951,14 @@ pub enum SessionCommand {
 
 /// A live provider session: send commands in, read canonical events out.
 /// Dropping both channels (or sending `Shutdown`) tears the child process down.
+#[cfg(feature = "process")]
 pub struct SessionHandle {
     pub provider: ProviderKind,
     pub commands: Sender<SessionCommand>,
     pub events: Receiver<AgentEvent>,
 }
 
+#[cfg(feature = "process")]
 async fn spawn_session<F, Fut>(
     provider: ProviderKind,
     opts: SessionOptions,
@@ -964,6 +990,7 @@ where
 }
 
 /// Start a new (or resumed) session with the given provider.
+#[cfg(feature = "process")]
 pub async fn start_session(
     provider: ProviderKind,
     opts: SessionOptions,
@@ -1550,6 +1577,7 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    #[cfg(feature = "process")]
     fn merge(&mut self, usage: Self) {
         self.input_tokens = add_token_counts(self.input_tokens, usage.input_tokens);
         self.cached_input_tokens =
@@ -1572,6 +1600,7 @@ impl TokenUsage {
     }
 }
 
+#[cfg(feature = "process")]
 fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (None, None) => None,
@@ -1579,6 +1608,7 @@ fn add_token_counts(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
+#[cfg(feature = "process")]
 fn json_u64(value: Option<&serde_json::Value>) -> Option<u64> {
     value.and_then(|value| {
         value
@@ -1673,7 +1703,7 @@ mod launch_env_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "process"))]
 mod resolve_binary_tests {
     use super::*;
 

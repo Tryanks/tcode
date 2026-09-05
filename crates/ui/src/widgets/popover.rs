@@ -4,6 +4,10 @@ use gpui::{
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
     prelude::FluentBuilder as _,
 };
+use gpui::{
+    Focusable as _, Role, SharedString, StatefulInteractiveElement as _, anchored, deferred, div,
+    point, px,
+};
 use gpui_base::StyledExt as _;
 use std::rc::Rc;
 
@@ -13,6 +17,7 @@ pub use gpui_base::PopoverState;
 #[derive(IntoElement)]
 pub struct Popover {
     id: ElementId,
+    sheet_title: Option<SharedString>,
     anchor: Anchor,
     default_open: bool,
     open: Option<bool>,
@@ -35,6 +40,7 @@ impl Popover {
     pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
+            sheet_title: None,
             anchor: Anchor::TopLeft,
             default_open: false,
             open: None,
@@ -48,6 +54,11 @@ impl Popover {
             appearance: true,
             on_open_change: None,
         }
+    }
+    /// Present the same picker state and content in a touch-sized bottom sheet.
+    pub fn bottom_sheet(mut self, title: impl Into<SharedString>) -> Self {
+        self.sheet_title = Some(title.into());
+        self
     }
     pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
         self.anchor = anchor.into();
@@ -118,7 +129,11 @@ impl Styled for Popover {
 }
 
 impl RenderOnce for Popover {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if self.sheet_title.is_some() {
+            return self.render_sheet(window, cx);
+        }
+
         let appearance = self.appearance;
         let content = self.content;
         let children = self.children;
@@ -150,5 +165,201 @@ impl RenderOnce for Popover {
                     .children(children)
                     .refine_style(&style)
             })
+            .into_any_element()
+    }
+}
+
+impl Popover {
+    fn render_sheet(self, window: &mut Window, cx: &mut App) -> AnyElement {
+        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| {
+            PopoverState::new(self.default_open, cx)
+        });
+        state.update(cx, |state, cx| {
+            state.track_focus(self.tracked_focus);
+            state.set_on_open_change(self.on_open_change);
+            if let Some(open) = self.open {
+                state.sync_open(open, window, cx);
+            }
+        });
+        let open = state.read(cx).is_open();
+        // 180ms bottom slide + backdrop fade (docs/mobile-design.md §3.0). The
+        // sheet stays mounted through its exit so dismissal animates too.
+        let presence = gpui_base::motion::Presence::new(
+            gpui::SharedString::from(format!("{:?}-sheet", self.id)),
+            open,
+        )
+        .transition(gpui_base::motion::Transition::new(
+            std::time::Duration::from_millis(180),
+        ))
+        .sample(window, cx);
+        let progress = presence.progress;
+        let parent = window.current_view();
+        let toggle = state.clone();
+        let mut root = div()
+            .id(self.id)
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                toggle.update(cx, |state, cx| state.toggle_open(window, cx));
+                cx.notify(parent);
+            })
+            .when_some(self.trigger, |el, trigger| {
+                el.child(trigger(open, window, cx))
+            });
+        if presence.should_render() {
+            let close = state.clone();
+            let backdrop = state.clone();
+            let focus = state.read(cx).focus_handle(cx);
+            let content = self
+                .content
+                .map(|content| state.update(cx, |state, cx| content(state, window, cx)));
+            let surface = gpui_base::v_flex()
+                .id("touch-picker-sheet")
+                .role(Role::Group)
+                .aria_label(self.sheet_title.clone().unwrap_or_default())
+                .occlude()
+                .track_focus(&focus)
+                .key_context("Popover")
+                .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
+                .on_mouse_down_out(move |_, window, cx| {
+                    backdrop.update(cx, |state, cx| state.dismiss(window, cx));
+                    cx.notify(parent);
+                })
+                // 180ms fade in step with the backdrop (§3.0). GPUI has no
+                // transform and offsetting the sheet moves its hit targets, so
+                // the presentation animates opacity rather than position.
+                .opacity(progress)
+                .w_full()
+                .max_h(window.viewport_size().height - px(64.))
+                // T3: opaque fill, hairline contour and a large soft shadow.
+                .rounded_t(crate::material::radius_overlay_sheet())
+                .bg(cx.theme().popover)
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .shadow_xl()
+                .text_color(cx.theme().foreground)
+                .child(crate::material::sheet_grabber(cx))
+                .child(
+                    gpui_base::h_flex()
+                        .h(px(48.))
+                        .flex_none()
+                        .px(px(16.))
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(17.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .children(self.sheet_title),
+                        )
+                        .child(
+                            div()
+                                .id("touch-picker-close")
+                                .role(Role::Button)
+                                .aria_label(crate::tr!("mobile.cancel"))
+                                .min_w(px(44.))
+                                .h(px(44.))
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .cursor_pointer()
+                                .text_size(px(15.))
+                                .text_color(cx.theme().foreground)
+                                .child(crate::tr!("mobile.cancel"))
+                                .on_click(move |_, window, cx| {
+                                    close.update(cx, |state, cx| state.dismiss(window, cx));
+                                    cx.notify(parent);
+                                }),
+                        ),
+                )
+                .child(crate::material::faded_hairline(cx))
+                .child(
+                    div()
+                        .id("touch-picker-content")
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p(px(16.))
+                        .pb(px(32.))
+                        .children(content)
+                        .children(self.children),
+                );
+            root = root.child(
+                deferred(
+                    anchored().position(point(px(0.), px(0.))).child(
+                        div()
+                            .id("touch-picker-backdrop")
+                            .occlude()
+                            .w(window.viewport_size().width)
+                            .h(window.viewport_size().height)
+                            .bg(crate::material::scrim(progress, cx))
+                            .flex()
+                            .flex_col()
+                            .justify_end()
+                            .child(surface),
+                    ),
+                )
+                .with_priority(gpui_base::POPUP_PRIORITY),
+            );
+        }
+        root.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Render, TestAppContext};
+    use std::cell::Cell;
+
+    struct SheetHarness(Rc<Cell<usize>>);
+    impl Render for SheetHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let selected = self.0.clone();
+            div().size_full().flex().flex_col().justify_end().child(
+                div().h(px(44.)).w_full().overflow_hidden().child(
+                    Popover::new("sheet-test")
+                        .bottom_sheet("Model")
+                        .default_open(false)
+                        .trigger(
+                            crate::widgets::button::Button::new("trigger")
+                                .label("Model")
+                                .debug_selector(|| "sheet-trigger".into()),
+                        )
+                        .content(move |_, _, _| {
+                            div()
+                                .id("sheet-option")
+                                .debug_selector(|| "sheet-option".into())
+                                .h(px(48.))
+                                .w_full()
+                                .child("Choose")
+                                .on_click(move |_, _, _| selected.set(selected.get() + 1))
+                        }),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn bottom_sheet_options_receive_clicks_above_the_backdrop(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let selected = Rc::new(Cell::new(0));
+        let (_, window) = cx.add_window_view({
+            let selected = selected.clone();
+            move |_, _| SheetHarness(selected)
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = window.debug_bounds("sheet-trigger").expect("trigger");
+        window.simulate_click(trigger.center(), gpui::Modifiers::default());
+        // Let the 180ms present transition finish so the sheet is at its
+        // resting position before the option is hit-tested.
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = window
+            .debug_bounds("sheet-option")
+            .expect("sheet option is laid out");
+        window.simulate_click(bounds.center(), gpui::Modifiers::default());
+        assert_eq!(selected.get(), 1);
     }
 }

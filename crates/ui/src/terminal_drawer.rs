@@ -222,7 +222,7 @@ struct GridGeometry {
 }
 
 struct TerminalEventSubscription {
-    receiver: smol::channel::Receiver<TermEvent>,
+    receiver: async_channel::Receiver<TermEvent>,
     _task: Task<()>,
 }
 
@@ -427,7 +427,9 @@ impl TerminalDrawer {
         #[cfg(not(test))]
         let blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                smol::Timer::after(Duration::from_millis(500)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
                 if this
                     .update(cx, |this, cx| {
                         this.cursor_phase = !this.cursor_phase;
@@ -485,7 +487,7 @@ impl TerminalDrawer {
             .update(cx, |store, cx| store.set_terminal_height(height, cx));
     }
 
-    fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&term::Terminal)) {
+    fn with_terminal(&self, cx: &mut Context<Self>, f: impl FnOnce(&crate::store::ClientTerminal)) {
         self.workspace_store
             .read(cx)
             .with_terminal_workspace(|workspace| {
@@ -499,7 +501,7 @@ impl TerminalDrawer {
         &self,
         terminal_id: u64,
         cx: &mut Context<Self>,
-        f: impl FnOnce(&term::Terminal),
+        f: impl FnOnce(&crate::store::ClientTerminal),
     ) {
         self.workspace_store
             .read(cx)
@@ -556,7 +558,7 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_terminal_id(action.0, cx, term::Terminal::select_all);
+        self.with_terminal_id(action.0, cx, |terminal| terminal.select_all());
     }
 
     fn on_terminal_clear(
@@ -565,7 +567,7 @@ impl TerminalDrawer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_terminal_id(action.0, cx, term::Terminal::clear);
+        self.with_terminal_id(action.0, cx, |terminal| terminal.clear());
     }
 
     fn on_terminal_add_context(
@@ -654,9 +656,11 @@ impl TerminalDrawer {
                     let mut saw_batched_event = false;
                     let mut non_wakeup_events = 0;
                     loop {
-                        let next = smol::future::or(
+                        let next = futures_lite::future::race(
                             async {
-                                smol::Timer::at(deadline).await;
+                                cx.background_executor()
+                                    .timer(deadline.saturating_duration_since(Instant::now()))
+                                    .await;
                                 None
                             },
                             async { Some(task_receiver.recv().await) },

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="icon" href="data:,">
+  <title>tcode remote client</title>
+  <style>
+    :root { color-scheme: dark; background: #111318; color: #f2f3f5; font: 14px system-ui, sans-serif; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    canvas { position: absolute; inset: 0; display: block; width: 100% !important; height: 100% !important; outline: none; }
+    #loading, noscript { position: absolute; inset: 0; display: grid; place-content: center; white-space: pre-wrap; padding: 24px; }
+  </style>
+</head>
+<body>
+  <canvas id="tcode-canvas"></canvas>
+  <p id="loading" role="status">Loading tcode…
+首次打开 HTTPS 执行端时，浏览器会显示自签名证书提示。核对执行端地址后，在高级选项中继续；同一浏览器通常只需接受一次。
+On first HTTPS access, your browser shows a self-signed certificate warning. Check the host address, then continue in Advanced; acceptance is normally needed once.</p>
+  <noscript>Enable JavaScript to use tcode.</noscript>
+  <script type="module">
+    import init, { start } from './tcode_web.js';
+    try {
+      await init();
+      await start('tcode-canvas');
+    } catch (error) {
+      console.error('tcode startup failed', error);
+      document.getElementById('loading').textContent = `tcode could not start.\n${error}`;
+    }
+  </script>
+</body>
+</html>

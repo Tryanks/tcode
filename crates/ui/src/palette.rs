@@ -11,7 +11,9 @@
 //!
 //! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
 
+#[cfg(feature = "desktop")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "desktop")]
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -28,8 +30,18 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_protocol::ThreadExportFormat;
+#[cfg(feature = "desktop")]
 use tcode_services::session_search::{SessionSearch, SessionSearchHit};
+#[cfg(feature = "desktop")]
 use tcode_services::store::SessionStore;
+
+#[cfg(not(feature = "desktop"))]
+struct SessionSearchHit {
+    session_id: String,
+    session_title: String,
+    snippet: String,
+    turn: usize,
+}
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
@@ -117,6 +129,7 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
+    #[cfg(feature = "desktop")]
     content_search: Option<Arc<Mutex<SessionSearch>>>,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
@@ -155,12 +168,14 @@ impl CommandPalette {
 
         Self {
             store,
-            window_state,
+            window_state: window_state.clone(),
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
-            content_search: SessionStore::open_default()
-                .ok()
+            #[cfg(feature = "desktop")]
+            content_search: (!window_state.read(cx).compact)
+                .then(SessionStore::open_default)
+                .and_then(Result::ok)
                 .map(SessionSearch::new)
                 .map(|search| Arc::new(Mutex::new(search))),
             content_hits: Vec::new(),
@@ -180,6 +195,7 @@ impl CommandPalette {
         self.content_hits.clear();
     }
 
+    #[cfg(feature = "desktop")]
     fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
@@ -216,6 +232,13 @@ impl CommandPalette {
                 }
             });
         }));
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    fn schedule_content_search(&mut self, _cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.content_hits.clear();
+        self._search_task = None;
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -419,8 +442,8 @@ impl CommandPalette {
         match action {
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
-                self.store.update(cx, |store, _cx| {
-                    store.start_draft(project_id, cwd);
+                self.store.update(cx, |store, cx| {
+                    store.start_draft(project_id, cwd, cx);
                 });
             }
             Action::OpenSettings => {
@@ -493,6 +516,8 @@ impl CommandPalette {
                     }
                 });
                 self.close(cx);
+                self.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
             }
         }
     }
@@ -522,7 +547,7 @@ impl CommandPalette {
 }
 
 impl Render for CommandPalette {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let groups = self.groups(cx);
         let total: usize = groups.iter().map(|g| g.items.len()).sum();
         if total > 0 && self.selected >= total {
@@ -558,7 +583,11 @@ impl Render for CommandPalette {
                         .when(is_sel, |row| row.aria_active_descendant())
                         .flex_none()
                         .w_full()
-                        .h(px(38.))
+                        .h(px(if self.window_state.read(cx).compact {
+                            48.
+                        } else {
+                            38.
+                        }))
                         .px_2()
                         .gap_2()
                         .items_center()
@@ -636,7 +665,11 @@ impl Render for CommandPalette {
         // Centered modal card, anchored ~15% from the top over a dim backdrop.
         let card = crate::material::overlay_contour(
             v_flex()
-                .w(px(640.))
+                .w(if self.window_state.read(cx).compact {
+                    window.viewport_size().width - px(32.)
+                } else {
+                    px(640.)
+                })
                 .max_h(px(440.))
                 .rounded(crate::material::radius_overlay())
                 .overflow_hidden(),
@@ -795,7 +828,7 @@ mod tests {
         ));
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host, cx));
+        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)

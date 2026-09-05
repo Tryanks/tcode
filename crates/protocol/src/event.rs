@@ -22,27 +22,23 @@ pub type SessionEventRecord = StoredEvent;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Topic {
-    SessionEvents {
-        session_id: String,
-    },
-    SessionStatus {
-        session_id: String,
-    },
+    SessionEvents { session_id: String },
+    SessionStatus { session_id: String },
     Index,
     Settings,
     Providers,
-    GitStatus,
+    GitStatus { session_id: String },
     RuntimeEvents,
-    /// The client's currently selected session/draft, including ephemeral
-    /// status and serialized terminal layout metadata.
-    ActiveSession,
-    Terminal {
-        terminal_id: u64,
-    },
+
+    Terminal { terminal_id: u64 },
+    Preview { session_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    /// Present only on subscription replies; mux routes these to their requester.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u64>,
     pub topic: Topic,
     pub event: ServerEvent,
 }
@@ -50,6 +46,20 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
+    TerminalOutput {
+        terminal_id: u64,
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+        /// A replay (or restarted PTY) replaces the client emulator.
+        reset: bool,
+        cols: u16,
+        rows: u16,
+    },
+    PreviewRequest {
+        request_id: u64,
+        session_id: String,
+        request: crate::PreviewRequest,
+    },
     SessionEvent(StoredEvent),
     SessionStatusReplaced(SessionStatus),
     ProvidersReplaced(ProvidersStatus),
@@ -64,7 +74,7 @@ pub enum ServerEvent {
     },
     SettingsReplaced(Settings),
     Runtime(RuntimeNotification),
-    ActiveSessionReplaced(Option<SessionStatus>),
+
     /// A provider-native rewind prompt is delivered once over the serialized
     /// event stream. The client store owns consumption after receipt.
     NativeRewindPrefill {
@@ -95,7 +105,10 @@ pub enum ServerEvent {
         /// the reviewer judged the flag not a false positive.
         draft: String,
     },
-    SessionSnapshot(Vec<StoredEvent>),
+    SessionSnapshot {
+        from: u64,
+        records: Vec<StoredEvent>,
+    },
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
 }
@@ -220,6 +233,10 @@ pub struct SessionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalStatus {
     pub id: u64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub exited: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +267,9 @@ pub struct QueuedMessageStatus {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexSnapshot {
+    /// Working, approval, user-input and background-only flags for sidebar rows.
+    #[serde(default)]
+    pub activity: HashMap<String, (bool, bool, bool, bool)>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
 }
@@ -276,6 +296,7 @@ pub struct RuntimeOperationId(pub u64);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitActionRequest {
+    pub session_id: String,
     pub action: GitAction,
     pub message: Option<String>,
     pub included: Option<Vec<String>>,
