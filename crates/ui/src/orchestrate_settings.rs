@@ -24,7 +24,7 @@ use crate::settings::{
     ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity,
     provider_label,
 };
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 
 struct IdentityRowState {
     provider: ProviderKind,
@@ -83,16 +83,23 @@ impl OrchestrateSettingsPanel {
             )
         });
         let subscriptions = vec![
-            observe_store_topics(&store, &[TopicKind::Settings], cx),
             cx.subscribe_in(
-                &identity_model_picker,
+                &store,
                 window,
-                |this, _, event, window, cx| {
-                    this.add_identity(&event.0, window, cx);
+                |this, _, change: &StoreChange, window, cx| {
+                    if change.topic == TopicKind::Settings {
+                        if !this.rows_match_settings(cx) {
+                            this.rebuild_rows(window, cx);
+                        }
+                        cx.notify();
+                    }
                 },
             ),
-            cx.subscribe_in(&child_model_picker, window, |this, _, event, window, cx| {
-                this.add_child(&event.0, window, cx);
+            cx.subscribe_in(&identity_model_picker, window, |this, _, event, _, cx| {
+                this.add_identity(&event.0, cx);
+            }),
+            cx.subscribe_in(&child_model_picker, window, |this, _, event, _, cx| {
+                this.add_child(&event.0, cx);
             }),
         ];
         let mut panel = Self {
@@ -145,6 +152,28 @@ impl OrchestrateSettingsPanel {
         self.store.update(cx, |store, _cx| {
             store.set_orchestrate_generic_identity(identity)
         });
+    }
+
+    /// Settings patches are echoed back asynchronously, so rows are rebuilt from
+    /// the replica only when the set of rows changed — never while typing.
+    fn rows_match_settings(&self, cx: &App) -> bool {
+        let orchestrate = self.store.read(cx).settings().orchestrate;
+        self.identity_rows.len() == orchestrate.model_identities.len()
+            && self
+                .identity_rows
+                .iter()
+                .zip(&orchestrate.model_identities)
+                .all(|(row, entry)| row.provider == entry.provider && row.model == entry.model)
+            && self.child_rows.len() == orchestrate.child_models.len()
+            && self
+                .child_rows
+                .iter()
+                .zip(&orchestrate.child_models)
+                .all(|(row, entry)| {
+                    row.provider == entry.provider
+                        && row.model == entry.model
+                        && row.profile_id == entry.profile_id
+                })
     }
 
     fn rebuild_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -316,7 +345,7 @@ impl OrchestrateSettingsPanel {
             .unwrap_or_default()
     }
 
-    fn add_identity(&mut self, option: &ModelOption, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_identity(&mut self, option: &ModelOption, cx: &mut Context<Self>) {
         let provider = option.provider;
         let model = option.id.clone();
         let identity = self
@@ -341,17 +370,9 @@ impl OrchestrateSettingsPanel {
             },
             cx,
         );
-        self.rebuild_rows(window, cx);
-        cx.notify();
     }
 
-    fn remove_identity(
-        &mut self,
-        provider: ProviderKind,
-        model: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn remove_identity(&mut self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {
         let model = model.to_string();
         self.update_model_identities(
             move |identities| {
@@ -359,11 +380,9 @@ impl OrchestrateSettingsPanel {
             },
             cx,
         );
-        self.rebuild_rows(window, cx);
-        cx.notify();
     }
 
-    fn add_child(&mut self, option: &ModelOption, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_child(&mut self, option: &ModelOption, cx: &mut Context<Self>) {
         let profile = OrchestrateChildModel {
             provider: option.provider,
             model: option.id.clone(),
@@ -392,11 +411,9 @@ impl OrchestrateSettingsPanel {
             },
             cx,
         );
-        self.rebuild_rows(window, cx);
-        cx.notify();
     }
 
-    fn remove_child(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn remove_child(&mut self, index: usize, cx: &mut Context<Self>) {
         self.update_child_models(
             move |models| {
                 if index < models.len() {
@@ -405,8 +422,6 @@ impl OrchestrateSettingsPanel {
             },
             cx,
         );
-        self.rebuild_rows(window, cx);
-        cx.notify();
     }
 
     fn set_child_enabled(&self, index: usize, enabled: bool, cx: &mut Context<Self>) {
@@ -989,8 +1004,8 @@ impl OrchestrateSettingsPanel {
                                     .xsmall()
                                     .icon(IconName::Delete)
                                     .tooltip(crate::tr!("orchestrate.model_identity.use_generic"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.remove_identity(provider, &model, window, cx);
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_identity(provider, &model, cx);
                                     })),
                             ),
                     )
@@ -1133,8 +1148,8 @@ impl OrchestrateSettingsPanel {
                                     .xsmall()
                                     .icon(IconName::Delete)
                                     .tooltip(crate::tr!("orchestrate.children.remove"))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.remove_child(index, window, cx);
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_child(index, cx);
                                     })),
                             ),
                     )
