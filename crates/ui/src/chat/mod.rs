@@ -345,6 +345,8 @@ pub struct ChatView {
     highlighted_turn: Option<usize>,
     /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
     _tick: Option<Task<()>>,
+    /// 1s ticker kept alive while an error card shows a scheduled resume.
+    _limit_tick: Option<Task<()>>,
     /// Which copy button is currently showing its "Copied!" confirmation (2s):
     /// the copy target's key (`plan`, `user:<id>`, `assistant:<id>`).
     copied: Option<String>,
@@ -425,6 +427,7 @@ impl ChatView {
             session_key: None,
             highlighted_turn: None,
             _tick: None,
+            _limit_tick: None,
             copied: None,
             _copied_task: None,
             commit_dialog: None,
@@ -558,6 +561,42 @@ impl ChatView {
             }));
         } else if !running {
             self._tick = None;
+        }
+
+        let scheduled_limit_resume = {
+            let store = self.workspace_store.read(cx);
+            let deadlines: HashSet<u64> = store
+                .composer_state()
+                .queue
+                .into_iter()
+                .flat_map(|queue| queue.messages)
+                .filter_map(|message| message.fire_at_unix_secs)
+                .collect();
+            store
+                .with_active_timeline(|timeline| {
+                    timeline.entries.iter().any(|entry| {
+                        matches!(
+                            entry.content,
+                            EntryContent::Error {
+                                limit_resets_at: Some(resets_at),
+                                ..
+                            } if deadlines.contains(&resets_at)
+                        )
+                    })
+                })
+                .unwrap_or(false)
+        };
+        if scheduled_limit_resume && self._limit_tick.is_none() {
+            self._limit_tick = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    smol::Timer::after(Duration::from_secs(1)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }));
+        } else if !scheduled_limit_resume {
+            self._limit_tick = None;
         }
     }
 
@@ -997,6 +1036,47 @@ impl ChatView {
                 }
                 Segment::Error(entry) => {
                     let message = displayed_error_text(&entry.content);
+                    let resume = match &entry.content {
+                        EntryContent::Error {
+                            limit_resets_at: Some(resets_at),
+                            ..
+                        } => {
+                            let resets_at = *resets_at;
+                            let queued_id = self
+                                .workspace_store
+                                .read(cx)
+                                .composer_state()
+                                .queue
+                                .into_iter()
+                                .flat_map(|queue| queue.messages)
+                                .find(|message| message.fire_at_unix_secs == Some(resets_at))
+                                .map(|message| message.id);
+                            if let Some(id) = queued_id {
+                                Some(components::error_card::LimitResume::Scheduled {
+                                    remaining_secs: resets_at.saturating_sub(now_secs()),
+                                    on_cancel: Box::new(cx.listener(move |this, _, _, cx| {
+                                        this.workspace_store
+                                            .update(cx, |store, _| store.drop_queued(id));
+                                    })),
+                                })
+                            } else if resets_at > now_secs() {
+                                Some(components::error_card::LimitResume::Offer {
+                                    on_schedule: Box::new(cx.listener(move |this, _, _, cx| {
+                                        this.workspace_store.update(cx, |store, _| {
+                                            store.schedule_turn(
+                                                tcode_core::session::RESUME_PROMPT.to_string(),
+                                                vec![],
+                                                resets_at,
+                                            )
+                                        });
+                                    })),
+                                })
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
                     let copy_key = format!("error:{}", entry.id);
                     let copied = self.copied.as_deref() == Some(copy_key.as_str());
                     let mark = copy_key;
@@ -1005,6 +1085,7 @@ impl ChatView {
                         &entry.id,
                         &message,
                         copied,
+                        resume,
                         cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                             this.mark_copied(mark.clone(), cx);

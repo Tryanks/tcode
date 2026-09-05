@@ -1230,6 +1230,11 @@ pub enum AgentEvent {
         message: String,
         fatal: bool,
     },
+    /// Emitted after the [`AgentEvent::Error`] of a turn Claude Code rejected
+    /// for an exhausted usage window. `resets_at` is unix seconds.
+    UsageLimitReached {
+        resets_at: u64,
+    },
     SessionClosed {
         reason: Option<String>,
     },

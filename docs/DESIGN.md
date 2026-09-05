@@ -223,6 +223,8 @@ platform pays that inset.
   which is exactly how T3 Code ends up showing "Request was abo…" and then
   nothing. A failed provider start additionally leaves the unsent message in the
   queue strip (typed text is never destroyed by a dead process).
+  When a Claude usage window is exhausted, the card adds a resume row: either a
+  live reset countdown with Cancel, or a button to schedule the resume manually.
 - CHANGED FILES card per turn with provider-attributed file changes: Codex uses
   its replacement `turn/diff/updated` net snapshot; providers without that
   capability fold only successfully completed structured file-edit operations
@@ -337,8 +339,11 @@ optional per-model multiline identity overrides, and models without an override
 inherit the generic text. Each editor has a compact "Restore default" action.
 Allowed child models are retained as provider/model profiles with one multiline
 routing-definition editor, an independent dispatch switch, restore and delete
-actions. Built-in ratings and recommended effort live inside the default text,
-not separate controls. Add-model popovers keep provider tabs fixed above a
+actions. Each row exposes the catalog's reasoning choices and shows a Fast
+switch only when the model catalog declares Claude fast mode or a Codex Fast
+service tier (or when a stored Fast value must remain available to turn off).
+Built-in ratings and recommended effort live inside the default text, not
+separate controls. Add-model popovers keep provider tabs fixed above a
 300px scrollable model list so large catalogs never grow past the viewport.
 That provider/model picker is one shared component also used by the General
 page's thread-title setting, so catalog resolution and provider switching stay

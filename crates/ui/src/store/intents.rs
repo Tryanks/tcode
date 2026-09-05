@@ -74,6 +74,9 @@ impl WorkspaceStore {
     pub fn set_abort_on_model_fallback(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AbortOnModelFallback(value));
     }
+    pub fn set_resume_on_limit_reset(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::ResumeOnLimitReset(value));
+    }
     pub fn set_fallback_review_advisor(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::FallbackReviewAdvisor(value));
     }

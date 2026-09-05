@@ -216,7 +216,7 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
                 let outcome = status_outcome(*status, summary.as_deref().unwrap_or(""));
                 activity(&mut body, agent_type, &one_line(description), &outcome);
             }
-            EntryContent::Error { message }
+            EntryContent::Error { message, .. }
             | EntryContent::ProviderStartError { error: message } => {
                 activity(&mut body, "error", "provider", &one_line(message));
             }

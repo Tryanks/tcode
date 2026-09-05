@@ -340,6 +340,8 @@ pub struct AppState {
     pending_native_rewinds: HashMap<String, (String, RewindMode)>,
     /// Provider-native subagent item ids mapped to their read-only mirror sessions.
     native_subagent_sessions: HashMap<(String, String), String>,
+    /// Synthetic turn state survives eviction; false remembers a finished child.
+    native_subagent_turns: HashMap<String, bool>,
     pub settings: Settings,
     pub providers: ProviderCatalog,
     terminal_preferences_path: PathBuf,
@@ -483,6 +485,7 @@ impl AppState {
             next_preview_request: 0,
             pending_native_rewinds: HashMap::new(),
             native_subagent_sessions: HashMap::new(),
+            native_subagent_turns: HashMap::new(),
             settings,
             providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
             terminal_preferences_path,

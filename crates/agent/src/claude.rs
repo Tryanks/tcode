@@ -1182,6 +1182,8 @@ pub(crate) struct Mapper {
     stop_reason: Option<String>,
     /// Classifier category captured from the active turn's structured refusal details.
     pending_refusal_category: Option<ClassifierCategory>,
+    /// Reset time reported for a rejected usage window in the active turn.
+    limit_resets_at: Option<u64>,
     /// Warning-bearing stop reason already emitted for this occurrence.
     warned_stop_reason: Option<String>,
 }
@@ -1244,6 +1246,7 @@ impl Mapper {
             fallback_detected: false,
             stop_reason: None,
             pending_refusal_category: None,
+            limit_resets_at: None,
             warned_stop_reason: None,
         }
     }
@@ -1486,12 +1489,22 @@ impl Mapper {
             Some("user") => self.on_user(&msg),
             Some("control_request") => self.on_control_request(&msg),
             Some("control_response") => self.on_control_response(&msg),
+            Some("rate_limit_event") => self.on_rate_limit_event(&msg),
             Some("result") => self.on_result(&msg),
             other => {
                 log::debug!("claude: ignoring message type {other:?}");
                 Vec::new()
             }
         }
+    }
+
+    fn on_rate_limit_event(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        let info = msg.get("rate_limit_info");
+        self.limit_resets_at = info
+            .filter(|info| info.get("status").and_then(Value::as_str) == Some("rejected"))
+            .and_then(|info| info.get("resetsAt"))
+            .and_then(Value::as_u64);
+        Vec::new()
     }
 
     fn synthesized_turn_started(&mut self) -> Vec<AgentEvent> {
@@ -2434,7 +2447,11 @@ impl Mapper {
                 message: format!("claude turn failed ({subtype}): {detail}"),
                 fatal: false,
             });
+            if let Some(resets_at) = self.limit_resets_at.take() {
+                events.push(AgentEvent::UsageLimitReached { resets_at });
+            }
         }
+        self.limit_resets_at = None;
         if self.stop_reason.as_deref() == Some("refusal") {
             let detail = msg
                 .get("result")
@@ -3101,7 +3118,6 @@ fn built_in_models() -> Vec<ModelSpec> {
                     &["low", "medium", "high", "xhigh", "max", "ultrathink"],
                     "xhigh",
                 ),
-                boolean("fastMode", "Fast Mode"),
                 context_window("1m"),
             ],
         ),
@@ -3110,17 +3126,13 @@ fn built_in_models() -> Vec<ModelSpec> {
             "Claude Opus 4.6",
             vec![
                 reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                boolean("fastMode", "Fast Mode"),
                 context_window("200k"),
             ],
         ),
         model(
             "claude-opus-4-5",
             "Claude Opus 4.5",
-            vec![
-                reasoning(&["low", "medium", "high", "max"], "high"),
-                boolean("fastMode", "Fast Mode"),
-            ],
+            vec![reasoning(&["low", "medium", "high", "max"], "high")],
         ),
         model(
             "claude-sonnet-5",
@@ -3596,6 +3608,21 @@ mod tests {
     }
 
     #[test]
+    fn fast_mode_models_match_supported_opus_versions() {
+        let ids: Vec<String> = built_in_models()
+            .into_iter()
+            .filter(|model| {
+                model.options.iter().any(
+                    |option| matches!(option, OptionDescriptor::Boolean { id, .. } if id == "fastMode"),
+                )
+            })
+            .map(|model| model.id)
+            .collect();
+
+        assert_eq!(ids, ["claude-opus-5", "claude-opus-4-8"]);
+    }
+
+    #[test]
     fn parse_semver_from_version_output() {
         assert_eq!(
             crate::process::parse_semver("2.1.206 (Claude Code)"),
@@ -4034,6 +4061,50 @@ mod tests {
         }
         // Second init is ignored.
         assert!(feed(&mut m, line).is_empty());
+    }
+
+    #[test]
+    fn rejected_rate_limit_is_emitted_after_failed_result_error() {
+        let mut m = Mapper::new();
+        assert!(feed(
+            &mut m,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1800000000,"rateLimitType":"five_hour","utilization":1.0}}"#,
+        )
+        .is_empty());
+
+        let events = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"You've hit your limit","session_id":"sess-1"}"#,
+        );
+        let error_index = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::Error { .. }))
+            .expect("failed result error");
+        assert!(matches!(
+            events.get(error_index + 1),
+            Some(AgentEvent::UsageLimitReached {
+                resets_at: 1_800_000_000
+            })
+        ));
+    }
+
+    #[test]
+    fn rejected_rate_limit_is_cleared_by_successful_result() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1800000000,"rateLimitType":"five_hour","utilization":1.0}}"#,
+        );
+
+        let events = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-1"}"#,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::UsageLimitReached { .. }))
+        );
     }
 
     #[test]

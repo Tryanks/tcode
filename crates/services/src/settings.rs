@@ -185,6 +185,7 @@ mod tests {
             provider_update_checks_disabled: true,
             inactive_frame_throttle_disabled: true,
             abort_on_model_fallback: true,
+            resume_on_limit_reset: true,
             fallback_review_advisor: false,
             auto_archive_disabled: false,
             auto_archive_max_idle_days: 7,
