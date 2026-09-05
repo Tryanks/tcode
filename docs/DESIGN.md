@@ -223,6 +223,8 @@ platform pays that inset.
   which is exactly how T3 Code ends up showing "Request was abo…" and then
   nothing. A failed provider start additionally leaves the unsent message in the
   queue strip (typed text is never destroyed by a dead process).
+  When a Claude usage window is exhausted, the card adds a resume row: either a
+  live reset countdown with Cancel, or a button to schedule the resume manually.
 - CHANGED FILES card per turn with provider-attributed file changes: Codex uses
   its replacement `turn/diff/updated` net snapshot; providers without that
   capability fold only successfully completed structured file-edit operations
