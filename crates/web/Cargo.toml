@@ -7,10 +7,15 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+debug-exports = []
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.3", default-features = false }
 tcode-mobile = { path = "../mobile", default-features = false }
+tcode-ui = { path = "../ui", default-features = false }
 async-channel = "2"
 futures-lite = "2"
 serde_json = "1"

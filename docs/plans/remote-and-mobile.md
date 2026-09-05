@@ -347,3 +347,40 @@ an automatic favicon 404. The literal preview-screenshot gate remains for an
 orchestrator with the owning conversation visible. Optional wasm Clippy with
 `-D warnings` hits HEAD's unused `Rc` import in `crates/mobile`; normal wasm
 check passes with that warning and a platform `instance_flags` dead-code warning.
+
+#### P3b notes
+
+P3b replaces the placeholder browser proof with the real compact mobile
+workspace. The web `Application` installs `tcode_ui::assets::Assets`, and the
+compact-mode GPUI icons used by hosts, sessions, chat, streaming and approval
+are embedded synchronously on wasm. This avoids the component asset loader's
+retry/error loop on the browser thread. `tcode-ui` uses `web-time` for the
+`Instant` and `SystemTime` call sites reachable from the browser; native builds
+continue to use `std::time`. The model-mismatch warning uses an ASCII marker on
+wasm because the bundled fonts do not contain U+26A0.
+
+The P3a transport probes are now behind `tcode-web/debug-exports`, which is off
+by default. The normal bundle exports only the application entry point.
+
+An isolated host on port 47430 was paired from a 393×852 browser client. The
+saved host resolved to the page origin (`127.0.0.1:47430`), its project and
+thread appeared, and Claude streamed real turns into the reused `ChatView` and
+`Composer`. No approval was requested because the selected provider ran in
+Full access mode. Killing and restarting the host produced
+Reconnecting → Connected without a reload and preserved the session list.
+The same client remained usable at 1280×800. Browser error capture returned
+`[]` for load, populated chat, streaming, disconnect and recovery.
+
+The preview canvas was exercised at both requested sizes, but its screenshot
+API again refused because the owning conversation was not visible. The P3b
+images in `docs/images/mobile/` are therefore captures from a dedicated Chrome
+instance connected to the same URL; the streaming frame uses Chrome's page
+capture because macOS window capture omits cached GPU layers during animation.
+
+One shared mobile rendering issue remains outside P3b's allowed edit scope:
+the Threads header passes the Unicode strings `＋` and `⚙` to the text button
+helper, but the browser font set lacks those glyphs. Replace those two text
+buttons in `crates/mobile/src/screens.rs` with `tcode_ui::icon::Icon` children
+(`IconName::Plus` and an asset-backed settings icon), retaining the existing
+44-pixel hit targets and listeners. The sidebar's asset-backed controls render
+correctly.

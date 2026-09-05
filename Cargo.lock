@@ -8619,6 +8619,7 @@ dependencies = [
  "jni 0.21.1",
  "log",
  "tcode-mobile",
+ "tcode-ui",
 ]
 
 [[package]]
@@ -8670,6 +8671,7 @@ dependencies = [
  "gpui-pre",
  "log",
  "tcode-mobile",
+ "tcode-ui",
 ]
 
 [[package]]
@@ -8820,6 +8822,7 @@ dependencies = [
  "tcode-services",
  "tcode-voice",
  "term",
+ "web-time",
 ]
 
 [[package]]
@@ -8840,6 +8843,7 @@ dependencies = [
  "js-sys",
  "serde_json",
  "tcode-mobile",
+ "tcode-ui",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

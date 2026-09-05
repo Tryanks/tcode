@@ -1,13 +1,17 @@
 //! Block renderer adapted from gpui-component's Apache-2.0 `text/node.rs` and
 //! `text/document.rs`, with rushdown IR and syntect highlighting.
 
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     ops::Range,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use crate::highlight::HighlightTheme;
 use crate::theme::ActiveTheme as _;

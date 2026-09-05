@@ -500,8 +500,12 @@ pub(crate) fn turn_time_clauses(
         });
     }
     if let Some(served) = divergent_served_model(served_model, requested_model) {
+        #[cfg(target_arch = "wasm32")]
+        let warning_mark = "!";
+        #[cfg(not(target_arch = "wasm32"))]
+        let warning_mark = "⚠";
         clauses.push(TurnTimeClause {
-            text: format!("⚠ {served}"),
+            text: format!("{warning_mark} {served}"),
             selector: "turn-time-model",
             warning: true,
         });

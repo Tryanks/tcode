@@ -1,4 +1,8 @@
 use super::super::*;
+#[cfg(not(target_family = "wasm"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_family = "wasm")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Queue bubbles collapse whitespace and clip long messages (the full text is
 /// still what gets sent).

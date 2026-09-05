@@ -7,12 +7,14 @@ mod transport;
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use host::{WebHost, window};
+#[cfg(feature = "debug-exports")]
 use tcode_mobile::host::{MobileHost as _, PairRequest, Transport};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
     static APPLICATION: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
     static CANVAS_OBSERVER: RefCell<Option<CanvasObserver>> = const { RefCell::new(None) };
+    #[cfg(feature = "debug-exports")]
     static DEBUG: RefCell<Option<DebugConnection>> = const { RefCell::new(None) };
 }
 
@@ -74,27 +76,30 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     }
     gpui_platform::web_init();
     prepare_canvas(canvas_id)?;
-    let application = gpui_platform::application().run_embedded(|cx| {
-        cx.text_system()
-            .add_fonts(vec![
-                Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
-                Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
-            ])
-            .expect("failed to load browser fonts");
-        tcode_mobile::run_with_host(cx, Rc::new(WebHost::new()));
-        if let Some(document) = window().document() {
-            if let Some(loading) = document.get_element_by_id("loading") {
-                loading.remove();
+    let application = gpui_platform::application()
+        .with_assets(tcode_ui::assets::Assets)
+        .run_embedded(|cx| {
+            cx.text_system()
+                .add_fonts(vec![
+                    Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
+                    Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
+                ])
+                .expect("failed to load browser fonts");
+            tcode_mobile::run_with_host(cx, Rc::new(WebHost::new()));
+            if let Some(document) = window().document() {
+                if let Some(loading) = document.get_element_by_id("loading") {
+                    loading.remove();
+                }
+                if let Some(body) = document.body() {
+                    let _ = body.set_attribute("data-tcode-ready", "true");
+                }
             }
-            if let Some(body) = document.body() {
-                let _ = body.set_attribute("data-tcode-ready", "true");
-            }
-        }
-    });
+        });
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
     Ok(())
 }
 
+#[cfg(feature = "debug-exports")]
 struct DebugConnection {
     transport: Transport,
     history: Vec<String>,
@@ -104,6 +109,7 @@ struct DebugConnection {
 /// Exercise the actual MobileHost methods without depending on screen state.
 /// The retained transport also permits restart/replay verification.
 #[wasm_bindgen]
+#[cfg(feature = "debug-exports")]
 pub async fn debug_pair_and_connect(code: String) -> String {
     let (tx, rx) = async_channel::bounded(1);
     let started = APPLICATION.with(|slot| {
@@ -153,6 +159,7 @@ pub async fn debug_pair_and_connect(code: String) -> String {
 /// Returns the last ConnectionState, its observed transitions, and received
 /// index snapshot count. Omits tokens and unrelated host payloads.
 #[wasm_bindgen]
+#[cfg(feature = "debug-exports")]
 pub fn debug_connection_state() -> String {
     DEBUG.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -177,6 +184,7 @@ pub fn debug_connection_state() -> String {
     })
 }
 
+#[cfg(feature = "debug-exports")]
 fn is_index_snapshot(line: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(line)
         .is_ok_and(|value| value["content"]["event"]["type"].as_str() == Some("index_snapshot"))
