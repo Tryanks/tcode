@@ -292,7 +292,7 @@ impl Popover {
                             .occlude()
                             .w(window.viewport_size().width)
                             .h(window.viewport_size().height)
-                            .bg(cx.theme().foreground.opacity(0.3 * progress))
+                            .bg(crate::material::scrim(progress, cx))
                             .flex()
                             .flex_col()
                             .justify_end()

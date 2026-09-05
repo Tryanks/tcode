@@ -2083,6 +2083,19 @@ impl ChatView {
     }
 
     fn render_empty_state(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The phone never shows the desktop launcher here: no "Add project"
+        // button and no Ctrl+K hint (docs/mobile-design.md §3.0 forbids desktop
+        // shortcut copy). Reaching this state on a phone means the host has no
+        // threads to open yet.
+        if self.window_state.read(cx).compact {
+            return crate::material::empty_state(
+                Icon::new(IconName::Folder),
+                crate::tr!("mobile.projects_empty"),
+                crate::tr!("mobile.projects_help"),
+                cx,
+            )
+            .into_any_element();
+        }
         let projects = self.workspace_store.read(cx).projects();
         let sessions = self.workspace_store.read(cx).sidebar_sessions();
         let hub_projects = start_hub_projects(&projects, &sessions);

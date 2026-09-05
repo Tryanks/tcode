@@ -724,7 +724,14 @@ fn render_model_pane(
         .child(rail)
         .child(pane);
     if compact {
-        return pane.into_any_element();
+        // The phone pins Effort and Approval mode to the bottom of the model
+        // sheet as segmented controls (§3.5); choosing applies at once.
+        return v_flex()
+            .w_full()
+            .min_h_0()
+            .child(pane)
+            .child(render_compact_model_footer(store_entity, cx))
+            .into_any_element();
     }
     pane.with_animation(
         "model-picker-pop-in",
@@ -732,6 +739,131 @@ fn render_model_pane(
         |element, delta| element.opacity(delta),
     )
     .into_any_element()
+}
+
+/// The compact model sheet's pinned footer (docs/mobile-design.md §3.5):
+/// "Effort" — only when the active model describes a `reasoningEffort` select —
+/// over "Approval mode", both as segmented controls. Selecting applies
+/// immediately and leaves the sheet open.
+fn render_compact_model_footer(
+    store_entity: &Entity<WorkspaceStore>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
+    let composer_state = store_entity.read(cx).composer_state();
+    let selections = composer_state.active_option_selections.clone();
+    let effort = composer_state
+        .active_option_descriptors
+        .iter()
+        .find_map(|descriptor| match descriptor {
+            OptionDescriptor::Select {
+                id,
+                options,
+                default_value,
+                ..
+            } if id == "reasoningEffort" => Some((
+                // The audited phone copy, not the provider's own descriptor
+                // label (§1: one word per concept, in both locales).
+                crate::tr!("mobile.effort").into_owned(),
+                // "Ultrathink" is a one-shot arming action, not a persisted
+                // effort level, so it stays out of the segmented control.
+                options
+                    .iter()
+                    .filter(|option| option.value != "ultrathink")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                resolved_select_value(id, options, default_value, &selections),
+            )),
+            _ => None,
+        });
+
+    let group = |label: gpui::SharedString,
+                 track: gpui::Stateful<gpui::Div>,
+                 cx: &mut Context<PopoverState>| {
+        v_flex()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(track)
+    };
+
+    let mut footer = v_flex()
+        .flex_none()
+        .w_full()
+        .gap(px(14.))
+        .px(px(16.))
+        .pt(px(12.));
+    if let Some((label, options, current)) = effort {
+        let mut track = crate::material::segmented_track("compact-effort", cx);
+        for option in options {
+            let selected = current.as_deref() == Some(option.value.as_str());
+            let store = store_entity.clone();
+            let value = option.value.clone();
+            track = track.child(
+                crate::material::segment(
+                    gpui::SharedString::from(format!("compact-effort-{}", option.value)),
+                    option.label.clone(),
+                    selected,
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    let value = value.clone();
+                    store.update(cx, |store, _cx| {
+                        store.set_active_option(
+                            "reasoningEffort".to_string(),
+                            Some(serde_json::Value::String(value)),
+                        );
+                    });
+                }),
+            );
+        }
+        footer = footer.child(group(label.into(), track, cx));
+    }
+
+    let current = composer_state.approval_mode;
+    let enabled = composer_state.native_approval_modes_enabled;
+    let mut track = crate::material::segmented_track("compact-approval", cx);
+    for (mode, label, _, _) in APPROVAL_MODES {
+        let disabled = !enabled
+            && matches!(
+                mode,
+                ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits
+            );
+        let store = store_entity.clone();
+        track = track.child(
+            crate::material::segment(
+                gpui::SharedString::from(format!("compact-approval-{label}")),
+                crate::tr!(label).into_owned(),
+                mode == current,
+                cx,
+            )
+            .when(disabled, |segment| segment.opacity(0.55))
+            .when(!disabled, |segment| {
+                segment.on_click(move |_, _, cx| {
+                    store.update(cx, |store, _cx| store.set_active_approval_mode(mode));
+                })
+            }),
+        );
+    }
+    footer
+        .child(group(
+            crate::tr!("mobile.approval_mode").into_owned().into(),
+            track,
+            cx,
+        ))
+        // The sheet's own bottom padding is the popover's; this keeps the last
+        // control clear of the home indicator.
+        .child(div().h(px(8.)).flex_none())
+        // Occluded so a tap on a segment never falls through to the rows
+        // above, which dismiss the sheet.
+        .id("compact-model-footer")
+        .occlude()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .into_any_element()
 }
 
 fn render_model_row(
@@ -767,7 +899,8 @@ fn render_model_row(
         .when(is_current, |row| row.aria_active_descendant())
         .flex_none()
         .w_full()
-        .min_h(px(if compact { 48. } else { 28. }))
+        // 52pt rows on the phone (docs/mobile-design.md §3.5).
+        .min_h(px(if compact { 52. } else { 28. }))
         .px_2()
         .py_1()
         .gap_2()
