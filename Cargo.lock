@@ -8837,9 +8837,10 @@ name = "tcode-web"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "console_error_panic_hook",
  "futures-lite",
  "gpui-pre",
- "gpui-pre-platform",
+ "gpui-pre-web",
  "js-sys",
  "serde_json",
  "tcode-mobile",

@@ -74,9 +74,16 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     if APPLICATION.with(|slot| slot.borrow().is_some()) {
         return Ok(());
     }
-    gpui_platform::web_init();
+    console_error_panic_hook::set_once();
+    gpui_web::init_logging();
     prepare_canvas(canvas_id)?;
-    let application = gpui_platform::application()
+    let platform = Rc::new(gpui_web::WebPlatform::new_with_backend(
+        true,
+        gpui_web::WebBackendPreference::Auto,
+    ));
+    let http_client = std::sync::Arc::new(platform.fetch_http_client());
+    let application = gpui::Application::with_platform(platform)
+        .with_http_client(http_client)
         .with_assets(tcode_ui::assets::Assets)
         .run_embedded(|cx| {
             cx.text_system()
