@@ -86,13 +86,16 @@ impl OrchestrateSettingsPanel {
             cx.subscribe_in(
                 &store,
                 window,
-                |this, _, change: &StoreChange, window, cx| {
-                    if change.topic == TopicKind::Settings {
+                |this, _, change: &StoreChange, window, cx| match change.topic {
+                    TopicKind::Settings => {
                         if !this.rows_match_settings(cx) {
                             this.rebuild_rows(window, cx);
                         }
                         cx.notify();
                     }
+                    // Fast/effort controls read the provider catalogs.
+                    TopicKind::Providers => cx.notify(),
+                    _ => {}
                 },
             ),
             cx.subscribe_in(&identity_model_picker, window, |this, _, event, _, cx| {
@@ -306,19 +309,7 @@ impl OrchestrateSettingsPanel {
     /// Whether the provider catalog declares a fast mode for a model: Claude's
     /// `fastMode` boolean or a Codex `serviceTier` selector offering `fast`.
     fn child_fast_supported(&self, provider: ProviderKind, model: &str, cx: &App) -> bool {
-        self.store
-            .read(cx)
-            .provider_model_catalog(provider)
-            .into_iter()
-            .find(|spec| spec.id == model)
-            .into_iter()
-            .flat_map(|spec| spec.options)
-            .any(|option| match option {
-                OptionDescriptor::Boolean { id, .. } => id == "fastMode",
-                OptionDescriptor::Select { id, options, .. } => {
-                    id == "serviceTier" && options.iter().any(|choice| choice.value == "fast")
-                }
-            })
+        model_fast_supported(&self.store.read(cx).provider_model_catalog(provider), model)
     }
 
     /// The valid `reasoningEffort` choices the provider catalog declares for a
@@ -1319,6 +1310,23 @@ impl OrchestrateSettingsPanel {
     }
 }
 
+fn model_fast_supported(catalog: &[agent::ModelSpec], model: &str) -> bool {
+    catalog
+        .iter()
+        .find(|spec| spec.id == model)
+        .into_iter()
+        .flat_map(|spec| &spec.options)
+        .any(|option| match option {
+            OptionDescriptor::Boolean { id, .. } => id == "fastMode",
+            OptionDescriptor::Select { id, options, .. } => {
+                id == "serviceTier"
+                    && options.iter().any(|choice| {
+                        choice.value == "fast" || choice.label.eq_ignore_ascii_case("fast")
+                    })
+            }
+        })
+}
+
 /// Whether two efforts name the same tier. Stored efforts are free text, so a
 /// hand-typed "Medium" must still match the bundled "medium".
 fn same_effort(left: &Option<String>, right: &Option<String>) -> bool {
@@ -1390,5 +1398,31 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_auto_archive(cx))
             .child(self.render_identities(cx))
             .child(self.render_children(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_fast_support_accepts_the_model_list_priority_tier() {
+        let catalog = vec![agent::ModelSpec {
+            id: "gpt-6-astra".into(),
+            display_name: "GPT-6 Astra".into(),
+            is_default: true,
+            options: vec![OptionDescriptor::Select {
+                id: "serviceTier".into(),
+                label: "Service Tier".into(),
+                options: vec![SelectOption {
+                    value: "priority".into(),
+                    label: "Fast".into(),
+                    description: None,
+                }],
+                default_value: Some("default".into()),
+            }],
+        }];
+
+        assert!(model_fast_supported(&catalog, "gpt-6-astra"));
     }
 }

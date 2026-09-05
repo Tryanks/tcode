@@ -3148,7 +3148,6 @@ fn built_in_models() -> Vec<ModelSpec> {
                     &["low", "medium", "high", "xhigh", "max", "ultrathink"],
                     "xhigh",
                 ),
-                boolean("fastMode", "Fast Mode"),
                 context_window("1m"),
             ],
         ),
@@ -3157,17 +3156,13 @@ fn built_in_models() -> Vec<ModelSpec> {
             "Claude Opus 4.6",
             vec![
                 reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                boolean("fastMode", "Fast Mode"),
                 context_window("200k"),
             ],
         ),
         model(
             "claude-opus-4-5",
             "Claude Opus 4.5",
-            vec![
-                reasoning(&["low", "medium", "high", "max"], "high"),
-                boolean("fastMode", "Fast Mode"),
-            ],
+            vec![reasoning(&["low", "medium", "high", "max"], "high")],
         ),
         model(
             "claude-sonnet-5",
@@ -3640,6 +3635,21 @@ mod tests {
         assert!(!ids(Some((2, 1, 218))).contains(&"claude-opus-5".to_string()));
         // Unknown version hides gated models.
         assert!(!ids(None).contains(&"claude-fable-5".to_string()));
+    }
+
+    #[test]
+    fn fast_mode_models_match_supported_opus_versions() {
+        let ids: Vec<String> = built_in_models()
+            .into_iter()
+            .filter(|model| {
+                model.options.iter().any(
+                    |option| matches!(option, OptionDescriptor::Boolean { id, .. } if id == "fastMode"),
+                )
+            })
+            .map(|model| model.id)
+            .collect();
+
+        assert_eq!(ids, ["claude-opus-5", "claude-opus-4-8"]);
     }
 
     #[test]
