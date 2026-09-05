@@ -72,9 +72,13 @@ Constraints from the brief:
    theme. The vendored set is our own `gpui-ios` and `gpui-android` backends plus
    `gpui-platform-shim`. The shim exists only because `gpui-base` unconditionally
    depends on `gpui-pre-platform` on non-wasm targets; it adds a fallback arm to
-   the published crate. Delete it when gpui-pre gains that arm or gpui-kit makes
-   the dependency optional. Published `gpui-pre-wgpu` and `gpui-pre-web` are used
-   directly.
+   the published crate. The fix is upstream in gpui-kit: PR "base: stop depending
+   on gpui_platform from the library" (branch `base-no-platform-dep`, patch and
+   body in the P2 notes) moves the dependency to dev-dependencies; verified
+   locally that with it tcode builds for macOS, iOS, Android and wasm with no
+   `[patch.crates-io]` at all. `tcode-web` constructs its platform directly from
+   `gpui-pre-web` (default features off) instead of via `gpui-pre-platform`.
+   Published `gpui-pre-wgpu` and `gpui-pre-web` are used directly.
 10. **Remote parity gaps deferred to P4**: terminal byte streams
     (`Topic::Terminal` exists, unused), preview reverse RPC, remote directory
     browser for Add Project, attachment upload. Until then the terminal drawer
