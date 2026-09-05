@@ -10,7 +10,12 @@ export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
 export CARGO_NDK_PLATFORM="${CARGO_NDK_PLATFORM:-26}"
 
 cd "$CRATE_DIR"
-cargo ndk -t arm64-v8a -o host/app/src/main/jniLibs build -p tcode-android
+# rust-embed normally reads assets from the current directory in dev builds,
+# which does not exist inside an APK. Embed only the existing asset crate (and
+# its rust-embed runtime) while keeping debug assertions for application code.
+cargo ndk -t arm64-v8a -o host/app/src/main/jniLibs build -p tcode-android \
+    --config 'profile.dev.package.gpui-kit-assets.debug-assertions=false' \
+    --config 'profile.dev.package.rust-embed.debug-assertions=false'
 
 cd "$SCRIPT_DIR"
 ./gradlew assembleDebug

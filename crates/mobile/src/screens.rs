@@ -212,32 +212,37 @@ impl MobileRoot {
                     .child(self.connection_badge(cx)),
             )
             .child(
-                button("new-thread", "＋", false, self.online(), cx)
-                    .w(px(44.))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if !this.online() {
-                            return;
-                        }
-                        let projects = this
-                            .store
-                            .as_ref()
-                            .map(|s| s.read(cx).projects())
-                            .unwrap_or_default();
-                        if projects.len() == 1 {
-                            this.start_draft(projects[0].clone(), window, cx);
-                        } else {
-                            this.sheet = Some(Sheet::Projects);
-                            cx.notify();
-                        }
-                    })),
+                icon_button(
+                    "new-thread",
+                    label("new_thread"),
+                    IconName::Plus,
+                    self.online(),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if !this.online() {
+                        return;
+                    }
+                    let projects = this
+                        .store
+                        .as_ref()
+                        .map(|s| s.read(cx).projects())
+                        .unwrap_or_default();
+                    if projects.len() == 1 {
+                        this.start_draft(projects[0].clone(), window, cx);
+                    } else {
+                        this.sheet = Some(Sheet::Projects);
+                        cx.notify();
+                    }
+                })),
             )
             .child(
-                button("settings", "⚙", false, true, cx)
-                    .w(px(44.))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                icon_button("settings", label("settings"), IconName::Settings, true, cx).on_click(
+                    cx.listener(|this, _, _, cx| {
                         this.sheet = Some(Sheet::Settings);
                         cx.notify();
-                    })),
+                    }),
+                ),
             );
         v_flex()
             .size_full()

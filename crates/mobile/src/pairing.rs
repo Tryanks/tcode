@@ -73,7 +73,6 @@ impl MobileRoot {
                 ));
             }
         }
-        self.pair.address.update(cx, |s, cx| s.focus(window, cx));
         self.sheet = Some(Sheet::Pair);
         cx.notify();
     }

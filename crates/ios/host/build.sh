@@ -49,7 +49,11 @@ export IPHONEOS_DEPLOYMENT_TARGET="26.0"
 if [[ "$RUST_PROFILE" == "release" ]]; then
     cargo build -p tcode-ios --target "$RUST_TARGET" --release
 else
-    cargo build -p tcode-ios --target "$RUST_TARGET"
+    # rust-embed otherwise looks for dependency assets in the app's runtime
+    # directory. Embed only the existing asset crate in the dev static library.
+    cargo build -p tcode-ios --target "$RUST_TARGET" \
+        --config 'profile.dev.package.gpui-kit-assets.debug-assertions=false' \
+        --config 'profile.dev.package.rust-embed.debug-assertions=false'
 fi
 
 mkdir -p "$HOST_DIR/lib"

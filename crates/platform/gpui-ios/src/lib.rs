@@ -33,6 +33,12 @@ pub fn safe_area() -> gpui::Edges<gpui::Pixels> {
     gpui::Edges::default()
 }
 
+/// Current safe-area and software-keyboard insets.
+#[cfg(not(target_os = "ios"))]
+pub fn insets() -> gpui::WindowInsets {
+    gpui::WindowInsets::default()
+}
+
 /// Requests the UIKit software keyboard on iOS.
 #[cfg(not(target_os = "ios"))]
 pub fn set_keyboard_visible(_visible: bool) {}

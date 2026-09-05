@@ -59,6 +59,16 @@ pub fn safe_area() -> gpui::Edges<gpui::Pixels> {
     })
 }
 
+/// Current system-bar, display-cutout, and software-keyboard insets.
+pub fn insets() -> gpui::WindowInsets {
+    PLATFORM.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|platform| platform.insets())
+            .unwrap_or_default()
+    })
+}
+
 #[doc(hidden)]
 pub fn jni_commit_text(text: String) {
     host::commit_text(text);

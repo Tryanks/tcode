@@ -271,3 +271,6 @@
 - 模型、参数、审批选择器及回退菜单复用原内容与 `PopoverState`，仅容器改为底部 sheet；最多为视口高度减 64 pt，模型列表高 360 pt，底部内边距 32 pt。紧凑选择器取消淡入动画；其无障碍容器使用命名分组，避免 GPUI 将嵌套对话框误识别为另一个窗口。
 - 紧凑审批卡默认展开，四个桌面动作排列为两行两列；所有按钮保持桌面行为，手机标签按 §1 替换。复制按钮在触屏上常显，紧凑平铺列表取消位置过渡。未访问对话离线时只有缓存状态；已访问对话保留事件副本用于只读浏览，断线期间的写命令被拒绝，重连后重新选择当前对话。
 - DM Sans 使用桌面同一字体资源，半透明画布按桌面不透明窗口规则压平。执行端与配对屏保留原布局。
+- iOS 与 Android 入口安装桌面同一 `Assets`，移动端统一注册 DM Sans；Android 另注册 Lilex 作为等宽字体。原生调试构建把现有字体与 SVG 嵌入包内，列表顶栏的新建和设置按钮使用 `IconName::Plus` / `IconName::Settings`，不再依赖字体里的 Unicode 符号。
+- `MobileHost::insets` 默认兼容旧 `safe_area` 实现；原生宿主返回完整 `WindowInsets`。页面底部使用 `max(safe_area.bottom, ime.bottom)`，Android 回到前台时重新上报 root insets，Composer 在两端软件键盘上方保持可见。
+- iOS 用 `UIDevice.current.name`、Android 用 `Build.MODEL` 初始化本机名称；扫码分别桥接 AVFoundation QR metadata output 与 CameraX + ML Kit，并把成功、取消或错误一次性送回配对 sheet。模拟器验收覆盖了权限提示、Android 原生扫描页以及取消后的无崩溃返回；iOS 模拟器没有相机，未执行实际二维码识别。

@@ -1,9 +1,13 @@
 //! Android cdylib entry point loaded by the NativeActivity host.
 
 #[cfg(target_os = "android")]
+mod host;
+
+#[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     use futures::{StreamExt as _, channel::mpsc};
+    use std::rc::Rc;
 
     android_logger::init_once(
         android_logger::Config::default()
@@ -12,23 +16,27 @@ pub fn android_main(app: android_activity::AndroidApp) {
     );
     std::panic::set_hook(Box::new(|panic| log::error!("GPUI Android panic: {panic}")));
     gpui_android::init_platform(&app);
-    gpui::Application::with_platform(gpui_android::platform()).run(|cx| {
-        tcode_mobile::run(cx);
-        let (back_sender, mut back_receiver) = mpsc::unbounded();
-        gpui_android::set_back_callback(move || {
-            let _ = back_sender.unbounded_send(());
+    gpui::Application::with_platform(gpui_android::platform())
+        .with_assets(tcode_ui::assets::Assets)
+        .run(move |cx| {
+            let mobile_host = host::native_host(app.clone(), cx)
+                .expect("failed to initialize Android host services");
+            tcode_mobile::run_with_host(cx, Rc::new(mobile_host));
+            let (back_sender, mut back_receiver) = mpsc::unbounded();
+            gpui_android::set_back_callback(move || {
+                let _ = back_sender.unbounded_send(());
+            });
+            cx.spawn(async move |cx| {
+                while back_receiver.next().await.is_some() {
+                    cx.update(|cx| {
+                        if !tcode_mobile::handle_back(cx) {
+                            cx.quit();
+                        }
+                    });
+                }
+            })
+            .detach();
         });
-        cx.spawn(async move |cx| {
-            while back_receiver.next().await.is_some() {
-                cx.update(|cx| {
-                    if !tcode_mobile::handle_back(cx) {
-                        cx.quit();
-                    }
-                });
-            }
-        })
-        .detach();
-    });
 }
 
 #[cfg(target_os = "android")]
@@ -36,7 +44,7 @@ mod jni_exports {
     use jni::{
         JNIEnv,
         objects::{JObject, JString},
-        sys::{jboolean, jint},
+        sys::{jboolean, jint, jlong},
     };
 
     #[unsafe(no_mangle)]
@@ -111,5 +119,25 @@ mod jni_exports {
         if enabled != 0 {
             gpui_android::jni_on_back();
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeQrScanCompleted(
+        mut env: JNIEnv,
+        _activity: JObject,
+        request_id: jlong,
+        status: jint,
+        value: JObject,
+    ) {
+        let value = if value.is_null() {
+            None
+        } else {
+            let value = JString::from(value);
+            env.get_string(&value)
+                .map(Into::into)
+                .map_err(|error| log::error!("failed reading QR result: {error}"))
+                .ok()
+        };
+        crate::host::deliver_result(request_id as u64, status, value);
     }
 }

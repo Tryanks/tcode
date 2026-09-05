@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Edges, Pixels};
+use gpui::{App, Edges, Pixels, WindowInsets};
 pub use tcode_client::ConnectionState;
 pub use tcode_client::pairing::{
     PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
@@ -87,6 +87,15 @@ pub trait MobileHost: 'static {
     fn safe_area(&self) -> Edges<Pixels> {
         Edges::default()
     }
+
+    /// All system-obscured regions in logical pixels. The default preserves
+    /// compatibility with hosts which only provide a safe area.
+    fn insets(&self) -> WindowInsets {
+        WindowInsets {
+            safe_area: self.safe_area(),
+            ..WindowInsets::default()
+        }
+    }
 }
 
 pub type SharedHost = Rc<dyn MobileHost>;
@@ -98,15 +107,20 @@ pub use native::NativeHost;
 mod native {
     use std::path::PathBuf;
 
-    use gpui::{App, Edges, Pixels};
+    use gpui::{App, Edges, Pixels, WindowInsets};
 
-    use super::{MobileHost, MobilePreferences, PairDone, PairRequest, PairedHost, Transport};
+    use super::{
+        MobileHost, MobilePreferences, PairDone, PairRequest, PairedHost, ScanDone, Transport,
+    };
+
+    type QrScanner = dyn Fn(ScanDone, &mut App);
 
     /// iOS, Android, and the desktop preview: `tcode-remote`'s WebSocket
     /// client, `hosts.json` and `mobile.json` under the platform data dir.
     pub struct NativeHost {
         data_dir: PathBuf,
         device_name: String,
+        qr_scanner: Option<Box<QrScanner>>,
     }
 
     impl NativeHost {
@@ -114,24 +128,30 @@ mod native {
             Self {
                 data_dir,
                 device_name,
+                qr_scanner: None,
             }
         }
 
         /// `TCODE_DATA_DIR`, else the platform data dir; hostname as device name.
         pub fn from_env() -> Self {
+            Self::from_env_with_device_name(default_device_name())
+        }
+
+        /// Uses the normal platform data directory with a native device name.
+        pub fn from_env_with_device_name(device_name: impl Into<String>) -> Self {
             let data_dir = match std::env::var_os("TCODE_DATA_DIR") {
                 Some(dir) => PathBuf::from(dir),
                 None => dirs::data_dir()
                     .unwrap_or_else(|| PathBuf::from("."))
                     .join("tcode"),
             };
-            let device_name = ["HOSTNAME", "HOST", "COMPUTERNAME"]
-                .iter()
-                .filter_map(|key| std::env::var(key).ok())
-                .map(|name| name.trim().to_owned())
-                .find(|name| !name.is_empty())
-                .unwrap_or_else(|| "tcode phone".into());
-            Self::new(data_dir, device_name)
+            Self::new(data_dir, device_name.into())
+        }
+
+        /// Installs the native camera scanner supplied by the app host.
+        pub fn with_qr_scanner(mut self, scanner: impl Fn(ScanDone, &mut App) + 'static) -> Self {
+            self.qr_scanner = Some(Box::new(scanner));
+            self
         }
 
         fn prefs_path(&self) -> PathBuf {
@@ -229,19 +249,44 @@ mod native {
             }
         }
 
+        fn supports_qr(&self) -> bool {
+            self.qr_scanner.is_some()
+        }
+
+        fn scan_qr(&self, done: ScanDone, cx: &mut App) {
+            if let Some(scanner) = &self.qr_scanner {
+                scanner(done, cx);
+            } else {
+                done(Err("unsupported".into()), cx);
+            }
+        }
+
         fn safe_area(&self) -> Edges<Pixels> {
+            self.insets().safe_area
+        }
+
+        fn insets(&self) -> WindowInsets {
             #[cfg(target_os = "ios")]
             {
-                gpui_ios::safe_area()
+                gpui_ios::insets()
             }
             #[cfg(target_os = "android")]
             {
-                gpui_android::safe_area()
+                gpui_android::insets()
             }
             #[cfg(not(any(target_os = "ios", target_os = "android")))]
             {
-                Edges::default()
+                WindowInsets::default()
             }
         }
+    }
+
+    fn default_device_name() -> String {
+        ["HOSTNAME", "HOST", "COMPUTERNAME"]
+            .iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .map(|name| name.trim().to_owned())
+            .find(|name| !name.is_empty())
+            .unwrap_or_else(|| "tcode phone".into())
     }
 }

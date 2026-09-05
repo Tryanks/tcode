@@ -106,8 +106,12 @@ impl AndroidPlatform {
     }
 
     pub(crate) fn safe_area(&self) -> gpui::Edges<gpui::Pixels> {
+        self.insets().safe_area
+    }
+
+    pub(crate) fn insets(&self) -> gpui::WindowInsets {
         self.window()
-            .map(|window| PlatformWindow::insets(&window).safe_area)
+            .map(|window| window.insets())
             .unwrap_or_default()
     }
 

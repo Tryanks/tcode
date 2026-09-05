@@ -133,7 +133,7 @@ Constraints from the brief:
   iPhone 17 simulator and the `Lims20Pixel6` AVD against `tcode-headless` on
   this Mac (`127.0.0.1` / `10.0.2.2`); screenshots of hosts, pairing, sessions,
   and a live chat turn checked into `docs/images/mobile/`.
-- Status: pending.
+- Status: **done** (P2a–P2d). Native runs verified on the iPhone 17 simulator and a Pixel 6 AVD: pairing, real turns, approvals, keyboard insets, camera permission flow, reconnect. Screenshots `docs/images/mobile/{ios,android}-p2d-*.png`.
 
 #### P2a notes
 
@@ -229,6 +229,44 @@ and `cargo check -p tcode-client --target wasm32-unknown-unknown` pass. The web
 shell, WebSocket implementation, and bundle/serve work remain P3; no deeper
 `term` or `syntect` blocker remains in the shared UI graph.
 
+#### P2d notes
+
+P2d completes the native phone runtime. Both entries install
+`tcode_ui::assets::Assets`; `tcode-mobile` registers DM Sans on every platform
+and Lilex on Android for the configured monospace family. Native debug builds
+selectively disable debug assertions for `gpui-kit-assets` and `rust-embed`, so
+the existing SVG/font bundle is embedded instead of trying to read dependency
+source paths from inside an app sandbox. The Threads header's new-thread and
+settings actions now use `IconName::Plus` and the desktop sidebar's
+`IconName::Settings`, retaining their 44 pt targets and listeners.
+
+`MobileHost::insets` is default-implemented from the old safe area. The iOS and
+Android backends expose their complete `WindowInsets`, and the phone root pads
+the page by `max(safe_area.bottom, ime.bottom)`. Android republishes the current
+root insets on resume. This keeps the shared Composer above both software
+keyboards without making the trait non-portable to wasm.
+
+The iOS host bridges `UIDevice.current.name` and an AVFoundation
+`AVCaptureMetadataOutput` QR scanner. The Android host bridges `Build.MODEL`
+and a CameraX + ML Kit `QrScannerActivity`; its result returns through the
+existing activity, JNI, and `MobileHost::scan_qr` callback chain. Camera usage
+descriptions/permissions are present on both platforms. The iOS simulator has
+no camera, so its exercised endpoint was the native permission prompt followed
+by denial and a clean return. The Android virtual camera reached its native
+scanner/permission screen, and denial returned to the pairing sheet without a
+crash.
+
+The original `Lims20Pixel6` AVD remained behind an unknown PIN after keyevent 82
+and the prescribed upward swipe. It was not wiped. Testing used a fresh
+`tcode-p2d` Pixel 6 AVD from the installed
+`system-images;android-35;google_apis;arm64-v8a` image; keyevent 82 plus the same
+swipe unlocked it. iPhone 17 and that Android AVD paired to the same
+`tcode-headless` data directory, displayed the seeded project, streamed real
+Claude turns, approved host commands from the phone, showed reconnect state,
+and recovered after host restart. Android system Back was exercised from chat
+to Threads and from Threads to Hosts. The checked captures are
+`docs/images/mobile/{ios,android}-p2d-{hosts,pair,scan,threads,thread,approval,keyboard,reconnecting}.png`.
+
 ### P3 — Browser client
 
 - `agent`, `core`, `protocol`, `ui`, `client` compile for
@@ -240,7 +278,7 @@ shell, WebSocket implementation, and bundle/serve work remain P3; no deeper
 - Gate: `cargo build -p tcode-web --target wasm32-unknown-unknown` +
   wasm-bindgen; the headless host serves it; the embedded preview browser
   loads it, pairs, lists sessions, sends a turn.
-- Status: pending.
+- Status: **done** (P3a transport + serving, P3b real screens). Verified in Chrome against `tcode-headless --features web`; screenshots `docs/images/mobile/web-p3b-*.png`.
 
 ### P4 — Remote parity
 

@@ -1,10 +1,12 @@
 package com.tryanks.tcode;
 
 import android.app.NativeActivity;
+import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -27,7 +29,13 @@ import android.widget.FrameLayout;
 
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
+    private static final int REQUEST_CAMERA = 6102;
+    private static final int HOST_OK = 0;
+    private static final int HOST_CANCELLED = 1;
+    private static final int HOST_ERROR = 2;
+
     private GpuiInputView inputView;
+    private long cameraRequest;
 
     private native void nativeCommitText(String text);
     private native void nativeSetComposingText(String text);
@@ -36,6 +44,7 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeKeyEvent(int keyCode, boolean down, int unicodeCodePoint, int metaState);
     private native void nativeOnInsets(int left, int top, int right, int bottom, int imeBottom);
     private native void nativeOnBack(boolean enabled);
+    private native void nativeQrScanCompleted(long requestId, int status, String value);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,6 +66,16 @@ public final class GpuiActivity extends NativeActivity {
             return insets;
         });
         decor.requestApplyInsets();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        View decor = getWindow().getDecorView();
+        decor.post(() -> {
+            WindowInsets insets = decor.getRootWindowInsets();
+            if (insets != null) publishInsets(insets);
+        });
     }
 
     private void ensureNativeLibraryVisibleToJvm() {
@@ -87,15 +106,17 @@ public final class GpuiActivity extends NativeActivity {
             window.setDecorFitsSystemWindows(false);
             WindowInsetsController controller = window.getInsetsController();
             if (controller != null) {
-                controller.setSystemBarsAppearance(0,
-                        WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-                                | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+                int lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(lightBars, lightBars);
             }
         } else {
             window.getDecorView().setSystemUiVisibility(
                     View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                            | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         }
     }
 
@@ -142,6 +163,47 @@ public final class GpuiActivity extends NativeActivity {
 
     public void gpuiFinish() { finish(); }
 
+    public String gpuiDataDir() {
+        return getFilesDir().getAbsolutePath();
+    }
+
+    public String gpuiDeviceModel() {
+        return Build.MODEL == null || Build.MODEL.isEmpty() ? "Android" : Build.MODEL;
+    }
+
+    public void gpuiStartCameraScan(long requestId) {
+        if (cameraRequest != 0) {
+            nativeQrScanCompleted(requestId, HOST_ERROR, "相机扫描正在进行");
+            return;
+        }
+        cameraRequest = requestId;
+        try {
+            startActivityForResult(new Intent(this, QrScannerActivity.class), REQUEST_CAMERA);
+        } catch (RuntimeException error) {
+            cameraRequest = 0;
+            nativeQrScanCompleted(requestId, HOST_ERROR, errorMessage(error));
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_CAMERA) {
+            return;
+        }
+        long request = cameraRequest;
+        cameraRequest = 0;
+        String value = data == null ? null : data.getStringExtra(QrScannerActivity.EXTRA_VALUE);
+        String error = data == null ? null : data.getStringExtra(QrScannerActivity.EXTRA_ERROR);
+        if (resultCode == Activity.RESULT_OK && value != null) {
+            nativeQrScanCompleted(request, HOST_OK, value);
+        } else if (error != null) {
+            nativeQrScanCompleted(request, HOST_ERROR, error);
+        } else {
+            nativeQrScanCompleted(request, HOST_CANCELLED, "已取消扫描");
+        }
+    }
+
     public String gpuiReadClipboard() {
         ClipboardManager clipboard =
                 (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
@@ -155,6 +217,11 @@ public final class GpuiActivity extends NativeActivity {
         ClipboardManager clipboard =
                 (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         clipboard.setPrimaryClip(ClipData.newPlainText("tcode", text));
+    }
+
+    private static String errorMessage(Throwable error) {
+        String message = error.getMessage();
+        return message == null || message.isEmpty() ? error.getClass().getSimpleName() : message;
     }
 
     private final class GpuiInputView extends View {

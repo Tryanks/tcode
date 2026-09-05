@@ -17,6 +17,7 @@ use tcode_core::project::Project;
 use tcode_ui::{
     OpenThread, WindowState,
     chat::ChatView,
+    icon::{Icon, IconName},
     overlay::OverlayHost,
     palette::CommandPalette,
     sidebar::SessionsSidebar,
@@ -566,6 +567,33 @@ fn button(
         .active(|s| s.bg(theme.foreground.opacity(0.08)))
         .child(div().min_w_0().truncate().child(title))
 }
+fn icon_button(
+    id: impl Into<ElementId>,
+    aria_label: impl Into<SharedString>,
+    icon: IconName,
+    enabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(aria_label.into())
+        .size(px(44.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(12.))
+        .cursor_pointer()
+        .text_color(if enabled {
+            theme.primary
+        } else {
+            theme.muted_foreground
+        })
+        .active(|s| s.bg(theme.foreground.opacity(0.08)))
+        .child(Icon::new(icon).size(px(18.)))
+}
 fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     div()
         .id(id)
@@ -575,7 +603,7 @@ fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
         .child(content.flex_none())
 }
 
-// Native entry points need no desktop SVG asset bundle for connection feedback.
+// Keep connection feedback independent of a separate animation asset.
 fn spinner(diameter: f32, color: Hsla) -> impl IntoElement {
     div().size(px(diameter)).flex_none().with_animation(
         "phone-spinner",
@@ -618,12 +646,21 @@ fn spinner(diameter: f32, color: Hsla) -> impl IntoElement {
 impl Render for MobileRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_workspace(window, cx);
-        let safe = self.host.safe_area();
+        let insets = self.host.insets();
+        let safe = insets.safe_area;
+        let bottom = safe.bottom.max(insets.ime.bottom);
         let page = match self.page {
             Page::Hosts => self.render_hosts(cx),
             Page::Threads => self.render_threads(cx),
             Page::Thread => self.render_thread(cx),
         };
+        let content = v_flex()
+            .size_full()
+            .pt(safe.top)
+            .pb(bottom)
+            .pl(safe.left)
+            .pr(safe.right)
+            .child(page);
         v_flex()
             .relative()
             .size_full()
@@ -632,11 +669,7 @@ impl Render for MobileRoot {
             .font_family(cx.theme().font_family.clone())
             .text_size(px(16.))
             .line_height(px(22.))
-            .pt(safe.top)
-            .pb(safe.bottom)
-            .pl(safe.left)
-            .pr(safe.right)
-            .child(page)
+            .child(content)
             .when(
                 self.window_state
                     .as_ref()
@@ -691,15 +724,25 @@ pub fn run_with_host(cx: &mut App, host: SharedHost) {
 }
 /// Desktop preview geometry; the screen implementation is identical.
 pub fn run_with_size(cx: &mut App, host: SharedHost, dimensions: Size<Pixels>) {
-    cx.text_system()
-        .add_fonts(vec![std::borrow::Cow::Borrowed(tcode_ui::assets::DM_SANS)])
-        .expect("DM Sans font");
+    #[cfg(target_os = "android")]
+    let fonts = vec![
+        std::borrow::Cow::Borrowed(tcode_ui::assets::DM_SANS),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_REGULAR),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_BOLD),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_ITALIC),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_BOLD_ITALIC),
+    ];
+    #[cfg(not(target_os = "android"))]
+    let fonts = vec![std::borrow::Cow::Borrowed(tcode_ui::assets::DM_SANS)];
+    cx.text_system().add_fonts(fonts).expect("mobile fonts");
     let palette: serde_json::Value =
         serde_json::from_str(include_str!("../../../themes/tcode.json")).expect("theme");
     let palette = palette
         .to_string()
         .replace("#F2F4F7C7", "#F2F4F7")
         .replace("#15171CC7", "#15171C");
+    #[cfg(target_os = "android")]
+    let palette = palette.replace("SF Mono", "Lilex");
     theme::init_with_json(&palette, cx);
     tcode_ui::markdown::init(cx);
     cx.activate(true);

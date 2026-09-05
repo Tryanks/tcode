@@ -244,9 +244,14 @@ pub(crate) fn host_write_clipboard(text: &str) {
     unsafe { gpui_ios_host_write_clipboard(text.as_ptr(), text.len()) }
 }
 
+/// Current UIKit safe-area and keyboard insets in logical points.
+pub fn insets() -> WindowInsets {
+    host_metrics().insets()
+}
+
 /// Current UIKit safe-area insets in logical points.
 pub fn safe_area() -> Edges<gpui::Pixels> {
-    host_metrics().insets().safe_area
+    insets().safe_area
 }
 
 /// Shows or hides the UIKit software-keyboard proxy.
