@@ -63,6 +63,10 @@ chat:
   scroll_end: "滚动到底部"
   copy: "复制"
   copied: "已复制！"
+  limit_resume:
+    resumes_in: "将在 %{countdown} 后继续"
+    cancel: "取消"
+    schedule: "额度恢复后继续"
   steering: "引导中…"
   steered: "已引导"
   orchestrate_skill: "编排技能"
@@ -241,6 +245,9 @@ settings:
   abort_on_model_fallback:
     title: "模型回退时中止"
     description: "开启后，tcode 会监控 Claude Code 的流，在检测到安全分类器回退或标记时从对话层面停止当前轮次，并将控制权交还给你。子代理不受影响。"
+  resume_on_limit_reset:
+    title: "额度重置后继续任务"
+    description: "当 Claude Code 因 5 小时用量窗口耗尽而停止本轮时，tcode 会在窗口重置的时刻自动继续任务。关闭后，错误卡片上会提供一个按钮供手动安排。"
   fallback_review_advisor:
     title: "回退审查顾问"
     description: "使用独立模型审查被 Claude Code 回退防护中断的请求。"

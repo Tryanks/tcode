@@ -255,6 +255,32 @@ impl AppState {
                     RuntimeEvent::Error(RuntimeError::ProviderMessage(message.clone())),
                 );
             }
+            AgentEvent::UsageLimitReached { resets_at } => {
+                if self.settings.resume_on_limit_reset {
+                    let not_before = UNIX_EPOCH + Duration::from_secs(*resets_at);
+                    let scheduled = self.resident_mut(session_id).is_some_and(|resident| {
+                        if resident
+                            .queue
+                            .iter()
+                            .any(|message| message.not_before == Some(not_before))
+                        {
+                            return false;
+                        }
+                        resident.push_scheduled(
+                            tcode_core::session::RESUME_PROMPT.to_string(),
+                            Vec::new(),
+                            not_before,
+                        );
+                        true
+                    });
+                    if scheduled {
+                        log::info!(
+                            "scheduled usage-limit resume for session {session_id} at {resets_at}"
+                        );
+                        self.reschedule_scheduled_wake(cx);
+                    }
+                }
+            }
             AgentEvent::Warning { message } => {
                 // Provider warnings (config problems, deprecations, failed
                 // mode switches) explain later misbehavior: a log line alone

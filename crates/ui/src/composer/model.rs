@@ -155,7 +155,7 @@ pub(super) fn parse_relative(spec: &str) -> Option<chrono::Duration> {
 
 /// Compact queue-strip countdown: hours retain an hour column, shorter waits
 /// use minutes and seconds.
-pub(super) fn format_countdown(secs: u64) -> String {
+pub(crate) fn format_countdown(secs: u64) -> String {
     let hours = secs / 3_600;
     let minutes = (secs % 3_600) / 60;
     let seconds = secs % 60;

@@ -241,6 +241,7 @@ fn settings_patches_round_trip() {
         SettingsPatch::ProviderUpdateChecksDisabled(true),
         SettingsPatch::InactiveFrameThrottleDisabled(true),
         SettingsPatch::AbortOnModelFallback(false),
+        SettingsPatch::ResumeOnLimitReset(false),
         SettingsPatch::FallbackReviewAdvisor(true),
         SettingsPatch::AutoArchiveDisabled(true),
         SettingsPatch::AutoArchiveMaxIdleDays(14),

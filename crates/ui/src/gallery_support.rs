@@ -118,7 +118,7 @@ pub fn assistant(id: &str, markdown: Entity<MarkdownState>, cwd: &Path, cx: &App
 }
 
 pub fn error_card(id: &str, message: &str, cx: &App) -> AnyElement {
-    error_card::error_card(id, message, false, |_, _, _| {}, cx)
+    error_card::error_card(id, message, false, None, |_, _, _| {}, cx)
 }
 
 pub fn relay_divider(id: &str, cx: &App) -> AnyElement {

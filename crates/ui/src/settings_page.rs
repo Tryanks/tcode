@@ -800,6 +800,12 @@ impl SettingsPage {
                 this.dispatch_settings(|store| store.set_abort_on_model_fallback(true), cx)
             },
         );
+        let resume_on_limit_reset_reset = self.reset_action(
+            "reset-resume-on-limit-reset",
+            !settings.resume_on_limit_reset,
+            cx,
+            |this, _, cx| this.dispatch_settings(|store| store.set_resume_on_limit_reset(true), cx),
+        );
         let mut conversation = vec![
             self.title_generation_row(cx),
             self.toggle_row(
@@ -837,6 +843,15 @@ impl SettingsPage {
                 abort_on_fallback_reset,
                 cx,
                 WorkspaceStore::set_abort_on_model_fallback,
+            ),
+            self.toggle_row(
+                "resume-on-limit-reset",
+                crate::tr!("settings.resume_on_limit_reset.title"),
+                crate::tr!("settings.resume_on_limit_reset.description"),
+                settings.resume_on_limit_reset,
+                resume_on_limit_reset_reset,
+                cx,
+                WorkspaceStore::set_resume_on_limit_reset,
             ),
         ];
         if settings.abort_on_model_fallback {
