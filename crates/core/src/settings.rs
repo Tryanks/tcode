@@ -630,6 +630,7 @@ pub enum SettingsPatch {
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     AbortOnModelFallback(bool),
+    ResumeOnLimitReset(bool),
     FallbackReviewAdvisor(bool),
     AutoArchiveDisabled(bool),
     AutoArchiveMaxIdleDays(u32),
@@ -732,6 +733,8 @@ pub struct Settings {
     pub inactive_frame_throttle_disabled: bool,
     #[serde(default = "default_true")]
     pub abort_on_model_fallback: bool,
+    #[serde(default = "default_true")]
+    pub resume_on_limit_reset: bool,
     #[serde(default)]
     pub fallback_review_advisor: bool,
     /// Whether automatic archiving is DISABLED. Stored inverted so the feature
@@ -827,6 +830,7 @@ impl Default for Settings {
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             abort_on_model_fallback: true,
+            resume_on_limit_reset: true,
             fallback_review_advisor: false,
             auto_archive_disabled: false,
             auto_archive_max_idle_days: default_auto_archive_max_idle_days(),
@@ -870,6 +874,9 @@ impl Settings {
             }
             SettingsPatch::AbortOnModelFallback(value) => {
                 self.abort_on_model_fallback = value;
+            }
+            SettingsPatch::ResumeOnLimitReset(value) => {
+                self.resume_on_limit_reset = value;
             }
             SettingsPatch::FallbackReviewAdvisor(value) => {
                 self.fallback_review_advisor = value;

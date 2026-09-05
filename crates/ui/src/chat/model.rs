@@ -41,7 +41,7 @@ pub(crate) struct SegmentedEntries<'a> {
 
 pub(crate) fn displayed_error_text(content: &EntryContent) -> Cow<'_, str> {
     match content {
-        EntryContent::Error { message } => Cow::Borrowed(message),
+        EntryContent::Error { message, .. } => Cow::Borrowed(message),
         EntryContent::ProviderStartError { error } => {
             crate::tr!("errors.provider_start", error = error)
         }
@@ -1084,7 +1084,13 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             std::mem::discriminant(status).hash(hash);
             summary.as_ref().map(String::len).hash(hash);
         }
-        EntryContent::Error { message } => message.len().hash(hash),
+        EntryContent::Error {
+            message,
+            limit_resets_at,
+        } => {
+            message.len().hash(hash);
+            limit_resets_at.hash(hash);
+        }
         EntryContent::ProviderStartError { error } => error.len().hash(hash),
         EntryContent::ProviderRelay {
             from_provider,
@@ -1291,6 +1297,7 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let generic = EntryContent::Error {
             message: "generic\0原样".into(),
+            limit_resets_at: None,
         };
         let provider_start = EntryContent::ProviderStartError {
             error: "spawn failed".into(),
@@ -1571,6 +1578,7 @@ mod tests {
                 "error",
                 EntryContent::Error {
                     message: "boom".into(),
+                    limit_resets_at: None,
                 },
             ),
         ];

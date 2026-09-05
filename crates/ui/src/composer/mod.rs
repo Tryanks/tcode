@@ -3,7 +3,7 @@
 //! the pending-approval panel (see docs/DESIGN.md "Composer").
 
 mod components;
-mod model;
+pub(crate) mod model;
 
 use components::images::PendingImage;
 #[cfg(target_os = "macos")]

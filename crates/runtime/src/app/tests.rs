@@ -3817,6 +3817,46 @@ fn schedule_status_and_queue_actions_preserve_or_remove_deadlines() {
 }
 
 #[test]
+fn usage_limit_event_schedules_resume_when_enabled_only() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-usage-limit-resume-test");
+    let state = cx.new_entity(|_| AppState::new((*test_store).clone()));
+    let resets_at = now_secs() + 3_600;
+
+    state.host_update(cx, |state, cx| {
+        let (commands, _) = smol::channel::unbounded();
+        let mut active = live_session(ProviderKind::ClaudeCode, commands);
+        active.meta.id = "resume-enabled".into();
+        state.residents.active = Some(active);
+        state.on_event(
+            "resume-enabled",
+            AgentEvent::UsageLimitReached { resets_at },
+            cx,
+        );
+
+        let queue = &state.residents.active.as_ref().unwrap().queue;
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].text, tcode_core::session::RESUME_PROMPT);
+        assert_eq!(
+            queue[0].not_before,
+            Some(UNIX_EPOCH + Duration::from_secs(resets_at))
+        );
+
+        let (commands, _) = smol::channel::unbounded();
+        let mut active = live_session(ProviderKind::ClaudeCode, commands);
+        active.meta.id = "resume-disabled".into();
+        state.residents.active = Some(active);
+        state.settings.resume_on_limit_reset = false;
+        state.on_event(
+            "resume-disabled",
+            AgentEvent::UsageLimitReached { resets_at },
+            cx,
+        );
+        assert!(state.residents.active.as_ref().unwrap().queue.is_empty());
+    });
+}
+
+#[test]
 fn due_scheduled_message_reenters_the_ordinary_send_path() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-scheduled-fire-test");

@@ -63,6 +63,10 @@ chat:
   scroll_end: "Scroll to end"
   copy: "Copy"
   copied: "Copied!"
+  limit_resume:
+    resumes_in: "Resumes in %{countdown}"
+    cancel: "Cancel"
+    schedule: "Resume when limit resets"
   steering: "Steering…"
   steered: "Steered"
   orchestrate_skill: "Orchestrate Skill"
@@ -241,6 +245,9 @@ settings:
   abort_on_model_fallback:
     title: "Abort on model fallback"
     description: "When on, tcode watches Claude Code's stream for safety-classifier fallbacks or flags and stops the turn at the conversation level, handing control back to you. Subagents are unaffected."
+  resume_on_limit_reset:
+    title: "Resume when the usage limit resets"
+    description: "When Claude Code stops a turn because the 5-hour usage window is exhausted, tcode schedules a resume for the moment the window resets. Off: the error card offers a button to schedule it by hand."
   fallback_review_advisor:
     title: "Fallback review advisor"
     description: "Use a separate model to review requests interrupted by Claude Code's fallback guard."

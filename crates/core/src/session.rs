@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::merge_file_changes_by_path;
 
+/// Claude Code's own prompt for resuming work after a usage-window reset.
+pub const RESUME_PROMPT: &str = "Continue from where you left off.";
+
 /// A local review note attached to a range in the diff panel. These live in
 /// the composer draft until the next send; they are never written to session
 /// history as separate events.
@@ -410,6 +413,8 @@ pub enum EntryContent {
     },
     Error {
         message: String,
+        /// Unix seconds when the turn failed because the usage window is exhausted.
+        limit_resets_at: Option<u64>,
     },
     #[rustfmt::skip]
     ProviderStartError { error: String },
@@ -782,10 +787,34 @@ impl Timeline {
                     id,
                     content: EntryContent::Error {
                         message: message.clone(),
+                        limit_resets_at: None,
                     },
                     ts,
                     turn,
                 }));
+            }
+            AgentEvent::UsageLimitReached { resets_at } => {
+                let Some((index, entry)) = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, entry)| matches!(entry.content, EntryContent::Error { .. }))
+                else {
+                    return;
+                };
+                let EntryContent::Error { message, .. } = &entry.content else {
+                    unreachable!();
+                };
+                self.entries[index] = Arc::new(TimelineEntry {
+                    id: entry.id.clone(),
+                    content: EntryContent::Error {
+                        message: message.clone(),
+                        limit_resets_at: Some(*resets_at),
+                    },
+                    ts: entry.ts,
+                    turn: entry.turn,
+                });
             }
             AgentEvent::SessionClosed { reason } => {
                 // An abnormal close carries the provider's dying words (exit
@@ -799,6 +828,7 @@ impl Timeline {
                         id,
                         content: EntryContent::Error {
                             message: reason.clone(),
+                            limit_resets_at: None,
                         },
                         ts,
                         turn,
@@ -2583,7 +2613,28 @@ mod tests {
         );
         assert!(matches!(
             &timeline.entries[1].content,
-            EntryContent::Error { message } if message == "boom"
+            EntryContent::Error { message, .. } if message == "boom"
+        ));
+    }
+
+    #[test]
+    fn usage_limit_reset_is_folded_into_the_latest_error() {
+        let mut timeline = Timeline::default();
+        timeline.apply_at(
+            None,
+            &AgentEvent::Error {
+                message: "boom".into(),
+                fatal: false,
+            },
+        );
+        timeline.apply_at(None, &AgentEvent::UsageLimitReached { resets_at: 42 });
+
+        assert!(matches!(
+            &timeline.entries[0].content,
+            EntryContent::Error {
+                message,
+                limit_resets_at: Some(42),
+            } if message == "boom"
         ));
     }
 
@@ -2622,7 +2673,7 @@ mod tests {
         assert!(timeline.pending_approvals.is_empty());
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::Error { message } if message == "boom"
+            EntryContent::Error { message, .. } if message == "boom"
         ));
         // A silent close (reason: None) leaves no entry…
         let entries_after_silent_close = timeline.entries.len();
@@ -2636,7 +2687,7 @@ mod tests {
         assert_eq!(timeline.entries.len(), entries_after_silent_close + 1);
         assert!(matches!(
             &timeline.entries.last().unwrap().content,
-            EntryContent::Error { message } if message.contains("stderr:\nboom")
+            EntryContent::Error { message, .. } if message.contains("stderr:\nboom")
         ));
     }
 
