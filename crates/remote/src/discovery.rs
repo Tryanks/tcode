@@ -5,6 +5,7 @@ use mdns_sd::ServiceInfo;
 #[cfg(feature = "client")]
 use mdns_sd::{ScopedIp, ServiceEvent};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "client")]
 use std::net::IpAddr;
 use std::time::Duration;
 #[cfg(feature = "client")]
@@ -12,12 +13,14 @@ use std::time::Instant;
 
 pub const SERVICE_TYPE: &str = "_tcode._tcp.local.";
 
+#[cfg(feature = "client")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalInterface {
     pub name: String,
     pub addr: IpAddr,
 }
 
+#[cfg(feature = "client")]
 /// Lower values are better. A private IPv4 address on the receiving LAN wins
 /// over addresses advertised for virtual bridges on the execution host.
 fn address_preference(address: &str, local_interfaces: &[LocalInterface]) -> u8 {
@@ -47,6 +50,7 @@ fn address_preference(address: &str, local_interfaces: &[LocalInterface]) -> u8 
     }
 }
 
+#[cfg(feature = "client")]
 fn is_link_local(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => address.is_link_local(),
@@ -54,6 +58,7 @@ fn is_link_local(address: IpAddr) -> bool {
     }
 }
 
+#[cfg(feature = "client")]
 fn is_virtual_bridge(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.contains("bridge")
