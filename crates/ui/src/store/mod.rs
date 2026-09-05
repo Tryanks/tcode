@@ -412,7 +412,7 @@ impl WorkspaceStore {
         self.remote_preview.1.clone()
     }
 
-    #[cfg(all(feature = "desktop", any(not(target_os = "linux"), test)))]
+    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     pub(crate) fn rewrite_preview_url(&self, url: &str) -> String {
         self.remote_address.as_deref().map_or_else(
             || url.to_string(),

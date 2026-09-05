@@ -9,7 +9,7 @@ use std::{
 
 use tcode_mobile::host::{BrowseDone, NativeHost, ScanDone};
 
-use crate::dispatch_to_app;
+use crate::entry::dispatch_to_app;
 
 thread_local! {
     static BROWSE_CALLBACKS: RefCell<HashMap<u64, BrowseDone>> = RefCell::new(HashMap::new());
