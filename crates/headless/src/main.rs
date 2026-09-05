@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
@@ -228,10 +226,13 @@ fn default_host_name() -> String {
         .unwrap_or_else(|| "tcode-host".into())
 }
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
-
 #[cfg(unix)]
 fn wait_for_interrupt() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
     type SignalHandler = extern "C" fn(i32);
     unsafe extern "C" {
         fn signal(signal: i32, handler: SignalHandler) -> SignalHandler;
