@@ -187,6 +187,11 @@ impl MobileRoot {
                 .into_owned()
             })
             .unwrap_or_else(|| label("never_connected"));
+        let fingerprint = tcode_client::pairing::display_fingerprint(&host.fingerprint)
+            .split(' ')
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(" ");
 
         material::accessible_clickable(
             material::group(cx),
@@ -234,8 +239,17 @@ impl MobileRoot {
             .text_color(cx.theme().muted_foreground)
             .truncate(),
         )
-        // certificate fingerprint (P4c): a third 12pt mono line goes here once
-        // `PairedHost` carries the pinned fingerprint.
+        // The pinned certificate, first four groups, for eyeballing against the
+        // host's own Settings → Remote (§3.1).
+        .when(!fingerprint.is_empty(), |card| {
+            card.child(
+                text(fingerprint, 12.)
+                    .line_height(px(16.))
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_color(cx.theme().muted_foreground)
+                    .truncate(),
+            )
+        })
         .on_click(cx.listener(move |this, _, _, cx| this.connect(connect.clone(), cx)))
         .on_mouse_down(
             MouseButton::Right,
@@ -249,9 +263,23 @@ impl MobileRoot {
 
     // -- §4 connection status ---------------------------------------------
 
+    /// A pinned certificate that no longer matches: the link is dead until the
+    /// user pairs again, so it outranks every other status (§4).
+    fn certificate_changed(&self) -> bool {
+        self.connected_host
+            .as_ref()
+            .is_some_and(|host| self.host.certificate_changed(&host.host_id))
+    }
+
     /// Caption, color, and whether the glyph spins, for the current link (§4).
     fn connection(&self, cx: &App) -> (String, Hsla, bool) {
-        if self.offline() {
+        if self.certificate_changed() {
+            (
+                label("certificate_changed"),
+                cx.theme().danger_foreground,
+                false,
+            )
+        } else if self.offline() {
             (label("offline"), cx.theme().danger_foreground, false)
         } else if !self.index_ready {
             (label("connecting"), cx.theme().muted_foreground, true)
@@ -270,9 +298,12 @@ impl MobileRoot {
         }
     }
 
-    fn connection_badge(&self, cx: &App) -> Div {
+    /// The status line under the thread-list title and the pill on the thread
+    /// page. A changed certificate makes it tappable: the sheet behind it is
+    /// the only place §4 lets us explain and offer "Pair again".
+    fn connection_badge(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let (caption, color, spinning) = self.connection(cx);
-        h_flex()
+        let badge = h_flex()
             .gap(px(4.))
             .items_center()
             .text_color(color)
@@ -290,7 +321,16 @@ impl MobileRoot {
                     })
                     .into_any_element()
             })
-            .child(text(caption, 13.).line_height(px(18.)).truncate())
+            .child(text(caption.clone(), 13.).line_height(px(18.)).truncate());
+        if !self.certificate_changed() {
+            return badge.id("connection");
+        }
+        material::accessible_clickable(badge, "connection", Role::Button, caption, cx)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.sheet = Some(Sheet::CertificateChanged);
+                cx.notify();
+            }))
     }
 
     // -- §3.3 thread list --------------------------------------------------
@@ -443,12 +483,14 @@ impl MobileRoot {
         let title = match &sheet {
             Sheet::Pair => label("pair_title"),
             Sheet::Remove(host) => tr!("mobile.remove_host", name = host.name).into_owned(),
+            Sheet::CertificateChanged => label("certificate_changed"),
             Sheet::Projects => label("choose_project"),
             Sheet::Settings => label("settings"),
         };
         let content = match sheet {
             Sheet::Pair => self.render_pair(cx),
             Sheet::Remove(host) => self.render_remove(host, cx),
+            Sheet::CertificateChanged => self.render_certificate_changed(cx),
             Sheet::Projects => self.render_projects(cx),
             Sheet::Settings => self.render_settings(cx),
         };
@@ -524,6 +566,41 @@ impl MobileRoot {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// §4's certificate-changed state: what happened, then the one action that
+    /// fixes it. Pairing again reuses the pair sheet with the endpoint filled.
+    fn render_certificate_changed(&self, cx: &mut Context<Self>) -> Div {
+        let endpoint = self.connected_host.as_ref().map(|host| {
+            (
+                host.addrs.first().cloned().unwrap_or_default(),
+                host.port.to_string(),
+            )
+        });
+        v_flex()
+            .gap(px(16.))
+            .child(
+                text(label("certificate_changed_help"), 15.)
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                button("certificate-repair", label("pair_again"), true, true, cx)
+                    .w_full()
+                    .h(px(50.))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.disconnect(false, cx);
+                        this.open_pair(window, cx);
+                        if let Some((addr, port)) = endpoint.clone() {
+                            this.pair
+                                .address
+                                .update(cx, |s, cx| s.set_value(addr, window, cx));
+                            this.pair
+                                .port
+                                .update(cx, |s, cx| s.set_value(port, window, cx));
+                        }
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_remove(&self, host: PairedHost, cx: &mut Context<Self>) -> Div {

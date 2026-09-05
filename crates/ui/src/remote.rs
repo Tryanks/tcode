@@ -852,7 +852,8 @@ impl RemotePanel {
             column = column.child(
                 div()
                     .text_color(cx.theme().danger_foreground)
-                    .child(crate::tr!("mobile.certificate_changed")),
+                    .child(crate::tr!("mobile.certificate_changed"))
+                    .child(crate::tr!("mobile.certificate_changed_help")),
             );
         }
         if let RemoteMode::Connected { name, .. } = &mode {

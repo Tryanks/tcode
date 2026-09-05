@@ -84,6 +84,9 @@ impl Render for PageView {
 enum Sheet {
     Pair,
     Remove(PairedHost),
+    /// The pinned certificate stopped matching (§4); explains and offers to
+    /// pair again.
+    CertificateChanged,
     Projects,
     Settings,
 }

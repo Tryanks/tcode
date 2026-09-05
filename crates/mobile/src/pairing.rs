@@ -5,6 +5,7 @@ pub(super) struct PairForm {
     pub fingerprint: String,
     pin_endpoint: Option<(String, u16)>,
     discovered: Vec<host::DiscoveredHost>,
+    browsing: bool,
     paired: Option<host::PairedHost>,
     pub address: Entity<InputState>,
     pub port: Entity<InputState>,
@@ -22,6 +23,7 @@ impl PairForm {
             fingerprint: String::new(),
             pin_endpoint: None,
             discovered: Vec::new(),
+            browsing: false,
             paired: None,
             address: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -97,6 +99,8 @@ impl MobileRoot {
                 ));
             }
         }
+        self.pair.discovered.clear();
+        self.pair.browsing = true;
         let weak = cx.weak_entity();
         let generation = self.pair.generation;
         self.host.browse_hosts(
@@ -104,6 +108,7 @@ impl MobileRoot {
                 let _ = weak.update(cx, |this, cx| {
                     if this.pair.generation == generation {
                         this.pair.discovered = hosts;
+                        this.pair.browsing = false;
                         cx.notify();
                     }
                 });
@@ -176,80 +181,110 @@ impl MobileRoot {
         );
         cx.notify();
     }
+    /// "Nearby hosts" (§3.2): what DNS-SD found, at most three rows. Tapping a
+    /// row fills the endpoint and its advertised fingerprint and drops the
+    /// caret in the code field, which is all that is left to type.
+    fn nearby_hosts(&self, mut form: Div, cx: &mut Context<Self>) -> Div {
+        if self.host.fixed_pairing_endpoint().is_some()
+            || (!self.pair.browsing && self.pair.discovered.is_empty())
+        {
+            return form;
+        }
+        let busy = self.pair.busy;
+        form = form.child(
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .text_color(cx.theme().muted_foreground)
+                .child(text(label("nearby_hosts"), 13.).line_height(px(18.)))
+                .when(self.pair.browsing, |row| {
+                    row.child(spinner(12., cx.theme().muted_foreground))
+                }),
+        );
+        for (index, found) in self.pair.discovered.iter().take(3).enumerate() {
+            let (addr, port, fp) = (found.addr.clone(), found.port, found.fp.clone());
+            let endpoint = format!("{addr}:{port}");
+            form = form.child(
+                material::accessible_clickable(
+                    material::group(cx),
+                    ("nearby", index),
+                    Role::Button,
+                    found.name.clone(),
+                    cx,
+                )
+                .min_h(px(56.))
+                .px(px(14.))
+                .py(px(10.))
+                .gap(px(2.))
+                .justify_center()
+                .when(busy, |row| row.opacity(0.5))
+                .when(!busy, |row| {
+                    row.cursor_pointer()
+                        .active(|s| s.bg(cx.theme().foreground.opacity(0.08)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.pair
+                                .address
+                                .update(cx, |s, cx| s.set_value(addr.clone(), window, cx));
+                            this.pair
+                                .port
+                                .update(cx, |s, cx| s.set_value(port.to_string(), window, cx));
+                            this.pair.fingerprint = fp.clone();
+                            this.pair.error = None;
+                            this.pair.code.update(cx, |s, cx| {
+                                s.set_value("", window, cx);
+                                s.focus(window, cx);
+                            });
+                            cx.notify();
+                        }))
+                })
+                .child(text(found.name.clone(), 15.).font_semibold().truncate())
+                .child(
+                    text(endpoint, 13.)
+                        .line_height(px(18.))
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate(),
+                ),
+            );
+        }
+        form
+    }
+
+    /// Paired, not yet connected (§3.2): the pinned fingerprint next to the one
+    /// the host shows, so a swapped certificate is caught before any traffic.
+    fn render_pair_confirm(&self, cx: &mut Context<Self>) -> Div {
+        v_flex()
+            .gap(px(16.))
+            .child(
+                material::group(cx).p(px(14.)).child(
+                    text(
+                        tcode_client::pairing::display_fingerprint(&self.pair.fingerprint),
+                        14.,
+                    )
+                    .line_height(px(20.))
+                    .font_family(cx.theme().mono_font_family.clone()),
+                ),
+            )
+            .child(
+                text(label("fingerprint_compare"), 13.)
+                    .line_height(px(18.))
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                button("pair-connect", label("connect_host"), true, true, cx)
+                    .h(px(50.))
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_pair(cx))),
+            )
+    }
+
     /// The pairing sheet's body (§3.2). The sheet chrome — grabber, title,
     /// Cancel — belongs to `render_sheet`; this is scan, form, error, submit.
     pub(super) fn render_pair(&mut self, cx: &mut Context<Self>) -> Div {
         if self.pair.paired.is_some() {
-            return v_flex()
-                .gap(px(16.))
-                .child(text(
-                    tr!(
-                        "mobile.fingerprint",
-                        fingerprint =
-                            tcode_client::pairing::display_fingerprint(&self.pair.fingerprint)
-                    )
-                    .into_owned(),
-                    14.,
-                ))
-                .child(
-                    text(label("fingerprint_compare"), 14.).text_color(cx.theme().muted_foreground),
-                )
-                .child(
-                    button("pair-connect", label("connect_host"), true, true, cx)
-                        .h(px(50.))
-                        .w_full()
-                        .on_click(cx.listener(|this, _, _, cx| this.submit_pair(cx))),
-                );
+            return self.render_pair_confirm(cx);
         }
         let busy = self.pair.busy;
         let mut form = v_flex().gap(px(16.));
-        if self.pair.paired.is_none() && self.host.fixed_pairing_endpoint().is_none() {
-            form = form
-                .child(text(label("nearby_hosts"), 13.).text_color(cx.theme().muted_foreground));
-            for (index, found) in self.pair.discovered.iter().enumerate() {
-                let addr = found.addr.clone();
-                let port = found.port;
-                let fp = found.fp.clone();
-                form = form.child(
-                    button(
-                        SharedString::from(format!("nearby-{index}")),
-                        format!("{} · {}:{}", found.name, addr, port),
-                        false,
-                        !busy,
-                        cx,
-                    )
-                    .min_h(px(48.))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pair
-                            .address
-                            .update(cx, |s, cx| s.set_value(addr.clone(), window, cx));
-                        this.pair
-                            .port
-                            .update(cx, |s, cx| s.set_value(port.to_string(), window, cx));
-                        this.pair.fingerprint = fp.clone();
-                        this.pair.code.update(cx, |s, cx| {
-                            s.set_value("", window, cx);
-                            s.focus(window, cx);
-                        });
-                        cx.notify();
-                    })),
-                );
-            }
-        }
-        if !self.pair.fingerprint.is_empty() {
-            form = form.child(
-                text(
-                    tr!(
-                        "mobile.fingerprint",
-                        fingerprint =
-                            tcode_client::pairing::display_fingerprint(&self.pair.fingerprint)
-                    )
-                    .into_owned(),
-                    13.,
-                )
-                .text_color(cx.theme().muted_foreground),
-            );
-        }
         if self.host.supports_qr() {
             form = form
                 .child(
@@ -292,8 +327,7 @@ impl MobileRoot {
                         .text_color(cx.theme().muted_foreground),
                 );
         }
-        // nearby hosts (P4c): the discovered-host section goes here, between the
-        // scanner and the manual form.
+        form = self.nearby_hosts(form, cx);
         if let Some(error) = &self.pair.error {
             form = form.child(
                 text(error.clone(), 13.)
@@ -320,18 +354,19 @@ impl MobileRoot {
                     .text_color(cx.theme().muted_foreground),
             );
         }
+        if !self.pair.fingerprint.is_empty() {
+            form = form.child(
+                text(fingerprint_line(&self.pair.fingerprint), 13.)
+                    .line_height(px(18.))
+                    .text_color(cx.theme().muted_foreground),
+            );
+        }
         form.child(
             button(
                 "pair-submit",
-                label(if self.pair.paired.is_some() {
-                    "connect_host"
-                } else if busy {
-                    "pairing"
-                } else {
-                    "pair"
-                }),
+                label(if busy { "pairing" } else { "pair" }),
                 true,
-                !busy && (self.pair.paired.is_some() || self.pair.request(cx).is_some()),
+                !busy && self.pair.request(cx).is_some(),
                 cx,
             )
             .h(px(50.))
@@ -339,6 +374,14 @@ impl MobileRoot {
             .on_click(cx.listener(|this, _, _, cx| this.submit_pair(cx))),
         )
     }
+}
+/// "Fingerprint: a1b2 c3d4 …" for whatever the invite or discovery pinned.
+fn fingerprint_line(fingerprint: &str) -> String {
+    tr!(
+        "mobile.fingerprint",
+        fingerprint = tcode_client::pairing::display_fingerprint(fingerprint)
+    )
+    .into_owned()
 }
 fn field(title: &str, state: &Entity<InputState>, busy: bool, code: bool, cx: &App) -> Div {
     v_flex()
