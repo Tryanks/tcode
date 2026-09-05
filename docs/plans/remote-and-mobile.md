@@ -1,6 +1,6 @@
 # Remote work mode, headless host, mobile and web clients
 
-Status: **in progress** (started 2026-09-05). This file is the resumable plan:
+Status: **feature-complete on branch `remote-and-mobile`** (started 2026-09-05); merge blocked on longbridge/gpui-kit#2963 (see Decision 9). This file is the resumable plan:
 each phase has an executable "done" gate. Update the status lines as phases
 land.
 
@@ -311,7 +311,7 @@ to Threads and from Threads to Hosts. The checked captures are
   `Command::TerminalInput/ResizeTerminal`), preview reverse RPC, remote
   directory browser, attachment upload. Desktop-remote reaches feature parity
   with local.
-- Status: pending.
+- Status: **done** (P4a per-client selection + filtered mux + incremental snapshots; P4b terminal over the link, preview reverse RPC, remote attachments; P4c TLS pinning, mDNS discovery, Android emoji; P4d follow-ups).
 
 ## Verification conventions
 
