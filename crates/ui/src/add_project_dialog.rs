@@ -139,8 +139,8 @@ impl AddProjectDialog {
                 return;
             };
             let _ = this.update_in(cx, |dialog, window, cx| {
-                dialog.store.update(cx, |store, _cx| {
-                    store.start_draft(project_id, path);
+                dialog.store.update(cx, |store, cx| {
+                    store.start_draft(project_id, path, cx);
                 });
                 window.close_dialog(cx);
             });
@@ -316,14 +316,19 @@ impl Render for AddProjectDialog {
                                     .flex_1()
                                     .rounded(crate::material::radius_input()),
                             )
-                            .child(
-                                Button::new("browse-project-directory")
-                                    .rounded(crate::material::radius_button())
-                                    .label(crate::tr!("sidebar.browse"))
-                                    .on_click(cx.listener(|dialog, _, window, cx| {
-                                        dialog.browse(window, cx);
-                                    })),
-                            ),
+                            // The native picker browses THIS machine; over a
+                            // remote link the typed path is validated against
+                            // the host instead (Query::IsDirectory).
+                            .when(!self.store.read(cx).is_remote(), |row| {
+                                row.child(
+                                    Button::new("browse-project-directory")
+                                        .rounded(crate::material::radius_button())
+                                        .label(crate::tr!("sidebar.browse"))
+                                        .on_click(cx.listener(|dialog, _, window, cx| {
+                                            dialog.browse(window, cx);
+                                        })),
+                                )
+                            }),
                     )
                     .when(self.path_error, |column| {
                         column.child(
@@ -360,7 +365,7 @@ impl ImportProgress {
 
     fn start(
         &mut self,
-        receiver: smol::channel::Receiver<ExternalImportUpdate>,
+        receiver: async_channel::Receiver<ExternalImportUpdate>,
         total: usize,
         current_tool: String,
         cx: &mut Context<Self>,

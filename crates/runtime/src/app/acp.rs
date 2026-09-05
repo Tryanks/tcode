@@ -186,8 +186,8 @@ impl AppState {
         }
     }
 
-    pub(super) fn preview_draft_or_persist_active(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub(super) fn preview_draft_or_persist_active(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         if active.draft {
@@ -201,9 +201,9 @@ impl AppState {
     /// Point the active draft at an installed ACP agent (the model picker's
     /// provider rail). ACP agents have no model catalog: the agent publishes its
     /// models over the wire once the session starts.
-    pub fn set_active_acp_agent(&mut self, id: &str, cx: &mut HostCx) {
+    pub fn set_active_acp_agent(&mut self, target_id: &str, id: &str, cx: &mut HostCx) {
         let provider_commands = self.cached_provider_commands(ProviderKind::Acp, Some(id));
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         if matches!(active.meta.provider, ProviderKind::Acp)
@@ -235,7 +235,7 @@ impl AppState {
         if active.pending_relay.is_some() {
             return;
         }
-        self.preview_draft_or_persist_active(cx);
+        self.preview_draft_or_persist_active(target_id, cx);
     }
 
     /// Reset the *preferences* to defaults. Anything the user had to configure

@@ -1,9 +1,11 @@
-use gpui::{Context, Entity};
+use gpui::{Context, Entity, EventEmitter};
 
 use crate::store::WorkspaceStore;
 
 /// Window-global UI state owned by the GPUI layer.
 pub struct WindowState {
+    /// Opt-in touch layout; desktop windows keep the default rendering.
+    pub compact: bool,
     pub route: Route,
     pub palette_open: bool,
     pub sidebar_collapsed: bool,
@@ -15,12 +17,24 @@ pub struct WindowState {
 impl WindowState {
     pub fn new(sidebar_collapsed: bool) -> Self {
         Self {
+            compact: false,
             route: Route::Chat,
             palette_open: false,
             sidebar_collapsed,
             quit_prompt_epoch: 0,
             quit_prompt_open: false,
             pending_settings_section: None,
+        }
+    }
+
+    pub fn with_compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
+    }
+
+    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
+        if self.compact {
+            cx.emit(OpenThread);
         }
     }
 
@@ -72,3 +86,7 @@ pub enum Route {
     Chat,
     Settings,
 }
+
+#[derive(Clone, Copy)]
+pub struct OpenThread;
+impl EventEmitter<OpenThread> for WindowState {}

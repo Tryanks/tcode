@@ -4,8 +4,8 @@ impl AppState {
     /// Request a provider-owned restore point. No local Git or transcript
     /// operation is performed: the canonical timeline changes only after the
     /// provider confirms the native request.
-    pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub fn rewind_turn(&mut self, target_id: &str, turn: usize, mode: RewindMode, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         if !active.meta.provider.caps().native_rewind
@@ -56,19 +56,24 @@ impl AppState {
                 self.report_error(RuntimeError::ProcessGone, cx);
             }
         } else {
-            self.ensure_started(cx);
+            self.ensure_started(target_id, cx);
         }
     }
 
     #[cfg(test)]
-    pub(super) fn native_rewind_pending(&self) -> bool {
-        self.active_session_id()
+    pub(super) fn native_rewind_pending(&self, target_id: &str) -> bool {
+        self.resident(target_id)
+            .map(|session| session.meta.id.as_str())
             .is_some_and(|id| self.pending_native_rewinds.contains_key(id))
     }
 
     /// Spawn the provider process for the active session if it isn't running.
-    pub(super) fn ensure_started(&mut self, cx: &mut HostCx) {
-        let Some(session_id) = self.active_session_id().map(str::to_owned) else {
+    pub(super) fn ensure_started(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(session_id) = self
+            .resident(target_id)
+            .map(|session| session.meta.id.as_str())
+            .map(str::to_owned)
+        else {
             return;
         };
         self.ensure_session_started(&session_id, cx);
@@ -78,8 +83,8 @@ impl AppState {
     pub(super) fn ensure_session_started(&mut self, session_id: &str, cx: &mut HostCx) {
         let idle = self
             .residents
-            .active
-            .as_ref()
+            .live
+            .get(session_id)
             .filter(|active| active.meta.id == session_id)
             .map(|active| matches!(active.runtime, Runtime::Idle))
             .or_else(|| {
@@ -147,7 +152,7 @@ impl AppState {
             );
             let result = provider_launcher.launch(meta.provider, opts).await;
             host_cx.enqueue(move |state, cx| {
-                let matches_active = state.residents.active.as_ref().is_some_and(|active| {
+                let matches_active = state.residents.live.get(&session_id).is_some_and(|active| {
                     active.meta.id == session_id && active.is_starting_generation(generation)
                 });
                 // The session may have been parked (thread switch) while its
@@ -197,7 +202,7 @@ impl AppState {
                                     state.pending_native_rewinds.remove(&session_id);
                                     state.report_error(RuntimeError::ProcessGone, cx);
                                 }
-                            } else if state.dispatch_next_queued(cx).is_err() {
+                            } else if state.dispatch_next_queued(&session_id, cx).is_err() {
                                 state.report_error(RuntimeError::ProcessGone, cx);
                             }
                         } else {
@@ -311,7 +316,7 @@ impl AppState {
         // switching away later does not surface a stale unread dot. Threads the
         // user is not viewing keep their watermark (and their dot), as does an
         // explicit "mark unread" (which only rewrites the watermark).
-        if self.active_session_id() == Some(meta.id.as_str()) {
+        if self.residents.live.contains_key(meta.id.as_str()) {
             let visited = self.settings.last_visited.entry(meta.id.clone());
             let visited = visited.or_insert(meta.updated_at);
             if *visited < meta.updated_at {
@@ -333,12 +338,16 @@ impl AppState {
         self.upsert_session_in_memory(meta.clone());
     }
 
-    pub(crate) fn shutdown_active(&mut self, _cx: &mut HostCx) {
-        if let Some(session_id) = self.active_session_id().map(str::to_string) {
+    pub(crate) fn shutdown_active(&mut self, target_id: &str, _cx: &mut HostCx) {
+        if let Some(session_id) = self
+            .resident(target_id)
+            .map(|session| session.meta.id.as_str())
+            .map(str::to_string)
+        {
             self.clear_approvals(&session_id);
             self.pending_native_rewinds.remove(&session_id);
         }
-        if let Some(active) = self.residents.active.take()
+        if let Some(active) = self.residents.live.remove(target_id)
             && let Runtime::Live(commands) = active.runtime
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
@@ -347,7 +356,9 @@ impl AppState {
 
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
-        self.shutdown_active(cx);
+        for id in self.residents.live.keys().cloned().collect::<Vec<_>>() {
+            self.shutdown_active(&id, cx);
+        }
         for (_, parked) in self.residents.parked.drain() {
             if let Runtime::Live(commands) = parked.runtime {
                 let _ = commands.try_send(SessionCommand::Shutdown);
@@ -362,8 +373,8 @@ impl AppState {
     /// Leave the active session without killing its provider or in-memory work.
     /// Every "switch away" path goes through here; only destructive paths use
     /// `shutdown_active` directly.
-    pub(super) fn park_active(&mut self, cx: &mut HostCx) {
-        let Some(mut active) = self.residents.active.take() else {
+    pub(super) fn park_active(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(mut active) = self.residents.live.remove(target_id) else {
             return;
         };
         self.park_terminal_workspace(&mut active);
@@ -373,7 +384,9 @@ impl AppState {
             || !active.queue.is_empty()
             || active.background_task_count > 0
             || native_rewind_pending;
-        let parkable = matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. });
+        let parkable = active.draft
+            || has_work
+            || matches!(active.runtime, Runtime::Live(_) | Runtime::Starting { .. });
         if parkable {
             log::info!(
                 "parking session {} (turn in flight: {}, queued: {}, background tasks: {})",

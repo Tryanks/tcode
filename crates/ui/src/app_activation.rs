@@ -1,14 +1,14 @@
 //! Cross-platform app-activation events for permission rechecks.
 
 pub(crate) struct AppActivationObserver {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
     center: objc2::rc::Retained<objc2_foundation::NSNotificationCenter>,
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
     token:
         objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(feature = "desktop", target_os = "macos"))]
 impl Drop for AppActivationObserver {
     fn drop(&mut self) {
         // SAFETY: `token` was returned by this notification center and remains
@@ -23,7 +23,7 @@ impl Drop for AppActivationObserver {
 pub(crate) fn observe() -> (AppActivationObserver, async_channel::Receiver<()>) {
     let (sender, receiver) = async_channel::unbounded();
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
     {
         use std::ptr::NonNull;
 
@@ -50,7 +50,7 @@ pub(crate) fn observe() -> (AppActivationObserver, async_channel::Receiver<()>) 
         (AppActivationObserver { center, token }, receiver)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(all(feature = "desktop", target_os = "macos")))]
     {
         drop(sender);
         (AppActivationObserver {}, receiver)

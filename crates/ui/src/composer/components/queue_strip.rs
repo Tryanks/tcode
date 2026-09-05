@@ -1,4 +1,8 @@
 use super::super::*;
+#[cfg(not(target_family = "wasm"))]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_family = "wasm")]
+use web_time::{SystemTime, UNIX_EPOCH};
 
 /// Queue bubbles collapse whitespace and clip long messages (the full text is
 /// still what gets sent).
@@ -36,7 +40,7 @@ impl Composer {
         if has_scheduled && self.scheduled_countdown_tick.is_none() {
             self.scheduled_countdown_tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_secs(1)).await;
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -111,11 +115,12 @@ impl Composer {
                         Button::new(("queue-steer", id as usize))
                             .ghost()
                             .xsmall()
+                            .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
                             .icon(IconName::ArrowUp)
                             // Scheduled rows always support send-now: the
                             // runtime removes the deadline and uses the normal
                             // send/queue path even when native steering is absent.
-                            .disabled(!scheduled && !can_steer)
+                            .disabled(!self.interactive(cx) || (!scheduled && !can_steer))
                             .tooltip(steer_tooltip)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.workspace_store
@@ -126,7 +131,9 @@ impl Composer {
                         Button::new(("queue-drop", id as usize))
                             .ghost()
                             .xsmall()
+                            .when(self.compact, |button| button.min_w(px(44.)).min_h(px(44.)))
                             .icon(IconName::Close)
+                            .disabled(!self.interactive(cx))
                             .tooltip(crate::tr!("composer.drop_queued"))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.drop_queued_and_refill(id, text.clone(), window, cx);

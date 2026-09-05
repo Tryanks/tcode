@@ -1,0 +1,832 @@
+//! The phone supervisor. Platform I/O belongs exclusively to `MobileHost`.
+pub mod host;
+mod pairing;
+mod screens;
+
+use gpui::{prelude::*, *};
+use gpui_base::{
+    NavMotion, NavOperation, NavStack, NavStackState, StyledExt as _, h_flex,
+    motion::{Presence, PresencePhase, Transition},
+    v_flex,
+};
+use host::{MobilePreferences, PairedHost, SharedHost};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+    time::Duration,
+};
+use tcode_client::{ConnectionState, HostLink};
+use tcode_core::project::Project;
+use tcode_ui::{
+    OpenThread, WindowState,
+    chat::ChatView,
+    icon::{Icon, IconName},
+    material,
+    overlay::OverlayHost,
+    palette::CommandPalette,
+    sidebar::SessionsSidebar,
+    store::{StoreChange, TopicKind, WorkspaceStore},
+    theme::{self, ActiveTheme as _},
+    tr,
+    widgets::input::{Input, InputEvent, InputState},
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Hosts,
+    Threads,
+    Thread,
+}
+impl Page {
+    /// Position in the three-level stack (docs/mobile-design.md §2).
+    fn depth(self) -> usize {
+        match self {
+            Page::Hosts => 1,
+            Page::Threads => 2,
+            Page::Thread => 3,
+        }
+    }
+}
+
+/// One level of the [`NavStack`]. It owns no state: it renders whichever
+/// `MobileRoot` screen it stands for, so the stack can keep all three mounted
+/// while a push or pop animates.
+struct PageView {
+    root: WeakEntity<MobileRoot>,
+    page: Page,
+}
+impl PageView {
+    fn new(root: &Entity<MobileRoot>, page: Page, cx: &mut Context<Self>) -> Self {
+        cx.observe(root, |_, _, cx| cx.notify()).detach();
+        Self {
+            root: root.downgrade(),
+            page,
+        }
+    }
+}
+impl Render for PageView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = self.page;
+        self.root
+            .upgrade()
+            .map(|root| {
+                root.update(cx, |root, cx| match page {
+                    Page::Hosts => root.render_hosts(cx),
+                    Page::Threads => root.render_threads(cx),
+                    Page::Thread => root.render_thread(cx),
+                })
+            })
+            .unwrap_or_else(|| div().into_any_element())
+    }
+}
+#[derive(Clone)]
+enum Sheet {
+    Pair,
+    Remove(PairedHost),
+    /// The pinned certificate stopped matching (§4); explains and offers to
+    /// pair again.
+    CertificateChanged,
+    Projects,
+    Settings,
+}
+
+#[derive(Default)]
+struct CachedThread {
+    status: Option<tcode_protocol::SessionStatus>,
+    records: Vec<tcode_core::session::StoredEvent>,
+}
+
+type ThreadCache = Rc<RefCell<HashMap<String, CachedThread>>>;
+
+struct Connection {
+    link: HostLink,
+    active_session: Rc<RefCell<Option<String>>>,
+    writable: Rc<Cell<bool>>,
+    cache: ThreadCache,
+    outgoing: async_channel::Sender<String>,
+    incoming: async_channel::Sender<String>,
+    target: Rc<RefCell<async_channel::Sender<String>>>,
+    wire: Vec<Task<()>>,
+    _tasks: Vec<Task<()>>,
+}
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.outgoing.close();
+        self.incoming.close();
+        self.target.borrow().close();
+    }
+}
+
+struct MobileRoot {
+    host: SharedHost,
+    hosts: Vec<PairedHost>,
+    preferences: MobilePreferences,
+    page: Page,
+    nav: Entity<NavStackState>,
+    pages: Vec<AnyView>,
+    sheet: Option<Sheet>,
+    /// The sheet still on screen, kept mounted through its exit transition.
+    mounted_sheet: Option<Sheet>,
+    connected_host: Option<PairedHost>,
+    connection: Option<Connection>,
+    store: Option<Entity<WorkspaceStore>>,
+    store_subscriptions: Vec<Subscription>,
+    subscriptions: Vec<Subscription>,
+    index_ready: bool,
+    state: ConnectionState,
+    disconnected_since: Option<Duration>,
+    elapsed: Box<dyn Fn() -> Duration>,
+    pair: pairing::PairForm,
+    device_name: Entity<InputState>,
+    window_state: Option<Entity<WindowState>>,
+    sidebar: Option<Entity<SessionsSidebar>>,
+    chat: Option<Entity<ChatView>>,
+    palette: Option<Entity<CommandPalette>>,
+    _tick: Task<()>,
+}
+
+impl MobileRoot {
+    fn new(host: SharedHost, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let clock = cx.background_executor().clone();
+        let epoch = clock.now();
+        let preferences = host.preferences();
+        tcode_ui::apply_locale(preferences.language.as_deref());
+        let device_name =
+            cx.new(|cx| InputState::new(window, cx).default_value(host.device_name()));
+        let pair = pairing::PairForm::new(&host, window, cx);
+        let subscriptions = vec![
+            cx.subscribe(&device_name, |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.preferences.device_name = Some(input.read(cx).value().to_string());
+                    this.host.save_preferences(&this.preferences);
+                }
+            }),
+            cx.observe_window_appearance(window, |this, window, cx| {
+                this.apply_appearance(window, cx)
+            }),
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() && this.connection.is_some() && !this.online() {
+                    this.rewire(cx);
+                }
+            }),
+        ];
+        let tick = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut root = Self {
+            hosts: host.load_hosts(),
+            host,
+            preferences,
+            page: Page::Hosts,
+            nav: cx.new(|_| NavStackState::new()),
+            pages: Vec::new(),
+            sheet: None,
+            mounted_sheet: None,
+            connected_host: None,
+            connection: None,
+            store: None,
+            store_subscriptions: vec![],
+            subscriptions,
+            index_ready: false,
+            state: ConnectionState::Reconnecting { attempt: 1 },
+            disconnected_since: None,
+            elapsed: Box::new(move || clock.now().duration_since(epoch)),
+            pair,
+            device_name,
+            window_state: None,
+            sidebar: None,
+            chat: None,
+            palette: None,
+            _tick: tick,
+        };
+        root.apply_appearance(window, cx);
+        if let Some(last) = root
+            .host
+            .last_host_id()
+            .and_then(|id| root.hosts.iter().find(|h| h.host_id == id).cloned())
+        {
+            root.connect(last, cx);
+        }
+        root
+    }
+
+    fn apply_appearance(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.preferences.appearance.as_deref() {
+            Some("light") => theme::change_mode(theme::ThemeMode::Light, Some(window), cx),
+            Some("dark") => theme::change_mode(theme::ThemeMode::Dark, Some(window), cx),
+            _ => theme::sync_system_appearance(Some(window), cx),
+        }
+    }
+    fn online(&self) -> bool {
+        self.index_ready && self.state == ConnectionState::Connected
+    }
+    fn offline(&self) -> bool {
+        self.state == ConnectionState::Offline
+            || self
+                .disconnected_since
+                .is_some_and(|t| (self.elapsed)().saturating_sub(t) >= Duration::from_secs(30))
+    }
+    fn connect(&mut self, host: PairedHost, cx: &mut Context<Self>) {
+        self.disconnect(false, cx);
+        self.host.set_last_host_id(Some(&host.host_id));
+        self.connected_host = Some(host.clone());
+        self.set_page(Page::Threads, cx);
+        self.index_ready = false;
+        self.disconnected_since = Some((self.elapsed)());
+        self.state = ConnectionState::Reconnecting { attempt: 1 };
+        let (outgoing, lines) = async_channel::unbounded::<String>();
+        let (incoming, received) = async_channel::unbounded();
+        let link = HostLink::new(outgoing.clone(), received);
+        link.set_connection_state(self.state.clone());
+        let initial = self.host.connect(&host);
+        let target = Rc::new(RefCell::new(initial.to_host.clone()));
+        let active_session = Rc::new(RefCell::new(None));
+        let writable = Rc::new(Cell::new(false));
+        let cache = ThreadCache::default();
+        let can_write = writable.clone();
+        let rejected = incoming.clone();
+        let to = target.clone();
+        let forward = cx.spawn(async move |_, _| {
+            while let Ok(line) = lines.recv().await {
+                if !can_write.get()
+                    && let Ok(request) =
+                        serde_json::from_str::<tcode_protocol::ClientMessage>(&line)
+                    && matches!(request.payload, tcode_protocol::ClientPayload::Command(_))
+                {
+                    let ack = tcode_protocol::HostMessage::Ack {
+                        id: request.id,
+                        result: Err(tcode_protocol::ProtocolError {
+                            code: "offline".into(),
+                            message: "Host is disconnected".into(),
+                        }),
+                    };
+                    if let Ok(line) = tcode_protocol::encode_line(&ack) {
+                        let _ = rejected.send(line).await;
+                    }
+                    continue;
+                }
+
+                let sender = to.borrow().clone();
+                if sender.send(line).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let pump = link.clone();
+        let pump = cx.spawn(async move |_, _| pump.pump().await);
+        let store = cx.new(|cx| {
+            let mut store = WorkspaceStore::new(link.clone(), cx);
+            store.attach_remote(host.name.clone(), cx);
+            store
+        });
+        self.store_subscriptions = vec![
+            cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+                if change.topic == TopicKind::Index {
+                    this.index_ready = true;
+                    if let Some(sidebar) = &this.sidebar {
+                        sidebar.update(cx, |sidebar, cx| sidebar.set_loading(false, cx));
+                    }
+                }
+                cx.notify();
+            }),
+            cx.observe(&store, |this, store, cx| {
+                if let Some(connection) = &this.connection {
+                    let active = store.read(cx).active_session_id();
+                    if *connection.active_session.borrow() != active {
+                        *connection.active_session.borrow_mut() = active.clone();
+                    }
+                }
+                cx.notify();
+            }),
+        ];
+        self.store = Some(store);
+        self.connection = Some(Connection {
+            link,
+            active_session,
+            writable,
+            cache,
+            outgoing,
+            incoming,
+            target,
+            wire: vec![],
+            _tasks: vec![forward, pump],
+        });
+        self.install_wire(initial, cx);
+        cx.notify();
+    }
+    fn install_wire(&mut self, transport: host::Transport, cx: &mut Context<Self>) {
+        let connection = self.connection.as_mut().expect("connection exists");
+        *connection.target.borrow_mut() = transport.to_host;
+        let incoming = connection.incoming.clone();
+        let cache = connection.cache.clone();
+        let receiver = transport.from_host;
+        let state = transport.state;
+        connection.wire = vec![
+            cx.spawn(async move |_, _| {
+                while let Ok(line) = receiver.recv().await {
+                    if let Ok(tcode_protocol::HostMessage::Event(event)) =
+                        serde_json::from_str(&line)
+                    {
+                        let mut cache = cache.borrow_mut();
+                        match &event.event {
+                            tcode_protocol::ServerEvent::SessionStatusReplaced(status) => {
+                                cache.entry(status.session_id.clone()).or_default().status =
+                                    Some(status.clone());
+                            }
+                            tcode_protocol::ServerEvent::SessionSnapshot { from, records } => {
+                                if let tcode_protocol::Topic::SessionEvents { session_id } =
+                                    &event.topic
+                                {
+                                    let held =
+                                        &mut cache.entry(session_id.clone()).or_default().records;
+                                    if *from == 0 {
+                                        held.clear();
+                                    }
+                                    if *from == held.len() as u64 {
+                                        held.extend(records.iter().cloned());
+                                    }
+                                }
+                            }
+                            tcode_protocol::ServerEvent::SessionEvent(record) => {
+                                if let tcode_protocol::Topic::SessionEvents { session_id } =
+                                    &event.topic
+                                {
+                                    cache
+                                        .entry(session_id.clone())
+                                        .or_default()
+                                        .records
+                                        .push(record.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if incoming.send(line).await.is_err() {
+                        break;
+                    }
+                }
+            }),
+            cx.spawn(async move |this, cx| {
+                while let Ok(state) = state.recv().await {
+                    if this
+                        .update(cx, |this, cx| {
+                            if state == ConnectionState::Connected {
+                                this.disconnected_since = None;
+                                if let Some(host) = this.connected_host.as_mut() {
+                                    host.last_connected_unix = Some(now_secs());
+                                    if let Some(saved) =
+                                        this.hosts.iter_mut().find(|h| h.host_id == host.host_id)
+                                    {
+                                        *saved = host.clone();
+                                    }
+                                    this.host.save_hosts(&this.hosts);
+                                }
+                            } else if this.disconnected_since.is_none() {
+                                this.disconnected_since = Some((this.elapsed)());
+                            }
+                            if let Some(connection) = &this.connection {
+                                connection.writable.set(state == ConnectionState::Connected);
+                                if state == ConnectionState::Connected
+                                    && let Some(session_id) =
+                                        connection.active_session.borrow().clone()
+                                    && let Some(store) = &this.store
+                                {
+                                    store.update(cx, |store, _| store.select_session(session_id));
+                                }
+
+                                connection.link.set_connection_state(state.clone());
+                            }
+                            this.state = state;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }),
+        ];
+    }
+    fn rewire(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.connected_host.clone() else {
+            return;
+        };
+        if let Some(connection) = &mut self.connection {
+            connection.target.borrow().close();
+            connection.wire.clear();
+        }
+        self.install_wire(self.host.connect(&host), cx);
+        if let Some(connection) = &self.connection {
+            for subscription in connection.link.subscriptions() {
+                let _ = connection.link.subscribe(subscription);
+            }
+        }
+    }
+    fn disconnect(&mut self, clear_last: bool, cx: &mut Context<Self>) {
+        self.connection = None;
+        self.store = None;
+        self.store_subscriptions.clear();
+        self.connected_host = None;
+        self.sheet = None;
+        self.set_page(Page::Hosts, cx);
+        self.window_state = None;
+        self.sidebar = None;
+        self.chat = None;
+        self.palette = None;
+        if clear_last {
+            self.host.set_last_host_id(None);
+        }
+        cx.notify();
+    }
+    fn back(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.sheet.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        match self.page {
+            Page::Thread => {
+                self.set_page(Page::Threads, cx);
+                true
+            }
+            Page::Threads => {
+                self.disconnect(false, cx);
+                true
+            }
+            Page::Hosts => false,
+        }
+    }
+    fn start_draft(&mut self, project: Project, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.online() {
+            return;
+        }
+        if let Some(store) = &self.store {
+            store.update(cx, |s, cx| {
+                s.start_draft(project.id.clone(), project.root.clone(), cx)
+            });
+        }
+        self.set_page(Page::Thread, cx);
+        self.sheet = None;
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The three pages, built once the root entity exists. Whatever page the
+    /// launch path already chose (a remembered host goes straight to the thread
+    /// list, §2) is restored without animating.
+    fn ensure_pages(&mut self, cx: &mut Context<Self>) {
+        if !self.pages.is_empty() {
+            return;
+        }
+        let root = cx.entity();
+        self.pages = [Page::Hosts, Page::Threads, Page::Thread]
+            .map(|page| AnyView::from(cx.new(|cx| PageView::new(&root, page, cx))))
+            .to_vec();
+        let restore = self.pages[..self.page.depth()].to_vec();
+        self.nav.update(cx, |nav, cx| {
+            for view in restore {
+                nav.push(view, NavMotion::Immediate, cx);
+            }
+        });
+    }
+
+    /// Move to `page`, driving the `NavStack` by the difference in depth so a
+    /// step in either direction animates (docs/mobile-design.md §3.0).
+    fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page == page {
+            return;
+        }
+        let (from, to) = (self.page.depth(), page.depth());
+        self.page = page;
+        // Before the first render the stack does not exist yet; `ensure_pages`
+        // restores it to whatever page the launch path landed on.
+        if self.pages.is_empty() {
+            cx.notify();
+            return;
+        }
+        let pages = self.pages.clone();
+        self.nav.update(cx, |nav, cx| {
+            if to > from {
+                for level in from + 1..=to {
+                    nav.push(pages[level - 1].clone(), NavMotion::Animated, cx);
+                }
+            } else {
+                for _ in to..from {
+                    nav.pop(NavMotion::Animated, cx);
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    fn ensure_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar.is_some() {
+            return;
+        }
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let sidebar = cx.new(|cx| {
+            let mut sidebar = SessionsSidebar::new(store.clone(), state.clone(), cx);
+            sidebar.set_loading(!self.index_ready, cx);
+            sidebar
+        });
+        let chat = cx.new(|cx| ChatView::new(store.clone(), state.clone(), window, cx));
+        let palette = cx.new(|cx| CommandPalette::new(store, state.clone(), window, cx));
+        self.store_subscriptions.push(cx.subscribe_in(
+            &state,
+            window,
+            |this, _, _: &OpenThread, window, cx| {
+                this.set_page(Page::Thread, cx);
+                if let Some(chat) = &this.chat {
+                    chat.update(cx, |chat, cx| chat.focus_composer(window, cx));
+                }
+                cx.notify();
+            },
+        ));
+        self.store_subscriptions
+            .push(cx.observe_in(&state, window, |this, state, window, cx| {
+                if state.read(cx).palette_open
+                    && let Some(palette) = &this.palette
+                {
+                    palette.update(cx, |palette, cx| palette.focus(window, cx));
+                }
+                cx.notify();
+            }));
+        self.window_state = Some(state);
+        self.sidebar = Some(sidebar);
+        self.chat = Some(chat);
+        self.palette = Some(palette);
+    }
+}
+
+fn now_secs() -> u64 {
+    chrono::Utc::now().timestamp().max(0) as u64
+}
+fn label(key: &str) -> String {
+    tr!(format!("mobile.{key}")).into_owned()
+}
+fn text(value: impl Into<SharedString>, size: f32) -> Div {
+    div()
+        .text_size(px(size))
+        .line_height(px(if size >= 16. { 22. } else { 20. }))
+        .child(value.into())
+}
+fn button(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    primary: bool,
+    enabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let title = title.into();
+    material::accessible_clickable(div(), id, Role::Button, title.clone(), cx)
+        .min_w(px(44.))
+        .min_h(px(44.))
+        .px(px(10.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(12.))
+        .text_size(px(16.))
+        .line_height(px(22.))
+        .cursor_pointer()
+        .text_color(if primary {
+            theme.primary_foreground
+        } else {
+            theme.foreground
+        })
+        .when(primary, |d| d.bg(theme.primary).font_medium())
+        .when(!enabled, |d| {
+            d.text_color(theme.muted_foreground)
+                .when(primary, |d| d.bg(theme.secondary))
+        })
+        .active(|s| s.bg(theme.foreground.opacity(0.08)))
+        .child(div().min_w_0().truncate().child(title))
+}
+/// A nav-bar icon button (§3.0): 44×44, a 20pt stroke icon in `foreground`.
+/// Blue is reserved for primary actions and live state.
+fn icon_button(
+    id: impl Into<ElementId>,
+    aria_label: impl Into<SharedString>,
+    icon: IconName,
+    enabled: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    material::accessible_clickable(div(), id, Role::Button, aria_label.into(), cx)
+        .size(px(44.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(12.))
+        .cursor_pointer()
+        .text_color(if enabled {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        })
+        .active(|s| s.bg(theme.foreground.opacity(0.08)))
+        .child(Icon::new(icon).size(px(20.)))
+}
+fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .child(content.flex_none())
+}
+
+// Keep connection feedback independent of a separate animation asset.
+fn spinner(diameter: f32, color: Hsla) -> impl IntoElement {
+    div().size(px(diameter)).flex_none().with_animation(
+        "phone-spinner",
+        Animation::new(Duration::from_millis(800)).repeat(),
+        move |element, progress| {
+            element.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let center = bounds.center();
+                        for spoke in 0..12 {
+                            let angle = (spoke as f32 / 12. + progress) * std::f32::consts::TAU;
+                            let mut path = PathBuilder::stroke(px(1.4));
+                            path.move_to(
+                                center
+                                    + point(
+                                        px(angle.cos() * diameter * 0.24),
+                                        px(angle.sin() * diameter * 0.24),
+                                    ),
+                            );
+                            path.line_to(
+                                center
+                                    + point(
+                                        px(angle.cos() * diameter * 0.43),
+                                        px(angle.sin() * diameter * 0.43),
+                                    ),
+                            );
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, color.opacity(0.25 + spoke as f32 / 16.));
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            )
+        },
+    )
+}
+
+impl Render for MobileRoot {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_pages(cx);
+        self.ensure_workspace(window, cx);
+        let insets = self.host.insets();
+        let safe = insets.safe_area;
+        let bottom = safe.bottom.max(insets.ime.bottom);
+        let width = window.viewport_size().width;
+        // 200ms lateral push/pop (§3.0). GPUI has no paint transform, so each
+        // page is offset by its own insets; setting `left` and `right` in
+        // opposite directions slides it without resizing it.
+        let stack = NavStack::new(&self.nav)
+            .size_full()
+            .overflow_hidden()
+            .transition(Transition::new(Duration::from_millis(200)))
+            .item(move |page, _, _| {
+                let rest = 1. - page.progress();
+                let (offset, opacity) = match (page.phase(), page.operation()) {
+                    (PresencePhase::Entering, Some(NavOperation::Pop)) => {
+                        (width * -0.25 * rest, 1.)
+                    }
+                    (PresencePhase::Entering, Some(_)) => (width * rest, page.progress()),
+                    (PresencePhase::Exiting, Some(NavOperation::Pop)) => {
+                        (width * page.progress(), 1.)
+                    }
+                    (PresencePhase::Exiting, Some(_)) => (width * -0.25 * page.progress(), 1.),
+                    _ => (px(0.), 1.),
+                };
+                page.left(offset)
+                    .right(px(0.) - offset)
+                    .opacity(opacity)
+                    .into_any_element()
+            });
+        let content = v_flex()
+            .size_full()
+            .pt(safe.top)
+            .pb(bottom)
+            .pl(safe.left)
+            .pr(safe.right)
+            .child(stack);
+        v_flex()
+            .relative()
+            .size_full()
+            // T1 paper under every page, up into the status bar (§3.0).
+            .bg(material::content_surface(cx))
+            .text_color(cx.theme().foreground)
+            .font_family(cx.theme().font_family.clone())
+            .text_size(px(16.))
+            .line_height(px(22.))
+            .child(content)
+            .when(
+                self.window_state
+                    .as_ref()
+                    .is_some_and(|state| state.read(cx).palette_open),
+                |el| el.children(self.palette.clone()),
+            )
+            .children(self.render_sheet(window, cx))
+    }
+}
+
+/// Consume a sheet/back-stack step. The platform exits only at the root.
+struct MobileRootHandle(WeakEntity<MobileRoot>);
+impl Global for MobileRootHandle {}
+
+pub fn handle_back(cx: &mut App) -> bool {
+    let Some(root) = cx
+        .try_global::<MobileRootHandle>()
+        .map(|handle| handle.0.clone())
+    else {
+        return false;
+    };
+    if gpui_base::GlobalState::is_in_deferred_context(cx) {
+        if let Some(window) = cx.windows().into_iter().next() {
+            let _ = window.update(cx, |_, window, cx| {
+                window.dispatch_action(Box::new(gpui_base::actions::Cancel), cx)
+            });
+        }
+        return true;
+    }
+    root.update(cx, |root, cx| {
+        if let Some(state) = &root.window_state
+            && state.read(cx).palette_open
+        {
+            state.update(cx, |state, cx| state.close_palette(cx));
+            return true;
+        }
+        root.back(cx)
+    })
+    .unwrap_or(false)
+}
+
+#[cfg(feature = "native")]
+pub fn run(cx: &mut App) {
+    run_with_host(cx, Rc::new(host::NativeHost::from_env()));
+}
+
+/// Open the same phone UI on native platforms and browser hosts.
+pub fn run_with_host(cx: &mut App, host: SharedHost) {
+    run_with_size(cx, host, size(px(393.), px(852.)));
+}
+/// Desktop preview geometry; the screen implementation is identical.
+pub fn run_with_size(cx: &mut App, host: SharedHost, dimensions: Size<Pixels>) {
+    #[cfg(target_os = "android")]
+    let fonts = vec![
+        std::borrow::Cow::Borrowed(tcode_ui::assets::DM_SANS),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_REGULAR),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_BOLD),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_ITALIC),
+        std::borrow::Cow::Borrowed(tcode_ui::assets::LILEX_BOLD_ITALIC),
+    ];
+    #[cfg(not(target_os = "android"))]
+    let fonts = vec![std::borrow::Cow::Borrowed(tcode_ui::assets::DM_SANS)];
+    cx.text_system().add_fonts(fonts).expect("mobile fonts");
+    let palette: serde_json::Value =
+        serde_json::from_str(include_str!("../../../themes/tcode.json")).expect("theme");
+    let palette = palette
+        .to_string()
+        .replace("#F2F4F7C7", "#F2F4F7")
+        .replace("#15171CC7", "#15171C");
+    #[cfg(target_os = "android")]
+    let palette = palette.replace("SF Mono", "Lilex");
+    theme::init_with_json(&palette, cx);
+    tcode_ui::markdown::init(cx);
+    cx.activate(true);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+            point(px(0.), px(0.)),
+            dimensions,
+        ))),
+        titlebar: None,
+        window_background: WindowBackgroundAppearance::Opaque,
+        ..Default::default()
+    };
+    cx.open_window(options, |window, cx| {
+        window.set_window_title("tcode phone");
+        let root = cx.new(|cx| MobileRoot::new(host, window, cx));
+        cx.set_global(MobileRootHandle(root.downgrade()));
+        cx.new(|cx| OverlayHost::new(root, window, cx))
+    })
+    .expect("open phone window");
+}

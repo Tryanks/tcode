@@ -19,7 +19,7 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(feature = "desktop", not(target_os = "linux")))]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastDisposition, apply_runtime_effect, present_runtime_event,
@@ -193,7 +193,9 @@ impl AppShell {
         // Pump preview automation requests from the MCP server into the live
         // WebView. The receiver is taken once; requests are resolved on the gpui
         // main thread (WKWebView `evaluate_script` must run there).
+        #[cfg(all(feature = "local-host", feature = "desktop"))]
         let requests = workspace_store.update(cx, |store, _cx| store.take_preview_requests());
+        #[cfg(all(feature = "local-host", feature = "desktop"))]
         if let Some(requests) = requests {
             let preview = preview.clone();
             cx.spawn_in(window, async move |_, cx| {
@@ -211,6 +213,59 @@ impl AppShell {
                     {
                         break;
                     }
+                }
+            })
+            .detach();
+        }
+
+        #[cfg(feature = "desktop")]
+        {
+            let requests = workspace_store.read(cx).remote_preview_requests();
+            let preview = preview.clone();
+            let store = workspace_store.clone();
+            cx.spawn_in(window, async move |_, cx| {
+                while let Ok(envelope) = requests.recv().await {
+                    let tcode_protocol::ServerEvent::PreviewRequest {
+                        request_id,
+                        session_id,
+                        request,
+                    } = envelope.event
+                    else {
+                        continue;
+                    };
+                    let (reply, receiver) = async_channel::bounded(1);
+                    let op = serde_json::to_value(request).and_then(serde_json::from_value);
+                    match op {
+                        Ok(op) => {
+                            if preview
+                                .update_in(cx, |panel, window, cx| {
+                                    panel.handle_op(session_id, op, reply, window, cx)
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = reply.try_send(Err(error.to_string()));
+                        }
+                    }
+                    // Each operation waits independently: a slow wait_for must
+                    // not block a second client's navigation or a screenshot.
+                    let store = store.clone();
+                    cx.spawn(async move |cx| {
+                        let response = receiver
+                            .recv()
+                            .await
+                            .unwrap_or_else(|_| Err("preview panel dropped request".into()));
+                        let response = response.and_then(|value| {
+                            serde_json::to_value(value)
+                                .and_then(serde_json::from_value)
+                                .map_err(|error| error.to_string())
+                        });
+                        store.update(cx, |store, _| store.preview_reply(request_id, response));
+                    })
+                    .detach();
                 }
             })
             .detach();
@@ -245,7 +300,7 @@ impl AppShell {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Entity<BrowserLifecycle> {
@@ -303,12 +358,7 @@ impl AppShell {
                     window.remove_notification1::<RuntimeToastNotification>(toast_id as usize, cx);
                     let request = request.clone();
                     store.update(cx, |store, _cx| {
-                        store.run_git_action(
-                            request.action,
-                            request.message,
-                            request.included,
-                            request.feature_branch,
-                        );
+                        store.retry_git_action(request);
                     });
                 }),
             }
@@ -368,6 +418,53 @@ impl AppShell {
     ) {
         self.window_state
             .update(cx, |state, cx| state.toggle_palette(cx));
+    }
+}
+
+impl AppShell {
+    /// A slim status bar above the chat column, shown only over a remote link
+    /// that is not currently connected.
+    fn render_connection_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let store = self.store.read(cx);
+        let host = store.remote_host_name()?;
+        let (text, accent) = match store.connection_state() {
+            tcode_client::ConnectionState::Connected => return None,
+            tcode_client::ConnectionState::Reconnecting { attempt } => (
+                crate::tr!("remote.banner.reconnecting", host = host, attempt = attempt)
+                    .into_owned(),
+                cx.theme().warning,
+            ),
+            tcode_client::ConnectionState::Offline => (
+                crate::tr!("remote.banner.offline", host = host).into_owned(),
+                cx.theme().danger,
+            ),
+        };
+        let reconnecting = matches!(
+            store.connection_state(),
+            tcode_client::ConnectionState::Reconnecting { .. }
+        );
+        Some(
+            gpui_base::h_flex()
+                .flex_none()
+                .w_full()
+                .h(px(28.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .bg(accent.opacity(0.12))
+                .text_size(px(12.))
+                .text_color(cx.theme().foreground)
+                .when(reconnecting, |bar| {
+                    bar.child({
+                        use crate::sizing::Sizable as _;
+                        crate::widgets::spinner::Spinner::new().xsmall()
+                    })
+                })
+                .child(text)
+                .into_any_element(),
+        )
     }
 }
 
@@ -507,12 +604,13 @@ impl Render for AppShell {
         // The chat and right columns are reading surfaces (T1): they sit on a
         // near-opaque plane over the vibrancy canvas (docs/visual-redesign.md).
         let chat_panel = resizable_panel().visible(chat_visible).child(
-            div()
+            gpui_base::v_flex()
                 .size_full()
                 .bg(crate::material::content_surface(cx))
                 // T1 paper floats above the glass canvas.
                 .shadow_sm()
-                .child(self.chat.clone()),
+                .children(self.render_connection_banner(cx))
+                .child(div().flex_1().min_h_0().child(self.chat.clone())),
         );
         let right = resizable_panel()
             .visible(diff_open)

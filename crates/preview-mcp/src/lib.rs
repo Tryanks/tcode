@@ -42,7 +42,7 @@ pub const PREVIEW_PRESETS: &[(&str, u32, u32)] = &[
 /// Names/semantics mirror T3's preview toolkit, reduced to the subset a raw
 /// WKWebView (`evaluate_script` + `load_url`, no Chrome DevTools Protocol) can
 /// serve.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PreviewOp {
     /// Open a URL (creating/showing the webview); `None` just reports status.
     Open { url: Option<String> },
@@ -83,7 +83,7 @@ pub enum PreviewOp {
 }
 
 /// The UI's answer to a [`PreviewOp`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PreviewReply {
     /// A JSON payload (status, snapshot, evaluate result, `{ "ok": true }`, …).
     Json(serde_json::Value),

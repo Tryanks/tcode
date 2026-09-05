@@ -1,0 +1,70 @@
+name: Tcode
+
+options:
+  bundleIdPrefix: com.tryanks
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+
+targets:
+  Tcode:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tryanks.tcode
+        PRODUCT_NAME: Tcode
+        INFOPLIST_FILE: Sources/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/BridgingHeader.h
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+        ONLY_ACTIVE_ARCH: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LIBRARY_SEARCH_PATHS:
+          - "$(PROJECT_DIR)/lib"
+        DEAD_CODE_STRIPPING: NO
+        OTHER_LDFLAGS:
+          - "-force_load"
+          - "$(PROJECT_DIR)/lib/libtcode_ios.a"
+          - "-framework"
+          - UIKit
+          - "-framework"
+          - Foundation
+          - "-framework"
+          - AVFoundation
+          - "-framework"
+          - QuartzCore
+          - "-framework"
+          - Metal
+          - "-framework"
+          - MetalKit
+          - "-framework"
+          - CoreText
+          - "-framework"
+          - CoreGraphics
+          - "-framework"
+          - CoreFoundation
+          - "-framework"
+          - IOSurface
+          - "-framework"
+          - Security
+          - "-lc++"
+
+schemes:
+  Tcode:
+    build:
+      targets:
+        Tcode: all
+    run:
+      config: Debug

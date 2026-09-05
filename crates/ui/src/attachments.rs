@@ -28,7 +28,7 @@ pub(crate) fn open_image_lightbox(path: PathBuf, title: String, window: &mut Win
             .content(move |content_el, _, _| {
                 content_el.child(
                     div().w_full().flex().items_center().justify_center().child(
-                        img(path.clone())
+                        img(crate::store::host_image(path.clone()))
                             .max_w_full()
                             .max_h(max_h)
                             .rounded(crate::material::radius_card()),

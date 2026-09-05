@@ -10,6 +10,7 @@
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Pixels, Rgba, Role, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
@@ -78,6 +79,10 @@ pub fn radius_chip() -> Pixels {
 }
 /// The composer field — the hero element.
 pub fn radius_composer() -> Pixels {
+    px(14.)
+}
+/// The phone's bottom sheet, top corners only (docs/mobile-design.md §5).
+pub fn radius_overlay_sheet() -> Pixels {
     px(14.)
 }
 
@@ -174,6 +179,124 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
                 .font_semibold()
                 .child("DEV"),
         )
+}
+
+/// The scrim behind a bottom sheet, at the `overlay` token's values
+/// (`themes/tcode.json`: `#1F232852` light, `#00000080` dark). Passing the ink
+/// `foreground` through in dark mode would *lighten* the page behind the sheet
+/// instead of pushing it back, so the dark scrim is black.
+pub fn scrim(progress: f32, cx: &App) -> Hsla {
+    if cx.theme().mode.is_dark() {
+        gpui::black().opacity(0.5 * progress)
+    } else {
+        cx.theme().foreground.opacity(0.32 * progress)
+    }
+}
+
+/// The bottom sheet's drag handle (docs/mobile-design.md §3.0): 36×5 at 30%
+/// muted, in its own 16pt-tall strip above the title row.
+pub fn sheet_grabber(cx: &App) -> impl IntoElement {
+    div()
+        .flex_none()
+        .w_full()
+        .h(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .w(px(36.))
+                .h(px(5.))
+                .rounded_full()
+                .bg(cx.theme().muted_foreground.opacity(0.3)),
+        )
+}
+
+/// The phone's empty state (docs/mobile-design.md §3.0): a muted 24pt icon, a
+/// 17pt semibold title and a ≤2-line 15pt body, centered in a 280pt column.
+/// Callers append their own primary action. Compact surfaces only — the desktop
+/// keeps its own richer empty states.
+pub fn empty_state(
+    icon: crate::icon::Icon,
+    title: impl Into<SharedString>,
+    body: impl Into<SharedString>,
+    cx: &App,
+) -> Div {
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .gap(px(10.))
+        .p(px(24.))
+        .child(icon.size(px(24.)).text_color(cx.theme().muted_foreground))
+        .child(
+            div()
+                .max_w(px(280.))
+                .text_center()
+                .text_size(px(17.))
+                .line_height(px(22.))
+                .font_semibold()
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .max_w(px(280.))
+                .text_center()
+                .text_size(px(15.))
+                .line_height(px(20.))
+                .text_color(cx.theme().muted_foreground)
+                .child(body.into()),
+        )
+}
+
+/// The phone's segmented-control track (docs/mobile-design.md §3.5): 40pt
+/// tall, 10 radius, T2 fill. Callers fill it with [`segment`]s.
+///
+/// The track scrolls horizontally rather than clipping its labels: a provider
+/// can describe six reasoning levels, and "Extra High" ellipsized to "Extra…"
+/// names nothing. With room to spare the segments still divide the full width.
+pub fn segmented_track(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+    gpui_base::h_flex()
+        .id(id)
+        .h(px(40.))
+        .flex_none()
+        .gap(px(2.))
+        .p(px(3.))
+        .rounded(px(10.))
+        .bg(cx.theme().secondary)
+        .overflow_x_scroll()
+}
+
+/// One segment of a [`segmented_track`]. The selected segment is a T3 solid
+/// with a hairline; the rest are bare. The caller attaches `on_click`.
+pub fn segment(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let label = label.into();
+    // Grows into spare width, never shrinks below its label: the track scrolls
+    // instead of ellipsizing (see `segmented_track`).
+    accessible_clickable(div(), id, Role::Button, label.clone(), cx)
+        .flex_grow(1.)
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(px(6.))
+        .rounded(px(8.))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .when(selected, |el| {
+            el.bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .font_medium()
+        })
+        .when(!selected, |el| el.text_color(cx.theme().muted_foreground))
+        .child(div().flex_none().child(label))
 }
 
 /// A compact metadata chip in chat's idiom (the plan/subagent badges in

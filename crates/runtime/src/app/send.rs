@@ -2,10 +2,16 @@ use super::*;
 
 impl AppState {
     /// Submit a user turn. Starts the provider lazily if needed.
-    pub fn send_turn(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut HostCx) {
-        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
-        self.send_turn_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context(cx);
+    pub fn send_turn(
+        &mut self,
+        target_id: &str,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut HostCx,
+    ) {
+        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        self.send_turn_assembled(target_id, text, attachments, cx);
+        self.clear_consumed_draft_context(target_id, cx);
     }
 
     /// Schedule an in-memory user turn for this session. It captures the same
@@ -13,22 +19,23 @@ impl AppState {
     /// invisible to the persisted transcript until provider acceptance.
     pub fn schedule_turn(
         &mut self,
+        target_id: &str,
         text: String,
         attachment_paths: Vec<PathBuf>,
         fire_at_unix_secs: u64,
         cx: &mut HostCx,
     ) {
         let not_before = UNIX_EPOCH + Duration::from_secs(fire_at_unix_secs);
-        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
-        if self.relay_confirmation().is_some() {
+        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        if self.relay_confirmation(target_id).is_some() {
             log::warn!("scheduled send deferred because a conversation relay needs confirmation");
             return;
         }
 
-        let commit_draft = self.residents.active.as_ref().is_some_and(|active| {
+        let commit_draft = self.resident(target_id).is_some_and(|active| {
             active.draft && !matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. })
         });
-        if commit_draft && let Err(err) = self.commit_draft(cx) {
+        if commit_draft && let Err(err) = self.commit_draft(target_id, cx) {
             self.report_error(
                 RuntimeError::PersistSession {
                     error: err.to_string(),
@@ -38,7 +45,7 @@ impl AppState {
             return;
         }
 
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         active.push_scheduled(text, attachments, not_before);
@@ -49,9 +56,9 @@ impl AppState {
             // Starting now keeps the in-memory session parkable/resident across
             // navigation. Eligibility prevents the future turn from being sent
             // when provider startup completes.
-            self.ensure_started(cx);
+            self.ensure_started(target_id, cx);
         }
-        self.clear_consumed_draft_context(cx);
+        self.clear_consumed_draft_context(target_id, cx);
         self.reschedule_scheduled_wake(cx);
     }
 
@@ -63,8 +70,8 @@ impl AppState {
         let generation = self.scheduler_generation;
         let earliest = self
             .residents
-            .active
-            .iter()
+            .live
+            .values()
             .chain(self.residents.parked.values())
             .flat_map(|session| {
                 session
@@ -97,27 +104,29 @@ impl AppState {
     /// deadline in place to preserve their captured options before dispatch.
     pub(super) fn fire_due_scheduled(&mut self, cx: &mut HostCx) {
         let now = SystemTime::now();
-        let active_due: Vec<u64> = self
+        let due: Vec<_> = self
             .residents
-            .active
+            .live
             .iter()
-            .flat_map(|active| active.queue.iter())
-            .filter(|message| message.not_before.is_some_and(|time| time <= now))
-            .map(|message| message.id)
+            .flat_map(|(session_id, session)| {
+                session
+                    .queue
+                    .iter()
+                    .filter(|m| m.not_before.is_some_and(|t| t <= now))
+                    .map(|m| (session_id.clone(), m.id))
+            })
             .collect();
-        for id in active_due {
-            let message = self
-                .residents
-                .active
-                .as_mut()
-                .and_then(|active| active.take_queued(id));
-            let Some(message) = message else {
+        for (session_id, id) in due {
+            let Some(message) = self
+                .resident_mut(&session_id)
+                .and_then(|s| s.take_queued(id))
+            else {
                 continue;
             };
-            if let Some(active) = self.residents.active.as_mut() {
-                active.pending_ultrathink = message.ultrathink;
+            if let Some(session) = self.resident_mut(&session_id) {
+                session.pending_ultrathink = message.ultrathink;
             }
-            self.send_turn_assembled(message.text, message.attachments, cx);
+            self.send_turn_assembled(&session_id, message.text, message.attachments, cx);
         }
 
         let parked_ids: Vec<String> = self.residents.parked.keys().cloned().collect();
@@ -185,8 +194,13 @@ impl AppState {
     /// observes a real adapter thread.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-support"))]
-    pub fn queue_message_for_replica_test(&mut self, text: String, _cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub fn queue_message_for_replica_test(
+        &mut self,
+        target_id: &str,
+        text: String,
+        _cx: &mut HostCx,
+    ) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         active.push_queued(text, Vec::new());
@@ -194,38 +208,37 @@ impl AppState {
 
     pub(super) fn send_turn_assembled(
         &mut self,
+        target_id: &str,
         text: String,
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
         if self
-            .residents
-            .active
-            .as_ref()
+            .resident(target_id)
             .is_some_and(|active| active.meta.native_subagent.is_some())
         {
             log::warn!("refusing to send to a read-only native subagent mirror session");
             return;
         }
-        if self.relay_confirmation().is_some() {
+        if self.relay_confirmation(target_id).is_some() {
             log::warn!("send deferred until the pending conversation relay is confirmed");
             return;
         }
         // Group C: a draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
-        if let Some(active) = self.residents.active.as_ref()
+        if let Some(active) = self.resident(target_id)
             && active.draft
             && !active.preparing_worktree
             && let WorkspaceMode::NewWorktree { base } = active.draft_workspace.clone()
         {
-            self.begin_worktree_prep(text, attachments, base, cx);
+            self.begin_worktree_prep(target_id, text, attachments, base, cx);
             return;
         }
 
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
-        if self.active_is_draft()
-            && let Err(err) = self.commit_draft(cx)
+        if self.active_is_draft(target_id)
+            && let Err(err) = self.commit_draft(target_id, cx)
         {
             self.report_error(
                 RuntimeError::PersistSession {
@@ -236,7 +249,7 @@ impl AppState {
             return;
         }
 
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
 
@@ -284,9 +297,10 @@ impl AppState {
             }
         }
         let should_start = matches!(active.runtime, Runtime::Idle);
-        let dispatch_failed = !restart_deferred && self.dispatch_next_queued(cx).is_err();
+        let dispatch_failed =
+            !restart_deferred && self.dispatch_next_queued(target_id, cx).is_err();
         if should_start {
-            self.ensure_started(cx);
+            self.ensure_started(target_id, cx);
         }
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
@@ -305,8 +319,8 @@ impl AppState {
         }
     }
 
-    pub(super) fn relay_confirmation(&self) -> Option<(String, String)> {
-        let active = self.residents.active.as_ref()?;
+    pub(super) fn relay_confirmation(&self, target_id: &str) -> Option<(String, String)> {
+        let active = self.resident(target_id)?;
         let pending = active.pending_relay.as_ref()?;
         if !has_meaningful_history(&active.timeline) {
             return None;
@@ -322,26 +336,28 @@ impl AppState {
     /// chat rendering never expose the injected preamble as user-authored text.
     pub fn confirm_relay_and_send(
         &mut self,
+        target_id: &str,
         text: String,
         attachment_paths: Vec<PathBuf>,
         cx: &mut HostCx,
     ) {
-        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
-        self.confirm_relay_and_send_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context(cx);
+        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        self.confirm_relay_and_send_assembled(target_id, text, attachments, cx);
+        self.clear_consumed_draft_context(target_id, cx);
     }
 
     pub(super) fn confirm_relay_and_send_assembled(
         &mut self,
+        target_id: &str,
         text: String,
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         let Some(pending) = active.pending_relay.take() else {
-            self.send_turn_assembled(text, attachments, cx);
+            self.send_turn_assembled(target_id, text, attachments, cx);
             return;
         };
         let transcript = render_relay_transcript(
@@ -367,15 +383,15 @@ impl AppState {
         self.persist_meta(&meta, cx);
         self.record_event(&session_id, &event, cx);
 
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         active.push_queued(text, attachments);
         if let Some(message) = active.queue.last_mut() {
             message.relay_transcript = Some(transcript);
         }
-        let dispatch_failed = self.dispatch_next_queued(cx).is_err();
-        self.ensure_started(cx);
+        let dispatch_failed = self.dispatch_next_queued(target_id, cx).is_err();
+        self.ensure_started(target_id, cx);
         if dispatch_failed {
             self.report_error(RuntimeError::ProcessGone, cx);
         }
@@ -384,16 +400,18 @@ impl AppState {
     /// Submit the first eligible queue entry when the live provider can accept
     /// a turn. It remains queued until the adapter emits its correlated `TurnAccepted`;
     /// only that provider-boundary acknowledgement persists the user bubble.
-    pub(super) fn dispatch_next_queued(&mut self, _cx: &mut HostCx) -> Result<bool, ()> {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub(super) fn dispatch_next_queued(
+        &mut self,
+        target_id: &str,
+        _cx: &mut HostCx,
+    ) -> Result<bool, ()> {
+        let Some(active) = self.resident(target_id) else {
             return Ok(false);
         };
         if active.turn_in_flight || !matches!(active.runtime, Runtime::Live(_)) {
             return Ok(false);
         }
-        self.residents
-            .active
-            .as_mut()
+        self.resident_mut(target_id)
             .ok_or(())?
             .dispatch_next_pending()
     }
@@ -401,7 +419,7 @@ impl AppState {
     /// Finalize one submitted queue entry. Queue-id correlation makes duplicate
     /// acceptance events idempotent, including after a provider close.
     pub(super) fn on_turn_accepted(&mut self, session_id: &str, delivery_id: u64, cx: &mut HostCx) {
-        let is_active = self.active_session_id() == Some(session_id);
+        let is_active = self.residents.live.contains_key(session_id);
         let accepted = self
             .resident_mut(session_id)
             .and_then(|resident| resident.accept_turn_delivery(delivery_id));
@@ -429,7 +447,7 @@ impl AppState {
                 .context_len
                 .and_then(|len| message.text.get(len..))
                 .unwrap_or(&message.text);
-            self.maybe_generate_title(title_source, &message.attachments, cx);
+            self.maybe_generate_title(session_id, title_source, &message.attachments, cx);
         }
     }
 
@@ -534,30 +552,37 @@ impl AppState {
     ///
     /// A steered message IS part of the conversation, so it is recorded to the
     /// session JSONL as a user message (unlike a merely queued one).
-    pub fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut HostCx) {
-        let (text, attachments) = self.assemble_user_message(text, attachment_paths);
-        self.steer_assembled(text, attachments, cx);
-        self.clear_consumed_draft_context(cx);
+    pub fn steer(
+        &mut self,
+        target_id: &str,
+        text: String,
+        attachment_paths: Vec<PathBuf>,
+        cx: &mut HostCx,
+    ) {
+        let (text, attachments) = self.assemble_user_message(target_id, text, attachment_paths);
+        self.steer_assembled(target_id, text, attachments, cx);
+        self.clear_consumed_draft_context(target_id, cx);
     }
 
     pub(super) fn steer_assembled(
         &mut self,
+        target_id: &str,
         text: String,
         attachments: Vec<Attachment>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.residents.active.as_ref() else {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         match active.route(true) {
             // Nothing is running, so there is nothing to steer into: an ordinary
             // send is exactly the right thing.
             SendRouting::Send | SendRouting::Queue => {
-                self.send_turn_assembled(text, attachments, cx)
+                self.send_turn_assembled(target_id, text, attachments, cx)
             }
             SendRouting::QueueUnsupported => {
                 let agent = active.meta.provider.display_name();
-                self.send_turn_assembled(text, attachments, cx);
+                self.send_turn_assembled(target_id, text, attachments, cx);
                 self.report_error(
                     RuntimeError::SteerUnsupported {
                         agent: agent.to_string(),
@@ -578,7 +603,7 @@ impl AppState {
                 // *queued* message does not — see `dispatch_next_queued`.)
                 let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);
 
-                let Some(active) = self.residents.active.as_mut() else {
+                let Some(active) = self.resident_mut(target_id) else {
                     return;
                 };
                 active.pending_ultrathink = false;
@@ -599,8 +624,8 @@ impl AppState {
 
     /// Queue strip: convert an already-queued message into a steering message —
     /// pull it out of the queue and inject it into the running turn.
-    pub fn steer_queued(&mut self, id: u64, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub fn steer_queued(&mut self, target_id: &str, id: u64, cx: &mut HostCx) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         let Some(message) = active.take_queued(id) else {
@@ -609,25 +634,25 @@ impl AppState {
         // `steer` consumes the session's armed Ultrathink flag, but this
         // message captured its own at queue time — re-arm so it rides along.
         active.pending_ultrathink = message.ultrathink;
-        self.steer_assembled(message.text, message.attachments, cx);
+        self.steer_assembled(target_id, message.text, message.attachments, cx);
         self.reschedule_scheduled_wake(cx);
     }
 
     /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
     /// so nothing needs undoing. A submitted head cannot be removed until its
     /// correlated provider acknowledgement commits it.
-    pub fn drop_queued(&mut self, id: u64, cx: &mut HostCx) {
-        if let Some(active) = self.residents.active.as_mut() {
+    pub fn drop_queued(&mut self, target_id: &str, id: u64, cx: &mut HostCx) {
+        if let Some(active) = self.resident_mut(target_id) {
             let _ = active.take_queued(id);
         }
         self.reschedule_scheduled_wake(cx);
     }
 
-    pub fn interrupt(&mut self, _cx: &mut HostCx) {
+    pub fn interrupt(&mut self, target_id: &str, _cx: &mut HostCx) {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
-        }) = &self.residents.active
+        }) = self.resident(target_id)
         {
             let _ = commands.try_send(SessionCommand::Interrupt);
         }
@@ -635,11 +660,16 @@ impl AppState {
 
     pub fn respond_approval(
         &mut self,
+        target_id: &str,
         request_id: String,
         decision: ApprovalDecision,
         _cx: &mut HostCx,
     ) {
-        if let Some(session_id) = self.active_session_id().map(str::to_string) {
+        if let Some(session_id) = self
+            .resident(target_id)
+            .map(|session| session.meta.id.as_str())
+            .map(str::to_string)
+        {
             let _ = self.respond_session_approval(&session_id, request_id, decision);
         }
     }
@@ -649,6 +679,7 @@ impl AppState {
     /// string (single-select / free text) or string-array (multi-select) values.
     pub fn respond_user_input(
         &mut self,
+        target_id: &str,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
         _cx: &mut HostCx,
@@ -656,7 +687,7 @@ impl AppState {
         if let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
-        }) = &self.residents.active
+        }) = self.resident(target_id)
         {
             let _ = commands.try_send(SessionCommand::RespondUserInput {
                 request_id,

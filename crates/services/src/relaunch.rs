@@ -29,6 +29,33 @@ fn marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join("relaunch.json")
 }
 
+/// Start a fresh tcode with `args` and return; the caller quits afterwards.
+///
+/// This is the arg-carrying sibling of `computer_use_mcp::permissions::
+/// relaunch_app`, which needs LaunchServices to preserve the `.app` bundle's
+/// TCC identity. Remote mode switching needs to pass `--connect <host_id>`
+/// instead, so it goes through `open -n --args` (macOS) or the bare executable.
+pub fn spawn_with_args(args: &[String]) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let bundle = exe
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|ext| ext == "app"));
+    match bundle {
+        Some(app) if cfg!(target_os = "macos") => {
+            let mut command = crate::process::command("open");
+            command.arg("-n").arg(app);
+            if !args.is_empty() {
+                command.arg("--args").args(args);
+            }
+            command.spawn()?;
+        }
+        _ => {
+            crate::process::command(exe).args(args).spawn()?;
+        }
+    }
+    Ok(())
+}
+
 /// Persist the marker, overwriting any previous one.
 pub fn write(data_dir: &Path, marker: &RelaunchMarker) -> std::io::Result<()> {
     let data = serde_json::to_vec_pretty(marker)

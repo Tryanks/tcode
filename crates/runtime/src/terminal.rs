@@ -12,6 +12,11 @@ pub use tcode_core::ui::TerminalSplitDirection;
 /// `1`.
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) struct OutputReplay {
+    pub generation: u64,
+    pub bytes: std::collections::VecDeque<u8>,
+}
+
 pub struct TerminalEntry {
     pub id: u64,
     pub terminal: Arc<term::Terminal>,

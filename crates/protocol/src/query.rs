@@ -7,9 +7,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Query {
-    ListActiveWorkspace,
+    ListActiveWorkspace {
+        session_id: String,
+    },
     ScanExternalHistory,
     GenerateCommitMessage {
+        session_id: String,
         included: Option<Vec<String>>,
     },
     LoadGitDiff {

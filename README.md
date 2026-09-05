@@ -94,6 +94,40 @@ speaks ACP.
 > ACP entries that duplicate a native integration are deliberately hidden from
 > the marketplace so each CLI has one clear, highest-fidelity path.
 
+## Remote work mode
+
+One tcode is the **host**: it runs the agents and keeps your projects and
+threads. Any other tcode — another desktop, your phone, a browser tab — is a
+screen for that host. Everything travels over your own LAN or overlay network
+(Tailscale, EasyTier); there is no relay service.
+
+**Host from the desktop.** Settings → Remote → **Host this computer**. Share the
+pairing code or QR code with the device you want to connect. Codes are
+single-use and expire after five minutes.
+
+**Host from a server.** Download `tcode-headless` from
+[Releases](https://github.com/Tryanks/tcode/releases), install your agent CLIs
+on the server, then:
+
+```sh
+tcode-headless serve --listen 0.0.0.0:47420 --name build-server
+tcode-headless pair      # prints a fresh pairing code and QR code
+```
+
+Release builds also serve the browser client at `https://<host>:47420/`.
+
+**Connect a screen.** Desktop: Settings → Remote → pair by code or pick a nearby
+host, then **Connect**. Phone: **Pair a host**, scan the QR code or enter the
+address and code. Browser: open the host's URL and enter the code. In every
+case, compare the certificate fingerprint shown on both sides before you trust
+a new host.
+
+**Security.** Connections use TLS with a per-host self-signed certificate that
+native clients pin at pairing. Pairing issues a device token you can revoke on
+the host. QR codes carry the fingerprint; typing a code by hand trusts the first
+certificate you reach, so compare fingerprints. Details, a systemd unit, and
+troubleshooting: [docs/remote.md](docs/remote.md).
+
 ## Getting started
 
 **1. Install Tcode.** Download a build for your platform from
@@ -110,6 +144,15 @@ Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
 executable, and an XDG desktop entry plus themed PNG on Linux. Release downloads
 also include a `SHA256SUMS.txt` file.
+
+| Platform / client | Release download |
+| --- | --- |
+| macOS, arm64 / x64 | Desktop `.zip` / `.dmg`; headless `.zip` |
+| Windows, x64 / arm64 | Desktop or headless `.zip` |
+| Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
+| Android, arm64 | `tcode-<version>-android-arm64-debug.apk` — debug build; install with adb |
+| iOS, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned debug build; re-sign before installing |
+| Browser | Embedded in the headless release; open its HTTPS URL. No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
 Make sure `claude` or `codex` is on your `PATH` — or install an ACP agent from

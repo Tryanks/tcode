@@ -2,7 +2,11 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use std::path::{Path, PathBuf};
 
@@ -38,6 +42,7 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
+#[cfg(feature = "terminal")]
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_secs;
 use crate::window_caption;
@@ -321,6 +326,7 @@ pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
+    #[cfg(feature = "terminal")]
     terminal_drawer: Entity<TerminalDrawer>,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
@@ -353,13 +359,24 @@ pub struct ChatView {
 }
 
 impl ChatView {
+    pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |composer, cx| composer.focus(window, cx));
+    }
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let composer = cx.new(|cx| Composer::new(workspace_store.clone(), window, cx));
+        let compact = window_state.read(cx).compact;
+        let composer = cx.new(|cx| {
+            if compact {
+                Composer::new_with_layout(workspace_store.clone(), true, window, cx)
+            } else {
+                Composer::new(workspace_store.clone(), window, cx)
+            }
+        });
         let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
@@ -387,12 +404,14 @@ impl ChatView {
                 cx.notify();
             }),
         ];
+        #[cfg(feature = "terminal")]
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
 
         let mut this = Self {
             workspace_store,
             window_state,
             composer,
+            #[cfg(feature = "terminal")]
             terminal_drawer,
             list_state,
             turn_items: Vec::new(),
@@ -532,7 +551,9 @@ impl ChatView {
         if running && self._tick.is_none() {
             self._tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_millis(100)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(100))
+                        .await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -568,7 +589,7 @@ impl ChatView {
         if scheduled_limit_resume && self._limit_tick.is_none() {
             self._limit_tick = Some(cx.spawn(async move |this, cx| {
                 loop {
-                    smol::Timer::after(Duration::from_secs(1)).await;
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -1000,6 +1021,7 @@ impl ChatView {
                             text,
                             cwd,
                             markdown,
+                            compact: self.window_state.read(cx).compact,
                             pinned: pinned.1 == Some(entry.id.as_str()),
                             show_actions: !turn.running
                                 && last_assistant_segment == Some(segment_index),
@@ -1208,7 +1230,10 @@ impl ChatView {
                 };
                 components::bubble::native_rewind_button(
                     turn,
-                    self.workspace_store.read(cx).chat_native_rewind_state(turn),
+                    (
+                        self.workspace_store.read(cx).chat_native_rewind_state(turn),
+                        self.window_state.read(cx).compact,
+                    ),
                     components::bubble::RewindHandlers {
                         files_and_conversation: rewind_handler(RewindMode::FilesAndConversation),
                         conversation: rewind_handler(RewindMode::Conversation),
@@ -1248,6 +1273,7 @@ impl ChatView {
                 cwd,
                 attachments,
                 steering,
+                compact: self.window_state.read(cx).compact,
                 pinned,
                 copied,
                 markdown,
@@ -1365,6 +1391,7 @@ impl ChatView {
             let toggle_section_key = section_key;
             flow = flow.child(components::work_log::work_log(
                 components::work_log::WorkLogData {
+                    compact: self.window_state.read(cx).compact,
                     index,
                     segment_id: segment_id.to_string(),
                     capsule_label,
@@ -1598,7 +1625,7 @@ impl ChatView {
     fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
         self.copied = Some(key.clone());
         self._copied_task = Some(cx.spawn(async move |this, cx| {
-            smol::Timer::after(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.copied.as_deref() == Some(key.as_str()) {
                     this.copied = None;
@@ -1716,7 +1743,7 @@ impl ChatView {
         let right_tab = panel.right_tab;
         let plan_showing = panel.plan_showing;
         let preview_showing = panel.preview_showing;
-        let terminal_open = panel.terminal_open;
+        let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
             .child(sidebar_toggle)
@@ -1728,19 +1755,22 @@ impl ChatView {
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            .child(
-                                Button::new("panel-layout")
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::PanelBottom)
-                                    .selected(terminal_open)
-                                    .tooltip(crate::tr!("chat.toggle_terminal"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_terminal_panel(cx))
-                                    })),
-                            )
+                            .when(cfg!(feature = "terminal"), |this| {
+                                this.child(
+                                    Button::new("panel-layout")
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::PanelBottom)
+                                        .selected(terminal_open)
+                                        .tooltip(crate::tr!("chat.toggle_terminal"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_store.update(cx, |store, cx| {
+                                                store.toggle_terminal_panel(cx)
+                                            })
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("plan-panel")
                                     .ghost()
@@ -1754,19 +1784,22 @@ impl ChatView {
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
-                            .child(
-                                Button::new("preview-panel")
-                                    .ghost()
-                                    .small()
-                                    .compact()
-                                    .icon(IconName::Globe)
-                                    .selected(preview_showing)
-                                    .tooltip(crate::tr!("chat.toggle_preview"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store
-                                            .update(cx, |store, cx| store.toggle_preview_panel(cx));
-                                    })),
-                            )
+                            .when(cfg!(feature = "desktop"), |this| {
+                                this.child(
+                                    Button::new("preview-panel")
+                                        .ghost()
+                                        .small()
+                                        .compact()
+                                        .icon(IconName::Globe)
+                                        .selected(preview_showing)
+                                        .tooltip(crate::tr!("chat.toggle_preview"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.workspace_store.update(cx, |store, cx| {
+                                                store.toggle_preview_panel(cx)
+                                            });
+                                        })),
+                                )
+                            })
                             .child(
                                 Button::new("diff-panel")
                                     .ghost()
@@ -2084,7 +2117,66 @@ impl ChatView {
             .into_any_element()
     }
 
+    /// The phone's "new thread" empty state (§3.4): which project the thread
+    /// starts in, and which provider/model the first message reaches.
+    fn render_compact_draft_empty(
+        &self,
+        cwd: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let store = self.workspace_store.read(cx);
+        let project = store
+            .projects()
+            .into_iter()
+            .find(|project| project.root == cwd)
+            .map(|project| project.name)
+            .unwrap_or_else(|| {
+                cwd.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let composer = store.composer_state();
+        let model = composer
+            .active_model
+            .as_ref()
+            .map(|active| {
+                let name = composer
+                    .active_model_spec
+                    .as_ref()
+                    .map(|spec| spec.display_name.clone())
+                    .or_else(|| active.model.clone())
+                    .unwrap_or_default();
+                let provider = crate::settings::provider_label(active.provider);
+                if name.is_empty() {
+                    provider.to_string()
+                } else {
+                    format!("{provider} · {name}")
+                }
+            })
+            .unwrap_or_default();
+        crate::material::empty_state(
+            Icon::empty().path("icons/message-square.svg"),
+            crate::tr!("mobile.draft_empty_title", project = project),
+            crate::tr!("mobile.draft_empty_body", model = model),
+            cx,
+        )
+        .into_any_element()
+    }
+
     fn render_empty_state(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The phone never shows the desktop launcher here: no "Add project"
+        // button and no Ctrl+K hint (docs/mobile-design.md §3.0 forbids desktop
+        // shortcut copy). Reaching this state on a phone means the host has no
+        // threads to open yet.
+        if self.window_state.read(cx).compact {
+            return crate::material::empty_state(
+                Icon::new(IconName::Folder),
+                crate::tr!("mobile.projects_empty"),
+                crate::tr!("mobile.projects_help"),
+                cx,
+            )
+            .into_any_element();
+        }
         let projects = self.workspace_store.read(cx).projects();
         let sessions = self.workspace_store.read(cx).sidebar_sessions();
         let hub_projects = start_hub_projects(&projects, &sessions);
@@ -2154,8 +2246,8 @@ impl ChatView {
                     .cursor_pointer()
                     .hover(|row| row.bg(cx.theme().accent))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.workspace_store.update(cx, |store, _cx| {
-                            store.start_draft(project_id.clone(), cwd.clone());
+                        this.workspace_store.update(cx, |store, cx| {
+                            store.start_draft(project_id.clone(), cwd.clone(), cx);
                         });
                     }))
                     .child(
@@ -2303,11 +2395,19 @@ impl Render for ChatView {
         self.sync_markdown_scroll_position(cx);
         let active = self.workspace_store.read(cx).chat_active_session();
 
-        let root = v_flex().size_full().min_w_0().bg(cx.theme().background);
+        let compact = self.window_state.read(cx).compact;
+        // The phone reads on T1 paper (§3.0); the desktop keeps the glass canvas.
+        let root = v_flex().size_full().min_w_0().bg(if compact {
+            crate::material::content_surface(cx)
+        } else {
+            cx.theme().background
+        });
 
         let Some((title, cwd, is_draft)) = active else {
             return root
-                .child(self.render_header(None, false, None, window, cx))
+                .when(!self.window_state.read(cx).compact, |el| {
+                    el.child(self.render_header(None, false, None, window, cx))
+                })
                 .child(self.render_empty_state(window, cx));
         };
 
@@ -2322,8 +2422,11 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
+        #[cfg(feature = "terminal")]
         let panel = self.workspace_store.read(cx).chat_panel_state();
-        let terminal_open = panel.terminal_open;
+        #[cfg(feature = "terminal")]
+        let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
+        #[cfg(feature = "terminal")]
         let terminal_height = panel.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
@@ -2384,7 +2487,11 @@ impl Render for ChatView {
                 h_flex()
                     .w_full()
                     .justify_center()
-                    .px(px(CONTENT_MIN_PADDING))
+                    .px(px(if this.window_state.read(cx).compact {
+                        16.
+                    } else {
+                        CONTENT_MIN_PADDING
+                    }))
                     .when(this.highlighted_turn == Some(index), |item| {
                         item.rounded(crate::material::radius_card())
                             .bg(cx.theme().list_active)
@@ -2398,6 +2505,14 @@ impl Render for ChatView {
         .flex_1()
         .min_h_0()
         .py_4();
+
+        // A fresh phone draft gets the spec'd empty state instead of a blank
+        // scroller (§3.4); the composer below it is already focused.
+        let timeline: AnyElement = if compact && is_draft && item_count == 0 {
+            self.render_compact_draft_empty(&cwd, cx)
+        } else {
+            timeline.into_any_element()
+        };
 
         let composer: AnyElement = if native_subagent_readonly {
             div()
@@ -2428,8 +2543,15 @@ impl Render for ChatView {
                         |this| this.child(self.render_scroll_pill(cx)),
                     ),
             )
+            // A faded hairline plus 8pt of air separates the phone's timeline
+            // from its composer (§3.4); the desktop separates by rhythm alone.
+            .when(compact, |el| {
+                el.child(crate::material::faded_hairline(cx))
+                    .child(div().h(px(8.)).flex_none())
+            })
             .child(composer);
 
+        #[cfg(feature = "terminal")]
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
             let drawer_resize = self.terminal_drawer.clone();
@@ -2457,7 +2579,10 @@ impl Render for ChatView {
         } else {
             main.into_any_element()
         };
-        root.child(header).child(body)
+        #[cfg(not(feature = "terminal"))]
+        let body: AnyElement = main.into_any_element();
+        root.when(!self.window_state.read(cx).compact, |el| el.child(header))
+            .child(body)
     }
 }
 
@@ -2512,6 +2637,7 @@ fn render_commit_footer(
         .into_any_element()
 }
 
+#[cfg(feature = "desktop")]
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
     if tcode_services::desktop::open_in_zed(cwd).is_err() {
         window.push_notification(
@@ -2519,6 +2645,14 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
             cx,
         );
     }
+}
+
+#[cfg(not(feature = "desktop"))]
+fn open_in_zed(_cwd: &Path, window: &mut Window, cx: &mut App) {
+    window.push_notification(
+        Notification::error(crate::tr!("errors.zed_cli_missing")),
+        cx,
+    );
 }
 
 #[cfg(test)]
@@ -3285,8 +3419,8 @@ This begins after the hard break."#;
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
-            let active = state.residents.active.as_mut().expect("active draft");
+            let id = state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).expect("selected draft");
             active.timeline = Timeline::default();
             active.timeline.turns = vec![TurnMeta::default()];
             active.timeline.entries = vec![
@@ -3297,7 +3431,7 @@ This begins after the hard break."#;
             (active.meta.id.clone(), active.timeline.clone())
         }))
         .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(host.clone(), cx));
+        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new_local(&host, cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id, timeline);
         });
@@ -3437,14 +3571,14 @@ This begins after the hard break."#;
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
         let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
-            let active = state.residents.active.as_mut().expect("active draft");
+            let id = state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).expect("selected draft");
             active.timeline = timeline;
             active.draft = false;
             (active.meta.id.clone(), active.timeline.clone())
         }))
         .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new(host, cx));
+        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id.clone(), timeline);
         });

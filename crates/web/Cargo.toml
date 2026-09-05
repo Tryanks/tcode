@@ -1,0 +1,35 @@
+[package]
+name = "tcode-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+debug-exports = []
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+# The browser constructs its own platform (gpui::Application::with_platform)
+# rather than going through gpui-pre-platform, whose wasm arm enables
+# gpui-pre-web's nightly-only "multithreaded" default.
+gpui_web = { package = "gpui-pre-web", version = "=0.3.3", default-features = false }
+console_error_panic_hook = "0.1"
+tcode-protocol = { path = "../protocol", default-features = false }
+tcode-mobile = { path = "../mobile", default-features = false }
+tcode-ui = { path = "../ui", default-features = false }
+async-channel = "2"
+futures-lite = "2"
+serde_json = "1"
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "=0.4.71"
+js-sys = "=0.3.98"
+web-sys = { version = "=0.3.98", features = [
+    "Window", "Document", "Element", "HtmlCanvasElement", "Node",
+    "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList",
+    "Location", "Navigator", "Storage", "Request", "RequestInit",
+    "Headers", "Response", "WebSocket", "Event", "EventTarget", "MessageEvent",
+] }

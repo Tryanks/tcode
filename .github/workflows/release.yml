@@ -35,9 +35,11 @@ jobs:
           version="${tag#v}"
           prerelease=false
           case "$version" in *-*) prerelease=true;; esac
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
 
   package:
     name: ${{ matrix.label }}
@@ -350,6 +352,8 @@ jobs:
 
           - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
           - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
+          - **Android**: the arm64 APK is a debug build signed with Gradle's default debug keystore.
+          - **iOS**: the arm64 IPA is unsigned and must be re-signed with an Apple provisioning profile before installation.
 
           Packages are uploaded as soon as each platform build completes. macOS artifacts are
           architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently
@@ -395,9 +399,278 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  web-bundle:
+    name: Build embedded web bundle
+    needs: setup
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Install stable Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-web-bundle
+
+      - name: Install wasm tools
+        run: |
+          cargo install wasm-bindgen-cli --version 0.2.121 --locked
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binaryen
+
+      - name: Build browser bundle
+        run: |
+          set -euo pipefail
+          cargo build -p tcode-web --target wasm32-unknown-unknown --release --locked
+          mkdir -p crates/web/dist
+          wasm-bindgen --target web --out-dir crates/web/dist --out-name tcode_web \
+            target/wasm32-unknown-unknown/release/tcode_web.wasm
+          wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
+            crates/web/dist/tcode_web_bg.wasm \
+            -o crates/web/dist/tcode_web_bg.optimized.wasm
+          mv crates/web/dist/tcode_web_bg.optimized.wasm crates/web/dist/tcode_web_bg.wasm
+          cp crates/web/static/index.html crates/web/dist/index.html
+          ls -lh crates/web/dist
+
+      - name: Upload browser bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: crates/web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  package-headless:
+    name: Headless ${{ matrix.label }}
+    needs: [setup, web-bundle]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            os: macos-26
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: arm64
+          - label: macOS x64
+            os: macos-26
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x64
+          - label: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x64
+          - label: Windows arm64
+            os: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: arm64
+          - label: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          - label: Linux arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      VERSION: ${{ needs.setup.outputs.version }}
+      TCODE_BUILD_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Install stable Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-headless-${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev mold
+
+      - name: Download browser bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: crates/web/dist
+
+      - name: Build headless server with embedded web client
+        shell: bash
+        run: cargo build -p tcode-headless --release --locked --features web --target "${{ matrix.target }}"
+
+      - name: Package Unix server
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/tcode-headless" dist/tcode-headless
+          chmod +x dist/tcode-headless
+          if [[ "${{ matrix.platform }}" == "macos" ]]; then
+            (cd dist && zip -q "tcode-headless-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}.zip" tcode-headless)
+          else
+            tar -C dist -czf "dist/tcode-headless-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz" tcode-headless
+          fi
+          rm dist/tcode-headless
+
+      - name: Package Windows server
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\tcode-headless.exe" "dist\tcode-headless.exe"
+          Compress-Archive -Path "dist\tcode-headless.exe" -DestinationPath "dist\tcode-headless-$env:VERSION-windows-${{ matrix.arch }}.zip"
+          Remove-Item "dist\tcode-headless.exe"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-headless-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  package-android:
+    name: Android arm64 debug
+    needs: setup
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_NDK_PLATFORM: 26
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Install stable Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-android-arm64
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and cargo-ndk
+        run: |
+          sdkmanager 'ndk;27.1.12297006'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+          cargo install cargo-ndk --locked
+
+      - name: Build Android debug APK
+        run: |
+          cargo ndk -t arm64-v8a build -p tcode-android --locked \
+            --config 'profile.dev.package.gpui-kit-assets.debug-assertions=false' \
+            --config 'profile.dev.package.rust-embed.debug-assertions=false'
+          crates/android/host/build.sh
+
+      - name: Package Android APK
+        run: |
+          mkdir -p dist
+          cp crates/android/host/app/build/outputs/apk/debug/app-debug.apk \
+            "dist/tcode-${VERSION}-android-arm64-debug.apk"
+          ls -lh dist
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-android-arm64-debug
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  package-ios:
+    name: iOS arm64 unsigned
+    needs: setup
+    runs-on: macos-26
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Install stable Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-ios-arm64
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build unsigned iOS app
+        run: |
+          IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build -p tcode-ios --target aarch64-apple-ios --locked \
+            --config 'profile.dev.package.gpui-kit-assets.debug-assertions=false' \
+            --config 'profile.dev.package.rust-embed.debug-assertions=false'
+          crates/ios/host/build.sh --device
+
+      - name: Package unsigned iOS IPA
+        run: |
+          mkdir -p dist/Payload
+          cp -R crates/ios/host/build/Build/Products/Debug-iphoneos/Tcode.app dist/Payload/Tcode.app
+          (cd dist && zip -qry "tcode-${VERSION}-ios-arm64-unsigned.ipa" Payload)
+          rm -rf dist/Payload
+          ls -lh dist
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-ios-arm64-unsigned
+          path: dist/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
   finalize:
     name: Publish release checksums
-    needs: [setup, package]
+    needs: [setup, package, package-headless, package-android, package-ios]
     runs-on: ubuntu-24.04
     steps:
       - name: Download all packages
@@ -412,15 +685,15 @@ jobs:
 
       - name: Generate SHA-256 checksums
         working-directory: dist
-        run: sha256sum * > SHA256SUMS.txt
+        run: sha256sum -- * > SHA256SUMS.txt
 
-      - name: Upload aggregate checksums
+      - name: Upload packages and aggregate checksums
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.setup.outputs.tag }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          gh release upload "$RELEASE_TAG" dist/SHA256SUMS.txt \
+          gh release upload "$RELEASE_TAG" dist/* \
             --repo "$REPOSITORY" \
             --clobber
 

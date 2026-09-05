@@ -1,15 +1,17 @@
 //! NDJSON in-process client/host pipe with typed endpoint APIs.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use tcode_client::HostLink;
+#[cfg(test)]
+use tcode_client::{HostEventReceiver, HostEventTryRecvError};
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, ProtocolError, Query,
-    QueryResponse, Subscription, decode_client_line, decode_host_line, encode_line,
+    QueryResponse, decode_client_line,
 };
 #[cfg(test)]
-use tcode_protocol::{EventEnvelope, ServerEvent, Topic};
+use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
 use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
@@ -25,9 +27,8 @@ pub struct HostServices {
     pub background_startup_probes: bool,
     /// Generate AI-authored titles after the first completed turn.
     pub ai_title_generation: bool,
-    /// Split at host construction: URL/tokens stay host-side and the
-    /// non-serializable WebView broker receiver moves once to `HostHandle`.
-    /// A remote transport replaces that receiver with reverse RPC.
+    /// URL/tokens and the broker receiver stay host-side. Requests reach
+    /// subscribed WebViews through the preview reverse-RPC topic.
     pub preview: Option<preview_mcp::PreviewMcpServer>,
     /// Deliberate construction-time local handle. The broker receiver stays
     /// entirely on the host executor; a remote transport must expose the same
@@ -38,256 +39,45 @@ pub struct HostServices {
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
 
-struct HostHandleInner {
-    client_tx: smol::channel::Sender<String>,
-    event_rx: smol::channel::Receiver<String>,
-    stopped_rx: smol::channel::Receiver<()>,
-    #[cfg(feature = "test-support")]
-    test_mailbox: smol::channel::Sender<HostMsg>,
-    next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, smol::channel::Sender<String>>>>,
-    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
-    preview_requests: Mutex<Option<smol::channel::Receiver<preview_mcp::BrokerRequest>>>,
-    terminals: LocalTerminalRegistry,
-}
+#[derive(Clone, Default)]
+pub struct ImportRoutes(Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>);
 
-/// Client-side endpoint for the host.
 #[derive(Clone)]
-pub struct HostHandle {
-    inner: Arc<HostHandleInner>,
+pub struct SpawnedHost {
+    pub to_host: async_channel::Sender<String>,
+    pub from_host: async_channel::Receiver<String>,
+    pub stopped: async_channel::Receiver<()>,
+    pub terminals: LocalTerminalRegistry,
+    /// Legacy local affordance; new hosts route preview requests through the link.
+    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
+    pub import_routes: ImportRoutes,
+    link: Arc<OnceLock<HostLink>>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_mailbox: async_channel::Sender<HostMsg>,
 }
 
-/// Client-side receiver that decodes each host NDJSON record on receipt.
-#[derive(Clone)]
-pub struct HostEventReceiver {
-    wire: smol::channel::Receiver<String>,
-}
-
-#[derive(Debug)]
-pub enum HostEventTryRecvError {
-    Empty,
-    Closed,
-    Protocol(ProtocolError),
-}
-
-impl HostEventReceiver {
-    pub async fn recv(&self) -> Result<HostMessage, ProtocolError> {
-        let line = self.wire.recv().await.map_err(transport_error)?;
-        decode_host_line(&line)
-    }
-
-    pub fn recv_blocking(&self) -> Result<HostMessage, ProtocolError> {
-        let line = self.wire.recv_blocking().map_err(transport_error)?;
-        decode_host_line(&line)
-    }
-
-    pub fn try_recv(&self) -> Result<HostMessage, HostEventTryRecvError> {
-        let line = self.wire.try_recv().map_err(|error| match error {
-            smol::channel::TryRecvError::Empty => HostEventTryRecvError::Empty,
-            smol::channel::TryRecvError::Closed => HostEventTryRecvError::Closed,
-        })?;
-        decode_host_line(&line).map_err(HostEventTryRecvError::Protocol)
-    }
-}
-
-impl HostHandle {
-    fn next_id(&self) -> u64 {
-        self.inner.next_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn send_payload(&self, id: u64, payload: ClientPayload) -> Result<(), ProtocolError> {
-        let line = encode_line(&ClientMessage { id, payload })?;
-        self.inner
-            .client_tx
-            .try_send(line)
-            .map_err(|error| ProtocolError {
-                code: "transport_closed".into(),
-                message: error.to_string(),
+impl SpawnedHost {
+    pub fn link(&self) -> HostLink {
+        self.link
+            .get_or_init(|| {
+                let link = HostLink::new(self.to_host.clone(), self.from_host.clone());
+                smol::spawn({
+                    let link = link.clone();
+                    async move { link.pump().await }
+                })
+                .detach();
+                link
             })
+            .clone()
     }
 
-    async fn request(&self, payload: ClientPayload) -> Result<HostMessage, ProtocolError> {
-        let id = self.next_id();
-        let (sender, receiver) = smol::channel::bounded(1);
-        self.inner.pending.lock().unwrap().insert(id, sender);
-        if let Err(error) = self.send_payload(id, payload) {
-            self.inner.pending.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        let line = receiver.recv().await.map_err(|error| ProtocolError {
-            code: "transport_closed".into(),
-            message: error.to_string(),
-        })?;
-        decode_host_line(&line)
-    }
-
-    /// Fire a mutation through the serialized pipe. Its correlated ack is intentionally
-    /// ignored by this fire-and-forget UI convenience.
-    pub fn dispatch(&self, command: Command) -> Result<(), ProtocolError> {
-        let id = self.next_id();
-        self.send_payload(id, ClientPayload::Command(command))
-    }
-
-    pub async fn command(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
-        match self.request(ClientPayload::Command(command)).await? {
-            HostMessage::Ack { result, .. } => result,
-            other => Err(unexpected_response("command ack", &other)),
-        }
-    }
-
-    pub fn command_blocking(&self, command: Command) -> Result<CommandResponse, ProtocolError> {
-        smol::block_on(self.command(command))
-    }
-
-    pub async fn query(&self, query: Query) -> Result<QueryResponse, ProtocolError> {
-        match self.request(ClientPayload::Query(query)).await? {
-            HostMessage::QueryResult { result, .. } => result,
-            other => Err(unexpected_response("query result", &other)),
-        }
-    }
-
-    /// Drain the host's store-write barrier, close the serialized client
-    /// endpoint, and wait until the state-owning thread has exited.
-    ///
-    /// This is the terminal lifecycle operation for the one-client in-process
-    /// transport. Closing happens after the correlated command result so the
-    /// shutdown request itself is always delivered.
-    pub async fn shutdown(&self) -> Result<(), ProtocolError> {
-        let result = self.command(Command::ShutdownAllAndFlush).await;
-        self.inner.client_tx.close();
-        let stopped = self.inner.stopped_rx.recv().await;
-        match result? {
-            CommandResponse::Unit => {}
-            other => {
-                return Err(ProtocolError {
-                    code: "unexpected_response".into(),
-                    message: format!("expected unit shutdown ack, got {other:?}"),
-                });
-            }
-        }
-        stopped.map_err(|error| ProtocolError {
-            code: "host_stop_failed".into(),
-            message: error.to_string(),
-        })
-    }
-
+    #[cfg(any(test, feature = "test-support"))]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
-        smol::block_on(self.shutdown())
+        self.link().shutdown_blocking()?;
+        self.stopped.recv_blocking().map_err(transport_error)
     }
 
-    pub fn subscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
-        let id = self.next_id();
-        self.send_payload(id, ClientPayload::Subscribe(subscription))
-    }
-
-    /// Decoded events consumed by the client-side replica pump.
-    pub fn event_receiver(&self) -> HostEventReceiver {
-        HostEventReceiver {
-            wire: self.inner.event_rx.clone(),
-        }
-    }
-
-    /// Take the preview MCP request receiver once.
-    ///
-    /// This is a deliberate local-transport affordance because each request
-    /// includes a reply sender and a native WebView must answer on the client.
-    /// A remote transport must replace it with reverse RPC.
-    pub fn take_preview_requests(
-        &self,
-    ) -> Option<smol::channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.inner.preview_requests.lock().unwrap().take()
-    }
-
-    /// Access the construction-time live-terminal handle registry.
-    ///
-    /// No bytes or layout metadata use JSON here: terminal bytes stay on the
-    /// split term channels, while layout is replicated in `SessionStatus`.
-    pub fn terminal_registry(&self) -> LocalTerminalRegistry {
-        self.inner.terminals.clone()
-    }
-
-    /// Start an import through a command and receive its progress stream.
-    /// The command and ack cross NDJSON; the progress receiver is a deliberate
-    /// local affordance correlated by the command's wire id.
-    pub async fn start_external_import(
-        &self,
-        project_id: String,
-        threads: Vec<tcode_protocol::ExternalThread>,
-    ) -> Result<Option<smol::channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
-        let id = self.next_id();
-        let (progress_sender, progress_receiver) = smol::channel::unbounded();
-        self.inner
-            .import_routes
-            .lock()
-            .unwrap()
-            .insert(id, progress_sender);
-        let (ack_sender, ack_receiver) = smol::channel::bounded(1);
-        self.inner.pending.lock().unwrap().insert(id, ack_sender);
-        if let Err(error) = self.send_payload(
-            id,
-            ClientPayload::Command(Command::StartExternalImport {
-                project_id,
-                threads,
-            }),
-        ) {
-            self.inner.pending.lock().unwrap().remove(&id);
-            self.inner.import_routes.lock().unwrap().remove(&id);
-            return Err(error);
-        }
-        let started = match ack_receiver
-            .recv()
-            .await
-            .map(|line| decode_host_line(&line))
-        {
-            Ok(Ok(HostMessage::Ack {
-                result: Ok(CommandResponse::ExternalImportStarted(started)),
-                ..
-            })) => started,
-            Ok(Ok(HostMessage::Ack {
-                result: Ok(other), ..
-            })) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(ProtocolError {
-                    code: "unexpected_response".into(),
-                    message: format!("expected external-import started result, got {other:?}"),
-                });
-            }
-            Ok(Ok(HostMessage::Ack {
-                result: Err(error), ..
-            })) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(error);
-            }
-            Ok(Ok(other)) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(unexpected_response("external-import ack", &other));
-            }
-            Ok(Err(error)) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(error);
-            }
-            Err(error) => {
-                self.inner.import_routes.lock().unwrap().remove(&id);
-                return Err(ProtocolError {
-                    code: "transport_closed".into(),
-                    message: error.to_string(),
-                });
-            }
-        };
-        if !started {
-            self.inner.import_routes.lock().unwrap().remove(&id);
-            return Ok(None);
-        }
-        Ok(Some(progress_receiver))
-    }
-
-    /// Test-fixture ingress for assertions that compare a client replica with
-    /// the authoritative host value after an internal mutation.
-    ///
-    /// This is intentionally absent from production builds. The mutation
-    /// enters the real host mailbox over a deliberate typed local affordance;
-    /// any emitted events still cross the serialized path to the client.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn update_state_for_test<R>(
         &self,
         update: impl FnOnce(&mut AppState, &mut HostCx) -> R + Send + 'static,
@@ -296,31 +86,50 @@ impl HostHandle {
         R: Send + 'static,
     {
         let (sender, receiver) = smol::channel::bounded(1);
-        self.inner
-            .test_mailbox
+        self.test_mailbox
             .send(HostMsg::Enqueued(Box::new(move |state, cx| {
                 let result = update(state, cx);
                 let _ = sender.try_send(result);
             })))
             .await
-            .map_err(|error| ProtocolError {
-                code: "transport_closed".into(),
-                message: error.to_string(),
-            })?;
-        receiver.recv().await.map_err(|error| ProtocolError {
-            code: "transport_closed".into(),
-            message: error.to_string(),
-        })
+            .map_err(transport_error)?;
+        receiver.recv().await.map_err(transport_error)
     }
 }
 
-fn unexpected_response(expected: &str, actual: &HostMessage) -> ProtocolError {
-    ProtocolError {
-        code: "unexpected_response".into(),
-        message: format!("expected {expected}, got {actual:?}"),
+pub async fn start_external_import(
+    link: &HostLink,
+    routes: &ImportRoutes,
+    project_id: String,
+    threads: Vec<tcode_protocol::ExternalThread>,
+) -> Result<Option<async_channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
+    let (id, response) = link.command_with_id(Command::StartExternalImport {
+        project_id,
+        threads,
+    });
+    let (sender, receiver) = async_channel::unbounded();
+    routes.0.lock().unwrap().insert(id, sender);
+    match response.await {
+        Ok(CommandResponse::ExternalImportStarted(true)) => Ok(Some(receiver)),
+        Ok(CommandResponse::ExternalImportStarted(false)) => {
+            routes.0.lock().unwrap().remove(&id);
+            Ok(None)
+        }
+        Ok(other) => {
+            routes.0.lock().unwrap().remove(&id);
+            Err(ProtocolError {
+                code: "unexpected_response".into(),
+                message: format!("expected external-import started result, got {other:?}"),
+            })
+        }
+        Err(error) => {
+            routes.0.lock().unwrap().remove(&id);
+            Err(error)
+        }
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError {
         code: "transport_closed".into(),
@@ -328,20 +137,18 @@ fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     }
 }
 
-/// Spawn the dedicated host thread and return its typed client endpoint.
-pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<HostHandle> {
+/// Spawn the dedicated host thread and return its serialized transport and local affordances.
+pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::Result<SpawnedHost> {
     fn assert_send<T: Send>() {}
     assert_send::<AppState>();
 
-    let (client_tx, client_rx) = smol::channel::unbounded::<String>();
-    let (event_tx, event_rx) = smol::channel::unbounded::<String>();
+    let (client_tx, client_rx) = async_channel::unbounded::<String>();
+    let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
     let terminals = LocalTerminalRegistry::default();
-    // Deliberate local-transport affordance: the WebView broker request
-    // receiver cannot cross serde. Move its single consumer exactly once into
-    // `HostHandle`; a remote transport must replace it with reverse RPC. The
-    // host retains only the URL/token registry used to register providers.
+    // The host owns the broker, including when started without a desktop.
+    // Both local and remote WebViews answer the same serialized reverse RPC.
     let (preview_registration, preview_requests) = match services.preview.take() {
         Some(preview_mcp::PreviewMcpServer {
             url,
@@ -351,20 +158,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
-    let pending = Arc::new(Mutex::new(HashMap::new()));
-    let import_routes = Arc::new(Mutex::new(HashMap::new()));
-    let inner = Arc::new(HostHandleInner {
-        client_tx,
-        event_rx,
-        stopped_rx,
-        #[cfg(feature = "test-support")]
-        test_mailbox: mailbox_tx.clone(),
-        next_id: AtomicU64::new(1),
-        pending: pending.clone(),
-        import_routes: import_routes.clone(),
-        preview_requests: Mutex::new(preview_requests),
-        terminals: terminals.clone(),
-    });
+    let broker_requests = preview_requests;
+    let preview_requests = None;
+    let import_routes = ImportRoutes::default();
+    let host_terminals = terminals.clone();
+    let host_import_routes = import_routes.clone();
+    #[cfg(any(test, feature = "test-support"))]
+    let test_mailbox = mailbox_tx.clone();
 
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -372,7 +172,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         .spawn(move || {
             let mut state = AppState::new_with_terminal_registry(
                 store,
-                terminals,
+                host_terminals,
                 services.ai_title_generation,
             );
             if let Some((url, tokens)) = preview_registration {
@@ -384,8 +184,9 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             if let Some(server) = services.computer_use.take() {
                 state.attach_computer_use_mcp(server.url, server.token);
             }
-            let mut cx = HostCx::new(mailbox_tx, event_tx, pending);
+            let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_orchestrate_requests(&mut cx);
+            state.pump_preview_requests(broker_requests, &mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);
@@ -397,7 +198,13 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(());
-            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx, import_routes));
+            smol::block_on(host_loop(
+                state,
+                cx,
+                client_rx,
+                mailbox_rx,
+                host_import_routes,
+            ));
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -407,7 +214,17 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         )
     })?;
 
-    Ok(HostHandle { inner })
+    Ok(SpawnedHost {
+        to_host: client_tx,
+        from_host: event_rx,
+        stopped: stopped_rx,
+        terminals,
+        preview_requests,
+        import_routes,
+        link: Arc::new(OnceLock::new()),
+        #[cfg(any(test, feature = "test-support"))]
+        test_mailbox,
+    })
 }
 
 async fn host_loop(
@@ -415,7 +232,7 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostMsg>,
-    import_routes: Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    import_routes: ImportRoutes,
 ) {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
@@ -446,6 +263,7 @@ async fn host_loop(
             },
         }
         state.sync_terminal_handles();
+        state.reap_terminal_output();
         domain_diff.emit_changes(&state, &mut cx);
     }
 }
@@ -461,7 +279,7 @@ fn handle_client_message(
     state: &mut AppState,
     cx: &mut HostCx,
     message: ClientMessage,
-    import_routes: &Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    import_routes: &ImportRoutes,
 ) {
     let ClientMessage { id, payload } = message;
     match payload {
@@ -498,9 +316,18 @@ fn handle_client_message(
             });
         }
         ClientPayload::Subscribe(subscription) => {
-            if let Some(snapshot) = state.subscription_snapshot(&subscription.topic) {
+            state.subscribe(&subscription, cx);
+            if let Some(mut snapshot) = state.subscription_snapshot(&subscription) {
+                snapshot.request_id = Some(id);
                 cx.emit(HostEvent::Domain(snapshot));
             }
+            cx.send_message(HostMessage::Ack {
+                id,
+                result: Ok(CommandResponse::Unit),
+            });
+        }
+        ClientPayload::Unsubscribe(subscription) => {
+            state.unsubscribe(&subscription, cx);
             cx.send_message(HostMessage::Ack {
                 id,
                 result: Ok(CommandResponse::Unit),
@@ -515,7 +342,7 @@ pub(crate) fn handle_client_message_for_test(
     cx: &mut HostCx,
     message: ClientMessage,
 ) {
-    handle_client_message(state, cx, message, &Arc::new(Mutex::new(HashMap::new())));
+    handle_client_message(state, cx, message, &ImportRoutes::default());
 }
 
 enum CommandOutcome {
@@ -528,22 +355,50 @@ fn dispatch_command(
     cx: &mut HostCx,
     request_id: u64,
     command: Command,
-    import_routes: &Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>,
+    import_routes: &ImportRoutes,
 ) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
-        Command::ApplyPendingRelaunch => {
-            response = CommandResponse::PendingRelaunchSection(app.apply_pending_relaunch(cx));
+        Command::TerminalInput { terminal_id, bytes } => {
+            if let Some(terminal) = app.terminal_handle(terminal_id) {
+                terminal.write_input(bytes);
+            }
         }
-        Command::OpenLatestSession => app.open_latest_session(cx),
+        Command::ResizeTerminal {
+            terminal_id,
+            cols,
+            rows,
+        } => {
+            if let Some(terminal) = app.terminal_handle(terminal_id) {
+                terminal.resize(
+                    usize::from(cols.clamp(2, 1000)),
+                    usize::from(rows.clamp(2, 1000)),
+                );
+            }
+        }
+        Command::PreviewReply {
+            request_id,
+            response,
+        } => app.resolve_preview(request_id, response),
+        Command::ApplyPendingRelaunch => {
+            let (section, session_id) = app.apply_pending_relaunch();
+            response = CommandResponse::PendingRelaunchSection {
+                section,
+                session_id,
+            };
+        }
+        Command::OpenLatestSession => {
+            response = CommandResponse::SessionId(app.sessions.first().map(|m| m.id.clone()));
+        }
         Command::ShutdownAllAndFlush => {
             app.shutdown_all(cx);
             return CommandOutcome::StoreBarrier(app.store_write_barrier(cx));
         }
         Command::OrchestrateTurn {
+            session_id,
             text,
             attachment_paths,
-        } => app.orchestrate_turn(text, attachment_paths, cx),
+        } => app.orchestrate_turn(&session_id, text, attachment_paths, cx),
         Command::ReloadProvider => app.reload_provider(cx),
         Command::SetProfileSecret {
             profile_id,
@@ -568,11 +423,12 @@ fn dispatch_command(
         Command::UpdateProvider { provider } => app.update_provider(provider, cx),
         Command::SetSidebarCollapsed { collapsed } => app.set_sidebar_collapsed(collapsed, cx),
         Command::RunGitAction {
+            session_id,
             action,
             message,
             included,
             feature_branch,
-        } => app.run_git_action(action, message, included, feature_branch, cx),
+        } => app.run_git_action(&session_id, action, message, included, feature_branch, cx),
         Command::RefreshAcpRegistry => app.refresh_acp_registry(cx),
         Command::InstallAcpAgent { id } => app.install_acp_agent(id, cx),
         Command::RemoveAcpAgent { id } => app.remove_acp_agent(&id, cx),
@@ -583,28 +439,50 @@ fn dispatch_command(
             env,
         } => app.add_custom_acp_agent(name, command, args, env, cx),
         Command::UpdateAcpAgent { id, patch } => app.update_acp_agent(&id, patch, cx),
-        Command::SetActiveAcpAgent { id } => app.set_active_acp_agent(&id, cx),
+        Command::SetActiveAcpAgent { session_id, id } => {
+            app.set_active_acp_agent(&session_id, &id, cx)
+        }
         Command::ResetSettings => app.reset_settings(cx),
-        Command::WriteRelaunchMarker { reopen_settings } => {
-            app.write_relaunch_marker(&reopen_settings)
-        }
+        Command::WriteRelaunchMarker {
+            session_id,
+            reopen_settings,
+        } => app.write_relaunch_marker(&session_id, &reopen_settings),
         Command::ClearRelaunchMarker => app.clear_relaunch_marker(),
-        Command::SetTerminalHeight { height } => app.set_terminal_height(height, cx),
-        Command::ToggleTerminalPanel => app.toggle_terminal_panel(cx),
-        Command::CloseTerminalPanel => app.close_terminal_panel(cx),
-        Command::RestartTerminal => app.restart_terminal(cx),
-        Command::NewTerminal => app.new_terminal(cx),
-        Command::SplitTerminal { direction } => app.split_terminal(direction, cx),
-        Command::ActivateTerminal { terminal_id } => app.activate_terminal(terminal_id, cx),
-        Command::CloseTerminal { terminal_id } => app.close_terminal(terminal_id, cx),
-        Command::CaptureTerminalSelection { terminal_id } => {
-            app.capture_terminal_selection(terminal_id, cx)
+        Command::SetTerminalHeight { session_id, height } => {
+            app.set_terminal_height(&session_id, height, cx)
         }
-        Command::RemoveTerminalContext { context_id } => {
-            app.remove_terminal_context(context_id, cx)
+        Command::ToggleTerminalPanel { session_id } => app.toggle_terminal_panel(&session_id, cx),
+        Command::CloseTerminalPanel { session_id } => app.close_terminal_panel(&session_id, cx),
+        Command::RestartTerminal { session_id } => app.restart_terminal(&session_id, cx),
+        Command::NewTerminal { session_id } => app.new_terminal(&session_id, cx),
+        Command::SplitTerminal {
+            session_id,
+            direction,
+        } => app.split_terminal(&session_id, direction, cx),
+        Command::ActivateTerminal {
+            session_id,
+            terminal_id,
+        } => app.activate_terminal(&session_id, terminal_id, cx),
+        Command::CloseTerminal {
+            session_id,
+            terminal_id,
+        } => app.close_terminal(&session_id, terminal_id, cx),
+        Command::CaptureTerminalSelection {
+            session_id,
+            terminal_id,
+            selection,
+        } => app.capture_terminal_selection(&session_id, terminal_id, selection, cx),
+        Command::RemoveTerminalContext {
+            session_id,
+            context_id,
+        } => app.remove_terminal_context(&session_id, context_id, cx),
+        Command::AddReviewComment {
+            session_id,
+            comment,
+        } => app.add_review_comment(&session_id, comment, cx),
+        Command::RemoveReviewComment { session_id, index } => {
+            app.remove_review_comment(&session_id, index, cx)
         }
-        Command::AddReviewComment { comment } => app.add_review_comment(comment, cx),
-        Command::RemoveReviewComment { index } => app.remove_review_comment(index, cx),
         Command::CycleProjectSort => app.cycle_project_sort(cx),
         Command::CreateProject { root } => {
             response = CommandResponse::ProjectId(app.create_project(root, cx));
@@ -616,7 +494,7 @@ fn dispatch_command(
             let receiver = app.start_external_import(&project_id, threads, cx);
             response = CommandResponse::ExternalImportStarted(receiver.is_some());
             if let Some(receiver) = receiver {
-                let route = import_routes.lock().unwrap().get(&request_id).cloned();
+                let route = import_routes.0.lock().unwrap().get(&request_id).cloned();
                 let import_routes = import_routes.clone();
                 cx.spawn_detached(async move {
                     if let Some(route) = route {
@@ -626,10 +504,10 @@ fn dispatch_command(
                             }
                         }
                     }
-                    import_routes.lock().unwrap().remove(&request_id);
+                    import_routes.0.lock().unwrap().remove(&request_id);
                 });
             } else {
-                import_routes.lock().unwrap().remove(&request_id);
+                import_routes.0.lock().unwrap().remove(&request_id);
             }
         }
         Command::FinishExternalImport { project_id } => app.finish_external_import(&project_id, cx),
@@ -648,7 +526,9 @@ fn dispatch_command(
             response = CommandResponse::ArchivedCount(app.auto_archive_sweep(&project_id, cx));
         }
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
-        Command::ForkThread { id } => app.fork_thread(&id, cx),
+        Command::ForkThread { id } => {
+            response = CommandResponse::SessionId(app.fork_thread(&id, cx));
+        }
         Command::MergeWorktree { session_id } => app.merge_worktree(&session_id, cx),
         Command::DeleteSession {
             session_id,
@@ -656,60 +536,96 @@ fn dispatch_command(
         } => app.delete_session(&session_id, remove_worktree, cx),
         Command::DeleteProject { project_id } => app.delete_project(&project_id, cx),
         Command::MarkSessionUnread { session_id } => app.mark_session_unread(&session_id, cx),
-        Command::StartDraft { project_id, cwd } => app.start_draft(project_id, cwd, cx),
-        Command::SetDraftWorkspace { mode } => app.set_draft_workspace(mode, cx),
-        Command::SelectSession { session_id } => app.select_session(&session_id, cx),
+        Command::StartDraft { project_id, cwd } => {
+            response = CommandResponse::SessionId(Some(app.start_draft(project_id, cwd, cx)));
+        }
+        Command::SetDraftWorkspace { session_id, mode } => {
+            app.set_draft_workspace(&session_id, mode, cx)
+        }
         Command::SendTurn {
+            session_id,
             text,
             attachment_paths,
-        } => app.send_turn(text, attachment_paths, cx),
+        } => app.send_turn(&session_id, text, attachment_paths, cx),
         Command::ScheduleTurn {
+            session_id,
             text,
             attachment_paths,
             fire_at_unix_secs,
-        } => app.schedule_turn(text, attachment_paths, fire_at_unix_secs, cx),
+        } => app.schedule_turn(&session_id, text, attachment_paths, fire_at_unix_secs, cx),
         Command::ConfirmRelayAndSend {
+            session_id,
             text,
             attachment_paths,
-        } => app.confirm_relay_and_send(text, attachment_paths, cx),
+        } => app.confirm_relay_and_send(&session_id, text, attachment_paths, cx),
         Command::Steer {
+            session_id,
             text,
             attachment_paths,
-        } => app.steer(text, attachment_paths, cx),
-        Command::SteerQueued { id } => app.steer_queued(id, cx),
-        Command::DropQueued { id } => app.drop_queued(id, cx),
-        Command::Interrupt => app.interrupt(cx),
+        } => app.steer(&session_id, text, attachment_paths, cx),
+        Command::SteerQueued { session_id, id } => app.steer_queued(&session_id, id, cx),
+        Command::DropQueued { session_id, id } => app.drop_queued(&session_id, id, cx),
+        Command::Interrupt { session_id } => app.interrupt(&session_id, cx),
         Command::RespondApproval {
+            session_id,
             request_id,
             decision,
-        } => app.respond_approval(request_id, decision, cx),
+        } => app.respond_approval(&session_id, request_id, decision, cx),
         Command::RespondUserInput {
+            session_id,
             request_id,
             answers,
-        } => app.respond_user_input(request_id, answers, cx),
+        } => app.respond_user_input(&session_id, request_id, answers, cx),
         Command::SetActiveModel {
+            session_id,
             provider,
             model,
             profile_id,
-        } => app.set_active_model(provider, model, profile_id, cx),
-        Command::SetActiveOption { id, value } => app.set_active_option(&id, value, cx),
-        Command::SelectUltrathink => app.select_ultrathink(cx),
-        Command::SetInteractionMode { mode } => app.set_interaction_mode(mode, cx),
-        Command::ToggleInteractionMode => app.toggle_interaction_mode(cx),
-        Command::ImplementPlan => app.implement_plan(cx),
-        Command::DismissPlan => app.dismiss_plan(cx),
-        Command::ImplementPlanInNewThread { title } => app.implement_plan_in_new_thread(title, cx),
+        } => app.set_active_model(&session_id, provider, model, profile_id, cx),
+        Command::SetActiveOption {
+            session_id,
+            id,
+            value,
+        } => app.set_active_option(&session_id, &id, value, cx),
+        Command::SelectUltrathink { session_id } => app.select_ultrathink(&session_id, cx),
+        Command::SetInteractionMode { session_id, mode } => {
+            app.set_interaction_mode(&session_id, mode, cx)
+        }
+        Command::ToggleInteractionMode { session_id } => {
+            app.toggle_interaction_mode(&session_id, cx)
+        }
+        Command::ImplementPlan { session_id } => app.implement_plan(&session_id, cx),
+        Command::DismissPlan { session_id } => app.dismiss_plan(&session_id, cx),
+        Command::ImplementPlanInNewThread { session_id, title } => {
+            response = CommandResponse::SessionId(app.implement_plan_in_new_thread(
+                &session_id,
+                title,
+                cx,
+            ));
+        }
         Command::CopyPlan { markdown } => app.copy_plan(markdown, cx),
-        Command::SavePlanToWorkspace { markdown } => app.save_plan_to_workspace(markdown, cx),
+        Command::SavePlanToWorkspace {
+            session_id,
+            markdown,
+        } => app.save_plan_to_workspace(&session_id, markdown, cx),
         Command::DownloadPlan {
+            session_id,
             markdown,
             fallback_title,
-        } => app.download_plan(markdown, fallback_title, cx),
-        Command::LoadBranches => app.load_branches(cx),
-        Command::CheckoutBranch { branch } => app.checkout_branch(branch, cx),
-        Command::SetActiveApprovalMode { mode } => app.set_active_approval_mode(mode, cx),
+        } => app.download_plan(&session_id, markdown, fallback_title, cx),
+        Command::LoadBranches { session_id } => app.load_branches(&session_id, cx),
+        Command::CheckoutBranch { session_id, branch } => {
+            app.checkout_branch(&session_id, branch, cx)
+        }
+        Command::SetActiveApprovalMode { session_id, mode } => {
+            app.set_active_approval_mode(&session_id, mode, cx)
+        }
         Command::ToggleFavoriteModel { model } => app.toggle_favorite_model(&model, cx),
-        Command::RewindTurn { turn, mode } => app.rewind_turn(turn, mode, cx),
+        Command::RewindTurn {
+            session_id,
+            turn,
+            mode,
+        } => app.rewind_turn(&session_id, turn, mode, cx),
     }
     CommandOutcome::Immediate(Ok(response))
 }
@@ -720,8 +636,10 @@ fn dispatch_query(
     query: Query,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
-        Query::ListActiveWorkspace => {
-            let cwd = app.active_session().map(|active| active.meta.cwd.clone());
+        Query::ListActiveWorkspace { session_id } => {
+            let cwd = app
+                .resident(&session_id)
+                .map(|active| active.meta.cwd.clone());
             let task = app.list_workspace_at(cwd, cx);
             cx.spawn_background(async move { Ok(QueryResponse::ActiveWorkspace(task.await)) })
         }
@@ -729,8 +647,11 @@ fn dispatch_query(
             let task = app.scan_external_history(cx);
             cx.spawn_background(async move { Ok(QueryResponse::ExternalHistory(task.await)) })
         }
-        Query::GenerateCommitMessage { included } => {
-            let task = app.generate_commit_message(included, cx);
+        Query::GenerateCommitMessage {
+            session_id,
+            included,
+        } => {
+            let task = app.generate_commit_message(&session_id, included, cx);
             cx.spawn_background(async move {
                 task.await
                     .map(QueryResponse::CommitMessage)
@@ -804,27 +725,23 @@ fn io_protocol_error(error: std::io::Error) -> ProtocolError {
 mod tests {
     use super::*;
 
-    fn next_event(
+    pub(super) fn next_event(
         events: &HostEventReceiver,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             match events.try_recv() {
-                Ok(HostMessage::Event(envelope)) => {
+                Ok(envelope) => {
                     if ready(&envelope) {
                         return envelope;
                     }
                 }
-                Ok(_) => {}
                 Err(HostEventTryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Err(HostEventTryRecvError::Closed) => {
                     panic!("host event stream closed before the expected event")
-                }
-                Err(HostEventTryRecvError::Protocol(error)) => {
-                    panic!("invalid host event line: {error:?}")
                 }
             }
         }
@@ -839,26 +756,31 @@ mod tests {
         std::fs::create_dir_all(&project_root).expect("create project root");
         let store = SessionStore::open_at(data_root.clone()).expect("open session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn host");
-        let events = host.event_receiver();
 
-        host.inner
-            .client_tx
+        host.to_host
             .try_send("{not valid ndjson}\n".into())
             .expect("send malformed client line");
         let decode_error = loop {
             if let HostMessage::Ack {
                 id: 0,
                 result: Err(error),
-            } = events
-                .recv_blocking()
-                .expect("receive protocol-error response")
+            } = tcode_protocol::decode_host_line(
+                &host
+                    .from_host
+                    .recv_blocking()
+                    .expect("receive protocol-error response"),
+            )
+            .expect("decode protocol-error response")
             {
                 break error;
             }
         };
         assert_eq!(decode_error.code, "decode_error");
+        let link = host.link();
+        let events = link.events();
 
-        host.subscribe(Subscription {
+        link.subscribe(Subscription {
+            after: None,
             topic: Topic::Index,
         })
         .expect("send subscription");
@@ -867,13 +789,13 @@ mod tests {
         });
         assert!(matches!(
             snapshot.event,
-            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+            ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot { activity: _,
                 ref sessions,
                 ref projects,
             }) if sessions.is_empty() && projects.is_empty()
         ));
 
-        let project_id = match host
+        let project_id = match link
             .command_blocking(Command::CreateProject {
                 root: project_root.clone(),
             })
@@ -900,10 +822,14 @@ mod tests {
                 .any(|project| project.id == project_id && project.root == project_root)
         );
 
-        let import_progress =
-            smol::block_on(host.start_external_import(project_id.clone(), Vec::new()))
-                .expect("start import over command")
-                .expect("known project starts an import");
+        let import_progress = smol::block_on(start_external_import(
+            &link,
+            &host.import_routes,
+            project_id.clone(),
+            Vec::new(),
+        ))
+        .expect("start import over command")
+        .expect("known project starts an import");
         assert_eq!(
             import_progress
                 .recv_blocking()
@@ -914,27 +840,41 @@ mod tests {
             }
         );
         assert!(
-            smol::block_on(host.start_external_import("missing".into(), Vec::new()))
-                .expect("unknown import command response")
-                .is_none()
+            smol::block_on(start_external_import(
+                &link,
+                &host.import_routes,
+                "missing".into(),
+                Vec::new(),
+            ))
+            .expect("unknown import command response")
+            .is_none()
         );
 
         assert_eq!(
-            smol::block_on(host.query(Query::IsDirectory {
+            smol::block_on(link.query(Query::IsDirectory {
                 path: project_root.clone(),
             }))
             .expect("query directory over pipe"),
             QueryResponse::IsDirectory(true)
         );
         assert_eq!(
-            smol::block_on(host.query(Query::ListActiveWorkspace))
-                .expect("query inactive workspace over pipe"),
+            smol::block_on(link.query(Query::ListActiveWorkspace {
+                session_id: "missing".into()
+            }))
+            .expect("query inactive workspace over pipe"),
             QueryResponse::ActiveWorkspace(Vec::new())
         );
 
-        host.shutdown_blocking()
+        link.shutdown_blocking()
             .expect("drain quit barrier and stop host");
+        host.stopped
+            .recv_blocking()
+            .expect("wait for host thread to stop");
         drop(host);
         std::fs::remove_dir_all(data_root).expect("remove test data");
     }
 }
+
+#[cfg(test)]
+#[path = "pipe_p4b_tests.rs"]
+mod p4b_tests;

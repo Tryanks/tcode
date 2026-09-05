@@ -25,6 +25,7 @@ pub(crate) type WorkLogArgs<'a> = (
 
 pub(crate) struct WorkLogData {
     pub(crate) index: usize,
+    pub(crate) compact: bool,
     pub(crate) segment_id: String,
     pub(crate) capsule_label: String,
     pub(crate) duration: String,
@@ -43,6 +44,7 @@ pub(crate) fn work_log(
 ) -> AnyElement {
     let WorkLogData {
         index,
+        compact,
         segment_id,
         capsule_label,
         duration,
@@ -62,6 +64,8 @@ pub(crate) fn work_log(
     .aria_expanded(expanded)
     .self_start()
     .h(px(28.))
+    .when(compact, |row| row.h_auto().min_h(px(44.)))
+    .when(compact, |row| row.max_w_full().flex_wrap())
     .px_1p5()
     .gap_1p5()
     .items_center()

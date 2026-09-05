@@ -136,7 +136,7 @@ impl Composer {
             return;
         }
         let locale = rust_i18n::locale();
-        let (events_tx, events_rx) = smol::channel::unbounded();
+        let (events_tx, events_rx) = async_channel::unbounded();
         let session = match tcode_voice::start(
             tcode_voice::preferred_locale(locale.as_ref()),
             Box::new(move |event| {

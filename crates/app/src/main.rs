@@ -5,12 +5,17 @@
 use std::{borrow::Cow, time::Duration};
 
 use gpui::{
-    App, AppContext as _, Entity, KeyBinding, ParentElement as _, Styled as _, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, point, px, size,
+    App, AppContext as _, BorrowAppContext as _, Entity, KeyBinding, ParentElement as _,
+    Styled as _, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, point, px, size,
 };
+use tcode_client::HostLink;
 use tcode_protocol::{Command, CommandResponse};
-use tcode_runtime::pipe::{HostServices, spawn_host};
+use tcode_remote::HostMux;
+use tcode_remote::client::PairedHost;
+use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
+use tcode_ui::remote::{RemoteController, load_hosts, machine_name};
 use tcode_ui::{
     AppShell, Quit, TogglePalette, WindowState,
     store::WorkspaceStore,
@@ -169,6 +174,127 @@ fn handle_quit(
     .detach();
 }
 
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
+}
+
+/// Hidden `tcode --pair <addr> <port> <code>`: pair with a host over HTTP,
+/// record it in `hosts.json`, print its id and exit. The desktop pairing UI
+/// does the same thing; this is the headless path used by the remote e2e run.
+fn pair_command(args: &[String], data_dir: &std::path::Path) -> Result<String, String> {
+    let [addr, port, code] = args else {
+        return Err("usage: tcode --pair <addr> <port> <code>".into());
+    };
+    let port: u16 = port
+        .parse()
+        .map_err(|error| format!("invalid port: {error}"))?;
+    let host = tcode_remote::client::pair(addr, port, code, &machine_name())?;
+    let mut hosts: Vec<PairedHost> = load_hosts(data_dir);
+    hosts.retain(|existing| existing.host_id != host.host_id);
+    let host_id = host.host_id.clone();
+    hosts.push(host);
+    tcode_remote::client::save_hosts(data_dir, &hosts).map_err(|error| error.to_string())?;
+    Ok(host_id)
+}
+
+/// Everything the window needs regardless of where the host runs.
+struct Wiring {
+    link: HostLink,
+    /// Present in local mode only: the in-process host and its affordances.
+    host: Option<SpawnedHost>,
+    /// Present in local mode only: the fan-out every client attaches through.
+    mux: Option<HostMux>,
+    /// `(host_id, host_name)` in remote mode.
+    remote: Option<(String, String)>,
+    remote_address: Option<String>,
+    data_dir: std::path::PathBuf,
+}
+
+/// Build a link to a host running in another process, forwarding the reconnect
+/// state machine's transitions onto the link so the UI can render its banner.
+fn connect_remote(host: PairedHost, data_dir: std::path::PathBuf) -> Wiring {
+    let identity = (host.host_id.clone(), host.name.clone());
+    let remote_address = host.addrs.first().cloned();
+    let client = tcode_remote::client::connect(host, machine_name());
+    let link = HostLink::new(client.to_host, client.from_host);
+    smol::spawn({
+        let link = link.clone();
+        async move { link.pump().await }
+    })
+    .detach();
+    smol::spawn({
+        let link = link.clone();
+        let states = client.state;
+        async move {
+            while let Ok(state) = states.recv().await {
+                link.set_connection_state(match state {
+                    tcode_remote::client::ConnectionState::Connected => {
+                        tcode_client::ConnectionState::Connected
+                    }
+                    tcode_remote::client::ConnectionState::Reconnecting { attempt } => {
+                        tcode_client::ConnectionState::Reconnecting { attempt }
+                    }
+                    tcode_remote::client::ConnectionState::Offline => {
+                        tcode_client::ConnectionState::Offline
+                    }
+                });
+            }
+        }
+    })
+    .detach();
+    Wiring {
+        link,
+        host: None,
+        mux: None,
+        remote: Some(identity),
+        remote_address,
+        data_dir,
+    }
+}
+
+/// Start the in-process host and put the mux in front of it. This window is
+/// then just the first client attached to that mux, exactly like a remote one.
+fn start_local(store: SessionStore, data_dir: std::path::PathBuf) -> Wiring {
+    let mut host_services = HostServices {
+        background_startup_probes: true,
+        ai_title_generation: true,
+        ..HostServices::default()
+    };
+    match mcp_host::Host::bind() {
+        Ok(mut mcp_host) => {
+            host_services.preview = Some(preview_mcp::start(&mut mcp_host));
+            host_services.orchestrate = Some(orchestrate_mcp::start(&mut mcp_host));
+            host_services.computer_use = Some(computer_use_mcp::start(&mut mcp_host));
+            if let Err(error) = mcp_host.start() {
+                log::warn!("MCP host failed to start: {error}");
+                host_services.preview = None;
+                host_services.orchestrate = None;
+                host_services.computer_use = None;
+            }
+        }
+        Err(error) => log::warn!("MCP host failed to bind: {error}"),
+    }
+    let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
+    let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let connection = mux.attach();
+    let link = HostLink::new(connection.to_host, connection.from_host);
+    smol::spawn({
+        let link = link.clone();
+        async move { link.pump().await }
+    })
+    .detach();
+    Wiring {
+        link,
+        host: Some(host),
+        mux: Some(mux),
+        remote: None,
+        remote_address: None,
+        data_dir,
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -200,27 +326,47 @@ fn main() {
 
     // Hidden debug/dev flag: open the most recently updated session on launch.
     let open_latest = std::env::args().any(|arg| arg == "--open-latest");
+    let args: Vec<String> = std::env::args().collect();
+    // `open_default` is used here purely to resolve (and create) the data dir:
+    // remote mode never hands a session store to a host.
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
-    let mut host_services = HostServices {
-        background_startup_probes: true,
-        ai_title_generation: true,
-        ..HostServices::default()
-    };
-    match mcp_host::Host::bind() {
-        Ok(mut mcp_host) => {
-            host_services.preview = Some(preview_mcp::start(&mut mcp_host));
-            host_services.orchestrate = Some(orchestrate_mcp::start(&mut mcp_host));
-            host_services.computer_use = Some(computer_use_mcp::start(&mut mcp_host));
-            if let Err(error) = mcp_host.start() {
-                log::warn!("MCP host failed to start: {error}");
-                host_services.preview = None;
-                host_services.orchestrate = None;
-                host_services.computer_use = None;
+    let data_dir = store.root().clone();
+
+    if let Some(index) = args.iter().position(|arg| arg == "--pair") {
+        match pair_command(&args[index + 1..], &data_dir) {
+            Ok(host_id) => println!("{host_id}"),
+            Err(error) => {
+                eprintln!("tcode: {error}");
+                std::process::exit(1);
             }
         }
-        Err(error) => log::warn!("MCP host failed to bind: {error}"),
+        return;
     }
-    let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
+
+    let wiring = match arg_value(&args, "--connect") {
+        Some(host_id) => {
+            let Some(host) = load_hosts(&data_dir)
+                .into_iter()
+                .find(|host| host.host_id == host_id)
+            else {
+                eprintln!(
+                    "tcode: no paired host with id {host_id:?} in {}/hosts.json; pair it first (Settings → Remote, or tcode --pair <addr> <port> <code>)",
+                    data_dir.display()
+                );
+                std::process::exit(1);
+            };
+            connect_remote(host, data_dir)
+        }
+        None => start_local(store, data_dir),
+    };
+    let Wiring {
+        link,
+        host,
+        mux,
+        remote,
+        remote_address,
+        data_dir,
+    } = wiring;
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -259,9 +405,46 @@ fn main() {
             };
             theme::init_with_json(&theme_json, cx);
 
-            let workspace_store =
-                cx.new(|cx| tcode_ui::store::WorkspaceStore::new(host.clone(), cx));
+            let workspace_store = cx.new(|cx| {
+                let mut store = WorkspaceStore::new(link.clone(), cx);
+                match (&host, &remote) {
+                    (Some(host), _) => store.attach_local(tcode_ui::store::LocalAffordances {
+                        terminals: host.terminals.clone(),
+                        preview_requests: host.preview_requests.clone(),
+                        import_routes: host.import_routes.clone(),
+                    }),
+                    (None, Some((_, name))) => store.attach_remote(name.clone(), cx),
+                    (None, None) => {}
+                }
+                if let Some(address) = &remote_address {
+                    store.set_remote_address(address.clone());
+                }
+                store
+            });
+            // The remote controller owns the listener, beacon and hosts.json for
+            // the whole process; Settings → Remote drives it.
+            cx.set_global(match (&mux, &remote) {
+                (Some(mux), _) => RemoteController::local(mux.clone(), data_dir.clone()),
+                (None, Some((host_id, name))) => {
+                    RemoteController::connected(data_dir.clone(), host_id.clone(), name.clone())
+                }
+                (None, None) => unreachable!("a window is either local or connected"),
+            });
             let initial_settings = workspace_store.read(cx).settings();
+            if host.is_some() && initial_settings.remote_hosting_enabled {
+                let port = initial_settings
+                    .remote_port
+                    .unwrap_or(tcode_ui::remote::DEFAULT_REMOTE_PORT);
+                let name = initial_settings
+                    .remote_host_name
+                    .clone()
+                    .unwrap_or_else(machine_name);
+                cx.update_global::<RemoteController, _>(|controller, _| {
+                    if let Err(error) = controller.start_hosting(port, name) {
+                        log::error!("remote hosting could not start: {error}");
+                    }
+                });
+            }
             let sidebar_collapsed = initial_settings.sidebar_collapsed;
             let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
@@ -273,9 +456,17 @@ fn main() {
             // relaunch, reopen the recorded session and Settings page. Runs
             // synchronously before the window (and settings page) is built, so
             // the page mounts already on the recorded section. No-op otherwise.
-            if let Ok(CommandResponse::PendingRelaunchSection(Some(section))) =
-                host.command_blocking(Command::ApplyPendingRelaunch)
+            // Only meaningful for a host in this process: the marker lives in
+            // this machine's data dir, and a remote host's marker is its own.
+            if host.is_some()
+                && let Ok(CommandResponse::PendingRelaunchSection {
+                    section: Some(section),
+                    session_id,
+                }) = link.command_blocking(Command::ApplyPendingRelaunch)
             {
+                if let Some(id) = session_id {
+                    workspace_store.update(cx, |store, _| store.select_session(id));
+                }
                 window_state.update(cx, |state, cx| {
                     state.pending_settings_section = Some(section);
                     state.open_settings(cx);
@@ -297,12 +488,26 @@ fn main() {
                 cx.theme().mode.name(),
                 cx.theme().theme_name()
             );
+            // Quitting a remote client must never shut the host down — other
+            // clients are still attached to it. Only the process that owns the
+            // host flushes it.
             let quit_subscription = cx.on_app_quit({
-                let host = host.clone();
+                let link = link.clone();
+                let host_channels = host
+                    .as_ref()
+                    .map(|host| (host.to_host.clone(), host.stopped.clone()));
                 move |_cx| {
-                    let host = host.clone();
+                    let link = link.clone();
+                    let host_channels = host_channels.clone();
                     async move {
-                        let _ = host.shutdown().await;
+                        let Some((to_host, stopped)) = host_channels else {
+                            return;
+                        };
+                        let _ = link.shutdown().await;
+                        // `shutdown` only closes this client's mux connection;
+                        // the host loop ends when its own inbox closes.
+                        to_host.close();
+                        let _ = stopped.recv().await;
                     }
                 }
             });
@@ -396,7 +601,11 @@ fn main() {
                 }
 
                 if open_latest {
-                    let _ = host.dispatch(Command::OpenLatestSession);
+                    if let Ok(CommandResponse::SessionId(Some(id))) =
+                        link.command(Command::OpenLatestSession).await
+                    {
+                        workspace_store.update(cx, |store, _| store.select_session(id));
+                    }
                     for _ in 0..100 {
                         if cx.update(|cx| workspace_store.read(cx).active_session_id().is_some()) {
                             break;

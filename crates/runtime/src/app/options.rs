@@ -8,6 +8,7 @@ impl AppState {
     /// live, the next `send_turn` restarts it (see `send_turn`).
     pub fn set_active_model(
         &mut self,
+        target_id: &str,
         provider: ProviderKind,
         model: Option<String>,
         // Which provider profile the picked row belongs to (`None` = the built-in
@@ -20,7 +21,7 @@ impl AppState {
         let profile_id = profile_id.filter(|id| !Settings::is_builtin_profile_id(id));
         let remembered_effort = self.remembered_effort(provider, model.as_deref());
         let store = self.store.clone();
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         // In a draft the model picker is also the provider picker. The selected
@@ -77,7 +78,7 @@ impl AppState {
             if active.pending_relay.is_some() {
                 return;
             }
-            self.preview_draft_or_persist_active(cx);
+            self.preview_draft_or_persist_active(target_id, cx);
             return;
         }
         if active.meta.model == model {
@@ -90,7 +91,7 @@ impl AppState {
         if active.pending_relay.is_some() {
             return;
         }
-        self.preview_draft_or_persist_active(cx);
+        self.preview_draft_or_persist_active(target_id, cx);
     }
 
     // -- traits (option selections) -----------------------------------------
@@ -101,11 +102,12 @@ impl AppState {
     /// effect per the restart machinery (see `send_turn`).
     pub fn set_active_option(
         &mut self,
+        target_id: &str,
         id: &str,
         value: Option<serde_json::Value>,
         cx: &mut HostCx,
     ) {
-        let Some(active) = self.residents.active.as_mut() else {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         active.meta.option_selections.retain(|s| s.id != id);
@@ -131,14 +133,14 @@ impl AppState {
             });
             active.live_option_selections = active.meta.option_selections.clone();
         }
-        self.preview_draft_or_persist_active(cx);
+        self.preview_draft_or_persist_active(target_id, cx);
     }
 
     /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
     /// T3 does not persist this as an option (it resolves back to the default),
     /// so it lives as a transient per-send flag.
-    pub fn select_ultrathink(&mut self, _cx: &mut HostCx) {
-        if let Some(active) = self.residents.active.as_mut() {
+    pub fn select_ultrathink(&mut self, target_id: &str, _cx: &mut HostCx) {
+        if let Some(active) = self.resident_mut(target_id) {
             active.pending_ultrathink = true;
         }
     }
@@ -146,10 +148,8 @@ impl AppState {
     // -- interaction mode (Build / Plan) ------------------------------------
 
     /// The active session's Build/Plan interaction mode (`Build` when none).
-    pub(crate) fn active_interaction_mode(&self) -> InteractionMode {
-        self.residents
-            .active
-            .as_ref()
+    pub(crate) fn active_interaction_mode(&self, target_id: &str) -> InteractionMode {
+        self.resident(target_id)
             .map(|a| a.meta.interaction_mode)
             .unwrap_or_default()
     }
@@ -157,8 +157,13 @@ impl AppState {
     /// Set the Build/Plan interaction mode for the active session. Both
     /// providers switch live (Codex per turn, Claude via a control request), so
     /// no restart is scheduled.
-    pub fn set_interaction_mode(&mut self, mode: InteractionMode, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub fn set_interaction_mode(
+        &mut self,
+        target_id: &str,
+        mode: InteractionMode,
+        cx: &mut HostCx,
+    ) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         if active.meta.interaction_mode == mode {
@@ -168,40 +173,38 @@ impl AppState {
         if let Runtime::Live(commands) = &active.runtime {
             let _ = commands.try_send(SessionCommand::SetInteractionMode(mode));
         }
-        self.preview_draft_or_persist_active(cx);
+        self.preview_draft_or_persist_active(target_id, cx);
     }
 
     /// Toggle Build ↔ Plan (the chip click and Shift+Tab).
-    pub fn toggle_interaction_mode(&mut self, cx: &mut HostCx) {
-        let next = match self.active_interaction_mode() {
+    pub fn toggle_interaction_mode(&mut self, target_id: &str, cx: &mut HostCx) {
+        let next = match self.active_interaction_mode(target_id) {
             InteractionMode::Build => InteractionMode::Plan,
             InteractionMode::Plan => InteractionMode::Build,
         };
-        self.set_interaction_mode(next, cx);
+        self.set_interaction_mode(target_id, next, cx);
     }
 
     // -- proposed-plan flow -------------------------------------------------
 
     /// Accept the proposed plan: send the verbatim implementation prompt, switch
     /// to Build mode, and persist the decision before dispatching the turn.
-    pub fn implement_plan(&mut self, cx: &mut HostCx) {
+    pub fn implement_plan(&mut self, target_id: &str, cx: &mut HostCx) {
         // A pending provider handoff makes `send_turn` defer. Validate it before
         // resolving the plan or changing mode, or the implementation prompt can
         // vanish while the UI claims the plan was accepted.
-        if self.relay_confirmation().is_some() {
+        if self.relay_confirmation(target_id).is_some() {
             return;
         }
-        let Some((session_id, item_id, markdown)) =
-            self.residents.active.as_ref().and_then(|active| {
-                active.timeline.plan_ready().map(|plan| {
-                    (
-                        active.meta.id.clone(),
-                        plan.item_id.clone(),
-                        plan.markdown.clone(),
-                    )
-                })
+        let Some((session_id, item_id, markdown)) = self.resident(target_id).and_then(|active| {
+            active.timeline.plan_ready().map(|plan| {
+                (
+                    active.meta.id.clone(),
+                    plan.item_id.clone(),
+                    plan.markdown.clone(),
+                )
             })
-        else {
+        }) else {
             return;
         };
         self.record_event(
@@ -212,14 +215,14 @@ impl AppState {
             },
             cx,
         );
-        self.set_interaction_mode(InteractionMode::Build, cx);
-        self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
+        self.set_interaction_mode(target_id, InteractionMode::Build, cx);
+        self.send_turn_assembled(target_id, implement_prompt(&markdown), Vec::new(), cx);
     }
 
     /// Leave the plan captured in history while removing its actionable
     /// composer state.
-    pub fn dismiss_plan(&mut self, cx: &mut HostCx) {
-        let Some((session_id, item_id)) = self.residents.active.as_ref().and_then(|active| {
+    pub fn dismiss_plan(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some((session_id, item_id)) = self.resident(target_id).and_then(|active| {
             active
                 .timeline
                 .plan_ready()
@@ -239,13 +242,14 @@ impl AppState {
 
     /// Accept the proposed plan in a fresh thread in the same project (same
     /// cwd/model/options, Build mode) titled "Implement <plan title>".
-    pub fn implement_plan_in_new_thread(&mut self, title: String, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
-            return;
-        };
-        let Some(plan) = active.timeline.plan_ready() else {
-            return;
-        };
+    pub fn implement_plan_in_new_thread(
+        &mut self,
+        target_id: &str,
+        title: String,
+        cx: &mut HostCx,
+    ) -> Option<String> {
+        let active = self.resident(target_id)?;
+        let plan = active.timeline.plan_ready()?;
         let source_session_id = active.meta.id.clone();
         let plan_item_id = plan.item_id.clone();
         let markdown = plan.markdown.clone();
@@ -285,21 +289,27 @@ impl AppState {
             cx,
         );
         self.upsert_session_in_memory(meta.clone());
-        self.park_active(cx);
         let session_id = meta.id.clone();
         let cwd = meta.cwd.clone();
         let provider_commands =
             self.cached_provider_commands(meta.provider, meta.acp_agent_id.as_deref());
-        self.residents.active = Some(ActiveSession::new(meta, false, provider_commands));
+        self.residents.live.insert(
+            session_id.clone(),
+            ActiveSession::new(meta, false, provider_commands),
+        );
         self.emit_domain(
             Topic::SessionEvents {
                 session_id: session_id.clone(),
             },
-            ServerEvent::SessionSnapshot(Vec::new()),
+            ServerEvent::SessionSnapshot {
+                from: 0,
+                records: Vec::new(),
+            },
             cx,
         );
-        self.refresh_session_git_branch(session_id, cwd, cx);
-        self.send_turn_assembled(implement_prompt(&markdown), Vec::new(), cx);
+        self.refresh_session_git_branch(session_id.clone(), cwd, cx);
+        self.send_turn_assembled(&session_id, implement_prompt(&markdown), Vec::new(), cx);
+        Some(session_id)
     }
 
     /// Copy plan markdown to the clipboard (the "Copy to clipboard" action).
@@ -312,8 +322,8 @@ impl AppState {
 
     /// Write the plan markdown to `PLAN-<n>.md` in the session cwd, choosing the
     /// lowest unused index ("Save to workspace"). Emits a success/error notice.
-    pub fn save_plan_to_workspace(&mut self, markdown: String, cx: &mut HostCx) {
-        let Some(cwd) = self.residents.active.as_ref().map(|a| a.meta.cwd.clone()) else {
+    pub fn save_plan_to_workspace(&mut self, target_id: &str, markdown: String, cx: &mut HostCx) {
+        let Some(cwd) = self.resident(target_id).map(|a| a.meta.cwd.clone()) else {
             return;
         };
         let host_cx = cx.clone();
@@ -327,10 +337,16 @@ impl AppState {
 
     /// Save the plan markdown to the user's Downloads directory (falling back to
     /// the session cwd) with a title-derived filename ("Download as markdown").
-    pub fn download_plan(&mut self, markdown: String, fallback_title: String, cx: &mut HostCx) {
+    pub fn download_plan(
+        &mut self,
+        target_id: &str,
+        markdown: String,
+        fallback_title: String,
+        cx: &mut HostCx,
+    ) {
         let title = plan_title(&markdown).unwrap_or(fallback_title);
         let filename = format!("{}.md", sanitize_filename(&title));
-        let fallback_cwd = self.residents.active.as_ref().map(|a| a.meta.cwd.clone());
+        let fallback_cwd = self.resident(target_id).map(|a| a.meta.cwd.clone());
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
@@ -367,17 +383,18 @@ impl AppState {
 
     /// Load the local branches for the active session's cwd in the background
     /// (called when the checkout-row popover opens).
-    pub fn load_branches(&mut self, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub fn load_branches(&mut self, target_id: &str, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
+        let target_id = target_id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let branches = host_cx.unblock(move || list_git_branches(&cwd)).await;
             host_cx.enqueue(move |state, _cx| {
-                if let Some(active) = state.residents.active.as_mut()
+                if let Some(active) = state.resident_mut(&target_id)
                     && active.meta.id == session_id
                 {
                     active.branches = branches;
@@ -389,8 +406,8 @@ impl AppState {
     /// Check out `branch` in the active session's cwd, if the working tree is
     /// clean. Runs git off the main thread; reports success/failure as an
     /// `RuntimeEvent` the chat view turns into a notification.
-    pub fn checkout_branch(&mut self, branch: String, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_ref() else {
+    pub fn checkout_branch(&mut self, target_id: &str, branch: String, cx: &mut HostCx) {
+        let Some(active) = self.resident(target_id) else {
             return;
         };
         if active.timeline.turn_running {
@@ -399,6 +416,7 @@ impl AppState {
         let cwd = active.meta.cwd.clone();
         let session_id = active.meta.id.clone();
         let branch_for_task = branch.clone();
+        let target_id = target_id.to_string();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
@@ -407,9 +425,7 @@ impl AppState {
             host_cx.enqueue(move |state, cx| match result {
                 Ok(()) => {
                     if let Some(cwd) = state
-                        .residents
-                        .active
-                        .as_ref()
+                        .resident(&target_id)
                         .filter(|active| active.meta.id == session_id)
                         .map(|active| active.meta.cwd.clone())
                     {
@@ -433,8 +449,13 @@ impl AppState {
     /// Select `mode` for the active session and persist it. Claude applies the
     /// switch live over the control protocol; Codex (which binds the mode at
     /// thread start) instead restarts via the resume cursor on the next turn.
-    pub fn set_active_approval_mode(&mut self, mode: ApprovalMode, cx: &mut HostCx) {
-        let Some(active) = self.residents.active.as_mut() else {
+    pub fn set_active_approval_mode(
+        &mut self,
+        target_id: &str,
+        mode: ApprovalMode,
+        cx: &mut HostCx,
+    ) {
+        let Some(active) = self.resident_mut(target_id) else {
             return;
         };
         if active.meta.approval_mode == mode {

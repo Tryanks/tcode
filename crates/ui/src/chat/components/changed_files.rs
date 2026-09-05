@@ -105,7 +105,7 @@ pub(crate) fn changed_files(
     let mut body = h_flex().w_full().px_1().gap_1p5().flex_wrap();
     for (file_index, (change, on_click)) in changes.iter().zip(open_files).take(visible).enumerate()
     {
-        let display = tcode_services::user_files::relativize_to_workspace(&change.path, cwd);
+        let display = crate::workspace_walk::relativize_to_workspace(&change.path, cwd);
         let name = Path::new(&display)
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())

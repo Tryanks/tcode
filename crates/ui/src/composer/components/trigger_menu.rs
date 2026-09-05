@@ -10,6 +10,10 @@ impl Composer {
     /// highlight (and un-dismissing) when the trigger identity changes, and
     /// lazily loading the workspace listing for `@`-mentions.
     pub(in super::super) fn recompute_trigger(&mut self, cx: &mut Context<Self>) {
+        if self.compact {
+            self.active_trigger = None;
+            return;
+        }
         let (text, cursor) = {
             let state = self.input.read(cx);
             (state.value().to_string(), state.cursor())

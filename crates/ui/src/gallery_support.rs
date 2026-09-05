@@ -39,6 +39,7 @@ pub fn user_bubble(
             cwd,
             attachments: &[],
             steering: pending.then_some(SteeringStatus::Pending),
+            compact: false,
             pinned: true,
             copied: false,
             markdown: None,
@@ -67,6 +68,7 @@ pub fn work_log(
 ) -> AnyElement {
     work_log::work_log(
         work_log::WorkLogData {
+            compact: false,
             index,
             segment_id: id.to_string(),
             capsule_label: label.to_string(),
@@ -108,6 +110,7 @@ pub fn assistant(id: &str, markdown: Entity<MarkdownState>, cwd: &Path, cx: &App
             text: "",
             cwd,
             markdown: Some(markdown),
+            compact: false,
             pinned: true,
             show_actions: true,
             copied: false,

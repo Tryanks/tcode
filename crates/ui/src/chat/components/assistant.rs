@@ -64,6 +64,7 @@ pub(crate) struct AssistantData<'a> {
     pub(crate) cwd: &'a Path,
     pub(crate) markdown: Option<Entity<MarkdownState>>,
     pub(crate) pinned: bool,
+    pub(crate) compact: bool,
     pub(crate) show_actions: bool,
     pub(crate) copied: bool,
 }
@@ -80,6 +81,7 @@ pub(crate) fn assistant(
         cwd,
         markdown,
         pinned,
+        compact,
         show_actions,
         copied,
     } = data;
@@ -109,13 +111,14 @@ pub(crate) fn assistant(
     let actions = h_flex().gap(px(2.)).items_center().child(copy_button(
         &format!("assistant:{id}"),
         copied,
+        compact,
         on_copy,
         cx,
     ));
     message
         .group(group_key.clone())
         .child(
-            reserve_action_row(actions, group_key, pinned).with_animation(
+            reserve_action_row(actions, group_key, pinned, compact).with_animation(
                 SharedString::from(format!("assistant-actions-{id}")),
                 Animation::new(Duration::from_millis(400)),
                 |element, delta| element.opacity(delta),
@@ -125,12 +128,21 @@ pub(crate) fn assistant(
 }
 
 /// Reserve action-row height so hover visibility never shifts the timeline.
-pub(crate) fn reserve_action_row(actions: Div, group_key: SharedString, pinned: bool) -> Div {
+pub(crate) fn reserve_action_row(
+    actions: Div,
+    group_key: SharedString,
+    pinned: bool,
+    compact: bool,
+) -> Div {
     div()
-        .h(px(crate::material::CHAT_ACTION_ROW_HEIGHT))
+        .h(px(if compact {
+            44.
+        } else {
+            crate::material::CHAT_ACTION_ROW_HEIGHT
+        }))
         .flex()
         .items_center()
-        .when(!pinned, |this| {
+        .when(!pinned && !compact, |this| {
             this.invisible()
                 .group_hover(group_key, |style| style.visible())
         })
@@ -160,6 +172,7 @@ pub(crate) fn action_button(
 pub(crate) fn copy_button(
     key: &str,
     copied: bool,
+    compact: bool,
     on_copy: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> impl IntoElement {
@@ -177,6 +190,7 @@ pub(crate) fn copy_button(
         },
         cx,
     )
+    .when(compact, |button| button.min_w(px(44.)).min_h(px(44.)))
     .on_click(on_copy)
 }
 

@@ -34,13 +34,13 @@ use crate::plan_panel::PlanPanel;
 use crate::store::WorkspaceStore;
 use crate::window_caption;
 use crate::window_state::WindowState;
+use crate::workspace_walk::relativize_to_workspace;
 use crate::{highlight, material};
 use tcode_core::{
     session::{ReviewComment, ReviewSide},
     ui::RightTab,
 };
 use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
-use tcode_services::user_files::relativize_to_workspace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DiffScope {

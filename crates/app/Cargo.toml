@@ -13,8 +13,10 @@ identifier = "com.tryanks.tcode"
 icon = ["../../assets/icons/app/tcode.icns"]
 
 [dependencies]
+tcode-client = { path = "../client" }
 tcode-services = { path = "../services" }
 tcode-protocol = { path = "../protocol" }
+tcode-remote = { path = "../remote" }
 tcode-runtime = { path = "../runtime" }
 tcode-ui = { path = "../ui" }
 preview-mcp = { path = "../preview-mcp" }
@@ -26,6 +28,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "0.3.1", features = [
 gpui-base = "0.6.0"
 env_logger = "0.11"
 log = "0.4"
+smol = "2"
 
 [build-dependencies]
 embed-resource = "3.0.11"

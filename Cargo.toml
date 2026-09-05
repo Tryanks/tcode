@@ -3,6 +3,10 @@ members = [
     "crates/agent",
     "crates/core",
     "crates/protocol",
+    "crates/client",
+    "crates/remote",
+    "crates/headless",
+    "crates/web",
     "crates/services",
     "crates/runtime",
     "crates/term",
@@ -13,6 +17,13 @@ members = [
     "crates/ui",
     "crates/voice",
     "crates/app",
+    "crates/mobile",
+    "crates/ios",
+    "crates/android",
+]
+exclude = [
+    "crates/platform/gpui-ios",
+    "crates/platform/gpui-android",
 ]
 resolver = "3"
 default-members = ["crates/app"]
@@ -23,3 +34,9 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+[patch.crates-io]
+# gpui-base 0.6.0 on crates.io declares gpui-pre-platform as a dependency it
+# never uses, which does not compile for iOS/Android. Fixed on gpui-kit main
+# (merged 2026-09-05); drop this patch once a gpui-base release includes it.
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" }

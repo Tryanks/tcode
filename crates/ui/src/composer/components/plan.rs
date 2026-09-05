@@ -49,7 +49,7 @@ impl Composer {
                             .child(Icon::new(IconName::Plus).xsmall())
                             .child(crate::tr!("plan.implement_new_thread"))
                             .on_click(move |_, window, cx| {
-                                store.update(cx, |store, _cx| {
+                                store.update(cx, |store, cx| {
                                     let Some(markdown) = store.composer_state().plan_ready_markdown
                                     else {
                                         return;
@@ -61,7 +61,7 @@ impl Composer {
                                         }
                                         None => crate::tr!("plan.implement_untitled").into_owned(),
                                     };
-                                    store.implement_plan_in_new_thread(title);
+                                    store.implement_plan_in_new_thread(title, cx);
                                 });
                                 let _ = &app;
                                 popover.update(cx, |st, cx| st.dismiss(window, cx));
