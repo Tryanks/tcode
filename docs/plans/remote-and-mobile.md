@@ -165,13 +165,10 @@ placeholder view. The checked-in smoke-test captures are
 `docs/images/mobile/ios-p2a-hello.png` and
 `docs/images/mobile/android-p2a-hello.png`.
 
-The only patched upstream crate is `gpui-platform-shim`, a source-identical copy
-of published `gpui-pre-platform` plus a fallback `current_platform` arm for
-targets without an upstream default backend. It exists for `gpui-base`'s
-unconditional non-wasm dependency. Upstream follow-ups are a gpui-pre fallback
-arm and making the gpui-kit dependency optional; delete the shim when either
-lands. `gpui-ios` and `gpui-android` are our backends, not upstream patches, and
-both compile against the published `gpui-pre-wgpu`.
+No upstream crate is patched. `gpui-ios` and `gpui-android` are our own
+backends, and both compile against the published `gpui-pre-wgpu`. `gpui-base`
+is pinned to a gpui-kit git revision until a release stops declaring the
+unused `gpui-pre-platform` dependency (Decision 9).
 
 The iOS host was built and run against the installed iOS 26.5 runtime on the
 booted iPhone 17 simulator with:
