@@ -15,6 +15,8 @@ pub(crate) struct TranscriptMapper {
     parent_id: String,
     tools: HashMap<String, (String, Value)>,
     next_user_id: u64,
+    /// Latest model/effort seen on an assistant record, until taken.
+    model: Option<(Option<String>, Option<String>)>,
 }
 
 impl TranscriptMapper {
@@ -23,12 +25,16 @@ impl TranscriptMapper {
             parent_id: parent_id.into(),
             tools: HashMap::new(),
             next_user_id: 0,
+            model: None,
         }
     }
 
     pub(crate) fn map_value(&mut self, value: &Value) -> Vec<AgentEvent> {
         if should_skip(value) {
             return Vec::new();
+        }
+        if let Some(seen) = model_and_effort(value) {
+            self.model = Some(seen);
         }
         match value.get("type").and_then(Value::as_str) {
             Some("assistant") => self.map_assistant(value),
@@ -186,6 +192,11 @@ impl TailReader {
         }
     }
 
+    /// Model/effort observed since the last call, if any record carried them.
+    pub(crate) fn take_model(&mut self) -> Option<(Option<String>, Option<String>)> {
+        self.mapper.model.take()
+    }
+
     pub(crate) fn read_appended(&mut self) -> std::io::Result<Vec<AgentEvent>> {
         let mut file = File::open(&self.path)?;
         if file.metadata()?.len() < self.offset {
@@ -273,6 +284,23 @@ fn find_named_dir(root: &Path, name: &str, depth: usize) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `(model, effort)` from an assistant record: `message.model` and the
+/// top-level `effort` that Claude writes to transcripts.
+pub(crate) fn model_and_effort(value: &Value) -> Option<(Option<String>, Option<String>)> {
+    if value.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let model = text(value.pointer("/message/model"));
+    let effort = text(value.get("effort"));
+    (model.is_some() || effort.is_some()).then_some((model, effort))
 }
 
 fn should_skip(value: &Value) -> bool {
