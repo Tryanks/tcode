@@ -7,7 +7,11 @@ mod host;
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     use futures::{StreamExt as _, channel::mpsc};
+    use gpui::{WindowBackgroundAppearance, WindowOptions};
+    use std::borrow::Cow;
     use std::rc::Rc;
+    use tcode_client::host::ClientHost;
+    use tcode_ui::{ShellOptions, ShellSetup, WindowSeam, assets};
 
     android_logger::init_once(
         android_logger::Config::default()
@@ -33,14 +37,53 @@ pub fn android_main(app: android_activity::AndroidApp) {
                     {
                         log::error!("failed registering emoji fallback: {error}");
                     }
+                } else {
+                    log::error!("bundled Noto Color Emoji font could not be read");
                 }
             } else {
                 log::error!("bundled Noto Color Emoji font is missing");
             }
 
-            let mobile_host = host::native_host(app.clone(), cx)
-                .expect("failed to initialize Android host services");
-            tcode_mobile::run_with_host(cx, Rc::new(mobile_host));
+            let host: Rc<dyn ClientHost> = Rc::new(
+                host::native_host(app.clone(), cx)
+                    .expect("failed to initialize Android host services"),
+            );
+            tcode_ui::run_shell(
+                cx,
+                host.clone(),
+                // System bars, display cutout and the IME. Android schedules a
+                // frame whenever they change, so the shell never polls.
+                WindowSeam::new(gpui_android::insets),
+                ShellOptions {
+                    window: WindowOptions {
+                        // The activity owns the geometry; the shell reads it back.
+                        window_bounds: None,
+                        titlebar: None,
+                        window_background: WindowBackgroundAppearance::Opaque,
+                        ..Default::default()
+                    },
+                    fonts: vec![
+                        Cow::Borrowed(assets::DM_SANS),
+                        Cow::Borrowed(assets::LILEX_REGULAR),
+                        Cow::Borrowed(assets::LILEX_BOLD),
+                        Cow::Borrowed(assets::LILEX_ITALIC),
+                        Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
+                    ],
+                    // Android has no SF Mono; the bundled Lilex takes its place.
+                    theme_json: Cow::Owned(
+                        tcode_ui::flattened_theme_json().replace("SF Mono", "Lilex"),
+                    ),
+                    activate: true,
+                    setup: ShellSetup {
+                        initial: tcode_ui::last_host_target(host.as_ref()),
+                        client_host: Some(host),
+                        local: None,
+                        seed_blocking: false,
+                    },
+                    ..Default::default()
+                },
+            );
+
             let (back_sender, mut back_receiver) = mpsc::unbounded();
             gpui_android::set_back_callback(move || {
                 let _ = back_sender.unbounded_send(());
@@ -48,7 +91,10 @@ pub fn android_main(app: android_activity::AndroidApp) {
             cx.spawn(async move |cx| {
                 while back_receiver.next().await.is_some() {
                     cx.update(|cx| {
-                        if !tcode_mobile::handle_back(cx) {
+                        // The shell dismisses the keyboard, then the topmost
+                        // overlay, then its navigation stack. `false` only at
+                        // the root, where Android closes the app.
+                        if !tcode_ui::handle_back(cx) {
                             cx.quit();
                         }
                     });

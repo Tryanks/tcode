@@ -1,4 +1,4 @@
-//! Android services used by `tcode-mobile`.
+//! Android services behind this client's `ClientHost`.
 
 use std::{
     cell::RefCell,
@@ -19,7 +19,6 @@ use jni::{
     objects::{GlobalRef, JObject, JString, JValue},
 };
 use tcode_client::host::HostFuture;
-use tcode_mobile::host::MobileHost;
 use tcode_remote::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
@@ -119,7 +118,7 @@ impl JavaBridge {
     }
 }
 
-pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<MobileHost, String> {
+pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeClientHost, String> {
     let bridge = JavaBridge::new(app)?;
     let data_dir = bridge
         .object
@@ -193,7 +192,7 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<MobileHost, S
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
         });
-    Ok(MobileHost::new(Rc::new(host)).with_insets(gpui_android::insets))
+    Ok(host)
 }
 
 pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {

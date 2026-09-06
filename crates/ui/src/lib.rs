@@ -1,6 +1,8 @@
 mod acp_panel;
 mod add_project_dialog;
 pub mod assets;
+/// The window's link to a host: its transport tasks and workspace store.
+pub mod attachment;
 mod attachments;
 pub mod chat;
 mod commit_dialog;
@@ -37,6 +39,7 @@ mod provider_model_picker;
 pub(crate) mod provider_models;
 pub(crate) mod provider_status;
 pub mod remote;
+mod run;
 pub(crate) mod runtime_event;
 mod scroll;
 pub mod settings;
@@ -54,6 +57,9 @@ pub(crate) mod toast;
 pub(crate) mod usage;
 pub mod widgets;
 mod window_caption;
+/// The window's outer seam (system insets, software keyboard) and the one
+/// layout rule derived from it.
+pub mod window_seam;
 mod window_state;
 mod workspace_walk;
 
@@ -61,8 +67,10 @@ pub use i18n::{
     LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale, resolve_locale, set_locale,
     translate, translate_with_args,
 };
+pub use run::{ShellOptions, THEME_JSON, flattened_theme_json, last_host_target, run_shell};
 pub(crate) use shell::window_drag_area;
-pub use shell::{AppShell, Quit, TogglePalette};
+pub use shell::{AppShell, Quit, ShellSetup, TogglePalette, handle_back};
+pub use window_seam::WindowSeam;
 pub use window_state::{OpenThread, WindowState};
 
 /// Where this client may keep its own files (the WebView2 profile is the only

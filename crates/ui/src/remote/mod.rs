@@ -52,20 +52,31 @@ pub type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
 /// needs saved hosts, a device name and a way to switch attachment.
 pub struct ClientAttachment {
     host: Rc<dyn ClientHost>,
+    local: bool,
     switch: SwitchAttachment,
 }
 
 impl Global for ClientAttachment {}
 
 impl ClientAttachment {
+    /// `local` is whether bootstrap gave this window a host inside its own
+    /// process. A phone or browser has none, so "back to local" is not a thing
+    /// it can be offered.
     pub fn new(
         host: Rc<dyn ClientHost>,
+        local: bool,
         switch: impl Fn(AttachmentTarget, &mut Window, &mut App) + 'static,
     ) -> Self {
         Self {
             host,
+            local,
             switch: Rc::new(switch),
         }
+    }
+
+    /// Whether [`AttachmentTarget::Local`] is reachable from this window.
+    pub fn can_attach_local(&self) -> bool {
+        self.local
     }
 
     pub fn host(&self) -> Rc<dyn ClientHost> {
@@ -157,7 +168,9 @@ fn field(state: &Entity<InputState>, width: f32) -> impl IntoElement {
 }
 
 pub struct RemotePanel {
-    store: Entity<WorkspaceStore>,
+    /// The window's current attachment, when it has one. The panel is also the
+    /// hosts destination of an unattached window, which has none.
+    store: Option<Entity<WorkspaceStore>>,
     form: PairForm,
     #[cfg(feature = "remote-hosting")]
     hosting: hosting::HostingSection,
@@ -165,7 +178,11 @@ pub struct RemotePanel {
 }
 
 impl RemotePanel {
-    pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Option<Entity<WorkspaceStore>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let fixed = cx
             .try_global::<ClientAttachment>()
             .and_then(|attachment| attachment.host.fixed_pairing_endpoint());
@@ -195,6 +212,12 @@ impl RemotePanel {
             hosting: hosting::HostingSection::new(window, cx),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Follow the window onto another attachment, or off every attachment.
+    pub fn set_store(&mut self, store: Option<Entity<WorkspaceStore>>, cx: &mut Context<Self>) {
+        self.store = store;
+        cx.notify();
     }
 
     fn client(&self, cx: &App) -> Option<Rc<dyn ClientHost>> {
@@ -249,21 +272,27 @@ impl RemotePanel {
     }
 
     fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let current_id = self.store.read(cx).remote_host_id().map(str::to_owned);
-        let current_name = self.store.read(cx).remote_host_name().map(str::to_owned);
+        let attached = self.store.as_ref().map(|store| store.read(cx));
+        let current_id = attached
+            .as_ref()
+            .and_then(|store| store.remote_host_id().map(str::to_owned));
+        let attached_locally = attached.is_some() && current_id.is_none();
         let mut column = v_flex().w_full().gap_3().child(section_caption(
             crate::tr!("remote.connect.section").into_owned().into(),
             cx,
         ));
-        if let Some(name) = current_name {
+        // "This computer" is one target among the saved hosts, offered only
+        // where bootstrap actually gave this window a local host to attach to.
+        let can_attach_local = cx
+            .try_global::<ClientAttachment>()
+            .is_some_and(ClientAttachment::can_attach_local);
+        if can_attach_local {
             column = column.child(
                 crate::material::group(cx).child(
                     row()
                         .child(labels(
-                            crate::tr!("remote.connect.connected_to", name = name)
-                                .into_owned()
-                                .into(),
-                            crate::tr!("remote.connect.connected_description")
+                            crate::tr!("remote.connect.local").into_owned().into(),
+                            crate::tr!("remote.connect.local_description")
                                 .into_owned()
                                 .into(),
                             cx,
@@ -272,7 +301,12 @@ impl RemotePanel {
                             Button::new("remote-back-to-local")
                                 .primary()
                                 .compact()
-                                .label(crate::tr!("remote.connect.back_to_local"))
+                                .disabled(attached_locally)
+                                .label(if attached_locally {
+                                    crate::tr!("remote.hosts.current")
+                                } else {
+                                    crate::tr!("remote.connect.back_to_local")
+                                })
                                 .on_click(|_, window, cx| {
                                     let switch = cx.global::<ClientAttachment>().switcher();
                                     switch(AttachmentTarget::Local, window, cx);
@@ -604,7 +638,16 @@ impl Render for RemotePanel {
                 .items_center()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::Info).xsmall())
-                .child(div().text_size(px(13.)).child(crate::tr!("remote.intro"))),
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .child(if cfg!(feature = "remote-hosting") {
+                            crate::tr!("remote.intro")
+                        } else {
+                            // A client that cannot listen has nothing to host with.
+                            crate::tr!("remote.intro_client")
+                        }),
+                ),
         );
         #[cfg(feature = "remote-hosting")]
         let column = column.child(self.render_hosting(cx));

@@ -1,16 +1,13 @@
-//! UIKit services used by `tcode-mobile`.
+//! UIKit services behind this client's `ClientHost`.
 
 use std::{
     cell::RefCell,
     collections::HashMap,
-    ptr,
-    rc::Rc,
-    slice,
+    ptr, slice,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use tcode_client::host::{DiscoveredHost, HostFuture};
-use tcode_mobile::host::MobileHost;
 use tcode_remote::NativeClientHost;
 
 type BrowseDone = Box<dyn FnOnce(Vec<DiscoveredHost>)>;
@@ -29,7 +26,7 @@ unsafe extern "C" {
     fn tcode_ios_host_browse(request_id: u64);
 }
 
-pub(crate) fn native_host() -> MobileHost {
+pub(crate) fn native_host() -> NativeClientHost {
     let device_name = read_native_string(|destination, capacity| {
         // SAFETY: Swift writes no more than `capacity` bytes during the call.
         unsafe { tcode_ios_host_device_name(destination, capacity) }
@@ -75,7 +72,7 @@ pub(crate) fn native_host() -> MobileHost {
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
         });
-    MobileHost::new(Rc::new(host)).with_insets(gpui_ios::insets)
+    host
 }
 
 /// Completes a one-shot AVFoundation QR scan from Swift.
@@ -142,7 +139,7 @@ pub extern "C" fn tcode_ios_browse_completed(request_id: u64, bytes: *const u8, 
         None
     };
     let hosts = json
-        .map(|s| tcode_mobile::host::parse_discovered_hosts(&s))
+        .map(|s| tcode_client::host::parse_discovered_hosts(&s))
         .unwrap_or_default();
     callback(hosts);
 }

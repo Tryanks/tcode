@@ -8828,7 +8828,6 @@ dependencies = [
  "jni 0.21.1",
  "log",
  "tcode-client",
- "tcode-mobile",
  "tcode-remote",
  "tcode-ui",
 ]
@@ -8881,26 +8880,6 @@ dependencies = [
  "gpui-pre",
  "log",
  "tcode-client",
- "tcode-mobile",
- "tcode-remote",
- "tcode-ui",
-]
-
-[[package]]
-name = "tcode-mobile"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "chrono",
- "gpui-android",
- "gpui-base",
- "gpui-ios",
- "gpui-pre",
- "gpui-pre-platform",
- "serde_json",
- "tcode-client",
- "tcode-core",
- "tcode-protocol",
  "tcode-remote",
  "tcode-ui",
 ]
@@ -9054,7 +9033,6 @@ dependencies = [
  "js-sys",
  "serde_json",
  "tcode-client",
- "tcode-mobile",
  "tcode-protocol",
  "tcode-ui",
  "wasm-bindgen",

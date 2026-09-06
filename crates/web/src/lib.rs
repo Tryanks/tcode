@@ -86,15 +86,38 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         .with_http_client(http_client)
         .with_assets(tcode_ui::assets::Assets)
         .run_embedded(|cx| {
-            cx.text_system()
-                .add_fonts(vec![
-                    Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
-                    Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
-                ])
-                .expect("failed to load browser fonts");
-            tcode_mobile::run_with_host(
+            let host: Rc<dyn tcode_client::host::ClientHost> = Rc::new(WebHost);
+            tcode_ui::run_shell(
                 cx,
-                Rc::new(tcode_mobile::host::MobileHost::new(Rc::new(WebHost))),
+                host.clone(),
+                // The canvas *is* the window: the browser resizes it around the
+                // on-screen keyboard itself, so subtracting one here would
+                // subtract it twice.
+                tcode_ui::WindowSeam::flush(),
+                tcode_ui::ShellOptions {
+                    window: gpui::WindowOptions {
+                        // GPUI takes the browser window's size from the canvas
+                        // element; a fixed size here would be a lie.
+                        window_bounds: None,
+                        titlebar: None,
+                        window_background: gpui::WindowBackgroundAppearance::Opaque,
+                        ..Default::default()
+                    },
+                    fonts: vec![
+                        Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
+                        Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
+                    ],
+                    theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
+                    activate: true,
+                    setup: tcode_ui::ShellSetup {
+                        initial: tcode_ui::last_host_target(host.as_ref()),
+                        client_host: Some(host),
+                        // A browser tab runs no host of its own.
+                        local: None,
+                        seed_blocking: false,
+                    },
+                    ..Default::default()
+                },
             );
             if let Some(document) = window().document() {
                 if let Some(loading) = document.get_element_by_id("loading") {

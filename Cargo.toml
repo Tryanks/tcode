@@ -17,7 +17,6 @@ members = [
     "crates/ui",
     "crates/voice",
     "crates/app",
-    "crates/mobile",
     "crates/ios",
     "crates/android",
 ]

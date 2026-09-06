@@ -90,7 +90,11 @@ fn create_once(
     url: &str,
     cx: &mut AsyncApp,
 ) -> Result<(), String> {
-    let lifecycle = shell.update(cx, |shell, cx| shell.preview_lifecycle(cx));
+    let lifecycle = shell.update(cx, |shell, cx| {
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+    });
     window
         .update(cx, |_, window, cx| {
             lifecycle.update(cx, |lifecycle, cx| {
@@ -187,12 +191,14 @@ pub async fn run(
         shell.update(cx, |shell, cx| {
             shell
                 .preview_lifecycle(cx)
+                .expect("preview smoke runs on an attached window")
                 .update(cx, |lifecycle, cx| lifecycle.set_visible(None, cx));
         });
         yield_for(cx, RAPID_DELAY).await;
         shell.update(cx, |shell, cx| {
             shell
                 .preview_lifecycle(cx)
+                .expect("preview smoke runs on an attached window")
                 .update(cx, |lifecycle, cx| lifecycle.set_visible(Some(KEYS[0]), cx));
         });
         yield_for(cx, RAPID_DELAY).await;
@@ -209,9 +215,12 @@ pub async fn run(
     watchdog.start_phase("rapid-switch");
     for ix in 0..30 {
         shell.update(cx, |shell, cx| {
-            shell.preview_lifecycle(cx).update(cx, |lifecycle, cx| {
-                lifecycle.set_visible(Some(KEYS[ix % KEYS.len()]), cx)
-            });
+            shell
+                .preview_lifecycle(cx)
+                .expect("preview smoke runs on an attached window")
+                .update(cx, |lifecycle, cx| {
+                    lifecycle.set_visible(Some(KEYS[ix % KEYS.len()]), cx)
+                });
         });
         yield_for(cx, RAPID_DELAY).await;
     }
@@ -238,10 +247,13 @@ pub async fn run(
 
     watchdog.start_phase("drop-one");
     shell.update(cx, |shell, cx| {
-        shell.preview_lifecycle(cx).update(cx, |lifecycle, cx| {
-            lifecycle.set_visible(Some(KEYS[1]), cx);
-            lifecycle.drop_view(KEYS[0]);
-        });
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| {
+                lifecycle.set_visible(Some(KEYS[1]), cx);
+                lifecycle.drop_view(KEYS[0]);
+            });
     });
     yield_for(cx, STEP_DELAY).await;
     watchdog.finish_phase("drop-one");
@@ -269,10 +281,13 @@ pub async fn run(
     // child while its Windows creation future is still alive. Keep the primary
     // window open so a premature process exit is observable as a missing phase.
     shell.update(cx, |shell, cx| {
-        shell.preview_lifecycle(cx).update(cx, |lifecycle, cx| {
-            lifecycle.set_visible(Some(KEYS[1]), cx);
-            lifecycle.drop_view(DROP_DURING_CREATE_KEY);
-        });
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, cx| {
+                lifecycle.set_visible(Some(KEYS[1]), cx);
+                lifecycle.drop_view(DROP_DURING_CREATE_KEY);
+            });
     });
     yield_for(cx, STEP_DELAY).await;
     watchdog.finish_phase("drop-during-create");
@@ -290,9 +305,12 @@ pub async fn run(
     )
     .await;
     shell.update(cx, |shell, cx| {
-        shell.preview_lifecycle(cx).update(cx, |lifecycle, _| {
-            lifecycle.drop_view(DROP_DURING_CREATE_KEY)
-        });
+        shell
+            .preview_lifecycle(cx)
+            .expect("preview smoke runs on an attached window")
+            .update(cx, |lifecycle, _| {
+                lifecycle.drop_view(DROP_DURING_CREATE_KEY)
+            });
     });
     watchdog.finish_phase("recreate-after-inflight-drop");
 
