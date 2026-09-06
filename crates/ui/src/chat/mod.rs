@@ -328,6 +328,8 @@ pub struct ChatView {
     composer: Entity<Composer>,
     #[cfg(feature = "terminal")]
     terminal_drawer: Entity<TerminalDrawer>,
+    #[cfg(feature = "terminal")]
+    terminal_was_open: bool,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
     turn_index_cache: TurnIndexCache,
@@ -399,13 +401,31 @@ impl ChatView {
                 this.list_state.scroll_to_end();
                 cx.notify();
             }),
-            cx.observe(&workspace_store, |this, _, cx| {
+            cx.observe_in(&workspace_store, window, |this, store, window, cx| {
+                #[cfg(not(feature = "terminal"))]
+                let _ = (&store, &window);
                 this.sync_markdown_states(cx);
+                // Opening the terminal (button, palette, or any other route
+                // through the store) should hand keyboard focus to it, so the
+                // user can type a command without clicking into the panel.
+                #[cfg(feature = "terminal")]
+                {
+                    let open = store.read(cx).panel_state().terminal_open;
+                    if open && !this.terminal_was_open {
+                        let drawer = this.terminal_drawer.clone();
+                        window.defer(cx, move |window, cx| {
+                            gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
+                        });
+                    }
+                    this.terminal_was_open = open;
+                }
                 cx.notify();
             }),
         ];
         #[cfg(feature = "terminal")]
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
+        #[cfg(feature = "terminal")]
+        let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
 
         let mut this = Self {
             workspace_store,
@@ -413,6 +433,8 @@ impl ChatView {
             composer,
             #[cfg(feature = "terminal")]
             terminal_drawer,
+            #[cfg(feature = "terminal")]
+            terminal_was_open,
             list_state,
             turn_items: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
