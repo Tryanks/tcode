@@ -1,6 +1,6 @@
 //! One Settings → Providers list row.
 //!
-//! A compact, non-expanding row: driver glyph + status dot, name, `v<version>`,
+//! A compact, non-expanding row: driver glyph, name, `v<version>`,
 //! an update icon when a newer CLI exists, the status summary line, a gear button
 //! and the enable switch. The row body and the gear both open the per-profile
 //! settings dialog, a transactional modal form.
@@ -111,33 +111,12 @@ impl ProviderCard {
         let muted = cx.theme().muted_foreground;
         let accent = store.provider_profile_accent(&self.profile_id);
 
-        let dot_color = match summary.dot {
-            StatusDot::Loading => muted,
-            StatusDot::Success => cx.theme().success,
-            StatusDot::Warning => cx.theme().warning,
-            StatusDot::Error => cx.theme().danger,
-            StatusDot::Amber => cx.theme().warning,
-        };
-
         let provider_icon = provider_glyph(provider).small();
         let provider_icon = match accent {
             Some(accent) => provider_icon.text_color(rgb(accent)),
             None => provider_icon,
         };
-        let glyph = div()
-            .relative()
-            .flex_none()
-            .size(px(20.))
-            .child(provider_icon)
-            .child(
-                div()
-                    .absolute()
-                    .left(px(-3.))
-                    .top(px(-3.))
-                    .size(px(7.))
-                    .rounded_full()
-                    .bg(dot_color),
-            );
+        let glyph = div().flex_none().size(px(20.)).child(provider_icon);
 
         let title = h_flex()
             .gap_2()
