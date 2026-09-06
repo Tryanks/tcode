@@ -1,5 +1,5 @@
-use gpui::App;
-use tcode_mobile::host::{MobileHost, PairDone, PairRequest, PairedHost, Transport};
+use tcode_client::host::{ClientHost, HostFuture, PairRequest, Transport};
+use tcode_client::pairing::PairedHost;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
@@ -13,7 +13,7 @@ fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
 }
 
-impl MobileHost for WebHost {
+impl ClientHost for WebHost {
     fn device_name(&self) -> String {
         let ua = window().navigator().user_agent().unwrap_or_default();
         let family = if ua.contains("Edg/") {
@@ -72,15 +72,9 @@ impl MobileHost for WebHost {
         ))
     }
 
-    fn pair(&self, request: PairRequest, cx: &mut App, done: PairDone) {
+    fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
         let device_name = self.device_name();
-        // Fetch is a browser future; the callback must re-enter GPUI through
-        // its foreground executor, never from a WebSocket/Promise callback.
-        cx.spawn(async move |cx| {
-            let result = pair(&request.code, &device_name).await;
-            cx.update(|cx| done(result, cx));
-        })
-        .detach();
+        Box::pin(async move { pair(&request.code, &device_name).await })
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {

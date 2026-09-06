@@ -779,7 +779,10 @@ pub fn handle_back(cx: &mut App) -> bool {
 
 #[cfg(feature = "native")]
 pub fn run(cx: &mut App) {
-    run_with_host(cx, Rc::new(host::NativeHost::from_env()));
+    run_with_host(
+        cx,
+        Rc::new(host::MobileHost::new(Rc::new(host::NativeHost::from_env()))),
+    );
 }
 
 /// Open the same phone UI on native platforms and browser hosts.

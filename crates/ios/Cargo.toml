@@ -12,5 +12,8 @@ crate-type = ["staticlib", "rlib"]
 gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
 gpui-ios = { path = "../platform/gpui-ios" }
 log = "0.4"
+tcode-client = { path = "../client" }
 tcode-mobile = { path = "../mobile" }
+tcode-remote = { path = "../remote", default-features = false, features = ["client"] }
 tcode-ui = { path = "../ui", default-features = false }
+async-channel = "2"

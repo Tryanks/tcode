@@ -17,6 +17,7 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
+use tcode_client::host::ClientHost as _;
 use tcode_remote::client::{PairInvite, PairedHost, pair_pinned, pair_url, parse_pair_url};
 use tcode_remote::discovery::{Beacon, BeaconHandle, browse, start_beacon};
 use tcode_remote::{DeviceInfo, HostMux, PairingCode, RemoteConfig, RemoteServer, serve};
@@ -194,22 +195,13 @@ impl RemoteController {
 
 /// Paired hosts recorded in `hosts.json`; an unreadable file reads as empty.
 pub fn load_hosts(data_dir: &Path) -> Vec<PairedHost> {
-    tcode_remote::client::load_hosts(data_dir).unwrap_or_else(|error| {
-        log::error!("could not read hosts.json: {error}");
-        Vec::new()
-    })
+    tcode_remote::NativeClientHost::new(data_dir.to_owned(), machine_name()).load_hosts()
 }
 
 /// This machine's name, used as the advertised host name and the device name
 /// presented while pairing.
 pub fn machine_name() -> String {
-    ["HOSTNAME", "HOST", "COMPUTERNAME"]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(std::fs::read_to_string("/etc/hostname").ok())
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
-        .unwrap_or_else(|| "tcode".into())
+    tcode_remote::client_host::default_device_name()
 }
 
 /// Relaunch tcode against `host_id` (or back to local when `None`) and quit.

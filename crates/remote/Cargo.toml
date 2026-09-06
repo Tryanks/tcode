@@ -14,12 +14,13 @@ server = [
     "dep:rcgen",
     "dep:uuid",
 ]
-client = ["dep:tcode-protocol"]
+client = ["dep:tcode-protocol", "dep:dirs"]
 
 [dependencies]
 tcode-client = { path = "../client" }
 tcode-protocol = { path = "../protocol", optional = true, default-features = false }
 async-channel = "2"
+dirs = { version = "6", optional = true }
 async-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 base64 = { version = "0.23", optional = true }
 futures-lite = "2"

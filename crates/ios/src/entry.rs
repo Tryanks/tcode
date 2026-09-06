@@ -1,24 +1,11 @@
 //! GPUI application lifetime and the `tcode_ios_start` entry point.
 
-use gpui::{App, Application, ApplicationHandle, AsyncApp};
+use gpui::{Application, ApplicationHandle};
 use std::cell::OnceCell;
 use std::rc::Rc;
 
 thread_local! {
     static APPLICATION: OnceCell<ApplicationHandle> = const { OnceCell::new() };
-    static ASYNC_APPLICATION: OnceCell<AsyncApp> = const { OnceCell::new() };
-}
-
-/// Re-enter the embedded app without borrowing it synchronously from a UIKit callback.
-pub(crate) fn dispatch_to_app(callback: impl FnOnce(&mut App) + 'static) {
-    ASYNC_APPLICATION.with(|slot| {
-        let Some(app) = slot.get().cloned() else {
-            log::warn!("dropping iOS host callback before GPUI finished starting");
-            return;
-        };
-        let executor = app.foreground_executor().clone();
-        executor.spawn(async move { app.update(callback) }).detach();
-    });
 }
 
 #[unsafe(no_mangle)]
@@ -33,12 +20,6 @@ pub extern "C" fn tcode_ios_start() {
             .run_embedded(|cx| {
                 tcode_mobile::run_with_host(cx, Rc::new(crate::host::native_host()));
             });
-        let async_app = handle.to_async();
-        ASYNC_APPLICATION.with(|async_slot| {
-            if async_slot.set(async_app).is_err() {
-                log::warn!("tcode's asynchronous GPUI application was already retained");
-            }
-        });
         if slot.set(handle).is_err() {
             log::warn!("tcode's embedded GPUI application was already started");
         }

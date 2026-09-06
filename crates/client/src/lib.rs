@@ -1,5 +1,6 @@
 //! Transport-agnostic client endpoint for a tcode host.
 
+pub mod host;
 pub mod pairing;
 
 use std::collections::{HashMap, HashSet};
