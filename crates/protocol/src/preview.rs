@@ -10,7 +10,7 @@ pub enum PreviewRequest {
     Status,
     /// Evaluate a JS expression in the page and return its value.
     Evaluate { js: String },
-    /// Dispatch a real click at the center of the first `selector` match.
+    /// Dispatch a DOM click at the center of the first `selector` match.
     Click { selector: String },
     /// Focus `selector` and type `text` into it (dispatching input events).
     Type { selector: String, text: String },

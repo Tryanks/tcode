@@ -136,9 +136,8 @@ pub fn update_command_string(provider: ProviderKind, source: InstallSource) -> O
 
 /// Parse the first provider-version token from loose, human-facing CLI output.
 ///
-/// Unlike app release tags, provider CLIs historically accept `MAJOR.MINOR`
-/// and default the absent patch to zero. That behavior predates this refactor
-/// and is preserved for compatibility with provider output shapes.
+/// Accepts `MAJOR.MINOR` provider output with an implicit zero patch, unlike
+/// the stricter parser for app release tags.
 pub(crate) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     text.split_whitespace().find_map(parse_version_token)
 }

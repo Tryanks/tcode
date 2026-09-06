@@ -112,10 +112,7 @@ const EXTRA_ICONS: &[(&str, &[u8])] = &[
         include_bytes!("../../../assets/icons/sparkles.svg"),
     ),
     ("icons/mic.svg", MIC_SVG.as_bytes()),
-    // Compact-shell icons (docs/mobile-design.md §3): the nav bar's back
-    // chevron and the two empty-state glyphs. Inlined for the same reason as
-    // `mic` — three files' worth of assets for the phone alone — and listed
-    // unconditionally so the wasm build resolves them too.
+    // Register compact-shell icons for native and browser clients.
     ("icons/chevron-left.svg", CHEVRON_LEFT_SVG.as_bytes()),
     ("icons/message-square.svg", MESSAGE_SQUARE_SVG.as_bytes()),
     (

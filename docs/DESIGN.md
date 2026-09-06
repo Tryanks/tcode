@@ -1,50 +1,35 @@
 # tcode design spec
 
-The visual contract for tcode's UI, closely modeled on
-[T3 Code](https://t3.gg)'s design (see the acknowledgment in the README). When
-code and this doc disagree, fix one of them — deliberately.
+The visual and interaction contract for tcode. Update it deliberately when a
+product decision changes; historical design drafts are not additional rules.
+Phone and browser adaptations are in [mobile design](mobile-design.md).
 
 ## Design tokens
 
-Fonts:
-- UI: **DM Sans** (bundled, OFL) → fallback -apple-system, system-ui
-- Mono: SF Mono → SFMono-Regular, JetBrains Mono, Menlo (system; not bundled)
+The embedded [theme](../themes/tcode.json) owns colors and font choices;
+[material.rs](../crates/ui/src/material.rs) owns surface treatments, shared
+geometry and radii. Use those definitions rather than maintaining a second
+palette in documentation.
 
-Radius base: 10px. Buttons/chips ~8px, cards ~10-12px, composer 16px, circular
-send button fully round.
+DM Sans is bundled for UI text. Desktop monospace text uses the configured
+system family; mobile font registration is described in [mobile design](mobile-design.md).
+The centered chat/composer column is 720px wide at most. Desktop prose and
+composer text use 13.5px type with a 21px line height; metadata is smaller and
+muted, with monospace for paths, command text and numeric evidence.
 
-Light theme:
-| token | value |
-|---|---|
-| background | #ffffff |
-| foreground | #262626 |
-| primary | #1447e6 |
-| primary-fg | #ffffff |
-| muted bg | rgba(0,0,0,0.04) |
-| muted-fg | #686868 |
-| accent (hover) | rgba(0,0,0,0.04) |
-| border | rgba(0,0,0,0.08) |
-| destructive | #ef4444 / fg #b91c1c |
-| success | #10b981 / fg #047857 |
+The material layers are:
 
-Dark theme:
-| token | value |
-|---|---|
-| background | #161616 |
-| foreground | #f5f5f5 |
-| primary | #155dfc |
-| muted bg | rgba(255,255,255,0.04) |
-| muted-fg | #818181 |
-| accent (hover) | rgba(255,255,255,0.04) |
-| border | rgba(255,255,255,0.06) |
-| destructive | #fb414a / fg #f87171 |
-| success | #10b981 / fg #34d399 |
+| Layer | Use | Treatment |
+| --- | --- | --- |
+| T0 | Sidebar and window edges | Translucent theme canvas over the native window material |
+| T1 | Chat, right panel and Settings reading surfaces | Near-opaque warm paper in light mode, blue carbon in dark mode |
+| T2 | Inline fields, hover and selection | Theme-derived tints |
+| T3 | Composer, popovers, dialogs, menus and toasts | Opaque popover fill, hairline border and soft shadow |
 
-Diff colors: added rows get a low-alpha success tint with a solid success left
-accent bar; removed rows the destructive equivalent; +N / -M counts render in
-success-fg / destructive-fg.
-
-Canonical values live in `themes/tcode.json` (embedded at build time).
+Keep the same material composition when navigating between Chat and Settings.
+Separate reading regions with space and material contrast; use faded or inset
+hairlines where a rule is needed. Hover and focus must not change geometry.
+Diff additions and deletions use the success and danger colors consistently.
 
 ## Window material
 
@@ -64,17 +49,17 @@ not receive native Acrylic.
 
 ## Layout metrics (at 1440×900)
 
-- Sidebar 255px, resizable; 1px right border. Collapsed it occupies **0px** —
+- Sidebar is resizable. Collapsed it occupies **0px** —
   no icon strip, no layout node at all: the chat (and right panel) run to the
   window's left edge. Collapsed, entering the first 12px at the window's left
   edge reveals the sidebar as an **overlay** (see Sidebar below).
 - Window top is seamless: no app titlebar — the sidebar's first row (traffic
   lights inset 74px, wordmark + channel pill) and the chat header (52px) form
   the top strip; both are window-drag areas.
-- Chat content column: max-width 768px, centered, ≥24px horizontal padding
+- Chat content column: max-width 720px, centered, ≥24px horizontal padding
   (must reflow, never clip, when the diff panel narrows the chat region).
-- Composer: floating card, radius 16, 1px border, subtle shadow; bottom control
-  row ≈44px.
+- Composer: floating opaque card with the shared composer radius, a hairline
+  border and subtle shadow. Focus changes the border color without resizing it.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
@@ -94,6 +79,7 @@ remains.
 ## Surface anatomy
 
 ### Sidebar
+
 Expanded, it is the first panel of the workspace resizable group (220–380px,
 dragged width remembered across collapse/expand and window resizes). Collapsed,
 it is **not in the layout at all**. A fixed, invisible 12px-wide element-level
@@ -112,20 +98,21 @@ in both states.
    host it.
 2. Search row: magnifier + "Search" muted + ⌘K (macOS) / Ctrl+K
    (Windows/Linux) kbd chip → opens the palette.
-3. "PROJECTS" header: 11px uppercase muted + sort (no-op) + add-project button
-   (native directory picker).
+3. Project/thread header: sort, grouped/flat layout and add-project controls.
+   Sorting and layout choices are persisted.
 4. Project groups: rotating chevron + folder icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. Inline rename
    commits on Enter and cancels on blur or any click outside the input.
-   and time swaps to archive icon; active = persistent accent bg; a running
+   On hover, time swaps to the archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
    expansion so the list can be collapsed again).
 5. Footer: gear + "Settings" → settings route.
 
 ### Chat header
+
 52px. The first control is the **sidebar toggle**, immediately left of the
 title: `PanelLeft` + "Collapse sidebar" while expanded, `PanelLeftOpen` +
 "Expand sidebar" while collapsed. Then the thread title 16px medium ("No active
@@ -136,15 +123,17 @@ row is inset 80px so the toggle clears the native traffic lights; no other
 platform pays that inset.
 
 ### Timeline
-- **Turn separation is rhythm, not rules.** Turns are 44px apart; inside a turn
-  blocks sit 16px apart. There is deliberately **no divider/hairline under the
-  user bubble** — the eye separates turns by the space around them and by the
-  typographic step down from the 15px bubble to the muted activity summary.
+
+- Turns are separated by 32px; smaller gaps group blocks within a turn. There
+  is no divider under the user bubble: space and typography separate prose from
+  the muted activity summary.
 - Subagent capsules use a spinner while active, then a compact lifecycle chip:
   green for completed, amber for interrupted, and red for failed or declined.
-- Turn activity = collapsible "Work Log" sections: an expanded section starts
-  with an 11px uppercase muted label, followed by activity rows (muted ✓ +
-  one-line summary; command/tool/subagent/reasoning). While a turn is running,
+- Turn activity uses collapsible "Work Log" sections. A compact disclosure
+  header reveals transparent activity rows
+  (muted status icon + one-line command/tool/subagent/reasoning summary).
+  Details sit beneath their row; execution traces do not need enclosing cards.
+  While a turn is running,
   the latest five activities remain directly visible. Once a sixth arrives,
   only the older prefix is summarized by a collapsed Work Log row (with a
   working spinner on its right); those five visible activities are excluded
@@ -160,14 +149,13 @@ platform pays that inset.
   Assistant prose settles the run, folding every
   activity in it under one summary row. A completed section's toggle summarizes
   only its real, nonzero events
-  (commands, unique edited files, tool calls, subagents, and compactions); an
-  earlier section uses its own counts and the final section uses turn-wide
-  counts, prefixed once with Chinese “共” to make the aggregate scope explicit.
-  A zero-event summary is omitted.
-- Assistant markdown 15px, relaxed line-height, inline code chips (mono 13,
-  muted bg, 4px radius). Streaming appends via push_str with
-  follow-when-near-bottom.
-- User messages: right-aligned bubble, muted bg, radius 12, max-width ~70%.
+  (commands, unique edited files, tool calls, subagents, and compactions). Each
+  section counts only the activities folded into it.
+  Empty activity sections are omitted; unclassified activity still has a Work Log
+  disclosure rather than disappearing.
+- Assistant Markdown follows the prose typography above. Streaming follows the
+  latest output only while the reader remains near the bottom.
+- User messages: right-aligned bubble, muted bg, radius 12, max-width 75%.
 - A confirmed provider handoff inserts a subtle centered divider chip before
   the next user bubble: “Relayed from X to Y”. The injected handoff transcript
   is provider-only context and never renders as a message or disclosure row.
@@ -185,7 +173,7 @@ platform pays that inset.
   provider still receives the whole composed text); and a child-thread callback
   renders as a single "`{title, ≤24 chars…} {state} ›`" row **instead of** a
   bubble. A disclosure row sits where the turn's user bubble would start and
-  keeps the 44px/16px turn rhythm. Message actions follow the split: the
+  keeps the surrounding turn rhythm. Message actions follow the split: the
   orchestrate bubble's Copy copies only the visible user text; callback rows are
   not bubbles and carry **no** action row. Messages logged before the split
   annotation existed lack it
@@ -219,20 +207,18 @@ platform pays that inset.
   its own block: a danger-tinted card (10px radius, danger border at 35%, danger
   bg at 6%) with an uppercase 11px ERROR label, a Copy button, and the FULL
   message wrapped at 13px/20px. Errors deliberately do not join the Work Log's
-  activity rows — those are one-line ellipsized and collapse when the turn ends,
-  which is exactly how T3 Code ends up showing "Request was abo…" and then
-  nothing. A failed provider start additionally leaves the unsent message in the
+  activity rows, which are ellipsized and collapse when the turn ends.
+  A failed provider start additionally leaves the unsent message in the
   queue strip (typed text is never destroyed by a dead process).
   When a Claude usage window is exhausted, the card adds a resume row: either a
   live reset countdown with Cancel, or a button to schedule the resume manually.
-- CHANGED FILES card per turn with provider-attributed file changes: Codex uses
-  its replacement `turn/diff/updated` net snapshot; providers without that
-  capability fold only successfully completed structured file-edit operations
-  and label the result **PARTIAL**. Neither path compares ambient workspace
-  state, so external edits are never claimed by the turn. Header "CHANGED FILES
-  (N) · +A -D" + "Collapse all" ghost + "View diff" bordered button; body =
-  directory tree, file rows with right-aligned per-file +a/-d; paths relative to
-  the session cwd.
+- Changed-file evidence sits in the flow as a quiet summary and clickable file
+  chips, showing three files initially with a Show more/Show fewer control.
+  Codex uses its replacement `turn/diff/updated` net snapshot; providers without
+  that capability fold only successfully completed structured file edits and
+  label the result **PARTIAL**. Neither path compares ambient workspace state,
+  so external edits are never claimed by the turn. The evidence remains visible
+  when activity details fold; desktop chips and View diff open the diff panel.
 - Finished turn's bottom row keeps the muted local completion clock; when the
   turn has a trustworthy timestamped breakdown, it appends "Total", "AI
   thinking & response", and "Tool calls" durations via the row's existing
@@ -242,14 +228,19 @@ platform pays that inset.
 - Floating "⌄ Scroll to end" pill when not at bottom.
 
 ### Composer
-Floating card; placeholder "Ask anything, @tag files/folders, $use skills, or
-/ for commands". Control row: provider glyph + model name + chevron (model
-picker popover) · divider · context chip ("42k / 200k" from live token usage)
-· lock + "Ask to edit" (static; permission profiles not yet a feature) · box +
-"Build" (static) · spacer · running: blue spinner + circular stop button; idle:
-circular send button (primary bg when input non-empty). Below the card: folder
-icon + "Local checkout" left, branch icon + current git branch right (hidden
-outside a git repo).
+
+The composer holds the draft plus removable attachment, terminal-context and
+review-comment chips. Its controls select the provider/model, model parameters,
+approval mode and Build/Plan mode, subject to provider capabilities. Context
+usage comes from the live session. Sending during a turn queues the message;
+the secondary send action steers when the provider supports it. Stop interrupts
+the current turn. Queue/steer guidance belongs in the send tooltip.
+
+The checkout row below the desktop composer shows the working directory and
+Git branch. Voice input is available on supported macOS 26 builds: live partial
+text replaces its provisional range at the insertion anchor, final text commits
+it, and stopping keeps the transcript without sending. Escape, submit and
+thread changes also stop dictation. Compact clients hide this entry point.
 
 A finalized, unresolved proposed plan adds a "Plan Ready" header with a dismiss
 button and changes the empty primary action to Implement. In Plan mode any
@@ -260,7 +251,7 @@ At compact widths the overflow Build/Plan row is interactive (it toggles like th
 full-width chip and closes the popover); the permission row stays display-only,
 since its full-width counterpart is an explicit picker.
 
-Model picker popover (~360px, radius 12): left rail = favorites star + provider
+Model picker popover: left rail = favorites star + provider
 glyphs; search input; rows = model name (✓ current) + provider subtitle,
 ⌘1…⌘9 (macOS) / Ctrl+1…Ctrl+9 (Windows/Linux) chips, favorite star; footer note
 when a live session will restart (via resume) on model change. Picking a
@@ -272,22 +263,23 @@ work outcomes, and plan/todo state, capped at roughly 60k characters) plus the
 new message. Later messages use the new provider's native cursor. Empty or
 incomplete threads switch silently without a transcript.
 
-Approval panel (above composer): "PENDING APPROVAL" label, summary + count,
-expandable detail (command text / file list), actions Deny / Always allow /
-Approve (primary).
+Approval and user-input panels sit above the composer. Preserve the provider
+request, available decisions, free-text answers and editor prefill; show the
+full actionable detail. Approval actions include deny, allow, allow for the
+thread and cancel the turn where supported.
 
 Pi extension select, input, and editor dialogs surface through the native
 user-input panel, including editor prefill in its free-text field.
 
 ### Diff panel
+
 Right resizable split (default 560px, min 320px). Sidebar · chat · right panel
 are **one** resizable group: nesting a second group inside the chat panel does not
 shrink the chat — the right panel is painted over it and the timeline and composer
 are clipped mid-word. The chat column reflows; it never clips.
 
-Details: tab strip ("Diff" + "+" no-op) with expand/close cluster; toolbar
-"Turn N ⌄" selector, unified/split layout, wrap, whitespace-insensitive, and
-invisibles toggles.
+The panel has expand/close controls, a diff-scope selector, unified/split
+layout, wrap, whitespace-insensitive and invisibles toggles.
 
 The body is a variable-height virtual GPUI list backed by a Zed-inspired
 pipeline: full old/new texts use imara-diff histogram hunks, with patch parsing
@@ -302,8 +294,8 @@ uses a 42px gutter without the rail. Both retain an 18px minimum row height.
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the
 conversation destination rather than the shared window. Stored threads key by
-session id; an unsent New thread surface keys by project, matching the composer
-draft cache despite its transient session ids. Switching conversations moves
+session id; unsent drafts use their own session ids so two drafts in one
+project keep separate state. Switching conversations moves
 the live terminal workspace with its PTYs, scrollback, tabs, splits and attached
 context. Because WebViews are native child overlays rather than GPUI scene
 nodes, their visibility is synchronized directly from app state: closing
@@ -311,35 +303,24 @@ Preview, selecting Diff/Plan, switching conversations, opening the command
 palette, or leaving Chat hides every WebView that no longer owns the panel.
 
 ### Settings (full-page route)
-Left nav (sidebar width): General / Providers / Orchestrate + "← Back" pinned
-bottom. Header: "Settings" + "Restore defaults" bordered button (confirm).
-Groups are **floating cards** in chat's composer-console idiom, not flat
-System-Settings boxes (`material::floating_card`: popover fill, hairline border,
-radius 12, subtle `shadow_md`); the 768px content column and window material
-(T0 blur + translucent paper) are identical to chat, so navigating in/out never
-flips the material. Rows: bold 15px title + 13px muted description left, control
-right (dropdown / toggle / text input). Sparse surfaces separate rows with
-breathing room and no rules; only dense lists (Providers, Orchestrate) carry the
-faintest inset hairline. General: Language, Theme
-(System/Light/Dark, live), thread-title provider/model, Word wrap in diffs,
-Delete confirmation, task-panel behavior, and provider update checks. The title
-model defaults to Codex `gpt-5.6-luna`; its isolated background request always
-uses `low` reasoning effort. Providers: Claude / Codex / pi / OpenCode
-configuration. Each pi profile includes an off-by-default "Trust project
-extensions" toggle; enabling it launches pi with `--approve` so the project's
-`.pi` extensions, settings, and skills are loaded for that session. pi also
-defaults to zero tcode injection: sessions run with effective Full access, no
-tcode permission extension, and no preview MCP registration. The off-by-default
-"Native approvals" toggle opts supervised and auto-accept-edits sessions into
-the tcode permission gate; without it those stored modes are effectively Full
-access while Read only remains enforced by pi's native tool filter. Because pi
-has no MCP client, its unattached-tools warning is emitted only for explicitly
-enabled orchestration or computer-use registrations.
+
+Settings uses a left navigation column and independently scrolling content.
+Groups share the composer's opaque floating-card treatment. Rows pair a title
+and description with a control; sparse groups use space, dense lists use inset
+hairlines. Restore defaults requires confirmation.
+
+Provider profiles expose only applicable options. Pi defaults to no tcode
+permission extension; its Native approvals toggle enables the gate for
+supervised and auto-accept-edits sessions. Without it those stored modes take
+effect as Full access, while Read only uses pi's native tool filter. Trust
+project extensions adds `--approve` at launch. Pi has no MCP client; explicitly
+enabled orchestration or computer-use registrations produce an unavailable-tools
+warning. Remote setup is documented in [remote work mode](remote.md), and
+permissions in [computer use](computer-use.md).
 
 Orchestrate uses one provider-neutral workflow, refreshed on each explicit
 `/orchestrate` message. It describes framing, cross-provider peer discussion,
-execution routing, and independent acceptance. Main-model self-concept editors
-and identity overrides are removed. Existing identity fields are ignored on load.
+execution routing, and independent acceptance.
 
 Settings show two model lists: **Collaboration models**, bundled
 with GPT-6 Astra and Claude Fable 5.1, and **Execution models**, bundled with
@@ -367,43 +348,35 @@ The main workflow has no self-concept. Peer descriptions contain their collabora
 self-concepts: the main thread sees only other peers, and a consulted peer receives
 its own description with the discussion brief. These texts emphasize complementary
 perspectives, useful initiative within scope, and proportionate verification.
-See [model guidance sources](orchestrate-model-guidance.md).
 
-Migration combines old effort-tier descriptions into one model record and retains
-the first record's endpoint, enable, and Fast choices. Bundled Sonnet entries are
-removed, Opus 4.8 becomes Opus 5, and Fable 5 becomes Fable 5.1. Custom descriptions
-are retained with their old effort context; explicitly empty lists stay empty.
 Both add-model popovers reuse the provider/model picker with fixed tabs and a
 300px scrollable model list.
 
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
+
 Centered top-anchored modal over a dim backdrop: search input; grouped results
 — Actions (new thread per project, open settings, toggle theme, toggle diff
 panel) and Threads (fuzzy over titles); footer key hints (↑↓ Navigate · Enter
 Select · Esc Close).
 
 ### Session lifetime
-A working session survives everything except an explicit stop. Switching
-threads (or opening a draft) parks a session that still has work — running turn
-or queued messages — instead of killing its provider: the process, event pump
-and queue stay alive in the background, its events keep landing in the JSONL,
-queued messages keep dispatching as turns complete, and its sidebar row keeps
-the green "● Working" dot. Selecting the thread re-adopts the live session
-seamlessly (timeline replayed from the JSONL, which stayed current). When a
-parked session runs out of work it shuts down for real. There is **no idle
-reaper and no timer** — T3 Code hard-kills provider processes after 30 minutes
-without a user message, which silently destroys autonomous overnight sessions;
-tcode's rule is "finish what you were given, then rest".
 
-Dedicated worktree sessions live under `~/.tcode/worktrees/<session-id>`. At
-startup, tcode removes entries in that app-owned directory whose session is no
-longer present in the session store. Projects may place a `.worktreeinclude` at
-their repository root to copy required ignored files or directories into each
+Navigating away from a thread must not cancel its running turn, queued messages
+or provider background tasks. Events continue to reach its stored timeline and
+sidebar status; returning adopts the resident session. Idle providers may be
+retained briefly and reclaimed by the runtime's idle grace period and LRU bound.
+That resource policy must not reap sessions with work still in flight.
+
+Dedicated worktree sessions normally live under `~/.tcode/worktrees/<session-id>`;
+`TCODE_WORKTREES_DIR` overrides that root for isolated runs. Startup cleanup
+removes registered orphan worktrees only after their minimum age, preserving
+fresh entries, unknown directories and paths it cannot safely inspect. Projects
+may place a `.worktreeinclude` at their repository root to copy required ignored files or directories into each
 new worktree. Entries are relative paths, one per line; blank lines and `#`
 comments are ignored. Copies never overwrite files Git materialized and stop at
 an aggregate 512 MiB limit. The list is entirely user-controlled: including
 `.env` files or other credentials copies those secrets into
-`~/.tcode/worktrees`, where they remain until the worktree is removed.
+the worktree directory, where they remain until the worktree is removed.
 
 A clean worktree session can merge its committed branch back into the clean,
 branch-attached original checkout. Descendants fast-forward; divergent history
@@ -414,6 +387,7 @@ cwd and creation failures fall back to the resolved cwd and are reported in the
 dispatch response.
 
 ### Empty state
+
 Centered "Pick a thread to continue" (20px semibold) over "Select an existing
 thread or create a new one to get started." (14px muted). No composer rendered.
 
@@ -435,7 +409,8 @@ than adding every result to the global tab sequence.
 
 ## Verification protocol
 
-For any visual change: `cargo build` (zero warnings) + `cargo test --workspace`,
-then launch with `--open-latest` (optionally `--open-diff` / `--open-settings` /
-`--open-palette`), capture the window (`tools/windowid.c` helper +
-`screencapture -x -l<id>`), and review both themes against this spec.
+Use the validation commands in [CONTRIBUTING.md](../CONTRIBUTING.md) and its
+linked CI workflow. For visual changes, also launch the affected surface and
+review both themes at its normal and narrow widths. Exercise keyboard focus,
+scrolling and the changed interaction. Capture the relevant states for the PR;
+unit or compile checks alone do not establish visual correctness.

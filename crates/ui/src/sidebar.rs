@@ -407,7 +407,6 @@ struct ThreadArchive(String);
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadDelete(String);
 
-// Project-header context-menu actions.
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectArchiveAll(String);
@@ -538,8 +537,6 @@ impl SessionsSidebar {
         }
     }
 
-    // -- actions ------------------------------------------------------------
-
     /// Prompt for a directory, then create a project rooted there.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::add_project_dialog::open(self.store.clone(), window, cx);
@@ -634,8 +631,6 @@ impl SessionsSidebar {
                 })
         });
     }
-
-    // -- context-menu action handlers ---------------------------------------
 
     fn on_filter_project(
         &mut self,
@@ -1031,8 +1026,6 @@ impl SessionsSidebar {
                 })
         });
     }
-
-    // -- rendering ----------------------------------------------------------
 
     fn render_app_row(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window_drag_area(
@@ -1773,7 +1766,6 @@ impl SessionsSidebar {
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
             .pr_2()
-            // macOS sidebar selection: a tight 6px rounded rect, not a capsule.
             .rounded(px(6.))
             .when_some(
                 Self::thread_status_badge(&state, working, cx),
@@ -2107,39 +2099,36 @@ impl SessionsSidebar {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex_none()
-            // No full-bleed divider above the footer: whitespace separates it.
-            .child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    "sidebar-settings",
-                    Role::Button,
-                    crate::tr!("settings.title"),
-                    cx,
-                )
-                .h(px(40.))
-                .items_center()
-                .gap_2()
-                .px_3()
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().sidebar_accent))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_state
-                        .update(cx, |state, cx| state.open_settings(cx));
-                }))
-                .child(
-                    Icon::new(IconName::Settings)
-                        .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().sidebar_foreground)
-                        .child(crate::tr!("settings.title")),
-                ),
+        div().flex_none().child(
+            crate::material::accessible_clickable(
+                h_flex(),
+                "sidebar-settings",
+                Role::Button,
+                crate::tr!("settings.title"),
+                cx,
             )
+            .h(px(40.))
+            .items_center()
+            .gap_2()
+            .px_3()
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().sidebar_accent))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.window_state
+                    .update(cx, |state, cx| state.open_settings(cx));
+            }))
+            .child(
+                Icon::new(IconName::Settings)
+                    .size_4()
+                    .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().sidebar_foreground)
+                    .child(crate::tr!("settings.title")),
+            ),
+        )
     }
 }
 
@@ -2193,25 +2182,13 @@ fn proceed_delete(
     });
 }
 
-// ---------------------------------------------------------------------------
-// Compact (phone) thread list — docs/mobile-design.md §3.3
-// ---------------------------------------------------------------------------
-
-/// The phone's list geometry (docs/mobile-design.md §5).
 const COMPACT_PAGE_PADDING: f32 = 16.;
 const COMPACT_ROW_HEIGHT: f32 = 56.;
 const COMPACT_SEARCH_HEIGHT: f32 = 40.;
 
 impl SessionsSidebar {
-    /// The phone's thread list: a pill search field, project group headers with
-    /// a thread count and a collapse chevron, and 56pt rows carrying a status
-    /// glyph plus a "status word · relative time" subtitle.
-    ///
-    /// None of the desktop chrome is rendered here — no app row, no
-    /// "Threads / Projects" header with its sort, layout and add-project
-    /// controls (that row owns the *second* "+" the phone must not have), no
-    /// footer, and no persistent selection highlight: navigating away from the
-    /// list is what "selects" a thread on a phone.
+    /// Compact thread list with search and project groups. Navigation replaces
+    /// persistent row selection; desktop-only controls stay in the desktop list.
     fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let (groups, collapsed_projects, sessions, flags) = {
             let store = self.store.read(cx);
@@ -2241,7 +2218,6 @@ impl SessionsSidebar {
         };
 
         let body = if self.loading {
-            // Three skeleton rows while the first index snapshot is in flight.
             v_flex()
                 .flex_1()
                 .px(px(COMPACT_PAGE_PADDING))
@@ -2317,7 +2293,6 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
-    /// The pill search field (§3.3): 40pt tall, T2 fill, magnifier + placeholder.
     fn render_compact_search(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex_none()
@@ -2361,7 +2336,6 @@ impl SessionsSidebar {
             )
     }
 
-    /// Project group header (§3.3): folder + name + thread count + chevron.
     fn render_compact_group_header(
         &self,
         group: &ProjectGroup,
@@ -2422,7 +2396,7 @@ impl SessionsSidebar {
         )
     }
 
-    /// One 56pt thread row (§3.3). No chevron, no persistent selection — only a
+    /// One 56pt thread row. No chevron, no persistent selection — only a
     /// pressed tint; long press opens the shared thread context menu.
     fn render_compact_thread(
         &self,
@@ -2516,7 +2490,7 @@ impl SessionsSidebar {
     }
 }
 
-/// The 20×20 status slot at the head of a compact row (§3.3). The slot is
+/// The 20×20 status slot at the head of a compact row. The slot is
 /// always taken so titles line up whether or not a thread has a status.
 fn compact_status_glyph(state: &ThreadRowState, working: bool, cx: &App) -> gpui::AnyElement {
     let slot = div().flex_none().size(px(20.)).flex().items_center();
@@ -2563,9 +2537,7 @@ fn compact_status_glyph(state: &ThreadRowState, working: bool, cx: &App) -> gpui
     slot.into_any_element()
 }
 
-/// The subtitle's status word and its color (§1 / §5), or `None` for an idle
-/// thread — copy rule 6: a status word only appears when it carries
-/// information, so a settled thread shows its time alone.
+/// Status label and color, or `None` for an idle thread that shows only its time.
 fn compact_status_line(
     state: &ThreadRowState,
     working: bool,
@@ -2760,7 +2732,6 @@ impl Render for SessionsSidebar {
 
         v_flex()
             .size_full()
-            // No seam against the content column: material contrast does the work.
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .on_action(cx.listener(Self::on_rename))
@@ -2786,10 +2757,6 @@ impl Render for SessionsSidebar {
             .into_any_element()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Relative-time humanizer
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

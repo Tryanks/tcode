@@ -1,7 +1,6 @@
 //! Localhost dev-server discovery for the preview chrome's port quick-picks.
 //!
-//! We probe a fixed list of common dev ports by attempting a short loopback TCP
-//! connect (no extra deps, no `lsof`).
+//! Probe common development ports with a short loopback TCP connection.
 
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;

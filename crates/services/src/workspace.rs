@@ -2,15 +2,13 @@
 //!
 //! Prefers `git ls-files` (cached + untracked, gitignore-respected) when the
 //! session cwd is a git repo; otherwise falls back to a bounded recursive walk
-//! that skips the usual noise directories. No external crates — a plain
-//! `std::fs` implementation (the `ignore` crate is intentionally avoided per
-//! the no-new-deps constraint).
+//! that skips common build and dependency directories.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 pub use tcode_protocol::PathEntry;
 
-/// Caps for the fallback walk (git listing is naturally bounded by the repo).
+/// Entry cap for both listing paths; depth cap for the filesystem fallback.
 const MAX_ENTRIES: usize = 8000;
 const MAX_DEPTH: usize = 8;
 /// Directories the fallback walk never descends into.

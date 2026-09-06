@@ -185,9 +185,6 @@ impl ProviderModelPicker {
                     });
                 let display = self.display_name(provider, model, profile_id, cx);
                 let glyph = tinted_glyph(&self.store, provider, profile_id, cx);
-                // A quiet resting trigger (glyph + value + muted chevron) that
-                // only tints on hover, matching the composer's model picker; the
-                // hairline marks it as a dropdown.
                 Button::new(self.trigger_id)
                     .ghost()
                     .outline()
@@ -323,8 +320,7 @@ impl Render for ProviderModelPicker {
                     }
                 }
 
-                // One tab per profile: the two built-ins first, then the user's
-                // profiles in their card order.
+                // Keep profile tabs in the same order as the settings cards.
                 let mut tabs = h_flex().w_full().p_1().gap_1();
                 for (tab_index, profile) in profiles.iter().enumerate() {
                     let is_selected = profile.id == current_profile;

@@ -29,10 +29,8 @@ pub struct StatusSummary {
 /// Placeholder the headline uses where a revealable email goes.
 pub const EMAIL_SLOT: &str = "{email}";
 
-/// Derive the status dot + exact headline/detail copy for a provider card.
-///
-/// This is a direct port of T3's `providerStatus.ts` derivation (spec §2),
-/// including the authenticated-with-email variants.
+/// Localized status copy adapted from T3 Code's `providerStatus.ts`.
+/// The core status summary supplies the semantic state.
 pub fn summarize(
     provider: ProviderKind,
     snapshot: Option<&ProviderSnapshot>,
@@ -223,7 +221,6 @@ mod tests {
         }
     }
 
-    /// T3 §2's derivation table, case by case.
     #[test]
     fn status_summary_derivation_table() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -245,7 +242,6 @@ mod tests {
             "This provider is installed but disabled for new sessions in tcode."
         );
 
-        // Not installed.
         let missing = ProviderSnapshot {
             installed: false,
             status: Some(ProviderStatusKind::Error),
@@ -256,7 +252,6 @@ mod tests {
         assert_eq!(s.headline, "Not found");
         assert_eq!(s.detail, "CLI not detected on PATH.");
 
-        // Authenticated with email + label.
         let authed = ProviderSnapshot {
             auth: Some(ProviderAuth {
                 status: AuthStatus::Authenticated,
@@ -286,7 +281,6 @@ mod tests {
         assert_eq!(s.headline, "Authenticated");
         assert_eq!(s.email, None);
 
-        // Authenticated, label only.
         let label_only = ProviderSnapshot {
             auth: Some(ProviderAuth {
                 status: AuthStatus::Authenticated,
@@ -300,7 +294,6 @@ mod tests {
             "Authenticated · OpenAI API Key"
         );
 
-        // Authenticated, nothing else known.
         let bare = ProviderSnapshot {
             auth: Some(ProviderAuth {
                 status: AuthStatus::Authenticated,
@@ -311,7 +304,6 @@ mod tests {
         };
         assert_eq!(summarize(Some(&bare), true).headline, "Authenticated");
 
-        // Unauthenticated.
         let signed_out = ProviderSnapshot {
             auth: Some(ProviderAuth {
                 status: AuthStatus::Unauthenticated,
@@ -325,7 +317,6 @@ mod tests {
         assert_eq!(s.headline, "Not authenticated");
         assert_eq!(s.detail, "Run `codex login` and try again.");
 
-        // Warning with unknown auth.
         let warn = ProviderSnapshot {
             status: Some(ProviderStatusKind::Warning),
             ..snapshot()
@@ -338,7 +329,6 @@ mod tests {
             "The provider is installed, but the server could not fully verify it."
         );
 
-        // Error with unknown auth.
         let err = ProviderSnapshot {
             status: Some(ProviderStatusKind::Error),
             ..snapshot()
@@ -348,7 +338,6 @@ mod tests {
         assert_eq!(s.headline, "Unavailable");
         assert_eq!(s.detail, "The provider failed its startup checks.");
 
-        // Ready, auth indeterminate.
         let s = summarize(Some(&snapshot()), true);
         assert_eq!(s.headline, "Available");
         assert_eq!(

@@ -33,14 +33,9 @@ pub struct TerminalWorkspace {
     next_context_id: u64,
 }
 
-/// The one deliberate local-transport terminal affordance.
-///
-/// Only opaque live terminal handles cross here; tab ids, split layout,
-/// selection contexts, and active-tab state travel in serialized
-/// [`tcode_protocol::SessionStatus`] events. A remote transport replaces each
-/// `Arc<Terminal>` with the term crate's existing raw-byte
-/// `PtyHandle`/`GridEmulator` streams rather than serializing terminal bytes as
-/// JSON.
+/// Live terminal handles for local clients. Layout metadata travels in
+/// [`tcode_protocol::SessionStatus`] events; remote clients consume raw output
+/// bytes and maintain their own [`term::GridEmulator`].
 #[derive(Clone, Default)]
 pub struct LocalTerminalRegistry {
     handles: Arc<RwLock<HashMap<u64, Arc<term::Terminal>>>>,
@@ -87,7 +82,7 @@ impl TerminalWorkspace {
         self.terminals.iter().find(|entry| entry.id == id)
     }
 
-    /// Add a terminal from the temporary app compatibility consumer.
+    /// Add and activate a terminal with a process-wide unique tab id.
     pub fn push(&mut self, terminal: term::Terminal) -> u64 {
         let id = NEXT_TERMINAL_ID.fetch_add(1, Ordering::Relaxed);
         self.terminals.push(TerminalEntry {
@@ -98,8 +93,7 @@ impl TerminalWorkspace {
         id
     }
 
-    /// Rebuild the UI's compatibility view from serialized layout metadata
-    /// plus the construction-time local live-handle registry.
+    /// Combine serialized layout metadata with locally registered terminal handles.
     pub fn from_replica(
         status: &tcode_protocol::SessionStatus,
         registry: &LocalTerminalRegistry,

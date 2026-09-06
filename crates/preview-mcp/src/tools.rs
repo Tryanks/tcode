@@ -435,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn broker_reports_disconnect_as_error() {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        drop(rx); // no UI listening
+        drop(rx);
         let broker = broker(tx, std::time::Duration::from_millis(200));
         let tools = PreviewTools::new(broker, "session-a".into());
         let result = tools.preview_status().await;

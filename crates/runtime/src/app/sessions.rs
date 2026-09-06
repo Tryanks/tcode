@@ -418,8 +418,6 @@ impl AppState {
         (Some(marker.reopen_settings), session_id)
     }
 
-    // -- archive / delete / rename / unread (Group A) -----------------------
-
     /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
     /// its turn is running (returns without changing anything so the caller's
     /// tooltip stands). The active thread is closed back to the empty state.
@@ -801,8 +799,6 @@ impl AppState {
             .is_some_and(|&visited| meta.updated_at > visited)
     }
 
-    // -- worktree mode (Group C) --------------------------------------------
-
     /// Remove app-owned worktrees whose session is absent from the loaded store.
     pub(crate) fn recover_orphaned_worktrees(&self, cx: &mut HostCx) {
         let known_ids = self
@@ -901,11 +897,8 @@ impl AppState {
         });
     }
 
-    // -- draft threads ------------------------------------------------------
-
-    /// Build a draft `ActiveSession` for `cwd` under `project_id`: set up but
-    /// not persisted or started (see `commit_draft`). Pure (no store/cx) so the
-    /// draft flow is unit-testable.
+    /// Build a draft for `cwd` under `project_id` without persisting it or
+    /// starting a provider (see `commit_draft`).
     pub(super) fn build_draft_session(
         project_id: String,
         cwd: PathBuf,

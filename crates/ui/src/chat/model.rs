@@ -698,10 +698,8 @@ pub(crate) fn plain_text_as_markdown(text: &str) -> String {
             }
 
             if newline_count == 1 && !line_is_empty && chars.peek().is_some() {
-                // gpui-component currently drops markdown Break nodes while
-                // building paragraph text. An inline HTML break is converted
-                // to an InlineNode containing "\n", so both display and mouse
-                // selection preserve the original newline.
+                // Encode a single newline as an explicit break so Markdown
+                // cannot fold it into a space in display or selection.
                 markdown.push_str("<br>");
             } else {
                 markdown.extend(std::iter::repeat_n('\n', newline_count));
@@ -1331,9 +1329,7 @@ mod tests {
 
     #[test]
     fn timeline_overdraw_keeps_multiple_viewports_warm() {
-        // Headless/early construction still gets a useful buffer.
         assert_eq!(timeline_overdraw(0.), 3072.);
-        // Normal windows retain four full window heights on both sides.
         assert_eq!(timeline_overdraw(900.), 3600.);
         assert_eq!(timeline_overdraw(1440.), 5760.);
     }
@@ -2030,7 +2026,6 @@ mod tests {
 
     #[test]
     fn live_edit_counts_only_survive_when_a_diff_has_real_edits() {
-        // A real diff counts accurately, ignoring the `+++`/`---` headers.
         assert_eq!(live_edit_counts(Some(REAL_DIFF)), Some((2, 1)));
         assert_eq!(live_edit_counts(Some("+only added\n")), Some((1, 0)));
         assert_eq!(live_edit_counts(Some("-only removed\n")), Some((0, 1)));
@@ -2137,7 +2132,6 @@ mod tests {
         // carry no new text for a given entry).
         assert_eq!(md_sync("abc", "abc"), MdSync::Noop);
         assert_eq!(md_sync("", ""), MdSync::Noop);
-        // An append is a push of just the delta.
         assert_eq!(md_sync("", "I"), MdSync::Push("I".into()));
         assert_eq!(md_sync("I", "I'll go"), MdSync::Push("'ll go".into()));
         // Anything that is not an append is a reset: a rewrite, a shrink, or a
@@ -2288,10 +2282,8 @@ mod tests {
     fn the_live_working_indicator_keeps_its_own_format() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::set_locale(crate::LANGUAGE_ENGLISH);
-        // The running row is untouched by the breakdown's hour rollup.
         assert_eq!(format_duration(3_600), "60m 00s");
         assert_eq!(format_duration(90_061), "1501m 01s");
-        // The finished row rolls up, and keeps every second it claims.
         assert_eq!(format_span(3_600), "1h 00m 00s");
         assert_eq!(format_span(90_061), "25h 01m 01s");
         assert_eq!(format_span(59), "59s");

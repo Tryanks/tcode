@@ -122,7 +122,6 @@ impl Composer {
                                 );
                                 store.dismiss_fallback_block();
                             });
-                            // The user reviews and sends it themselves.
                             this.set_input_text(text.clone(), window, cx);
                         })),
                 )

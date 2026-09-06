@@ -1,18 +1,8 @@
 //! GUI-launch environment repair.
 //!
-//! A macOS app bundle launched from Finder/Dock (and a Linux desktop launch)
-//! never passes through a login shell: it inherits launchd's minimal
-//! environment, whose PATH is roughly `/usr/bin:/bin:/usr/sbin:/sbin`. The
-//! provider CLIs live in directories the login shell adds (`/opt/homebrew/bin`,
-//! `~/.local/bin`, npm/bun/volta shims, …), so every PATH lookup — the provider
-//! probes, session spawns, the embedded terminal — reports `claude`/`codex` as
-//! not installed even though the user's terminal finds them fine.
-//!
-//! The fix, same as Zed's and VS Code's: at startup, before anything reads
-//! PATH, run the user's login shell once, capture its environment, and merge it
-//! into the process — PATH replaces the launchd stub outright, everything else
-//! only fills in vars that are missing (so API keys, `CODEX_HOME`, proxy
-//! settings … travel too, without clobbering anything launchd set).
+//! Desktop launches can lack the shell's PATH entries for provider CLIs.
+//! Before other threads start, capture the login shell's environment: replace
+//! PATH and fill missing variables without overwriting inherited configuration.
 
 /// Printed by the shell before `env -0` so config-file noise on stdout can be
 /// discarded (some rc files `echo` unconditionally).
@@ -80,7 +70,7 @@ fn capture_login_shell_env() -> Result<String, String> {
     });
     let output = match rx.recv_timeout(SHELL_TIMEOUT) {
         Ok(result) => result.map_err(|err| format!("`{shell}` failed: {err}"))?,
-        // The orphaned shell dies on its own; only the import is abandoned.
+        // Abandon the import; the detached waiter still owns the shell process.
         Err(_) => return Err(format!("`{shell}` did not exit within {SHELL_TIMEOUT:?}")),
     };
     // The thread has sent already; join so no second thread is alive while the

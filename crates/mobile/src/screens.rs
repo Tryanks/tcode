@@ -1,11 +1,8 @@
-//! The phone's shell: nav bar, the three pages, and the bottom sheets
-//! (docs/mobile-design.md §3).
+//! Phone navigation, host/thread pages and bottom sheets.
 
 use super::*;
 
-/// The nav bar (§3.0): 52pt on paper, a centered title column, a chevron back
-/// button carrying the parent page's title, at most two 44×44 icon buttons, and
-/// a faded hairline underneath.
+/// Navigation header with a centered title and at most two trailing actions.
 fn nav_bar(
     back: Option<AnyElement>,
     title: SharedString,
@@ -13,7 +10,10 @@ fn nav_bar(
     actions: Vec<AnyElement>,
     cx: &App,
 ) -> Div {
-    debug_assert!(actions.len() <= 2, "§3.0 allows at most two nav actions");
+    debug_assert!(
+        actions.len() <= 2,
+        "navigation bar allows at most two trailing actions"
+    );
     v_flex()
         .flex_none()
         .w_full()
@@ -58,8 +58,7 @@ fn nav_bar(
         .child(material::faded_hairline(cx))
 }
 
-/// The back control (§3.0): a 20pt chevron plus the parent page's title, both
-/// in `foreground` — never the primary blue.
+/// Back button labelled with the parent page title.
 fn back_button(id: &'static str, parent: SharedString, cx: &App) -> Stateful<Div> {
     material::accessible_clickable(h_flex(), id, Role::Button, parent.clone(), cx)
         .flex_none()
@@ -90,8 +89,6 @@ fn back_button(id: &'static str, parent: SharedString, cx: &App) -> Stateful<Div
 }
 
 impl MobileRoot {
-    // -- §3.1 hosts --------------------------------------------------------
-
     pub(super) fn render_hosts(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let last = self.host.last_host_id();
         let mut list = v_flex().gap(px(12.)).px(px(16.)).pb(px(16.));
@@ -121,8 +118,6 @@ impl MobileRoot {
                     .pt(px(20.))
                     .pb(px(16.))
                     .gap(px(6.))
-                    // The wordmark over the large title is the only place the
-                    // brand appears outside About (§3.0).
                     .child(div().flex_none().child(material::brand_wordmark(cx)))
                     .child(
                         text(label("hosts"), 28.)
@@ -143,9 +138,7 @@ impl MobileRoot {
             .into_any_element()
     }
 
-    /// One host card (§3.1): a T2 group carrying the name, its address and last
-    /// connection, and — once the host is used — a "Last used" chip. The whole
-    /// card is the tap target, so it carries no chevron.
+    /// The whole host card is a tap target, including its connection summary.
     fn render_host_card(
         &self,
         index: usize,
@@ -240,7 +233,7 @@ impl MobileRoot {
             .truncate(),
         )
         // The pinned certificate, first four groups, for eyeballing against the
-        // host's own Settings → Remote (§3.1).
+        // host's own Settings → Remote.
         .when(!fingerprint.is_empty(), |card| {
             card.child(
                 text(fingerprint, 12.)
@@ -261,17 +254,14 @@ impl MobileRoot {
         .into_any_element()
     }
 
-    // -- §4 connection status ---------------------------------------------
-
     /// A pinned certificate that no longer matches: the link is dead until the
-    /// user pairs again, so it outranks every other status (§4).
+    /// user pairs again, so it outranks every other status.
     fn certificate_changed(&self) -> bool {
         self.connected_host
             .as_ref()
             .is_some_and(|host| self.host.certificate_changed(&host.host_id))
     }
 
-    /// Caption, color, and whether the glyph spins, for the current link (§4).
     fn connection(&self, cx: &App) -> (String, Hsla, bool) {
         if self.certificate_changed() {
             (
@@ -298,9 +288,7 @@ impl MobileRoot {
         }
     }
 
-    /// The status line under the thread-list title and the pill on the thread
-    /// page. A changed certificate makes it tappable: the sheet behind it is
-    /// the only place §4 lets us explain and offer "Pair again".
+    /// Connection status opens certificate-repair pairing when the pin changes.
     fn connection_badge(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let (caption, color, spinning) = self.connection(cx);
         let badge = h_flex()
@@ -332,8 +320,6 @@ impl MobileRoot {
                 cx.notify();
             }))
     }
-
-    // -- §3.3 thread list --------------------------------------------------
 
     pub(super) fn render_threads(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let back = back_button("back-hosts", label("hosts").into(), cx)
@@ -390,8 +376,6 @@ impl MobileRoot {
             .into_any_element()
     }
 
-    // -- §3.4 thread -------------------------------------------------------
-
     pub(super) fn render_thread(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let meta = self
             .store
@@ -418,7 +402,6 @@ impl MobileRoot {
                 this.back(cx);
             }))
             .into_any_element();
-        // The connection only earns space here when it is not "Connected" (§4).
         let actions = if self.online() {
             vec![]
         } else {
@@ -456,11 +439,7 @@ impl MobileRoot {
             .into_any_element()
     }
 
-    // -- §3.0 / §3.2 / §3.6 sheets ----------------------------------------
-
-    /// The bottom sheet: T3 body, grabber, title bar, and a 180ms slide-up with
-    /// the backdrop fading in step (§3.0). It stays mounted through its exit so
-    /// dismissal animates as well.
+    /// Keep sheets mounted through their slide-out so dismissal animates too.
     pub(super) fn render_sheet(
         &mut self,
         window: &mut Window,
@@ -568,8 +547,7 @@ impl MobileRoot {
         )
     }
 
-    /// §4's certificate-changed state: what happened, then the one action that
-    /// fixes it. Pairing again reuses the pair sheet with the endpoint filled.
+    /// Re-pair a host after its certificate changes, keeping the endpoint filled.
     fn render_certificate_changed(&self, cx: &mut Context<Self>) -> Div {
         let endpoint = self.connected_host.as_ref().map(|host| {
             (
@@ -661,9 +639,6 @@ impl MobileRoot {
         body
     }
 
-    // -- §3.6 settings -----------------------------------------------------
-
-    /// One labelled segmented control in a grouped card row.
     fn setting_row(
         &self,
         caption: String,
@@ -740,7 +715,6 @@ impl MobileRoot {
                 ],
                 cx,
             ))
-            // About names the product with the wordmark, never "phone client".
             .child(material::grouped(
                 vec![
                     v_flex()

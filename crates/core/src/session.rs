@@ -900,9 +900,7 @@ impl Timeline {
                     turn,
                 }));
             }
-            // Session metadata (composer menus) — not folded into the timeline.
-            // Session metadata (composer menus / traits picker) — held on the
-            // active session, not folded into the timeline.
+            // Composer metadata belongs to the runtime, not the timeline.
             AgentEvent::ProviderCommands { .. } | AgentEvent::ProviderOptions { .. } => {}
         }
     }
@@ -2813,8 +2811,6 @@ mod tests {
             },
         })
     }
-
-    // -- turn timing --------------------------------------------------------
 
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {
         StoredEvent {

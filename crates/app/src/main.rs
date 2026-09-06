@@ -394,10 +394,9 @@ fn main() {
             cx.text_system()
                 .add_fonts(application_fonts)
                 .expect("failed to register bundled application fonts");
-            // The theme's canvas color stays translucent over macOS vibrancy
-            // and Windows Acrylic (docs/visual-redesign.md). Opaque windows flatten
-            // it onto each mode's solid base first. (macOS fullscreen flattens
-            // at paint time instead: material::opaque_canvas.)
+            // Translucent canvas colors composite over macOS vibrancy and Windows
+            // Acrylic. Opaque windows flatten them to the solid base; macOS
+            // fullscreen applies the same fallback in material::opaque_canvas.
             let theme_json: Cow<'_, str> = if translucent_canvas_enabled() {
                 Cow::Borrowed(TCODE_THEME)
             } else {

@@ -1,10 +1,8 @@
 //! The platform seam of the phone/browser client.
 //!
-//! Everything the screens need from the outside world goes through
-//! [`MobileHost`]: persisted paired hosts, pairing, the transport to a host,
-//! the camera, and safe-area insets. `tcode-mobile` itself never touches a
-//! socket or the filesystem, so the same screens run on iOS, Android, the
-//! desktop preview window, and (with a wasm implementation) in a browser.
+//! [`MobileHost`] supplies persisted hosts, pairing, transport, camera access
+//! and safe-area insets. The screens run on iOS, Android, the desktop preview
+//! and the browser without accessing sockets or the filesystem directly.
 
 use std::rc::Rc;
 

@@ -91,9 +91,6 @@ impl ProviderCard {
         });
     }
 
-    // -- rendering ----------------------------------------------------------
-
-    /// The row: glyph + dot, name, version, update icon, summary, gear, switch.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
         // Name, enabled state, and probe result all belong to this profile;
@@ -258,9 +255,6 @@ impl ProviderCard {
             ),
             StatusDot::Amber => (cx.theme().muted, muted),
         };
-        // A compact metadata chip in chat's idiom (11px, tinted fill, pill
-        // radius, tight padding) that hugs its content — not a full-width
-        // green/orange bar that reads as web-form validation.
         let mut line = h_flex()
             .flex_none()
             .items_center()
@@ -330,7 +324,6 @@ impl ProviderCard {
         let store = self.store.clone();
 
         crate::material::overlay_popover("update-popover")
-            // Prose card, not a menu: keep the roomier panel padding.
             .p_3()
             .trigger(
                 Button::new("update-available")
@@ -435,14 +428,9 @@ impl ProviderCard {
 #[cfg(feature = "desktop")]
 impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A row inside the providers group — the group owns the fill and border.
         v_flex().w_full().child(self.render_header(cx))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Shared glyph
-// ---------------------------------------------------------------------------
 
 /// The provider's glyph (the same asset the composer's picker rail uses).
 pub fn provider_glyph(provider: ProviderKind) -> Icon {

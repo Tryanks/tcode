@@ -82,8 +82,6 @@ mod tests {
             },
         ];
         let out = filter_entries(&entries, "compo", 10);
-        // `composer.rs` (basename prefix) ranks above `decompose.md` (basename
-        // contains) which ranks above nothing here.
         assert_eq!(out[0].rel_path, "src/composer.rs");
         assert!(
             out.iter()

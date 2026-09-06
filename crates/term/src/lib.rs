@@ -56,7 +56,7 @@ const DEFAULT_ROWS: usize = 24;
 const DEFAULT_CELL_WIDTH_PX: u32 = 8;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 17;
 
-/// A rendering-relevant event emitted by the compatibility terminal.
+/// A rendering-relevant event emitted by a [`Terminal`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// The terminal grid or cursor changed.
@@ -340,7 +340,7 @@ impl Terminal {
         PtyHandle::with_spawn_cwd(cwd, f)
     }
 
-    /// Return a receiver for rendering-relevant compatibility events.
+    /// Return a receiver for rendering-relevant terminal events.
     ///
     /// Cloned receivers compete for events; callers should create one draining
     /// task per terminal and fan notifications out from there when necessary.
@@ -496,7 +496,6 @@ mod tests {
         }
     }
 
-    // Only the live-PTY tests use this, and those are unix-gated.
     #[cfg(unix)]
     fn find_char(state: &TermSnapshot, needle: char) -> Option<(usize, usize)> {
         state
