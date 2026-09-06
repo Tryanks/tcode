@@ -499,7 +499,7 @@ pub fn windows_keycode_for_name(name: &str) -> Option<u16> {
     })
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bool {
     if filters.pid.is_some_and(|pid| root.pid != pid)
         || filters.kind.is_some_and(|kind| root.kind != kind)
@@ -524,7 +524,7 @@ pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bo
     })
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
@@ -534,17 +534,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_roots_rejects_the_host_process_before_platform_access() {
-        let error = list_roots(&RootFilters {
-            pid: Some(std::process::id()),
-            ..RootFilters::default()
-        })
-        .unwrap_err();
-        assert_eq!(error.code, BackendErrorCode::RootNotFound);
-    }
-
-    #[test]
-    fn delivery_serializes_as_snake_case() {
+    fn delivery_uses_stable_mcp_wire_labels() {
         for (delivery, expected) in [
             (Delivery::Ax, "ax"),
             (Delivery::BackgroundPid, "background_pid"),
@@ -553,6 +543,16 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(delivery).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn list_roots_rejects_the_host_process_before_platform_access() {
+        let error = list_roots(&RootFilters {
+            pid: Some(std::process::id()),
+            ..RootFilters::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::RootNotFound);
     }
 
     #[test]

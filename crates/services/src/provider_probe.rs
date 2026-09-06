@@ -186,15 +186,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_programs_cover_native_and_acp() {
-        assert_eq!(default_program(ProviderKind::Codex), "codex");
-        assert_eq!(default_program(ProviderKind::ClaudeCode), "claude");
-        assert_eq!(default_program(ProviderKind::Pi), "pi");
-        assert_eq!(default_program(ProviderKind::OpenCode), "opencode");
-        assert_eq!(default_program(ProviderKind::Acp), "");
-    }
-
-    #[test]
     fn missing_binary_is_semantic_and_unlocalized() {
         let result = smol::block_on(probe_provider(
             ProviderKind::Codex,

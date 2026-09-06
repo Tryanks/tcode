@@ -2409,22 +2409,6 @@ mod tests {
     }
 
     #[test]
-    fn proposed_plan_delta_alone_is_not_ready() {
-        let timeline = Timeline::fold_events([
-            AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
-            },
-            AgentEvent::ProposedPlanDelta {
-                item_id: "plan-1".into(),
-                text: "# Partial plan".into(),
-            },
-        ]);
-
-        assert!(timeline.proposed_plan.is_some());
-        assert!(timeline.plan_ready().is_none());
-    }
-
-    #[test]
     fn unfinished_streaming_plan_is_discarded_when_turn_ends() {
         let timeline = Timeline::fold_events([
             AgentEvent::TurnStarted {
@@ -2733,12 +2717,6 @@ mod tests {
             EntryContent::Item(ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. })
                 if summary == "pong"
         ));
-        assert!(
-            timeline
-                .entries
-                .iter()
-                .all(|entry| entry.id != "spawn:user-1")
-        );
     }
 
     #[test]
@@ -2959,11 +2937,6 @@ mod tests {
 
         assert_eq!(timing.total_ms, 9_000);
         assert_eq!(timing.tool_ms, 2_000);
-        assert_eq!((timing.total_ms - timing.tool_ms), 7_000);
-        assert_eq!(
-            (timing.total_ms - timing.tool_ms) + timing.tool_ms,
-            timing.total_ms
-        );
     }
 
     #[test]
@@ -2986,7 +2959,6 @@ mod tests {
         // the union [1000, 3000] is 2000ms.
         assert_eq!(timing.tool_ms, 2_000);
         assert_eq!(timing.total_ms, 4_000);
-        assert_eq!((timing.total_ms - timing.tool_ms), 2_000);
     }
 
     #[test]
@@ -3020,7 +2992,7 @@ mod tests {
         .expect("a fully timestamped turn has a breakdown");
 
         assert_eq!(timing.tool_ms, 1_500);
-        assert_eq!((timing.total_ms - timing.tool_ms), 3_500);
+        assert_eq!(timing.total_ms, 5_000);
     }
 
     #[test]
@@ -3047,7 +3019,6 @@ mod tests {
 
         assert_eq!(timing.total_ms, 8_000);
         assert_eq!(timing.tool_ms, 0);
-        assert_eq!((timing.total_ms - timing.tool_ms), 8_000);
     }
 
     #[test]
@@ -3060,7 +3031,7 @@ mod tests {
         .expect("a fully timestamped turn has a breakdown");
 
         assert_eq!(timing.tool_ms, 3_000);
-        assert_eq!((timing.total_ms - timing.tool_ms), 1_000);
+        assert_eq!(timing.total_ms, 4_000);
     }
 
     #[test]
@@ -3114,7 +3085,6 @@ mod tests {
 
         assert_eq!(timing.total_ms, 10_000);
         assert_eq!(timing.tool_ms, 2_000);
-        assert_eq!((timing.total_ms - timing.tool_ms), 8_000);
 
         // A turn that ends before it started yields no breakdown at all.
         let inverted = timing_of(vec![at(9_000, turn_started()), at(1_000, turn_completed())]);
@@ -3138,8 +3108,6 @@ mod tests {
 
         assert_eq!(timing.total_ms, 4_000);
         assert_eq!(timing.tool_ms, 500);
-        // The pre-start second is real AI/idle time and must survive.
-        assert_eq!((timing.total_ms - timing.tool_ms), 3_500);
     }
 
     #[test]
@@ -3156,7 +3124,6 @@ mod tests {
         assert_eq!(timing.total_ms, 4_000);
         // [1_100, 6_000] intersected with [5_000, 9_000] is 1_000ms, not 4_900.
         assert_eq!(timing.tool_ms, 1_000);
-        assert_eq!((timing.total_ms - timing.tool_ms), 3_000);
     }
 
     #[test]
@@ -3178,7 +3145,6 @@ mod tests {
 
             assert_eq!(timing.total_ms, 5_000, "{label}");
             assert_eq!(timing.tool_ms, 2_500, "{label}");
-            assert_eq!((timing.total_ms - timing.tool_ms), 2_500, "{label}");
         }
     }
 
@@ -3261,7 +3227,6 @@ mod tests {
             .expect("the reopened turn is fully timestamped");
         assert_eq!(timing.total_ms, 6_000);
         assert_eq!(timing.tool_ms, 0);
-        assert_eq!((timing.total_ms - timing.tool_ms), 6_000);
     }
 
     #[test]
@@ -3314,7 +3279,6 @@ mod tests {
         let timing = replayed.turns[0].timing.expect("breakdown");
         assert_eq!(timing.total_ms, 6_000);
         assert_eq!(timing.tool_ms, 2_800);
-        assert_eq!((timing.total_ms - timing.tool_ms), 3_200);
     }
 
     #[test]

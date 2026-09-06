@@ -8739,7 +8739,6 @@ dependencies = [
  "computer-use-mcp",
  "embed-resource",
  "env_logger",
- "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
  "log",

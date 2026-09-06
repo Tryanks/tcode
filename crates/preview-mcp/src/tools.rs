@@ -393,34 +393,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broker_roundtrip_with_fake_resolver() {
-        // Fake UI: echoes op kind back as JSON.
+    async fn tools_preserve_session_and_map_json_and_image_replies() {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
         let broker = broker(tx, std::time::Duration::from_secs(2));
         let resolver = tokio::spawn(async move {
-            while let Ok(request) = rx.recv().await {
-                assert_eq!(request.session_id, "session-a");
-                let reply = match &request.op {
-                    PreviewOp::Status => {
-                        PreviewReply::Json(serde_json::json!({ "url": "https://x/" }))
-                    }
-                    PreviewOp::Screenshot => PreviewReply::Image {
+            for (op, reply) in [
+                (
+                    PreviewOp::Status,
+                    PreviewReply::Json(serde_json::json!({"url":"https://x/"})),
+                ),
+                (
+                    PreviewOp::Screenshot,
+                    PreviewReply::Image {
                         mime: "image/png".into(),
                         data_base64: "AAA".into(),
                     },
-                    _ => PreviewReply::Json(serde_json::json!({ "ok": true })),
-                };
-                let _ = request.reply.send(Ok(reply)).await;
+                ),
+            ] {
+                let request = rx.recv().await.unwrap();
+                assert_eq!(request.session_id, "session-a");
+                assert_eq!(request.op, op);
+                request.reply.send(Ok(reply)).await.unwrap();
             }
         });
-
         let tools = PreviewTools::new(broker, "session-a".into());
-        let status = tools.run(PreviewOp::Status).await;
+        let status = tools.preview_status().await;
         assert_eq!(status.is_error, Some(false));
-        let shot = tools.run(PreviewOp::Screenshot).await;
+        assert!(
+            matches!(status.content.as_slice(), [ContentBlock::Text(text)]
+            if serde_json::from_str::<serde_json::Value>(&text.text).unwrap() == serde_json::json!({"url":"https://x/"}))
+        );
+        let shot = tools.preview_screenshot().await;
         assert_eq!(shot.is_error, Some(false));
-
-        resolver.abort();
+        assert!(
+            matches!(shot.content.as_slice(), [ContentBlock::Image(image)]
+            if image.mime_type == "image/png" && image.data == "AAA")
+        );
+        resolver.await.unwrap();
     }
 
     #[tokio::test]
@@ -429,7 +438,11 @@ mod tests {
         drop(rx); // no UI listening
         let broker = broker(tx, std::time::Duration::from_millis(200));
         let tools = PreviewTools::new(broker, "session-a".into());
-        let result = tools.run(PreviewOp::Status).await;
+        let result = tools.preview_status().await;
         assert_eq!(result.is_error, Some(true));
+        assert!(
+            matches!(result.content.as_slice(), [ContentBlock::Text(text)]
+            if text.text == "preview UI is not available")
+        );
     }
 }

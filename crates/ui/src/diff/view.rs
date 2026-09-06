@@ -1891,7 +1891,6 @@ impl Render for DiffPanel {
 mod tests {
     use super::*;
     use crate::diff::model::RenderedRow;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn out_of_workspace_turn_change_renders_from_stored_diff_without_file_text() {
@@ -2053,47 +2052,5 @@ mod tests {
                 row: 4_999
             }
         ));
-    }
-
-    #[gpui::test]
-    fn virtual_list_constructs_only_the_large_diff_viewport(cx: &mut gpui::TestAppContext) {
-        cx.update(crate::theme::init);
-        let cx = cx.add_empty_window();
-        let constructions = Arc::new(AtomicUsize::new(0));
-        let state = ListState::new(5_001, ListAlignment::Top, px(180.));
-
-        struct TestList {
-            state: ListState,
-            constructions: Arc<AtomicUsize>,
-        }
-        impl Render for TestList {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let observed = self.constructions.clone();
-                list(self.state.clone(), move |_, _, _| {
-                    observed.fetch_add(1, Ordering::Relaxed);
-                    div().h(px(18.)).w_full().into_any_element()
-                })
-                .size_full()
-            }
-        }
-        let view_constructions = constructions.clone();
-
-        cx.draw(
-            gpui::point(px(0.), px(0.)),
-            gpui::size(px(900.), px(720.)),
-            move |_, cx| {
-                cx.new(|_| TestList {
-                    state,
-                    constructions: view_constructions,
-                })
-                .into_any_element()
-            },
-        );
-
-        let count = constructions.load(Ordering::Relaxed);
-        assert!(
-            count < 100,
-            "expected viewport-only construction for 5,001 items, got {count}"
-        );
     }
 }

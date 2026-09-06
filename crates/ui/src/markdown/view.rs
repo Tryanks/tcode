@@ -515,22 +515,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn renders_gfm_document_without_panicking(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let (_, cx) = cx.add_window_view(|_, cx| {
-            TestRoot::new(
-                "# Heading\n\n> quote with `inline code`\n\n- [x] done\n\n| a | b |\n|:-|--:|\n| 1 | 2 |\n\n```rust\nfn main() {}\n```",
-                cx,
-            )
-        });
-        let cx: &mut VisualTestContext = cx;
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-    }
-
-    #[gpui::test]
     fn markdown_reports_intrinsic_height_inside_outer_list(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);

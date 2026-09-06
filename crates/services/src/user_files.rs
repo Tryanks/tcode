@@ -161,12 +161,11 @@ mod tests {
             relativize_to_workspace(path.to_str().unwrap(), &workspace),
             "exact.bin"
         );
-        if let Ok(canonical_path) = path.canonicalize() {
-            assert_eq!(
-                relativize_to_workspace(canonical_path.to_str().unwrap(), &workspace),
-                "exact.bin"
-            );
-        }
+        let canonical_path = path.canonicalize().unwrap();
+        assert_eq!(
+            relativize_to_workspace(canonical_path.to_str().unwrap(), &workspace),
+            "exact.bin"
+        );
         let outside = root.join("outside.bin");
         assert_eq!(
             relativize_to_workspace(outside.to_str().unwrap(), &workspace),

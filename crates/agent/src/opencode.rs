@@ -54,7 +54,7 @@ pub async fn list_models(
             &[],
         )?;
         let result = (|| {
-            server.wait_healthy()?;
+            server.wait_healthy(Duration::from_secs(15))?;
             let provider_state = server.http.get_json("/provider")?;
             let mut catalog = server.http.get_json("/config/providers")?;
             reconcile_provider_catalog(&mut catalog, &provider_state);
@@ -86,7 +86,7 @@ async fn run_actor(
             return;
         }
     };
-    if let Err(err) = server.wait_healthy() {
+    if let Err(err) = server.wait_healthy(Duration::from_secs(15)) {
         server.stop();
         let _ = ready.send(Err(err)).await;
         return;
@@ -1426,8 +1426,8 @@ impl OpenCodeServer {
         })
     }
 
-    fn wait_healthy(&mut self) -> Result<(), AgentError> {
-        let deadline = Instant::now() + Duration::from_secs(15);
+    fn wait_healthy(&mut self, timeout: Duration) -> Result<(), AgentError> {
+        let deadline = Instant::now() + timeout;
         let mut last_error = None;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
@@ -1451,6 +1451,8 @@ impl OpenCodeServer {
             }
             std::thread::sleep(Duration::from_millis(75));
         }
+        // Tail readers need EOF before append_to joins them for final diagnostics.
+        self.stop();
         Err(AgentError::Protocol(self.stderr_tail.append_to(
             format!(
                 "timed out waiting for OpenCode health: {}",
@@ -1743,6 +1745,58 @@ fn opencode_config_content(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn health_timeout_stops_the_child_before_draining_its_output() {
+        let dir =
+            std::env::temp_dir().join(format!("agent-opencode-health-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // OpenCodeServer passes `serve` as argv[1]; sh reads this script without
+        // needing a generated executable. The final line is flushed only at EOF.
+        std::fs::write(
+            dir.join("serve"),
+            "printf 'OpenCode health stalled\nfinal startup detail' >&2\n: > ready\nexec sleep 5\n",
+        )
+        .unwrap();
+        let mut server = OpenCodeServer::spawn(
+            Some(Path::new("/bin/sh")),
+            &dir,
+            &LaunchEnv::default(),
+            ApprovalMode::FullAccess,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let started = Instant::now();
+        while !dir.join("ready").exists() {
+            if started.elapsed() > Duration::from_secs(2) {
+                server.stop();
+                std::fs::remove_dir_all(&dir).unwrap();
+                panic!("test child did not reach its startup stall");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let error = server.wait_healthy(Duration::from_millis(100)).unwrap_err();
+        let status = server.child.try_wait().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // The child has a finite lifetime so a regression fails within five
+        // seconds instead of leaving the test stuck in the output-reader join.
+        assert!(
+            status.is_some_and(|status| !status.success()),
+            "stalled child was not stopped"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("timed out waiting for OpenCode health"),
+            "{message}"
+        );
+        assert!(
+            message.contains("OpenCode health stalled\nfinal startup detail"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn maps_recorded_sse_fixture_and_filters_other_sessions() {
         let mut mapper = OpenCodeMapper::new("ses_target".into());
@@ -1932,7 +1986,7 @@ mod tests {
     }
 
     #[test]
-    fn translates_ordered_multi_question_answers_and_cancellation() {
+    fn orders_multi_question_answers_and_ignores_unrelated_questions() {
         let question_ids = vec!["que_1:0".into(), "que_1:1".into(), "que_1:2".into()];
         let answers = serde_json::Map::from_iter([
             ("que_1:2".into(), json!("free text")),
@@ -1940,18 +1994,8 @@ mod tests {
             ("unrelated".into(), json!("ignored")),
         ]);
         assert_eq!(
-            (!answers.is_empty()).then(|| native_question_answers(&question_ids, &answers)),
-            Some(vec![
-                vec!["Agent".into(), "Core".into()],
-                Vec::new(),
-                vec!["free text".into()]
-            ])
-        );
-        let empty_answers = serde_json::Map::new();
-        assert_eq!(
-            (!empty_answers.is_empty())
-                .then(|| native_question_answers(&question_ids, &empty_answers)),
-            None
+            native_question_answers(&question_ids, &answers),
+            vec![vec!["Agent", "Core"], Vec::new(), vec!["free text"]]
         );
     }
 

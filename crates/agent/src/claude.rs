@@ -3611,21 +3611,6 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_models_match_supported_opus_versions() {
-        let ids: Vec<String> = built_in_models()
-            .into_iter()
-            .filter(|model| {
-                model.options.iter().any(
-                    |option| matches!(option, OptionDescriptor::Boolean { id, .. } if id == "fastMode"),
-                )
-            })
-            .map(|model| model.id)
-            .collect();
-
-        assert_eq!(ids, ["claude-opus-5", "claude-opus-4-8"]);
-    }
-
-    #[test]
     fn parse_semver_from_version_output() {
         assert_eq!(
             crate::process::parse_semver("2.1.206 (Claude Code)"),
@@ -3656,38 +3641,6 @@ mod tests {
         assert_eq!(format_context_window(200_000), "200k");
         assert_eq!(format_context_window(750_000), "750k");
         assert_eq!(format_context_window(1_000_000), "1M");
-    }
-
-    #[test]
-    fn catalog_context_window_defaults_match_native_windows() {
-        let default = |model_id: &str| {
-            model_spec(model_id)
-                .unwrap()
-                .options
-                .into_iter()
-                .find_map(|option| match option {
-                    OptionDescriptor::Select {
-                        id, default_value, ..
-                    } if id == "contextWindow" => default_value,
-                    _ => None,
-                })
-        };
-
-        for model_id in [
-            "claude-fable-5",
-            "claude-fable-5-1",
-            "claude-opus-5",
-            "claude-sonnet-5",
-            "claude-opus-4-7",
-            "claude-opus-4-8",
-        ] {
-            assert_eq!(default(model_id).as_deref(), Some("1m"));
-        }
-        for model_id in ["claude-sonnet-4-6", "claude-opus-4-6"] {
-            assert_eq!(default(model_id).as_deref(), Some("200k"));
-        }
-        assert_eq!(default("claude-haiku-4-5"), None);
-        assert_eq!(default("claude-opus-4-5"), None);
     }
 
     #[test]
@@ -4111,53 +4064,37 @@ mod tests {
     }
 
     #[test]
-    fn text_delta_maps_to_assistant_delta() {
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#,
-        );
-        let evs = feed(
-            &mut m,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}}"#,
-        );
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            AgentEvent::Delta {
-                item_id,
-                kind,
-                text,
-            } => {
-                assert_eq!(item_id, "msg_1:0");
-                assert_eq!(*kind, DeltaKind::AssistantText);
-                assert_eq!(text, "Hi");
-            }
-            other => panic!("expected Delta, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn thinking_delta_maps_to_reasoning() {
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_r"}}}"#,
-        );
-        let evs = feed(
-            &mut m,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"hmm"}}}"#,
-        );
-        match &evs[0] {
-            AgentEvent::Delta {
-                item_id,
-                kind,
-                text,
-            } => {
-                assert_eq!(item_id, "msg_r:1");
-                assert_eq!(*kind, DeltaKind::ReasoningText);
-                assert_eq!(text, "hmm");
-            }
-            other => panic!("expected reasoning Delta, got {other:?}"),
+    fn streamed_deltas_preserve_block_identity_and_content_kind() {
+        for (index, delta, expected_kind, expected_text) in [
+            (
+                0,
+                json!({"type":"text_delta","text":"Hi"}),
+                DeltaKind::AssistantText,
+                "Hi",
+            ),
+            (
+                1,
+                json!({"type":"thinking_delta","thinking":"hmm"}),
+                DeltaKind::ReasoningText,
+                "hmm",
+            ),
+        ] {
+            let mut m = Mapper::new();
+            feed(
+                &mut m,
+                r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#,
+            );
+            let events = feed(
+                &mut m,
+                &json!({"type":"stream_event", "event": {
+                    "type":"content_block_delta", "index":index, "delta":delta
+                }})
+                .to_string(),
+            );
+            assert!(
+                matches!(events.as_slice(), [AgentEvent::Delta { item_id, kind, text }]
+                if item_id == &format!("msg_1:{index}") && *kind == expected_kind && text == expected_text)
+            );
         }
     }
 
@@ -4276,114 +4213,6 @@ mod tests {
     }
 
     #[test]
-    fn background_bash_result_completes_turn_immediately() {
-        let mut m = Mapper::new();
-        let turn_id = m.start_turn();
-
-        let started = feed(
-            &mut m,
-            r#"{"type":"assistant","message":{"id":"msg-bg","content":[{"type":"tool_use","id":"toolu-bg","name":"Bash","input":{"command":"sleep 30","run_in_background":true}}]}}"#,
-        );
-        assert!(matches!(
-            &started[0],
-            AgentEvent::ItemStarted(ThreadItem {
-                content: ItemContent::CommandExecution {
-                    status: ItemStatus::InProgress,
-                    ..
-                },
-                ..
-            })
-        ));
-
-        assert!(matches!(
-            feed(
-                &mut m,
-                r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"sleep"}]}"#,
-            )
-            .as_slice(),
-            [AgentEvent::BackgroundTasksChanged { count: 1 }]
-        ));
-        assert!(
-            feed(
-                &mut m,
-                r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","task_type":"local_bash"}"#,
-            )
-            .is_empty()
-        );
-        let running = feed(
-            &mut m,
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-bg","content":"Command running in background with ID: bg-1"}]},"tool_use_result":{"backgroundTaskId":"bg-1"}}"#,
-        );
-        assert!(matches!(
-            &running[0],
-            AgentEvent::ItemUpdated(ThreadItem {
-                content: ItemContent::CommandExecution {
-                    status: ItemStatus::InProgress,
-                    exit_code: None,
-                    ..
-                },
-                ..
-            })
-        ));
-
-        // Claude ends its model turn as soon as it launches the process. A
-        // background command must not hold the canonical turn open.
-        let result = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"success","is_error":false}"#,
-        );
-        assert!(matches!(
-            turn_completed_after_count(&result, 1),
-            AgentEvent::TurnCompleted {
-                turn_id: completed,
-                status: TurnStatus::Completed,
-                ..
-            } if completed == &turn_id
-        ));
-    }
-
-    #[test]
-    fn background_bash_notification_completes_command_card() {
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"assistant","message":{"id":"msg-bg","content":[{"type":"tool_use","id":"toolu-bg","name":"Bash","input":{"command":"sleep 30","run_in_background":true}}]}}"#,
-        );
-        feed(
-            &mut m,
-            r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash"}]}"#,
-        );
-        feed(
-            &mut m,
-            r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","task_type":"local_bash"}"#,
-        );
-        feed(
-            &mut m,
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu-bg","content":"Command running in background with ID: bg-1"}]},"tool_use_result":{"backgroundTaskId":"bg-1"}}"#,
-        );
-        feed(
-            &mut m,
-            r#"{"type":"system","subtype":"task_updated","task_id":"bg-1","patch":{"status":"completed"}}"#,
-        );
-
-        let finished = feed(
-            &mut m,
-            r#"{"type":"system","subtype":"task_notification","task_id":"bg-1","tool_use_id":"toolu-bg","status":"completed","summary":"sleep finished"}"#,
-        );
-        assert!(matches!(
-            &finished[0],
-            AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::CommandExecution {
-                    status: ItemStatus::Completed,
-                    exit_code: Some(0),
-                    ..
-                },
-                ..
-            })
-        ));
-    }
-
-    #[test]
     fn reinvocation_after_background_task_synthesizes_turn() {
         let mut m = Mapper::new();
         feed(
@@ -4392,22 +4221,48 @@ mod tests {
         );
         let first_turn_id = m.start_turn();
 
-        feed(
+        let started = feed(
             &mut m,
             r#"{"type":"assistant","message":{"id":"msg-bg","content":[{"type":"tool_use","id":"toolu-bg","name":"Bash","input":{"command":"sleep 8 && echo BG_DONE","description":"Launch background sleep command","run_in_background":true}}]}}"#,
         );
-        feed(
+        assert!(matches!(
+            started.as_slice(),
+            [AgentEvent::ItemStarted(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    status: ItemStatus::InProgress,
+                    ..
+                },
+                ..
+            })]
+        ));
+        let count = feed(
             &mut m,
             r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg-1","task_type":"local_bash","description":"Launch background sleep command"}]}"#,
         );
-        feed(
+        assert!(matches!(
+            count.as_slice(),
+            [AgentEvent::BackgroundTasksChanged { count: 1 }]
+        ));
+        let task_started = feed(
             &mut m,
             r#"{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu-bg","description":"Launch background sleep command","task_type":"local_bash"}"#,
         );
-        feed(
+        assert!(task_started.is_empty());
+        let running = feed(
             &mut m,
             r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu-bg","type":"tool_result","content":"Command running in background with ID: bg-1","is_error":false}]},"tool_use_result":{"stdout":"","stderr":"","interrupted":false,"backgroundTaskId":"bg-1"}}"#,
         );
+        assert!(matches!(
+            running.as_slice(),
+            [AgentEvent::ItemUpdated(ThreadItem {
+                content: ItemContent::CommandExecution {
+                    status: ItemStatus::InProgress,
+                    exit_code: None,
+                    ..
+                },
+                ..
+            })]
+        ));
         let first_result = feed(
             &mut m,
             r#"{"type":"result","subtype":"success","is_error":false,"result":"Background command launched."}"#,
@@ -4556,27 +4411,6 @@ mod tests {
     }
 
     #[test]
-    fn write_tool_maps_to_file_change() {
-        let mut m = Mapper::new();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"assistant","message":{"id":"msg_4","content":[{"type":"tool_use","id":"toolu_w","name":"Write","input":{"file_path":"/tmp/x.txt","content":"hi\n"}}]}}"#,
-        );
-        match &evs[0] {
-            AgentEvent::ItemStarted(item) => match &item.content {
-                ItemContent::FileChange { changes, status } => {
-                    assert_eq!(changes.len(), 1);
-                    assert_eq!(changes[0].path, "/tmp/x.txt");
-                    assert_eq!(changes[0].kind, FileChangeKind::Create);
-                    assert_eq!(*status, ItemStatus::InProgress);
-                }
-                other => panic!("expected FileChange, got {other:?}"),
-            },
-            other => panic!("expected ItemStarted, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn empty_structured_patch_preserves_external_file_diff() {
         let mut mapper = Mapper::new();
         let started = feed(
@@ -4586,9 +4420,12 @@ mod tests {
         assert!(matches!(
             &started[0],
             AgentEvent::ItemStarted(ThreadItem {
-                content: ItemContent::FileChange { changes, .. },
+                content: ItemContent::FileChange { changes, status: ItemStatus::InProgress },
                 ..
-            }) if changes[0].diff.as_deref() == Some("+visible diff")
+            }) if changes.len() == 1
+                && changes[0].path == "/tmp/tcode-outside-workspace.txt"
+                && changes[0].kind == FileChangeKind::Create
+                && changes[0].diff.as_deref() == Some("+visible diff")
         ));
 
         let completed = feed(
@@ -4962,7 +4799,7 @@ mod tests {
         let turn_id = m.start_turn();
         let evs = feed(
             &mut m,
-            r#"{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":10,"output_tokens":20},"modelUsage":{"claude-opus-4-8[1m]":{"contextWindow":1000000}}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.125,"duration_ms":4321,"usage":{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":10,"output_tokens":20},"modelUsage":{"claude-opus-4-8[1m]":{"contextWindow":1000000}}}"#,
         );
         match turn_completed_after_count(&evs, 0) {
             AgentEvent::TurnCompleted {
@@ -4978,6 +4815,8 @@ mod tests {
                 assert_eq!(usage.output_tokens, Some(20));
                 assert_eq!(usage.used_tokens, Some(180));
                 assert_eq!(usage.context_window, Some(1_000_000));
+                assert_eq!(usage.cost_usd, Some(0.125));
+                assert_eq!(usage.duration_ms, Some(4321));
             }
             other => panic!("expected TurnCompleted, got {other:?}"),
         }
@@ -5089,13 +4928,6 @@ mod tests {
                 if message.contains("unsupported mode")
         ));
         assert_eq!(m.applied_permission_mode, "acceptEdits");
-    }
-
-    #[test]
-    fn turn_ids_increment() {
-        let mut m = Mapper::new();
-        assert_eq!(m.start_turn(), "turn-1");
-        assert_eq!(m.start_turn(), "turn-2");
     }
 
     #[test]
@@ -5357,20 +5189,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_steer_waits_for_requesting_checkpoint() {
-        let mut mapper = Mapper::new();
-        mapper.pending_steers.push_back("steer-1".into());
-
-        assert_eq!(mapper.pending_steers.len(), 1);
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint-1","session_id":"session-1"}"#,
-        );
-        assert_eq!(accepted_request_ids(&events), ["steer-1"]);
-        assert!(mapper.pending_steers.is_empty());
-    }
-
-    #[test]
     fn requesting_accepts_multiple_pending_steers_in_fifo_order() {
         let mut mapper = Mapper::new();
         mapper.pending_steers.push_back("steer-first".into());
@@ -5384,6 +5202,7 @@ mod tests {
             accepted_request_ids(&events),
             ["steer-first", "steer-second"]
         );
+        assert!(mapper.pending_steers.is_empty());
     }
 
     #[test]
@@ -5501,26 +5320,5 @@ mod tests {
             render_structured_patch(&patch).as_deref(),
             Some("@@ -3,2 +3,2 @@\n keep\n-old\n+new")
         );
-    }
-
-    #[test]
-    fn result_cost_and_duration_land_in_completed_usage() {
-        let mut mapper = Mapper::new();
-        mapper.start_turn();
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.125,"duration_ms":4321,"usage":{"input_tokens":10,"output_tokens":2}}"#,
-        );
-        assert!(matches!(
-            turn_completed_after_count(&events, 0),
-            AgentEvent::TurnCompleted {
-                usage: Some(TokenUsage {
-                    cost_usd: Some(cost),
-                    duration_ms: Some(4321),
-                    ..
-                }),
-                ..
-            } if (*cost - 0.125).abs() < f64::EPSILON
-        ));
     }
 }

@@ -1100,7 +1100,6 @@ mod observation_tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn auto_with_permission_returns_sparse_flag_and_image() {
         let permissions = crate::permissions::PermissionStatus {
@@ -1120,11 +1119,10 @@ mod observation_tests {
             result.content.as_slice(),
             [ContentBlock::Text(text), ContentBlock::Image(image)]
                 if text.text.contains("text_sparse: true")
-                    && image.mime_type == "image/jpeg"
+                    && image.mime_type == "image/jpeg" && image.data == "/9j/"
         ));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn never_returns_sparse_flag_without_image() {
         let permissions = crate::permissions::PermissionStatus {

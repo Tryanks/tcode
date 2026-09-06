@@ -602,23 +602,51 @@ mod tests {
     }
 
     #[test]
-    fn pending_fork_is_legacy_safe_and_roundtrips() {
+    fn session_metadata_preserves_legacy_defaults_and_persisted_options() {
         let legacy = serde_json::json!({
             "id": "legacy", "title": "Legacy", "provider": "codex",
-            "cwd": "/work", "forked_from": "source", "created_at": 1, "updated_at": 2
+            "cwd": "/work", "forked_from": "source", "created_at": 1, "updated_at": 2,
+            "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}]
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(meta.approval_mode, ApprovalMode::FullAccess);
         assert!(!meta.pending_fork);
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("forked_from"));
-        assert!(!json.contains("pending_fork"));
+        assert_eq!(meta.parent_session_id, None);
+        assert_eq!(meta.native_subagent, None);
+        assert!(!meta.orchestrate_enabled);
+        assert_eq!(meta.archived_at, None);
+        assert_eq!(meta.worktree, None);
+        let json = serde_json::to_value(&meta).unwrap();
+        for omitted in [
+            "forked_from",
+            "checkpoints",
+            "pending_fork",
+            "parent_session_id",
+            "native_subagent",
+            "orchestrate_enabled",
+            "archived_at",
+            "worktree",
+        ] {
+            assert!(json.get(omitted).is_none(), "unexpected field: {omitted}");
+        }
 
         let mut meta = meta;
+        meta.approval_mode = ApprovalMode::Supervised;
         meta.pending_fork = true;
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("forked_from"));
-        let roundtrip: SessionMeta = serde_json::from_str(&json).unwrap();
-        assert!(roundtrip.pending_fork);
+        meta.parent_session_id = Some("parent".into());
+        meta.native_subagent = Some("spawn-1".into());
+        meta.orchestrate_enabled = true;
+        meta.archived_at = Some(1234);
+        meta.worktree = Some(WorktreeInfo {
+            root_project_path: PathBuf::from("/proj"),
+            base: "main".into(),
+            branch: "tcode/abc".into(),
+        });
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["approval_mode"], "supervised");
+        assert!(json.get("forked_from").is_none());
+        assert!(json.get("checkpoints").is_none());
+        assert_eq!(serde_json::from_value::<SessionMeta>(json).unwrap(), meta);
     }
 
     #[test]

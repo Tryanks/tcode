@@ -352,11 +352,6 @@ impl StateStore {
             page(ref_id, Some(state_id.to_string()), &text, offset)
         }
     }
-
-    #[cfg(test)]
-    fn contains(&self, state_id: &str) -> bool {
-        self.observations.contains_key(state_id)
-    }
 }
 
 pub(crate) fn harness_action_description(
@@ -670,9 +665,9 @@ mod tests {
         store.get(&first.state_id).unwrap();
         let newest =
             store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"));
-        assert!(store.contains(&first.state_id));
-        assert!(!store.contains("S2"));
-        assert!(store.contains(&newest.state_id));
+        assert!(store.get(&first.state_id).is_ok());
+        assert!(store.get("S2").is_err());
+        assert!(store.get(&newest.state_id).is_ok());
         assert!(matches!(store.get("S2"), Err(StateError::Evicted(_))));
     }
 

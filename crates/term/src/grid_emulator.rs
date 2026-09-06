@@ -1095,11 +1095,15 @@ mod tests {
     #[test]
     fn kitty_keyboard_mode_is_available_without_consuming_damage() {
         let emulator = GridEmulator::new();
-        emulator.feed(b"\x1b[>1u");
+        emulator.snapshot();
+        emulator.feed(b"\x1b[>1uwritten");
         assert_eq!(
             emulator.keyboard_mode(),
             KeyboardModes::DISAMBIGUATE_ESC_CODES
         );
+        let snapshot = emulator.snapshot();
+        assert!(snapshot.row_damage[0]);
+        assert_eq!(snapshot.damage, TerminalDamage::Partial);
     }
 
     #[test]

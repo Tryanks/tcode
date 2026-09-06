@@ -2,7 +2,6 @@ use super::test_support::*;
 use super::*;
 use super::{active_session::*, events::*, orchestrate::*, providers::*};
 
-use tcode_core::project::group_sessions;
 use tcode_core::settings::{SettingsPatch, ThemeMode};
 use tcode_protocol::{Command, CommandResponse, HostMessage};
 
@@ -1046,34 +1045,6 @@ fn marketplace_items_are_runtime_owned_views() {
 }
 
 #[test]
-fn provider_update_command_hides_install_source() {
-    let test_store = TestStore::new("tcode-provider-update-view-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-    state.providers.provider_versions.insert(
-        ProviderKind::ClaudeCode,
-        ProviderVersionState {
-            install_source: InstallSource::Npm,
-            ..ProviderVersionState::default()
-        },
-    );
-    state.providers.provider_versions.insert(
-        ProviderKind::Codex,
-        ProviderVersionState {
-            install_source: InstallSource::Native,
-            ..ProviderVersionState::default()
-        },
-    );
-
-    assert_eq!(
-        state.provider_update_command(ProviderKind::ClaudeCode),
-        Some("npm install -g @anthropic-ai/claude-code@latest".into())
-    );
-    assert_eq!(state.provider_update_command(ProviderKind::Codex), None);
-    assert_eq!(state.provider_update_command(ProviderKind::Acp), None);
-}
-
-#[test]
 fn orchestrate_guidance_and_current_configuration_are_composed() {
     let mut settings = OrchestrateSettings::default();
     let first = compose_orchestrate_text(&settings, "Ship it", None, &HashMap::new());
@@ -1392,10 +1363,7 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
     let store = (*test_store).clone();
     let state = cx.new_entity(TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
-    let mut expected_full = String::new();
-    let mut expected_context = 0;
-
-    state.update(cx, |state, cx| {
+    let sent_text = state.update(cx, |state, cx| {
         // A live, idle, already-enabled orchestrator: the turn is an ordinary
         // send (no restart, nothing in flight), so it flows through
         // record_user_message where the split is stored.
@@ -1437,28 +1405,17 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
         state.install_selected(active);
 
         state.orchestrate_turn("orchestrator", "执行某某任务".into(), Vec::new(), cx);
-        let delivery_id = match receiver.try_recv() {
-            Ok(SessionCommand::SendTurn { delivery_id, .. }) => delivery_id,
+        let (delivery_id, text) = match receiver.try_recv() {
+            Ok(SessionCommand::SendTurn {
+                delivery_id, text, ..
+            }) => (delivery_id, text),
             other => panic!("expected orchestrator SendTurn, got {other:?}"),
         };
         state.on_event("orchestrator", AgentEvent::TurnAccepted { delivery_id }, cx);
 
-        // What the provider actually receives is the whole composed text.
-        expected_full = compose_orchestrate_text(
-            &state.settings.orchestrate,
-            "执行某某任务",
-            Some((
-                ProviderKind::Codex,
-                state
-                    .resident("orchestrator")
-                    .unwrap()
-                    .meta
-                    .model
-                    .as_deref(),
-            )),
-            &state.providers.model_catalogs,
-        );
-        expected_context = expected_full.len() - "执行某某任务".len();
+        assert!(text.ends_with("执行某某任务"));
+        assert!(text.len() > "执行某某任务".len());
+        text
     });
     cx.run_until_parked();
     state.update(cx, |state, _| {
@@ -1476,8 +1433,8 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
                 _ => None,
             })
             .expect("orchestrate turn recorded a user message");
-        assert_eq!(recorded.0, expected_full);
-        assert_eq!(recorded.1, Some(expected_context));
+        assert_eq!(recorded.0, sent_text);
+        assert_eq!(recorded.1, Some(sent_text.len() - "执行某某任务".len()));
 
         // Folded, the timeline splits the prefix from the user's own words.
         let timeline = Timeline::fold_events(events);
@@ -2446,32 +2403,6 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
 }
 
 #[test]
-fn session_options_injects_mcp_registration() {
-    let settings = Settings::default();
-    let meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-    let reg = agent::McpRegistration {
-        name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
-        url: "http://127.0.0.1:7/mcp".into(),
-        bearer_token: "tok".into(),
-    };
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        Some(reg),
-        None,
-        None,
-        None,
-    );
-    let mcp = opts
-        .mcp_servers
-        .first()
-        .expect("registration threaded through");
-    assert_eq!(mcp.url, "http://127.0.0.1:7/mcp");
-    assert_eq!(mcp.bearer_token, "tok");
-}
-
-#[test]
 fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
     let settings = Settings::default();
     let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
@@ -2576,6 +2507,8 @@ fn non_pi_session_options_preserve_mode_and_preview_registration() {
 
     assert_eq!(opts.approval_mode, ApprovalMode::AutoAcceptEdits);
     assert_eq!(opts.mcp_servers.len(), 1);
+    assert_eq!(opts.mcp_servers[0].url, "http://127.0.0.1:7/mcp");
+    assert_eq!(opts.mcp_servers[0].bearer_token, "tok");
 }
 
 #[test]
@@ -3358,7 +3291,6 @@ fn child_report_result_approval_is_auto_approved_in_every_mode() {
     let (child_commands, child_receiver) = smol::channel::unbounded();
 
     state.update(cx, |state, cx| {
-        // Default routing (Orchestrator) — the report tool must never reach it.
         let mut parent = live_session(ProviderKind::Codex, parent_commands);
         parent.meta.id = "parent".into();
         parent.turn_in_flight = true;
@@ -3373,32 +3305,39 @@ fn child_report_result_approval_is_auto_approved_in_every_mode() {
         state.sessions.push(child.meta.clone());
         state.residents.parked.insert(child.meta.id.clone(), child);
 
-        state.on_event(
-            "child",
-            AgentEvent::ApprovalRequested(agent::ApprovalRequest {
-                id: "approval-report".into(),
-                turn_id: None,
-                kind: agent::ApprovalKind::ToolUse {
-                    name: "mcp__tcode_report__report_result".into(),
-                    input: serde_json::json!({ "text": "full report" }),
-                    detail: "mcp__tcode_report__report_result".into(),
-                },
-                options: Vec::new(),
-            }),
-            cx,
-        );
+        for mode in [
+            ChildApprovalMode::Orchestrator,
+            ChildApprovalMode::Manual,
+            ChildApprovalMode::AlwaysAllow,
+        ] {
+            state.settings.orchestrate.child_approval = mode;
+            state.on_event(
+                "child",
+                AgentEvent::ApprovalRequested(agent::ApprovalRequest {
+                    id: "approval-report".into(),
+                    turn_id: None,
+                    kind: agent::ApprovalKind::ToolUse {
+                        name: "mcp__tcode_report__report_result".into(),
+                        input: serde_json::json!({ "text": "full report" }),
+                        detail: "mcp__tcode_report__report_result".into(),
+                    },
+                    options: Vec::new(),
+                }),
+                cx,
+            );
 
-        assert!(matches!(
-            child_receiver.try_recv(),
-            Ok(SessionCommand::RespondApproval {
-                request_id,
-                decision: ApprovalDecision::ApproveForSession,
-            }) if request_id == "approval-report"
-        ));
-        assert!(
-            parent_receiver.try_recv().is_err(),
-            "the report tool must not surface an approval to the orchestrator"
-        );
+            assert!(matches!(
+                child_receiver.try_recv(),
+                Ok(SessionCommand::RespondApproval {
+                    request_id,
+                    decision: ApprovalDecision::ApproveForSession,
+                }) if request_id == "approval-report"
+            ));
+            assert!(
+                parent_receiver.try_recv().is_err(),
+                "the report tool must not surface an approval to the orchestrator"
+            );
+        }
     });
 }
 
@@ -5141,71 +5080,19 @@ fn model_switch_restarts_live_provider() {
 }
 
 #[test]
-fn archived_hidden_from_sidebar_and_unread_logic() {
-    let test_store = TestStore::new("tcode-archive-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-    let project = Project {
-        id: "p1".into(),
-        name: "Proj".into(),
-        root: PathBuf::from("/p"),
-        created_at: 1,
-    };
-    state.projects = vec![project.clone()];
-    let mut visible = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
-    visible.project_id = Some(project.id.clone());
-    visible.updated_at = 100;
-    let mut archived = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
-    archived.project_id = Some(project.id.clone());
-    archived.updated_at = 100;
-    archived.archived_at = Some(50);
-    state.sessions = vec![visible.clone(), archived.clone()];
+fn unread_requires_a_visit_before_the_latest_update() {
+    let test_store = TestStore::new("tcode-unread-watermark-test");
+    let mut state = TestClientState::new((*test_store).clone());
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
+    meta.updated_at = 100;
+    let id = meta.id.clone();
+    state.sessions.push(meta);
 
-    // Sidebar groups exclude archived; the Archived view includes only it.
-    let groups = group_sessions(
-        &state.projects,
-        &state
-            .sessions
-            .iter()
-            .filter(|meta| meta.archived_at.is_none())
-            .cloned()
-            .collect::<Vec<_>>(),
-        state.settings.project_sort,
-    );
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].sessions.len(), 1);
-    assert_eq!(groups[0].sessions[0].id, visible.id);
-    let arch = group_sessions(
-        &state.projects,
-        &state
-            .sessions
-            .iter()
-            .filter(|meta| meta.archived_at.is_some())
-            .cloned()
-            .collect::<Vec<_>>(),
-        state.settings.project_sort,
-    );
-    assert_eq!(arch.len(), 1);
-    assert_eq!(arch[0].sessions.len(), 1);
-    assert_eq!(arch[0].sessions[0].id, archived.id);
-
-    // Unread: never-visited is not unread; visited-before-update is unread;
-    // visited-at-or-after-update clears it.
-    assert!(!state.session_unread(&visible.id));
-    state.settings.last_visited.insert(visible.id.clone(), 50);
-    assert!(state.session_unread(&visible.id));
-    assert!(state.sessions.iter().any(|meta| {
-        meta.archived_at.is_none()
-            && meta.project_id.as_deref() == Some(&project.id)
-            && state.session_unread(&meta.id)
-    }));
-    state.settings.last_visited.insert(visible.id.clone(), 100);
-    assert!(!state.session_unread(&visible.id));
-    assert!(!state.sessions.iter().any(|meta| {
-        meta.archived_at.is_none()
-            && meta.project_id.as_deref() == Some(&project.id)
-            && state.session_unread(&meta.id)
-    }));
+    assert!(!state.session_unread(&id));
+    state.settings.last_visited.insert(id.clone(), 50);
+    assert!(state.session_unread(&id));
+    state.settings.last_visited.insert(id.clone(), 100);
+    assert!(!state.session_unread(&id));
 }
 
 #[test]

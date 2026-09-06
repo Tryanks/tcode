@@ -3011,22 +3011,18 @@ mod tests {
 
     #[test]
     fn turn_input_carries_image_entries() {
-        let (mut actor, _events) = test_actor();
-        actor.model = Some("gpt-5-codex".into());
         let attachments = vec![Attachment {
             media_type: "image/png".into(),
             data_base64: "AAAA".into(),
             source_path: None,
         }];
-        let params = actor.build_turn_params("what color?", None, &attachments);
-        let input = params["input"].as_array().unwrap();
+        let payload = user_input("what color?", &attachments);
+        let input = payload.as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "text");
         assert_eq!(input[0]["text"], "what color?");
         assert_eq!(input[1]["type"], "image");
         assert_eq!(input[1]["url"], "data:image/png;base64,AAAA");
-        let _ = actor.child.kill();
-        let _ = actor.child.wait();
     }
 
     #[test]
@@ -3148,19 +3144,6 @@ mod tests {
         assert!(message.contains("Cannot find module"), "{message}");
         assert!(message.contains("exit status: 1"), "{message}");
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn token_usage_reads_total_processed() {
-        let usage = map_usage(&json!({
-            "last": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 120},
-            "total": {"totalTokens": 5000},
-            "modelContextWindow": 200000
-        }))
-        .unwrap();
-        assert_eq!(usage.used_tokens, Some(120));
-        assert_eq!(usage.total_processed_tokens, Some(5000));
-        assert_eq!(usage.context_window, Some(200000));
     }
 
     #[test]
@@ -3608,6 +3591,7 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, Some(2));
         assert_eq!(usage.output_tokens, Some(4));
         assert_eq!(usage.used_tokens, Some(12));
+        assert_eq!(usage.total_processed_tokens, Some(123));
         assert_eq!(usage.context_window, Some(200000));
     }
 

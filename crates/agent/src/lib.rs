@@ -1826,52 +1826,27 @@ mod turn_diff_tests {
 }
 
 #[cfg(test)]
-#[test]
-fn provider_start_failed_event_round_trips() {
-    let event = AgentEvent::ProviderStartFailed {
-        error: "spawn failed".into(),
-    };
-    let json = serde_json::to_string(&event).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"provider_start_failed","error":"spawn failed"}"#
-    );
-    let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(
-        decoded,
-        AgentEvent::ProviderStartFailed { error } if error == "spawn failed"
-    ));
-
-    let legacy = r#"{"type":"error","message":"boom","fatal":true}"#;
-    let decoded: AgentEvent = serde_json::from_str(legacy).unwrap();
-    assert!(matches!(
-        &decoded,
-        AgentEvent::Error { message, fatal: true } if message == "boom"
-    ));
-    assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
-}
-
-#[cfg(test)]
 mod thread_item_serde_tests {
     use super::*;
 
     #[test]
-    fn parent_item_id_round_trips_and_legacy_items_default_to_none() {
-        let event = AgentEvent::ItemCompleted(ThreadItem {
-            id: "child".into(),
-            parent_item_id: Some("spawn".into()),
-            content: ItemContent::AssistantMessage {
-                text: "working".into(),
-            },
-        });
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), .. })
-                if parent == "spawn"
-        ));
+    fn provider_failure_wire_tag_and_legacy_error_remain_compatible() {
+        let event = AgentEvent::ProviderStartFailed {
+            error: "spawn failed".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"provider_start_failed","error":"spawn failed"}"#
+        );
+        let legacy = r#"{"type":"error","message":"boom","fatal":true}"#;
+        assert!(
+            matches!(serde_json::from_str::<AgentEvent>(legacy).unwrap(),
+            AgentEvent::Error { message, fatal: true } if message == "boom")
+        );
+    }
 
+    #[test]
+    fn stored_items_preserve_parent_links_and_read_legacy_records() {
         let legacy = r#"{"type":"item_completed","id":"old","content":{"kind":"user_message","text":"hello"}}"#;
         let decoded: AgentEvent = serde_json::from_str(legacy).unwrap();
         assert!(matches!(
@@ -1881,5 +1856,16 @@ mod thread_item_serde_tests {
                 ..
             })
         ));
+        let parented = r#"{"type":"item_completed","id":"child","parent_item_id":"spawn","content":{"kind":"assistant_message","text":"working"}}"#;
+        let decoded: AgentEvent = serde_json::from_str(parented).unwrap();
+        assert!(matches!(
+            &decoded,
+            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), .. })
+                if parent == "spawn"
+        ));
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["parent_item_id"],
+            "spawn"
+        );
     }
 }

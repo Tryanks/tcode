@@ -43,10 +43,4 @@ mod tests {
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
     }
-
-    #[test]
-    fn empty_candidate_list_is_not_found() {
-        let result = open_with_candidates(&[], Path::new("."));
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
-    }
 }

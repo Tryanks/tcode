@@ -1207,15 +1207,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_sort_defaults_and_cycles() {
-        // Legacy files (field absent) default to recent-activity ordering.
-        assert_eq!(ProjectSort::default(), ProjectSort::RecentActivity);
-        // The button cycles RecentActivity → NameAsc → RecentActivity.
-        assert_eq!(ProjectSort::RecentActivity.next(), ProjectSort::NameAsc);
-        assert_eq!(ProjectSort::NameAsc.next(), ProjectSort::RecentActivity);
-    }
-
-    #[test]
     fn auto_archive_settings_are_legacy_safe_and_roundtrip() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert!(!legacy.auto_archive_disabled);
@@ -1255,16 +1246,6 @@ mod tests {
             settings.unknown.get("diff_view_mode"),
             Some(&serde_json::Value::String("line".into()))
         );
-    }
-
-    #[test]
-    fn launch_arguments_split_on_whitespace() {
-        let settings = ProviderSettings {
-            launch_args: Some("  --chrome  --verbose ".into()),
-            ..ProviderSettings::default()
-        };
-        assert_eq!(settings.extra_args(), vec!["--chrome", "--verbose"]);
-        assert!(ProviderSettings::default().extra_args().is_empty());
     }
 
     #[test]

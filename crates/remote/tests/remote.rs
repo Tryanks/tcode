@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
-use tcode_remote::client::{ConnectionState, PairedHost, connect, pair};
+use tcode_remote::client::{ConnectionState, connect, pair};
 use tcode_remote::{HostMux, RemoteConfig, serve};
 use tungstenite::Message;
 
@@ -313,20 +313,6 @@ fn devices_are_listed_and_revoking_refuses_the_token() {
         assert_eq!(reply["type"], "hello_rejected");
     });
     server.shutdown();
-}
-
-#[test]
-fn paired_host_shape_is_public() {
-    let host = PairedHost {
-        host_id: "id".into(),
-        name: "name".into(),
-        addrs: vec!["127.0.0.1".into()],
-        port: 1,
-        token: "token".into(),
-        fingerprint: "ab".repeat(32),
-        last_connected_unix: None,
-    };
-    assert_eq!(host.port, 1);
 }
 
 #[test]

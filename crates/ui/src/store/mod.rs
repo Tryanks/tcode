@@ -2284,6 +2284,30 @@ mod tests {
             .expect("persist seed session");
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        wait_until(cx, &workspace, "initial session index", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .index_replica
+                    .0
+                    .iter()
+                    .any(|meta| meta.id == seed_session_id)
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .grouped_sessions()
+                    .iter()
+                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+            );
+            assert!(
+                store
+                    .flat_sessions()
+                    .iter()
+                    .any(|meta| meta.id == seed_session_id)
+            );
+            assert!(store.archived_groups().is_empty());
+        });
 
         command(
             &host,
@@ -2317,6 +2341,27 @@ mod tests {
                         .is_some_and(|meta| meta.archived_at.is_some())
                     && store.settings_replica.word_wrap_diffs == expected_word_wrap
             })
+        });
+
+        workspace.read_with(cx, |store, _| {
+            assert!(
+                !store
+                    .grouped_sessions()
+                    .iter()
+                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+            );
+            assert!(
+                !store
+                    .flat_sessions()
+                    .iter()
+                    .any(|meta| meta.id == seed_session_id)
+            );
+            assert!(
+                store
+                    .archived_groups()
+                    .iter()
+                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+            );
         });
 
         let live_index = update_host!(&host, |state, _| {

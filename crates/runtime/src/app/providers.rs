@@ -606,18 +606,6 @@ impl AppState {
         });
     }
 
-    /// The copyable update command for a provider whose install source has
-    /// already been detected. The install-source detail stays inside runtime.
-    #[cfg(test)]
-    pub(super) fn provider_update_command(&self, provider: ProviderKind) -> Option<String> {
-        let source = self
-            .providers
-            .provider_versions
-            .get(&provider)?
-            .install_source;
-        update_command_string(provider, source)
-    }
-
     pub(super) fn cached_provider_commands(
         &self,
         provider: ProviderKind,

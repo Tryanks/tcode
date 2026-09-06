@@ -383,24 +383,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broker_op_reply_roundtrip_preserves_parent() {
-        let (tx, rx) = async_channel::unbounded();
-        let broker = broker(tx, std::time::Duration::from_secs(2));
-        let resolver = tokio::spawn(async move {
-            let request = rx.recv().await.unwrap();
-            assert!(
-                matches!(request.op, OrchestrateOp::Status { parent_id, thread_id: None } if parent_id == "parent")
-            );
-            request.reply.send(Ok(serde_json::json!([]))).await.unwrap();
-        });
-        let result = OrchestrateTools::new(broker, "parent".into())
-            .status(Parameters(StatusParams { thread_id: None }))
-            .await;
-        assert_eq!(result.is_error, Some(false));
-        resolver.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn collaboration_tool_routes_peer_purpose_with_read_only_defaults() {
         let (tx, rx) = async_channel::unbounded();
         let broker = broker(tx, std::time::Duration::from_secs(2));

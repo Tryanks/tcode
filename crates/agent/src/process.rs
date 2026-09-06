@@ -161,6 +161,7 @@ impl StderrTail {
         lines.push(line);
     }
 
+    /// Joins spawned readers; stop or reap their child before collecting diagnostics.
     pub(crate) fn append_to(&self, mut message: String, separator: &str) -> String {
         let tail = self.text();
         if !tail.trim().is_empty() {
@@ -176,5 +177,26 @@ impl StderrTail {
             let _ = reader.join();
         }
         self.lines.lock().unwrap().join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_reader_preserves_unicode_separators_inside_json_records() {
+        let record = "{\"text\":\"a\u{2028}b\"}";
+        let (lines, spawned) = spawn_line_reader(
+            std::io::Cursor::new(format!("{record}\n").into_bytes()),
+            "test-json-lines",
+            None,
+            true,
+        );
+        spawned.unwrap();
+        assert!(
+            matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == record)
+        );
+        assert!(matches!(lines.recv_blocking().unwrap(), ChildOutput::Eof));
     }
 }

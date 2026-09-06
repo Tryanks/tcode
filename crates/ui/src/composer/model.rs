@@ -588,41 +588,26 @@ mod tests {
     }
 
     #[test]
-    fn composer_text_cache_restores_a_after_switching_a_to_b_to_a() {
-        let mut cache = ComposerTextCache::default();
-
-        assert_eq!(cache.switch_to(Some(thread("a")), ""), Some(String::new()));
-        assert_eq!(
-            cache.switch_to(Some(thread("b")), "text for a"),
-            Some(String::new())
-        );
-        assert_eq!(
-            cache.switch_to(Some(thread("a")), "text for b"),
-            Some("text for a".to_string())
-        );
-        assert_eq!(cache.drafts.get(&thread("b")).unwrap(), "text for b");
-    }
-
-    #[test]
-    fn composer_text_cache_isolates_two_project_new_thread_pages() {
-        let mut cache = ComposerTextCache::default();
-
-        assert_eq!(
-            cache.switch_to(Some(project_draft("project-a")), ""),
-            Some(String::new())
-        );
-        assert_eq!(
-            cache.switch_to(Some(project_draft("project-b")), "draft for project a"),
-            Some(String::new())
-        );
-        assert_eq!(
-            cache.switch_to(Some(project_draft("project-a")), "draft for project b"),
-            Some("draft for project a".to_string())
-        );
-        assert_eq!(
-            cache.switch_to(Some(project_draft("project-b")), "draft for project a"),
-            Some("draft for project b".to_string())
-        );
+    fn composer_text_cache_isolates_threads_and_project_drafts() {
+        for (a, b) in [
+            (thread("a"), thread("b")),
+            (project_draft("a"), project_draft("b")),
+        ] {
+            let mut cache = ComposerTextCache::default();
+            assert_eq!(cache.switch_to(Some(a.clone()), ""), Some(String::new()));
+            assert_eq!(
+                cache.switch_to(Some(b.clone()), "text for a"),
+                Some(String::new())
+            );
+            assert_eq!(
+                cache.switch_to(Some(a), "text for b"),
+                Some("text for a".into())
+            );
+            assert_eq!(
+                cache.switch_to(Some(b), "text for a"),
+                Some("text for b".into())
+            );
+        }
     }
 
     #[test]

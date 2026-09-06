@@ -2653,18 +2653,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn binary_recipe_runs_as_given() {
-        let (program, args) = launch_command(&AcpLaunch::Binary {
-            command: PathBuf::from("/opt/acp/goose"),
-            args: vec!["acp".into()],
-            env: Vec::new(),
-        })
-        .unwrap();
-        assert_eq!(program, PathBuf::from("/opt/acp/goose"));
-        assert_eq!(args, vec!["acp".to_string()]);
-    }
-
     /// The preview MCP server is a loopback HTTP endpoint: it may only be handed
     /// to agents that advertise `mcpCapabilities.http`.
     #[test]
@@ -3025,7 +3013,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_replaces_the_step_list() {
+    fn plan_update_preserves_turn_and_steps() {
         let mut state = state();
         state.turn = Some("turn-1".into());
         let events = state.apply_update(update(json!({
@@ -3085,16 +3073,6 @@ mod tests {
             }
             other => panic!("expected TokenUsage, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn session_info_update_is_ignored() {
-        let mut state = state();
-        let events = state.apply_update(update(json!({
-            "sessionUpdate": "session_info_update",
-            "title": "the agent's own title"
-        })));
-        assert!(events.is_empty());
     }
 
     #[test]

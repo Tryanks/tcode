@@ -1603,8 +1603,9 @@ mod tests {
         );
         assert!(matches!(
             approval,
-            ApprovalKind::ToolUse { name, input, .. }
+            ApprovalKind::ToolUse { name, input, detail }
                 if name == "bash" && input == json!({ "command": "x" })
+                    && detail.contains("/extensions/bash.ts")
         ));
     }
 
@@ -1622,24 +1623,6 @@ mod tests {
             approval,
             ApprovalKind::ExecCommand { command, cwd, .. }
                 if command == "x" && cwd.as_deref() == Some("/project")
-        ));
-    }
-
-    #[test]
-    fn extension_tool_approval_detail_contains_path() {
-        let approval = approval_kind(
-            "hello_world",
-            &json!({
-                "toolName": "hello_world",
-                "source": "extension",
-                "extensionPath": "/extensions/hello.ts",
-                "input": {}
-            }),
-        );
-        assert!(matches!(
-            approval,
-            ApprovalKind::ToolUse { name, detail, .. }
-                if name == "hello_world" && detail.contains("/extensions/hello.ts")
         ));
     }
 
@@ -1966,14 +1949,5 @@ mod tests {
                     .is_empty()
             );
         }
-    }
-
-    #[test]
-    fn lf_reader_preserves_unicode_line_separators() {
-        let bytes = b"{\"text\":\"a\xE2\x80\xA8b\"}\n";
-        let mut lines = BufReader::new(bytes.as_slice()).lines();
-        let record = lines.next().unwrap().unwrap();
-        assert!(record.contains('\u{2028}'));
-        assert!(lines.next().is_none());
     }
 }

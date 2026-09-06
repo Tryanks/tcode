@@ -738,30 +738,21 @@ impl Render for AppShell {
 mod tests {
     use super::*;
 
-    fn transition(current: bool, transition: SidebarHoverTransition) -> bool {
-        next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false)
-    }
-
     #[test]
-    fn trigger_true_opens_overlay() {
-        assert!(transition(false, SidebarHoverTransition::Trigger(true)));
-    }
-
-    #[test]
-    fn trigger_false_preserves_current_visibility() {
-        assert!(!transition(false, SidebarHoverTransition::Trigger(false)));
-        assert!(transition(true, SidebarHoverTransition::Trigger(false)));
-    }
-
-    #[test]
-    fn overlay_true_opens_or_keeps_overlay_open() {
-        assert!(transition(false, SidebarHoverTransition::Overlay(true)));
-        assert!(transition(true, SidebarHoverTransition::Overlay(true)));
-    }
-
-    #[test]
-    fn overlay_false_closes_overlay() {
-        assert!(!transition(true, SidebarHoverTransition::Overlay(false)));
+    fn hover_transitions_open_preserve_and_close_the_overlay() {
+        for (current, transition, visible) in [
+            (false, SidebarHoverTransition::Trigger(true), true),
+            (false, SidebarHoverTransition::Trigger(false), false),
+            (true, SidebarHoverTransition::Trigger(false), true),
+            (false, SidebarHoverTransition::Overlay(true), true),
+            (true, SidebarHoverTransition::Overlay(true), true),
+            (true, SidebarHoverTransition::Overlay(false), false),
+        ] {
+            assert_eq!(
+                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false),
+                visible
+            );
+        }
     }
 
     #[test]

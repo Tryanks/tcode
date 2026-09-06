@@ -2147,10 +2147,6 @@ mod tests {
         assert_eq!(md_sync("abc", ""), MdSync::Reset);
     }
 
-    fn turn_time_row(clock: String, timing: Option<TurnTiming>) -> String {
-        turn_time_parts(clock, timing).join(" · ")
-    }
-
     #[test]
     fn finished_time_clauses_format_cost_and_only_show_a_divergent_served_model() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
@@ -2233,8 +2229,8 @@ mod tests {
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
-            turn_time_row("3:04 PM".into(), Some(timing)),
-            "3:04 PM · 1m20s"
+            turn_time_parts("3:04 PM".into(), Some(timing)),
+            vec!["3:04 PM", "1m20s"]
         );
         assert_eq!(
             turn_time_breakdown(Some(timing)).as_deref(),
@@ -2243,8 +2239,8 @@ mod tests {
 
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
-            turn_time_row("3:04 PM".into(), Some(timing)),
-            "3:04 PM · 1m20s"
+            turn_time_parts("3:04 PM".into(), Some(timing)),
+            vec!["3:04 PM", "1m20s"]
         );
         assert_eq!(
             turn_time_breakdown(Some(timing)).as_deref(),
@@ -2258,20 +2254,13 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
-            turn_time_row("9:00 AM".into(), Some(TurnTiming::new(8_000, 0))),
-            "9:00 AM · 8s"
+            turn_time_parts("9:00 AM".into(), Some(TurnTiming::new(8_000, 0))),
+            vec!["9:00 AM", "8s"]
         );
         assert_eq!(
             turn_time_breakdown(Some(TurnTiming::new(8_000, 0))).as_deref(),
             Some("AI thinking & response 8s · Tool calls 0s")
         );
-    }
-
-    #[test]
-    fn a_turn_without_a_derivable_breakdown_keeps_the_bare_clock() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(turn_time_row("9:00 AM".into(), None), "9:00 AM");
     }
 
     #[test]
@@ -2283,14 +2272,14 @@ mod tests {
 
         crate::set_locale(crate::LANGUAGE_ENGLISH);
         assert_eq!(
-            turn_time_row("1:00 AM".into(), Some(timing)),
-            "1:00 AM · 24h00m59s"
+            turn_time_parts("1:00 AM".into(), Some(timing)),
+            vec!["1:00 AM", "24h00m59s"]
         );
 
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(
-            turn_time_row("1:00 AM".into(), Some(timing)),
-            "1:00 AM · 24h00m59s"
+            turn_time_parts("1:00 AM".into(), Some(timing)),
+            vec!["1:00 AM", "24h00m59s"]
         );
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
