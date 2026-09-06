@@ -109,7 +109,7 @@ jobs:
           apt_get=(sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3)
           "${apt_get[@]}" update
           "${apt_get[@]}" install -y --no-install-recommends \
-            build-essential clang cmake pkg-config libssl-dev libzstd-dev mold \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev libvulkan-dev
           if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
@@ -159,11 +159,7 @@ jobs:
           PLIST
           plutil -lint "$app/Contents/Info.plist"
 
-      # Signs, notarizes, and packages the macOS build. When the Developer ID
-      # secrets are configured (see docs/release-signing.md) the app AND the DMG
-      # are each signed, notarized, and stapled — a DMG carries its own ticket,
-      # separate from the app inside it. Absent the secrets the step ships
-      # unsigned .zip/.dmg exactly as before, so tags never fail to publish.
+      # Signing credentials are optional; configure the complete set in docs/release-signing.md.
       - name: Sign, notarize, and package macOS
         id: macos_sign
         if: matrix.platform == 'macos'
@@ -181,9 +177,6 @@ jobs:
           zip="dist/tcode-${VERSION}-macos-${{ matrix.arch }}.zip"
           dmg="dist/tcode-${VERSION}-macos-${{ matrix.arch }}.dmg"
 
-          # All-or-nothing on the six secrets: none → unsigned build; a partial
-          # set is a misconfiguration we fail loudly on rather than 20 minutes
-          # later inside notarytool.
           missing=()
           for var in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD MACOS_SIGN_IDENTITY \
                      MACOS_NOTARY_APPLE_ID MACOS_NOTARY_TEAM_ID MACOS_NOTARY_PASSWORD; do
@@ -199,7 +192,7 @@ jobs:
             echo "::notice::macOS signing secrets not configured — shipping an unsigned build."
           fi
 
-          notarize() { # notarize() <path>: submit, surface the log on rejection, wait
+          notarize() {
             local out status id
             out="$(xcrun notarytool submit "$1" \
               --apple-id "$MACOS_NOTARY_APPLE_ID" --team-id "$MACOS_NOTARY_TEAM_ID" \
@@ -215,9 +208,7 @@ jobs:
           }
 
           if [[ "$signed" == "true" ]]; then
-            # Ephemeral keychain; the trap guarantees teardown + temp cleanup on
-            # every exit path, so a mid-run failure can't leak the private key or
-            # leave the user search list rewritten (matters on self-hosted runners).
+            # Delete the temporary signing keychain and certificate even if signing fails.
             keychain="$RUNNER_TEMP/tcode-signing.keychain-db"
             cert_path="$RUNNER_TEMP/developer_id.p12"
             trap 'security delete-keychain "$keychain" 2>/dev/null || true; rm -f "$cert_path"' EXIT
@@ -233,8 +224,7 @@ jobs:
             security list-keychain -d user -s "$keychain" login.keychain-db
             rm -f "$cert_path"
 
-            # Sign the app with the hardened runtime + entitlements (required for
-            # notarization). One Mach-O, no nested code, so the bundle sign covers it.
+            # Notarization requires the hardened runtime.
             codesign --force --timestamp --options runtime \
               --entitlements assets/macos/tcode.entitlements \
               --sign "$MACOS_SIGN_IDENTITY" "$app"
@@ -247,17 +237,13 @@ jobs:
             xcrun stapler staple "$app"
             rm -f "$notarize_zip"
 
-            # Assert the result is actually Gatekeeper-acceptable — the only
-            # end-to-end check available for a workflow that can't be dry-run.
             codesign -dv --verbose=4 "$app" 2>&1 | grep -q 'flags=.*runtime' \
               || { echo "::error::hardened runtime flag missing on the app" >&2; exit 1; }
             spctl -a -vvv -t exec "$app"
           fi
 
-          # Distribution zip (from the stapled app when signed).
           ditto -c -k --sequesterRsrc --keepParent "$app" "$zip"
 
-          # DMG from the same app.
           mkdir -p dmg-root
           ditto "$app" "dmg-root/Tcode.app"
           ln -s /Applications dmg-root/Applications
@@ -265,9 +251,7 @@ jobs:
             -fs HFS+ -format UDZO "$PWD/$dmg"
 
           if [[ "$signed" == "true" ]]; then
-            # The DMG is its own container: sign (no runtime/entitlements — it
-            # isn't executable code), notarize, and staple it too, or Gatekeeper
-            # rejects it at mount time before the stapled app inside is reached.
+            # The DMG needs its own notarization ticket, separate from the app inside.
             codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$dmg"
             notarize "$dmg"
             xcrun stapler staple "$dmg"
@@ -512,7 +496,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang cmake pkg-config libssl-dev libzstd-dev mold
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev
 
       - name: Download browser bundle
         uses: actions/download-artifact@v8

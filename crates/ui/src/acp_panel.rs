@@ -688,7 +688,6 @@ impl AcpPanel {
                 crate::tr!("providers.third_party.model").into_owned(),
                 Input::new(&self.tp_model).xsmall().into_any_element(),
             ))
-            // The API key is the point of the whole flow — give it prominence.
             .child(field(
                 crate::tr!("providers.third_party.key").into_owned(),
                 Input::new(&self.tp_key).small().into_any_element(),

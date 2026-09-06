@@ -21,7 +21,7 @@ pub fn default_program(provider: ProviderKind) -> String {
     }
 }
 
-/// Spawn `program args...` and return its trimmed stdout on success.
+/// Return trimmed stdout on success, falling back to stderr when stdout is empty.
 pub async fn run_capture(program: &str, args: &[&str]) -> Option<String> {
     run_capture_env(program, args, &[]).await
 }
@@ -99,8 +99,6 @@ pub async fn probe_provider(
                 .home
                 .or_else(|| dirs::home_dir().map(|home| home.join(".codex")));
             let path = home.map(|home| home.join("auth.json"));
-            // This is a small local JSON file; keep the direct read used by the
-            // app rather than introducing a thread-pool hop.
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_codex_auth)
         }
@@ -109,8 +107,6 @@ pub async fn probe_provider(
                 .home
                 .or_else(|| dirs::home_dir().map(|home| home.join(".pi/agent")));
             let path = home.map(|home| home.join("auth.json"));
-            // This is a small local JSON file; keep the direct read used by the
-            // app rather than introducing a thread-pool hop.
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }
@@ -123,8 +119,6 @@ pub async fn probe_provider(
                 .or_else(|| std::env::var_os("XDG_DATA_HOME").map(PathBuf::from))
                 .or_else(|| dirs::home_dir().map(|home| home.join(".local/share")));
             let path = xdg_data.map(|home| home.join("opencode/auth.json"));
-            // This is a small local JSON file; keep the direct read used by the
-            // app rather than introducing a thread-pool hop.
             let json = path.and_then(|path| std::fs::read_to_string(path).ok());
             json.as_deref().and_then(parse_aggregator_auth)
         }

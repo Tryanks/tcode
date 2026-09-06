@@ -1,9 +1,8 @@
 //! Composer inline-trigger detection and mention serialization.
 //!
-//! A faithful Rust port of T3's `packages/shared/src/composerTrigger.ts`: given
-//! the composer text and the cursor byte offset, detect an active `@file`,
-//! `$skill`, or `/command` trigger, and serialize a picked file path into the
-//! exact Markdown link T3 emits (`[basename](encoded-path)`).
+//! Adapted from T3 Code's `packages/shared/src/composerTrigger.ts`.
+//! Detects `@file`, `$skill` and `/command` at a UTF-8 cursor offset, and
+//! serializes selected paths as Markdown links.
 
 use std::ops::Range;
 
@@ -29,15 +28,14 @@ pub struct ComposerTrigger {
     pub range: Range<usize>,
 }
 
-/// ASCII whitespace token boundary (matches T3's `isWhitespace`).
+/// ASCII whitespace token boundary.
 fn is_ws(b: u8) -> bool {
     matches!(b, b' ' | b'\n' | b'\t' | b'\r')
 }
 
 /// Detect an active trigger at `cursor` (a UTF-8 byte offset into `text`).
 ///
-/// `/` is only recognized at the start of the current line; `@` and `$` are
-/// recognized after any whitespace boundary. Mirrors T3's `detectComposerTrigger`.
+/// `/` is recognized at the start of a line; `@` and `$` follow whitespace.
 pub fn detect_composer_trigger(text: &str, cursor: usize) -> Option<ComposerTrigger> {
     let cursor = cursor.min(text.len());
     // Snap to a char boundary defensively (byte offsets from the input are on
@@ -76,7 +74,6 @@ pub fn detect_composer_trigger(text: &str, cursor: usize) -> Option<ComposerTrig
         // A `/word …` that is not a bare command and not `/model`: fall through.
     }
 
-    // Walk back over the current whitespace-delimited token.
     let bytes = text.as_bytes();
     let mut token_start = cursor;
     while token_start > 0 && !is_ws(bytes[token_start - 1]) {
@@ -116,7 +113,6 @@ fn escape_markdown_link_label(label: &str) -> String {
 /// Percent-encode like JS `encodeURI`: keep unreserved + reserved URI chars,
 /// escape everything else per UTF-8 byte.
 fn encode_uri(s: &str) -> String {
-    // Chars `encodeURI` leaves untouched.
     const KEEP: &[u8] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'();,/?:@&=+$#";
     let mut out = String::with_capacity(s.len());
@@ -140,8 +136,7 @@ fn encode_markdown_link_destination(path: &str) -> String {
         .replace('\\', "%5C")
 }
 
-/// Serialize a picked file path into T3's exact Markdown link form,
-/// `[basename](encoded-path)`.
+/// Serialize a selected path as `[basename](encoded-path)`.
 pub fn serialize_composer_file_link(path: &str) -> String {
     let label = escape_markdown_link_label(basename(path));
     let dest = encode_markdown_link_destination(path);
@@ -182,9 +177,7 @@ mod tests {
         let t = detect_composer_trigger("/pla", 4).unwrap();
         assert_eq!(t.kind, TriggerKind::SlashCommand);
         assert_eq!(t.query, "pla");
-        // Mid-line slash is not a command.
         assert!(detect_composer_trigger("hello /pla", 10).is_none());
-        // On a second line at its start it is recognized.
         let t2 = detect_composer_trigger("hi\n/de", 6).unwrap();
         assert_eq!(t2.kind, TriggerKind::SlashCommand);
         assert_eq!(t2.query, "de");

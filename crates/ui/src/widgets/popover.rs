@@ -182,8 +182,7 @@ impl Popover {
             }
         });
         let open = state.read(cx).is_open();
-        // 180ms bottom slide + backdrop fade (docs/mobile-design.md §3.0). The
-        // sheet stays mounted through its exit so dismissal animates too.
+        // Keep the sheet mounted through its fade-out before dismissal.
         let presence = gpui_base::motion::Presence::new(
             gpui::SharedString::from(format!("{:?}-sheet", self.id)),
             open,
@@ -224,13 +223,11 @@ impl Popover {
                     backdrop.update(cx, |state, cx| state.dismiss(window, cx));
                     cx.notify(parent);
                 })
-                // 180ms fade in step with the backdrop (§3.0). GPUI has no
-                // transform and offsetting the sheet moves its hit targets, so
-                // the presentation animates opacity rather than position.
+                // Offset animation would move the hit targets, so fade with the
+                // backdrop while keeping the sheet in its final position.
                 .opacity(progress)
                 .w_full()
                 .max_h(window.viewport_size().height - px(64.))
-                // T3: opaque fill, hairline contour and a large soft shadow.
                 .rounded_t(crate::material::radius_overlay_sheet())
                 .bg(cx.theme().popover)
                 .border_t_1()

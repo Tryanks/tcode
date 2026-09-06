@@ -37,8 +37,7 @@ const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
 /// The wire strings are the kebab-case `AskForApproval` / `SandboxMode`
 /// variants from codex `app-server-protocol` v2 (`shared.rs`): approval
 /// `untrusted` / `on-request` / `never`, sandbox `read-only` /
-/// `workspace-write` / `danger-full-access`. The three-mode assignment mirrors
-/// T3's `CodexSessionRuntime.runtimeModeToThreadConfig`:
+/// `workspace-write` / `danger-full-access`. The modes map as follows:
 /// - Supervised (approval-required): everything outside a read-only sandbox is
 ///   confirmed → asks before commands and file changes.
 /// - ReadOnly: reads proceed inside the read-only sandbox; an attempted
@@ -65,10 +64,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     )
     .await
 }
-
-// ---------------------------------------------------------------------------
-// Model catalog (`model/list`)
-// ---------------------------------------------------------------------------
 
 /// Spawn `codex app-server`, page through `model/list`, and tear the process
 /// down. Mirrors T3's `requestAllCodexModels` (initial `{}`, then `{cursor}`
@@ -583,7 +578,7 @@ impl SessionActor for Actor {
                     return Ok(());
                 };
                 // `cancel` is protocol-defined as deny + immediate turn
-                // interruption (S2 §4.2); the others map 1:1.
+                // interruption; the others map 1:1.
                 let wire_decision = match decision {
                     ApprovalDecision::Approve => "accept",
                     ApprovalDecision::ApproveForSession => "acceptForSession",
@@ -616,7 +611,7 @@ impl SessionActor for Actor {
             } => {
                 if let Some(json_rpc_id) = self.user_inputs.remove(&request_id) {
                     // Native result shape: `{answers: {<qid>: {answers: [<strings>]}}}`
-                    // — a single string is wrapped into a 1-element array (S2 §3.2).
+                    // — a single string is wrapped into a 1-element array.
                     let mut wire_answers = serde_json::Map::new();
                     for (qid, value) in &answers {
                         wire_answers
@@ -1174,9 +1169,6 @@ impl Actor {
             params["serviceTier"] = json!(tier);
         }
 
-        // Interaction mode is always present in our session model, so Codex
-        // always carries `collaborationMode` (T3 sends it whenever the toggle
-        // is exposed, which it is for Codex).
         let mode_str = match mode {
             InteractionMode::Build => "default",
             InteractionMode::Plan => "plan",
@@ -1307,7 +1299,7 @@ impl Actor {
             .unwrap_or_default();
 
         // Structured user-input request: map to a canonical UserInputRequested
-        // and remember the JSON-RPC id so RespondUserInput can reply (S2 §3).
+        // and remember the JSON-RPC id so RespondUserInput can reply.
         if method == "item/tool/requestUserInput" {
             let questions = parse_codex_user_input(params);
             self.user_inputs.insert(key.clone(), id);
@@ -1871,7 +1863,7 @@ fn request_id_string(id: &Value) -> String {
 
 /// Normalize a canonical answer value into the wire array shape. A single
 /// string becomes a 1-element array; an array of strings is kept; anything
-/// else yields an empty array (S2 §3.2).
+/// else yields an empty array.
 fn strings(value: Option<&Value>) -> Vec<String> {
     let Some(value) = value else {
         return Vec::new();
@@ -2004,11 +1996,8 @@ fn parse_elicitation_form(
     let mut questions = Vec::new();
     let mut fields = Vec::new();
 
-    // `serde_json::Map` preserves the server's declaration order because this
-    // workspace transitively enables `preserve_order`. Questions are presented
-    // sequentially, so that declaration order is the intended answering order.
-    // If the feature goes away, this degrades to alphabetical order and the
-    // declaration-order tests below will catch it.
+    // `serde_json`'s `preserve_order` feature keeps questions in the schema's
+    // declaration order, which is also their answering order.
     for (key, schema) in properties {
         let schema_type = schema.get("type").and_then(Value::as_str);
         let (kind, options, values) = match schema_type {
@@ -2112,11 +2101,9 @@ fn parse_elicitation_url(
 }
 
 /// Map an `item/tool/requestUserInput` params object into canonical
-/// [`UserInputQuestion`]s (S2 §3.1). Questions missing a non-empty
-/// `id`/`header`/`question` are dropped, as are options with an empty label.
-/// Unlike T3, questions with zero options are KEPT (with `options: []`) so a
-/// free-text-only question still renders — a deliberate fix for T3's
-/// dropped-question bug (S2 §2.2 limitations). `multiSelect` is forced false.
+/// [`UserInputQuestion`]s. Questions missing a non-empty `id`/`header`/`question`
+/// are dropped, as are options with an empty label. Questions with zero options
+/// remain available for free-text answers. `multiSelect` is forced false.
 fn parse_codex_user_input(params: &Value) -> Vec<UserInputQuestion> {
     let questions = match params.get("questions").and_then(Value::as_array) {
         Some(q) => q,

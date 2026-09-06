@@ -1742,9 +1742,7 @@ pub(super) fn assemble_callback_text(
         // The child chose this text deliberately via report_result, so it is
         // delivered verbatim and never truncated.
         let mut body = format!("Result (reported via report_result):\n{report}");
-        // ponytail: fixed 200-char floor; a one-line "done" report would
-        // otherwise hide a substantive final message and force the
-        // orchestrator back to status/result.
+        // A brief report must not hide a more substantive final message.
         if report.chars().count() < 200 && final_message.chars().count() > report.chars().count() {
             body.push_str("\n\nThe report is brief; the final assistant message follows:\n");
             body.push_str(&digest());

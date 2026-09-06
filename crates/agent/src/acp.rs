@@ -1,8 +1,7 @@
 //! Agent Client Protocol provider: any agent from the ACP registry.
 //!
-//! Codex and Claude Code keep their native clients (they expose steering,
-//! structured questions and richer tool payloads that ACP cannot carry); this
-//! module covers the rest of the ecosystem through one protocol.
+//! Registry-managed agents share this adapter; native providers retain their
+//! richer protocol-specific clients.
 //!
 //! Shape: one child process per session, JSON-RPC over its stdio, driven by an
 //! `agent_client_protocol::Client` connection builder. The whole connection
@@ -128,10 +127,6 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
         events: events_rx,
     })
 }
-
-// ---------------------------------------------------------------------------
-// Launch
-// ---------------------------------------------------------------------------
 
 /// The resolved command line for a launch recipe.
 ///
@@ -306,10 +301,6 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ObservedWriter<W> {
         Pin::new(&mut self.inner).poll_close(cx)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Actor
-// ---------------------------------------------------------------------------
 
 async fn run_actor(
     executor: Rc<smol::LocalExecutor<'static>>,
@@ -1303,7 +1294,6 @@ async fn finish_turn(
     turn_id: &str,
     outcome: TurnOutcome,
 ) {
-    // Flush whatever text was still streaming.
     let tail = state.lock_recover().flush_text();
     for event in tail {
         let _ = events.send(event).await;
@@ -1399,10 +1389,6 @@ async fn emit_provider_options(
     }
     let _ = events.send(event).await;
 }
-
-// ---------------------------------------------------------------------------
-// Session state + the `session/update` mapping
-// ---------------------------------------------------------------------------
 
 /// Where a canonical option id came from, so `SetOption` routes to the right
 /// ACP method.
@@ -1877,7 +1863,6 @@ impl State {
                     },
                 }
             }
-            // read | search | fetch | switch_mode | other
             _ => tool_call_content(tool, status, self.tool_output(tool)),
         };
         ThreadItem {
@@ -2212,10 +2197,6 @@ fn approval_request(
     }
 }
 
-// ---------------------------------------------------------------------------
-// The `Client` half of the connection (agent → us)
-// ---------------------------------------------------------------------------
-
 #[derive(Clone)]
 struct AcpClient {
     events: Sender<AgentEvent>,
@@ -2408,10 +2389,6 @@ impl AcpClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Terminals (client-owned processes the agent drives)
-// ---------------------------------------------------------------------------
-
 /// A command the agent asked us to run. Headless: we capture the output and
 /// serve `terminal/output` / `terminal/wait_for_exit` from it, and the text is
 /// folded into the owning tool card (`ToolCallContent::Terminal`). Wiring these
@@ -2542,10 +2519,6 @@ fn exit_status(status: &std::process::ExitStatus) -> acp::TerminalExitStatus {
         .exit_code(status.code().map(|code| code as u32))
         .signal(signal)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

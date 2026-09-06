@@ -14,11 +14,7 @@ use syntect::{
     util::LinesWithEndings,
 };
 
-/// The syntax-highlight surface tcode reads from the former styled theme.
-///
-/// Keeping the serializable registry out of tcode makes this deliberately
-/// small: callers only resolve named syntax styles and select a built-in
-/// light or dark palette.
+/// Named syntax styles resolved from the bundled light or dark palette.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HighlightTheme {
     styles: BTreeMap<&'static str, ThemeStyle>,

@@ -1,8 +1,6 @@
 use super::*;
 
 impl AppState {
-    // -- the ACP agent marketplace ------------------------------------------
-
     /// Load the registry index (cache first, network when stale). Cheap enough
     /// to call every time the Providers page opens.
     pub fn refresh_acp_registry(&mut self, cx: &mut HostCx) {

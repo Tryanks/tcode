@@ -1,18 +1,9 @@
-//! In-process MCP server exposing the embedded preview browser to the agent.
+//! In-process [Model Context Protocol] server exposing the preview browser to agents.
 //!
-//! The GUI process owns a native WebView (see `src/ui/preview_panel.rs`). The
-//! agent CLIs (`claude`, `codex`) are separate child processes; to let them
-//! drive that WebView we run a small [Model Context Protocol] server over
-//! **streamable HTTP** on `127.0.0.1:<random port>`, guarded by a bearer token,
-//! and register it with each spawned agent.
-//!
-//! A tool call arrives on the tokio HTTP runtime, is turned into a
-//! [`PreviewOp`], and handed to the UI process through the [`Broker`]: a
-//! request rides an [`async_channel`] into the gpui main thread, which resolves
-//! it against the live WebView (running JS via `evaluate_script`, or shelling
-//! out to `screencapture`) and answers on a per-request reply channel. This
-//! mirrors T3's `PreviewAutomationBroker` request→deferred→respond pattern,
-//! reduced to what a single native WebView can do without CDP.
+//! Agent CLIs connect over loopback streamable HTTP with per-session bearer
+//! tokens. [`Broker`] passes each [`PreviewOp`] to the host, which routes it
+//! through serialized reverse RPC to a local or remote client owning a WebView.
+//! The client returns a [`PreviewReply`] over the same protocol.
 //!
 //! [Model Context Protocol]: https://modelcontextprotocol.io
 
@@ -39,8 +30,8 @@ pub const PREVIEW_PRESETS: &[(&str, u32, u32)] = &[
 
 pub use tcode_protocol::{PreviewRequest as PreviewOp, PreviewResponse as PreviewReply};
 
-/// One in-flight automation request handed to the UI: an [`PreviewOp`] plus a
-/// bounded channel the UI sends the outcome back on. `Ok` = success payload,
+/// One in-flight automation request handed to the host: a [`PreviewOp`] plus a
+/// bounded channel for its reply. `Ok` = success payload,
 /// `Err` = human-readable failure (surfaced to the agent as a tool error).
 #[derive(Debug)]
 pub struct BrokerRequest {
@@ -56,15 +47,14 @@ pub type Broker = mcp_host::Broker<BrokerRequest>;
 pub type TokenRegistry = mcp_host::TokenRegistry<tools::Service>;
 
 /// A running preview MCP server: the URL + per-session bearer-token issuer to
-/// register with agents, and the receiver the UI pumps to service automation
-/// requests.
+/// register with agents, and the receiver the host pumps to route automation.
 pub struct PreviewMcpServer {
     /// Streamable-HTTP endpoint, e.g. `http://127.0.0.1:53211/preview`.
     pub url: String,
     /// Per-session bearer-token registry.
     pub tokens: TokenRegistry,
-    /// Automation requests to resolve against the live WebView. The UI consumes
-    /// this (single consumer); dropping it makes [`Broker::invoke`] fail fast.
+    /// Automation requests for the host to route to a client WebView. Dropping
+    /// this single-consumer receiver makes [`Broker::invoke`] fail fast.
     pub requests: async_channel::Receiver<BrokerRequest>,
 }
 

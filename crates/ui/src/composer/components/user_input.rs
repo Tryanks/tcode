@@ -60,7 +60,6 @@ impl Composer {
             .cloned()
             .unwrap_or_default();
 
-        // Header: question header + "N/total" when multiple.
         let header = h_flex()
             .w_full()
             .gap_2()
@@ -80,7 +79,6 @@ impl Composer {
                 )))
             });
 
-        // Option rows.
         let mut options_content = v_flex().w_full().gap_1();
         for (opt_index, option) in question.options.iter().enumerate() {
             let is_selected = selected.iter().any(|l| l == &option.label);
@@ -184,7 +182,6 @@ impl Composer {
                 div().flex_1().min_w_0().child(
                     Textarea::new(&self.user_input_custom)
                         .appearance(false)
-                        // Match the 13px option rows around it.
                         .text_size(px(13.)),
                 ),
             )
@@ -442,10 +439,8 @@ impl Composer {
             .update(cx, |state, cx| state.set_value(prefill, window, cx));
     }
 
-    /// After answering: jump to the next unanswered question, or — when the
-    /// answer completed the whole set — submit without any button press
-    /// (S1 §7). The ~200ms pause lets the selection mark register visually
-    /// before the panel moves on.
+    /// Advance to the next unanswered question or submit a completed answer
+    /// set. The brief pause lets the selection mark register before moving on.
     pub(in super::super) fn ui_advance_or_submit(
         &mut self,
         questions: &[UserInputQuestion],

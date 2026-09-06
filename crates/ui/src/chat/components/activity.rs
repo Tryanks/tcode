@@ -46,8 +46,6 @@ pub(crate) fn activity_row(
                 color: Some(muted.opacity(0.45)),
                 ..Default::default()
             };
-            // Same scheme as a tool row: the primary word is the thing's own
-            // identity — the binary here, the tool name there — never a verb.
             let summary = activity_summary(
                 binary_name(command),
                 Some(
@@ -257,7 +255,6 @@ fn activity_detail(
             .into_any_element(),
         _ => div().into_any_element(),
     };
-    // Every drill-down hangs off the same hairline rail — no inset panel.
     div()
         .w_full()
         .ml_2()

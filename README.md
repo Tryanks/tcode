@@ -22,15 +22,10 @@ one workflow.
 
 ## What it is
 
-Coding agents live in the terminal. That's fine for a quick question and painful
-for a long one: the conversation dies with the tab, seeing what the agent
-actually changed means running `git diff` yourself, and approving a command means
-squinting at scrollback.
-
 Tcode is a desktop layer over the agent CLIs already installed on your machine.
-It spawns them, speaks their native protocols, and adds the things a terminal
-can't: threads that persist, rendered diffs, a readable approval panel, and
-native provider actions when the underlying CLI exposes them.
+It spawns them, speaks their native protocols, and provides persistent threads,
+rendered diffs, a readable approval panel, and native provider actions when the
+underlying CLI exposes them.
 
 It does **not** replace your agent, proxy your API keys, or run a cloud service.
 Your accounts, subscriptions, models and tooling keep working exactly as they
@@ -57,9 +52,9 @@ or deny. Permission modes run from "ask about everything" to "don't ask".
 **Queue and steer.** The composer stays live while a turn runs.
 <kbd>Enter</kbd> queues your message and sends it when the turn finishes;
 <kbd>⌘</kbd><kbd>Enter</kbd> on macOS or <kbd>Ctrl</kbd><kbd>Enter</kbd> on
-Windows/Linux steers — injecting it into the turn in flight so the agent changes
-course at its next step. Queued messages show above the composer and can be
-promoted to a steer with one click.
+Windows/Linux steers when the provider supports it, injecting the message into
+the turn in flight. Providers without steering support queue it instead.
+Queued messages show above the composer and offer a steer action where supported.
 
 **A terminal, a browser, and a plan.** Per-thread terminal drawer (select output,
 send it as context), an embedded preview browser the agent can drive over MCP,
@@ -82,8 +77,7 @@ and a live plan/task panel.
 | [OpenCode](https://opencode.ai) | `opencode` on your `PATH` |
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
-marketplace backed by the official Agent Client Protocol registry — Gemini CLI,
-Cursor, GitHub Copilot, goose, Qwen Code, Cline and dozens more.
+marketplace backed by the official Agent Client Protocol registry.
 Install one from **Settings → Providers**, or point Tcode at any command that
 speaks ACP.
 
@@ -118,9 +112,9 @@ Release builds also serve the browser client at `https://<host>:47420/`.
 
 **Connect a screen.** Desktop: Settings → Remote → pair by code or pick a nearby
 host, then **Connect**. Phone: **Pair a host**, scan the QR code or enter the
-address and code. Browser: open the host's URL and enter the code. In every
-case, compare the certificate fingerprint shown on both sides before you trust
-a new host.
+address and code. Browser: open the host's HTTPS URL, verify its certificate in
+the browser, and enter the code. See [pairing and certificate trust](docs/remote.md)
+for the native and browser flows.
 
 **Security.** Connections use TLS with a per-host self-signed certificate that
 native clients pin at pairing. Pairing issues a device token you can revoke on
@@ -132,13 +126,13 @@ troubleshooting: [docs/remote.md](docs/remote.md).
 
 **1. Install Tcode.** Download a build for your platform from
 [Releases](https://github.com/Tryanks/tcode/releases) — macOS (Apple Silicon /
-Intel), Windows (x64 / ARM64), Linux (x64 / ARM64) — and run it. It is a single
-self-contained binary: no runtime to install, no libraries to hunt down, nothing
-to uninstall but the file itself.
+Intel), Windows (x64 / ARM64), Linux (x64 / ARM64) — and run it. Check the release
+notes for runtime requirements and signing status. Windows preview uses
+WebView2; Linux needs the listed system libraries and a Vulkan driver.
 
-macOS builds aren't code-signed yet, so the first launch needs
+For an unsigned macOS build, remove quarantine after installing the app with
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is not available on Linux yet; everything else is.
+browser is available on macOS and Windows; voice input requires macOS 26 or later.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
@@ -171,47 +165,14 @@ lives under your platform's app-data directory.
 
 ## Building from source
 
-You need a recent Rust toolchain. The first build compiles GPUI from source, so
-budget 10–20 minutes.
-
-```sh
-git clone https://github.com/Tryanks/tcode
-cd tcode
-cargo run
-```
-
-Platform prerequisites, tests, headless smoke runs and provider probes are all in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Build instructions, platform prerequisites, workspace layout, tests and provider
+probes are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The editable macOS 26 source is
 [`assets/icons/app/tcode.icon`](assets/icons/app/tcode.icon). Icon Composer's
 official 16-bit Display P3 render is committed as
 [`assets/icons/app/tcode.png`](assets/icons/app/tcode.png), then converted into
 the native macOS and Windows icon formats used by releases.
-
-## How it works
-
-```
-crates/core              pure domain types and semantics
-crates/services          persistence, filesystem, process, git, import, and probes
-crates/runtime           sessions, providers, queues, orchestration, terminals,
-                         and semantic events
-crates/ui/src/i18n.rs     translation backend
-crates/ui                GPUI views, assets, presentation, and localized rendering
-crates/app/src/main.rs   desktop binary and composition root
-crates/headless          headless host binary
-crates/agent             provider clients and their canonical event model
-crates/term              terminal implementation (PTY, alacritty)
-crates/preview-mcp       MCP server exposing the preview browser to the agent
-crates/orchestrate-mcp   MCP server for orchestration tools
-```
-
-The app composes these crates into the desktop application. Providers normalize
-their protocols into shared events; the runtime turns activity into semantic
-events, and the UI localizes and presents them without learning provider-shaped
-details. The normal source command remains `cargo run` because `crates/app` is
-the workspace's sole default binary package. [`docs/DESIGN.md`](docs/DESIGN.md)
-is the visual contract.
 
 ## Contributing
 
@@ -229,7 +190,7 @@ Tcode's design and interaction model are closely modeled on
 reduced-feature homage. All credit for the original UX goes to them.
 
 Built with [GPUI](https://gpui.rs) and
-[gpui-component](https://github.com/longbridge/gpui-component).
+[gpui-kit](https://github.com/longbridge/gpui-kit).
 
 ## License
 

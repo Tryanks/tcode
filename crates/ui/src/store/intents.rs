@@ -41,7 +41,6 @@ impl WorkspaceStore {
     }
 }
 
-// Settings intents (32).
 impl WorkspaceStore {
     fn patch_settings(&mut self, patch: SettingsPatch) {
         self.dispatch(Command::PatchSettings { patch });
@@ -178,7 +177,6 @@ impl WorkspaceStore {
     }
 }
 
-// Session and turn intents (27).
 impl WorkspaceStore {
     pub fn archive_session(&mut self, session_id: String) {
         self.dispatch(Command::ArchiveSession { session_id });
@@ -432,7 +430,6 @@ impl WorkspaceStore {
     }
 }
 
-// Project and git intents (10).
 impl WorkspaceStore {
     pub fn create_project(
         &self,
@@ -526,7 +523,6 @@ impl WorkspaceStore {
     }
 }
 
-// Terminal intents (10).
 impl WorkspaceStore {
     pub fn toggle_terminal_panel(&mut self, cx: &mut Context<Self>) {
         let opening = !self
@@ -639,7 +635,6 @@ impl WorkspaceStore {
     }
 }
 
-// Provider intents (12).
 impl WorkspaceStore {
     pub fn refresh_provider_status(&mut self) {
         self.dispatch(Command::RefreshProviderStatus);
@@ -713,7 +708,6 @@ impl WorkspaceStore {
     }
 }
 
-// ACP intents (6).
 impl WorkspaceStore {
     pub fn refresh_acp_registry(&mut self) {
         self.dispatch(Command::RefreshAcpRegistry);
@@ -749,7 +743,6 @@ impl WorkspaceStore {
     }
 }
 
-// Composer mode intents (3).
 impl WorkspaceStore {
     pub fn set_interaction_mode(&mut self, mode: InteractionMode) {
         self.dispatch(Command::SetInteractionMode {

@@ -69,7 +69,6 @@ impl CommitDialog {
             scroll: ScrollHandle::new(),
             _gen_task: None,
         };
-        // Pre-fill the message with an AI-generated commit message.
         this.regenerate(window, cx);
         this
     }
@@ -114,8 +113,8 @@ impl CommitDialog {
         cx.notify();
     }
 
-    /// Confirm the commit. Returns `true` when the dialog should close. An empty
-    /// message triggers a regeneration instead of committing (T3 semantics).
+    /// Confirm the commit; an empty message starts regeneration instead.
+    /// Returns whether the dialog should close.
     pub fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let message = self.message.read(cx).value().trim().to_string();
         if message.is_empty() {
@@ -212,7 +211,6 @@ impl Render for CommitDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
 
-        // Branch row.
         let branch_label = self
             .branch
             .clone()
@@ -239,7 +237,6 @@ impl Render for CommitDialog {
 
         let mut body = v_flex().w_full().gap_3().child(branch_row);
 
-        // Default-branch safeguard banner.
         if self.on_default_branch {
             let create = self.create_feature_branch;
             body = body.child(
@@ -279,7 +276,6 @@ impl Render for CommitDialog {
             );
         }
 
-        // Changed-files list.
         let files_header = h_flex().w_full().justify_between().items_center().child(
             div()
                 .text_size(px(11.))
@@ -323,7 +319,6 @@ impl Render for CommitDialog {
             ),
         );
 
-        // Commit-message textarea + regenerate control.
         let message_header = h_flex()
             .w_full()
             .justify_between()

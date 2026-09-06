@@ -1,8 +1,6 @@
 use super::*;
 
 impl AppState {
-    // -- git quick actions (Group: Git) -------------------------------------
-
     pub(super) fn next_operation_id(&mut self) -> RuntimeOperationId {
         let id = RuntimeOperationId(self.next_operation_id);
         self.next_operation_id += 1;

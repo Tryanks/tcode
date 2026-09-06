@@ -128,8 +128,6 @@ impl AppState {
         }
     }
 
-    // -- provider version checks (Group C / s3 §6) --------------------------
-
     /// Whether the on-launch provider version check is enabled (default on).
     pub fn provider_update_checks_enabled(&self) -> bool {
         !self.settings.provider_update_checks_disabled
@@ -157,8 +155,6 @@ impl AppState {
         self.refresh_provider_status(cx);
     }
 
-    // -- provider profiles (built-in + user-created) ------------------------
-    //
     // A *profile* is a named configuration on top of a protocol `ProviderKind`.
     // The built-in native-provider cards are profiles too (with stable ids such
     // as "claude", "codex", "pi", and "opencode").

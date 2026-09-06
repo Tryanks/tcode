@@ -51,8 +51,6 @@ impl AppState {
         }
     }
 
-    // -- conversation-owned terminal resources -----------------------------
-
     pub(super) fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) -> bool {
         let destination = conversation_destination(active);
         let Some(workspace) = self.terminal_workspaces.remove(&destination) else {
@@ -115,8 +113,6 @@ impl AppState {
             self.new_terminal(target_id, cx);
         }
     }
-
-    // -- terminal drawer ---------------------------------------------------
 
     pub(super) fn persist_terminal_resource_count(&mut self, target_id: &str, cx: &mut HostCx) {
         if let Some(active) = self.resident(target_id) {

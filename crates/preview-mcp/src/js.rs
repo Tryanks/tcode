@@ -1,12 +1,6 @@
-//! JavaScript payloads run in the page to implement automation ops, plus the
-//! helper that decodes what the WebView hands back.
-//!
-//! We only have `evaluate_script` (WKWebView `evaluateJavaScript`), so — unlike
-//! T3, which drives Chrome DevTools Protocol — click/type are implemented by
-//! dispatching real DOM events, and selectors are plain CSS (no Playwright
-//! engine). Each snippet is an IIFE that returns a JSON-serializable value; the
-//! WebView serializes the result and the UI passes the string to
-//! [`parse_result`].
+//! Page scripts for WebView automation using CSS selectors and synthetic DOM
+//! events. Each snippet returns a JSON-serializable value; [`parse_result`]
+//! decodes the WebView callback's result.
 
 /// Report `{ url, title, loading }` for the current page.
 pub const STATUS: &str = r#"(() => ({
@@ -64,8 +58,8 @@ pub const SNAPSHOT: &str = r##"(() => {
   };
 })()"##;
 
-/// JS to click the first `selector` match by dispatching real pointer/mouse
-/// events at its center (with an `element.click()` fallback). Returns
+/// Dispatch synthetic pointer/mouse events at the first match's center, then
+/// invoke `element.click()` when available. Returns
 /// `{ ok: true }` or `{ error: "..." }`.
 pub fn click(selector: &str) -> String {
     let sel = json_string(selector);

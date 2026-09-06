@@ -832,7 +832,6 @@ fn render_code_block(
     let mut offset = 0;
     let mut rendered_lines = Vec::with_capacity(lines.len());
     let mono_font_family = cx.theme().mono_font_family.clone();
-    // Long lines soft-wrap in place; nothing scrolls out of reach.
     for (ix, (line, line_state)) in lines.iter().zip(states).enumerate() {
         let end = offset + line.len();
         let runs = sub_runs(&all_runs, offset, end);
@@ -1097,9 +1096,7 @@ mod tests {
     fn code_lines_drops_only_the_terminating_newline() {
         assert_eq!(code_lines("fn main() {}\n"), ["fn main() {}"]);
         assert_eq!(code_lines("a\nb"), ["a", "b"]);
-        // A genuine trailing blank line survives.
         assert_eq!(code_lines("a\n\n"), ["a", ""]);
-        // Empty code renders zero lines rather than one phantom.
         assert_eq!(code_lines(""), Vec::<&str>::new());
     }
 

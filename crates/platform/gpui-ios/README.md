@@ -1,7 +1,7 @@
 # gpui-ios
 
 `gpui-ios` is the UIKit platform backend for `gpui-pre` 0.3.3 used by the
-EAuth iOS host. It is deliberately an embedded backend: `UIApplication` owns
+tcode iOS host. It is deliberately an embedded backend: `UIApplication` owns
 the process and run loop, Swift supplies a `UIView`, and
 `Application::run_embedded` keeps GPUI alive while UIKit drives frames and
 input.
@@ -22,7 +22,7 @@ The Swift host creates a `GPUIHostView` whose backing layer is
 `CAMetalLayer`, then passes the unretained `UIView` pointer and its logical
 geometry through `gpui_ios_attach_view`. `IosWindow` wraps that pointer in
 `raw-window-handle`'s UIKit handle, creates a Metal-only `wgpu::Instance`, and
-hands its context to the patched in-tree `gpui-pre-wgpu::WgpuRenderer`. Logical
+hands its context to the published `gpui-pre-wgpu::WgpuRenderer`. Logical
 resizes are converted to device pixels before `update_drawable_size`. The
 UIKit content scale is also applied to the renderer at creation, on every
 scale change, and immediately after a detached surface is replaced so glass
@@ -46,32 +46,15 @@ Unsafe code and all C/Objective-C-facing state are confined to `src/ios/`.
 Swift retains every UIKit object; Rust keeps only a non-owning pointer for the
 lifetime of the attached platform window.
 
-## C ABI exported to Swift
+## Host boundary
 
-| Symbol | Purpose |
-| --- | --- |
-| `gpui_ios_init` | Lazily initialize the main-thread platform. |
-| `gpui_ios_attach_view`, `gpui_ios_detach_view` | Attach/detach the host `CAMetalLayer` view and initial metrics. |
-| `gpui_ios_request_frame` | Let the active GPUI window render one display-link frame. |
-| `gpui_ios_touches_began/moved/ended/cancelled` | Forward a batch of UIKit touches with stable IDs, coordinates, force, and optional prediction. |
-| `gpui_ios_resize`, `gpui_ios_scale_factor_changed` | Update logical bounds, drawable size, and display scale. |
-| `gpui_ios_safe_area_changed` | Forward UIKit safe-area edges. |
-| `gpui_ios_keyboard_frame_changed` | Forward the current bottom IME obstruction. |
-| `gpui_ios_appearance_changed` | Map the current trait collection to light/dark `WindowAppearance`. |
-| `gpui_ios_lifecycle_active/inactive/background/foreground` | Forward `UIScene` lifecycle phases. |
-| `gpui_ios_memory_warning` | Notify GPUI of UIKit memory pressure. |
-| `gpui_ios_insert_text` | Commit UTF-8 text through the focused `PlatformInputHandler`. |
-| `gpui_ios_set_marked_text`, `gpui_ios_unmark_text` | Update or end an IME composition, including its UTF-16 selection. |
-| `gpui_ios_delete_backward` | Deliver a Backspace key pair to the focused input. |
-| `gpui_ios_key_event` | Forward hardware key up/down, modifiers, character, and repeat state. |
-| `gpui_ios_open_url_received` | Deliver an incoming URL to the registered platform callback. |
-
-The linked Swift executable provides the reverse callbacks
-`gpui_ios_host_log`, `gpui_ios_host_schedule_frame`, `gpui_ios_host_show_keyboard`,
-`gpui_ios_host_hide_keyboard`, `gpui_ios_host_configure_text_input`,
-`gpui_ios_host_open_url`, and the three `gpui_ios_host_*clipboard*` functions.
-The forward declarations live in `../eauth-ios/host/Sources/BridgingHeader.h`;
-the reverse implementations live in `../eauth-ios/host/Sources/HostCallbacks.swift`.
+The forward ABI declarations live in
+[BridgingHeader.h](../../ios/host/Sources/BridgingHeader.h); the Rust exports
+are in [ffi.rs](src/ios/ffi.rs). The Swift host implements the reverse callbacks
+in [HostCallbacks.swift](../../ios/host/Sources/HostCallbacks.swift), including
+frame scheduling, keyboard presentation, input configuration, clipboard and URL
+opening. Keep declarations synchronized when changing that boundary. Callbacks
+copy transient byte buffers synchronously; UIKit objects remain Swift-owned.
 
 ## Touch and scrolling behavior
 
@@ -88,11 +71,8 @@ mouse-down/up click pair until the tap wins, emits drag scrolling as
 momentum on later frames, and preserves its own long-press deadline. A second
 touch can therefore participate in GPUI's multi-touch recognition without
 creating a second mouse pointer, and small movements do not break click or
-long-press timing. Application components consume the arena's phased
-`LongPressEvent` through the shared `eauth-app` `LongPress` helper. There is no
-UIKit-only recognizer or synthetic right-click path, so iOS and Android use the
-same long-press threshold, cancellation, capture, and post-press click
-suppression semantics.
+long-press timing. The backend supplies touch events and platform tuning; application components
+choose which gestures to handle. The same portable arena serves Android.
 
 ## Keyboard bridge
 
@@ -106,36 +86,41 @@ updated from `TextInputConfiguration`. Keyboard frame notifications update
 
 ## Build and run
 
-From the host directory:
+From the repository root, with Xcode, XcodeGen and the corresponding Rust target
+installed:
 
-```bash
-./build.sh                 # arm64 iPhone 17 simulator
-./build.sh --device        # arm64 physical-device build, unsigned
+```sh
+crates/ios/host/build.sh --simulator
+crates/ios/host/build.sh --device
 ```
 
-The script builds `eauth-ios` in debug mode by default, copies
-`libeauth_ios.a` into the ignored `host/lib/` directory, regenerates the Xcode
-project with XcodeGen, and builds the app. Set
-`EAUTH_IOS_RUST_PROFILE=release` for an optimized Rust static library. The
-default destination is an iPhone 17 on iOS 26.5; override the runtime explicitly
-with `EAUTH_IOS_SIMULATOR_OS` when testing a different installed SDK.
+The script builds `tcode-ios`, copies `libtcode_ios.a` into the ignored host
+`lib/` directory, generates `Tcode.xcodeproj`, and builds the Debug `Tcode`
+scheme. The simulator destination defaults to iPhone 17 / iOS 26.5; set
+`TCODE_IOS_SIMULATOR_OS` for another installed runtime. Set
+`TCODE_IOS_RUST_PROFILE=release` for an optimized Rust library; the Xcode host
+configuration remains Debug. Device builds are unsigned and need signing and
+provisioning before installation.
 
-The generated `EAuth` scheme includes the coordinate-based `EAuthUITests`
-acceptance suite. It covers PIN setup/relaunch/wrong-and-right unlock,
-background relock, debug seeding, list/grid and theme states, shared long press,
-detail edit/save, scanner fallbacks and image QR import, settings depth,
-security audit, logs, sync validation, export/share dismissal, rotation, and
-liquid glass over moving content. Named screenshot attachments are checked in
-under `eauth-ios/host/screenshots/`; `screenshots/PARITY.md` places the primary
-states beside the SwiftUI iOS 26 references and records visible differences.
+The simulator app is written to
+`crates/ios/host/build/Build/Products/Debug-iphonesimulator/Tcode.app`:
+
+```sh
+xcrun simctl install booted crates/ios/host/build/Build/Products/Debug-iphonesimulator/Tcode.app
+xcrun simctl launch booted com.tryanks.tcode
+```
+
+See [mobile design](../../../docs/mobile-design.md) for application behavior and
+platform verification, and [remote work mode](../../../docs/remote.md) for
+pairing with a host.
 
 ## Current limitations
 
 - One attached UIKit view and one GPUI window are supported. Native secondary
   windows, dialogs, menus, drag-and-drop, screen capture, and cursor APIs are
   not implemented.
-- Credentials return an explicit unsupported error; production authentication
-  secrets must use the application-owned Keychain layer.
+- GPUI credential APIs return an unsupported error. tcode pairing persistence
+  belongs to the application host, not this platform backend.
 - IME candidate-window caret positioning and continuous interpolation of the
   keyboard animation are not yet implemented; endpoint insets are exact.
 - Custom CoreText feature dictionaries and explicit fallback lists are retained

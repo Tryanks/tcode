@@ -1,4 +1,4 @@
-//! P4b acceptance through serialized links and the production fan-out mux.
+//! Integration coverage through serialized links and the production fan-out mux.
 use super::*;
 use std::time::Duration;
 use tcode_remote::HostMux;
@@ -56,8 +56,6 @@ fn next(
     super::tests::next_event(events, |event| predicate(&event.event)).event
 }
 
-// Drives a real PTY through `/bin/sh` and `stty`; the term crate's own PTY
-// tests are gated the same way.
 #[cfg(unix)]
 #[test]
 fn terminal_mux_replays_bounded_raw_output_then_streams_input_and_resize() {

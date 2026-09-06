@@ -42,8 +42,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CARGO_TERM_COLOR: always
-      # Smaller target/ keeps the per-repo 10 GB Actions cache pool under its
-      # limit; full debug info was evicting the Windows/Linux/release caches.
+      # Limit debug info to avoid evicting other platform caches.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       RUST_BACKTRACE: 1
 
@@ -105,11 +104,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang cmake pkg-config libssl-dev libzstd-dev mold \
+            build-essential clang cmake pkg-config libssl-dev libzstd-dev \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
             libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev \
             libvulkan-dev xvfb
-          # Install GTK/WebKit only when enabled by the dependency graph.
           if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
             sudo apt-get install -y --no-install-recommends \
               libgtk-3-dev libwebkit2gtk-4.1-dev

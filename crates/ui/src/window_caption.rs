@@ -68,11 +68,9 @@ fn caption_host(
         return None;
     }
     Some(match route {
-        // Settings replaces the whole workspace; its content paper is rightmost.
         Route::Settings => CaptionSurface::Settings,
         Route::Chat if !right_panel_open => CaptionSurface::Chat,
         Route::Chat if right_tab == RightTab::Preview => CaptionSurface::Preview,
-        // Diff and Plan share the one right-panel container.
         Route::Chat => CaptionSurface::RightPanel,
     })
 }
@@ -188,7 +186,6 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
         .items_center()
         .justify_center()
         .text_color(cx.theme().muted_foreground)
-        // Native hit-testing: no click handlers needed.
         .window_control_area(button.area())
         // Blocking the mouse ends gpui's hit test at this button, so neither the
         // header's drag listeners nor any enclosing `Drag` control area is in
@@ -238,7 +235,6 @@ mod tests {
 
     #[test]
     fn the_settings_header_hosts_the_cluster_on_the_settings_route() {
-        // Settings replaces the workspace, whatever the chat layout was.
         for open in [false, true] {
             for tab in TABS {
                 assert_eq!(

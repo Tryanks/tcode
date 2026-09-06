@@ -10,8 +10,7 @@ use tcode_core::ui::ConversationDestination;
 use crate::context_meter;
 use crate::palette::fuzzy_score;
 
-/// The three approval modes in display order, each with its label, one-line
-/// description (exact UI copy), and chip icon (lock → pencil → unlock).
+/// Approval modes in picker order, with translation keys and chip icons.
 pub(super) const APPROVAL_MODES: [(ApprovalMode, &str, &str, &str); 3] = [
     (
         ApprovalMode::Supervised,
@@ -47,7 +46,6 @@ pub(super) fn approval_mode_meta(mode: ApprovalMode) -> (String, &'static str) {
     (crate::tr!(*label_key).into_owned(), icon)
 }
 
-/// The minimal `/`-command set this slice handles (S1 §7).
 pub(super) enum SlashIntent {
     Plan,
     Default,
@@ -166,8 +164,7 @@ pub(crate) fn format_countdown(secs: u64) -> String {
     }
 }
 
-/// Recognize a standalone `/plan`, `/default`, or `/model` message (T3 strips
-/// the command and switches mode / opens the picker instead of sending it).
+/// Recognize standalone mode-switch or model-picker commands without sending a turn.
 pub(super) fn slash_command(text: &str) -> Option<SlashIntent> {
     match text.trim() {
         "/plan" => Some(SlashIntent::Plan),
@@ -277,10 +274,8 @@ pub(super) struct MenuRow {
     pub(super) secondary: String,
     pub(super) icon: MenuIcon,
     pub(super) accept: MenuAccept,
-    /// The group this row belongs to (T3 §5: the `/` menu is grouped
-    /// `Built-in` / `Provider`; the `$` menu is a single `Skills` group). A
-    /// header is rendered above the first row of each group. `None` = ungrouped
-    /// (the `@` file menu).
+    /// Group heading emitted before this row when its group changes.
+    /// `None` leaves the file-mention menu ungrouped.
     pub(super) group: Option<&'static str>,
 }
 
@@ -342,7 +337,7 @@ pub(super) fn resolved_select_value(
 
 /// The traits chip label: every resolved descriptor label joined with " · "
 /// (e.g. "High · 200k", "High · 200k · Fast", "Thinking Off"). `None` when the
-/// model has no descriptors (S1 §3).
+/// model has no descriptors.
 pub(super) fn traits_chip_label(
     spec: &ModelSpec,
     selections: &[agent::OptionSelection],
@@ -412,7 +407,7 @@ pub(super) fn traits_chip_label(
 
 /// Build the answers map for a user-input request: keyed by question id, with a
 /// string (single-select / free-text) or string-array (multi-select) value. A
-/// non-empty custom answer overrides the current question's selections (S1 §7).
+/// non-empty custom answer overrides the current question's selections.
 /// A question counts as answered once it carries at least one selection (or a
 /// recorded custom-text answer, which is stored the same way).
 pub(super) fn user_input_answered(
@@ -808,7 +803,6 @@ mod tests {
             current_model_name(&catalog, Some("claude-fable-5")),
             "Claude Fable 5"
         );
-        // Unknown id falls back to the raw id.
         assert_eq!(current_model_name(&catalog, Some("gpt-9")), "gpt-9");
     }
 
@@ -862,7 +856,6 @@ mod tests {
             traits_chip_label(&spec, &[], false),
             Some("High · 1M".into())
         );
-        // A selection overrides the default.
         let sel = vec![agent::OptionSelection {
             id: "contextWindow".into(),
             value: serde_json::Value::String("1m".into()),
@@ -925,7 +918,6 @@ mod tests {
             traits_chip_label(&unresolved, &[], false),
             Some("Thinking".into())
         );
-        // A model with no descriptors has no chip.
         let bare = agent::ModelSpec {
             id: "b".into(),
             display_name: "b".into(),
@@ -951,7 +943,6 @@ mod tests {
         let questions = vec![question("q1"), question("q2"), question("q3")];
         let mut selections = std::collections::HashMap::new();
 
-        // Nothing answered: from q1, the next stop is q2.
         assert!(!user_input_all_answered(&questions, &selections));
         assert_eq!(
             next_unanswered_question(&questions, &selections, 0),
@@ -975,7 +966,6 @@ mod tests {
             Some(1)
         );
 
-        // Everything answered → completion, and no hop target remains.
         selections.insert("q2".into(), vec!["custom text".into()]);
         assert!(user_input_all_answered(&questions, &selections));
         assert_eq!(next_unanswered_question(&questions, &selections, 0), None);
@@ -1025,21 +1015,17 @@ mod tests {
         selections.insert("q1".to_string(), vec!["A".to_string()]);
         selections.insert("q2".to_string(), vec!["X".to_string(), "Y".to_string()]);
 
-        // No custom override: single-select → string, multi-select → array.
         let answers = assemble_user_input_answers(&questions, &selections, 0, None);
         assert_eq!(answers["q1"], serde_json::json!("A"));
         assert_eq!(answers["q2"], serde_json::json!(["X", "Y"]));
 
-        // A custom answer overrides the current question's selection only.
         let answers = assemble_user_input_answers(&questions, &selections, 0, Some("  freehand  "));
         assert_eq!(answers["q1"], serde_json::json!("freehand"));
         assert_eq!(answers["q2"], serde_json::json!(["X", "Y"]));
 
-        // A blank/whitespace custom answer does not override.
         let answers = assemble_user_input_answers(&questions, &selections, 0, Some("   "));
         assert_eq!(answers["q1"], serde_json::json!("A"));
 
-        // An unanswered single-select yields an empty string.
         let answers =
             assemble_user_input_answers(&questions, &std::collections::HashMap::new(), 0, None);
         assert_eq!(answers["q1"], serde_json::json!(""));

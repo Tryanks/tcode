@@ -201,8 +201,6 @@ impl ProviderDialog {
         !tcode_core::settings::Settings::is_builtin_profile_id(&self.profile_id)
     }
 
-    // -- persistence (Save) -------------------------------------------------
-
     /// Persist the whole draft: card settings, then secret writes/clears, then a
     /// single provider reload. `enabled` is owned by the row switch and left as
     /// it is. Called only from Save.
@@ -292,8 +290,6 @@ impl ProviderDialog {
         });
     }
 
-    // -- environment variables ---------------------------------------------
-
     /// Read the live env inputs back into seeds (preserves other rows' edits
     /// across a rebuild).
     fn snapshot_env(&self, cx: &App) -> Vec<EnvSeed> {
@@ -375,8 +371,6 @@ impl ProviderDialog {
         cx.notify();
     }
 
-    // -- models -------------------------------------------------------------
-
     fn add_custom_model(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.custom_model.read(cx).value().to_string();
         let catalog = self.store.read(cx).profile_catalog(&self.profile_id);
@@ -412,9 +406,6 @@ impl ProviderDialog {
         cx.notify();
     }
 
-    // -- rendering ----------------------------------------------------------
-
-    /// A labelled section: an 11px caption over its field blocks.
     fn section(
         &self,
         label: SharedString,
@@ -435,7 +426,6 @@ impl ProviderDialog {
             .into_any_element()
     }
 
-    /// A labelled field block: label, control, optional muted help text.
     fn field_block(
         &self,
         label: SharedString,
@@ -720,7 +710,6 @@ impl ProviderDialog {
             block = block.child(self.render_model_row(index, row, cx));
         }
 
-        // Custom-model input + validation copy.
         block = block.child(
             h_flex()
                 .w_full()
@@ -978,10 +967,6 @@ pub fn render_footer(
         )
         .into_any_element()
 }
-
-// ---------------------------------------------------------------------------
-// Copy + helpers
-// ---------------------------------------------------------------------------
 
 type ProviderCopy = [&'static str; 6];
 

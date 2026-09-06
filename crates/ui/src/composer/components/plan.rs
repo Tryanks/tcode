@@ -13,7 +13,7 @@ impl Composer {
     }
 
     /// The Implement split-button: primary "Implement" + a chevron menu with
-    /// "Implement in a new thread" (S1 §5).
+    /// "Implement in a new thread".
     pub(in super::super) fn render_implement_split(&self, cx: &mut Context<Self>) -> AnyElement {
         let primary = cx.theme().primary;
         let fg = cx.theme().primary_foreground;
@@ -100,7 +100,7 @@ impl Composer {
     }
 
     /// The "Plan Ready" header strip shown atop the composer while a proposed
-    /// plan awaits a decision (S1 §5).
+    /// plan awaits a decision.
     pub(in super::super) fn render_plan_ready_header(
         &self,
         title: String,

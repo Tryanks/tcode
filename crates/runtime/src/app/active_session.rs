@@ -4,11 +4,9 @@ use super::*;
 /// while another turn was running; orchestration callbacks also wait here while
 /// an idle provider is starting.
 ///
-/// Queueing is an APP-LEVEL concept and works for every provider, including the
-/// ones that cannot steer. The queue is per-session and in-memory only: it is
-/// deliberately NOT persisted to the session JSONL, because a queued message is
-/// not yet part of the conversation (it is recorded only once it is actually
-/// dispatched, or steered, as a user message).
+/// The queue is per-session and in-memory for every provider. Ordinary messages
+/// enter the persisted transcript only after the adapter confirms delivery;
+/// steering records its own request and acceptance events.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedMessage {
     /// Stable per-session id, so the UI can address a row for steer/drop even
@@ -20,9 +18,8 @@ pub struct QueuedMessage {
     pub(super) relay_transcript: Option<String>,
     pub attachments: Vec<Attachment>,
     /// Earliest wall-clock time at which this turn may dispatch. Scheduled
-    /// messages ride the same in-memory queue as ordinary turns, so v1 keeps a
-    /// parked provider resident while one is pending instead of persisting or
-    /// rehydrating a separate scheduler record.
+    /// messages share the in-memory queue and keep a parked provider resident
+    /// while pending.
     pub not_before: Option<SystemTime>,
     /// Per-turn settings captured with the user's send gesture. A later mode
     /// toggle must affect later messages, not rewrite work already in the FIFO.
@@ -158,14 +155,13 @@ pub struct ActiveSession {
     /// stale and forces a resume-restart before the next turn.
     pub(super) live_approval_mode: Option<ApprovalMode>,
     /// The option selections the live provider was started with (reasoning
-    /// effort, context window, fast mode, …). A mid-session change to a
-    /// launch-time option forces a resume-restart before the next turn; Codex's
-    /// reasoning effort is the exception (it applies per turn, see `send_turn`).
+    /// effort, context window, fast mode, …). Launch-time changes force a
+    /// resume-restart; live and per-turn options are excluded by
+    /// `options_changed_while_live`.
     pub(super) live_option_selections: Vec<OptionSelection>,
     /// A transient "the next send should be an Ultrathink turn" flag, set when
-    /// the user picks Ultrathink in the traits picker. It is never persisted
-    /// (T3: Ultrathink is a prompt-prefix mode, not an option) and is cleared
-    /// after one send.
+    /// the user picks Ultrathink in the traits picker. It is not persisted as
+    /// a session option and is cleared after one send.
     pub(super) pending_ultrathink: bool,
     /// A transient "the next queued send carries an injected context prefix of
     /// this many bytes" flag, set by [`AppState::orchestrate_turn`] right before
@@ -173,10 +169,10 @@ pub struct ActiveSession {
     /// per-send annotation, consumed by the next `push_queued`, and never
     /// persisted on the session.
     pub(super) pending_context_len: Option<usize>,
-    /// Draft-only (Group C): run in the current checkout or a new dedicated
+    /// Draft-only: run in the current checkout or a new dedicated
     /// worktree. Chosen in the checkout row before the first send; locked after.
     pub draft_workspace: WorkspaceMode,
-    /// Group C: set while the first send is creating a worktree in the
+    /// Set while the first send is creating a worktree in the
     /// background (drives the composer's "Preparing worktree…" action).
     pub(super) preparing_worktree: bool,
     /// Messages typed while a turn was running (Enter → queue). In-memory only,
@@ -184,8 +180,8 @@ pub struct ActiveSession {
     pub(super) queue: Vec<QueuedMessage>,
     /// Source of [`QueuedMessage::id`]s.
     pub(super) next_queue_id: u64,
-    /// Queue head submitted to the adapter but not yet confirmed at its native
-    /// delivery boundary. The head remains in `queue` until acceptance.
+    /// Id of the submitted queue entry awaiting adapter delivery confirmation.
+    /// The entry remains in `queue` until acceptance; scheduled rows may precede it.
     pub(super) delivery_in_flight: Option<u64>,
     pub(super) turn_in_flight: bool,
     /// Provider-owned background tasks which outlive a completed model turn.
@@ -283,8 +279,7 @@ impl ActiveSession {
         if !matches!(self.runtime, Runtime::Live(_)) {
             return false;
         }
-        // ACP agents take option changes live (`session/set_mode` /
-        // `set_model` / `set_config_option`), so nothing ever needs a restart.
+        // ACP option changes use session/set_mode or session/set_config_option.
         if self.meta.provider.caps().options_apply_live {
             return false;
         }

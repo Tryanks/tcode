@@ -659,7 +659,7 @@ pub struct ComputerUseSettings {
     /// background PID delivery cannot be initialized.
     #[serde(default)]
     pub allow_foreground_fallback: bool,
-    /// Show the agent cursor overlay. The overlay consumes this in a later PR.
+    /// Show the agent cursor overlay.
     #[serde(default = "default_true")]
     pub show_agent_cursor: bool,
 }
@@ -804,8 +804,7 @@ pub struct Settings {
     #[serde(default)]
     pub live_command_panel_disabled: bool,
     /// Whether the on-launch provider version check is DISABLED. Stored inverted
-    /// so the feature defaults to on (s3 §6: "Provider update checks", default
-    /// on) even for legacy settings files that lack the field.
+    /// so it remains enabled for legacy settings files that lack the field.
     #[serde(default)]
     pub provider_update_checks_disabled: bool,
     /// Whether inactive-window frame throttling is DISABLED. Stored inverted so
@@ -874,7 +873,7 @@ pub struct Settings {
     /// Per-session last-visited time (unix secs), keyed by session id. A session
     /// whose `updated_at` exceeds its last-visited time (and isn't active) shows
     /// an unread dot. Opening a thread refreshes it; "Mark unread" clears it.
-    /// UI state; absent in legacy files (Group A).
+    /// UI state; absent in legacy files.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub last_visited: HashMap<String, u64>,
     /// ACP agents the user installed from the marketplace (or defined by hand),

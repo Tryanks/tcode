@@ -1364,9 +1364,8 @@ fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
     let state = cx.new_entity(TestClientState::new(store));
     let (commands, receiver) = smol::channel::unbounded();
     let sent_text = state.update(cx, |state, cx| {
-        // A live, idle, already-enabled orchestrator: the turn is an ordinary
-        // send (no restart, nothing in flight), so it flows through
-        // record_user_message where the split is stored.
+        // Keep the provider live so the send exercises ordinary delivery and
+        // records its context split after acceptance.
         let mut active = live_session(ProviderKind::Codex, commands);
         active.meta.id = "orchestrator".into();
         active.meta.model = Some("gpt-6-astra".into());
@@ -2181,7 +2180,7 @@ fn provider_env_home_and_launch_args_reach_session_options() {
         ]
     );
 
-    // Codex takes its home as CODEX_HOME, and has no launch args.
+    // Codex takes its home as CODEX_HOME; this profile has no launch arguments.
     let launch_env = LaunchEnv {
         env: Vec::new(),
         home: settings.provider(ProviderKind::Codex).home_path.clone(),
@@ -4474,7 +4473,6 @@ fn send_routing_matrix() {
 
 /// Steering must not disturb the turn bookkeeping: it joins the turn already
 /// in flight, so no queue entry is consumed and no new turn is opened.
-/// (See examples/steer_probe.rs for the live protocol probe.)
 #[test]
 fn steering_does_not_disturb_turn_accounting() {
     let (commands, receiver) = smol::channel::unbounded();
@@ -5016,8 +5014,8 @@ fn settings_restart_waits_for_background_follow_up() {
         assert!(actor.try_recv().is_err());
         assert_eq!(state.selected_session().unwrap().queue.len(), 1);
 
-        // Claude publishes zero immediately before its self-invoked result;
-        // the restart is still deferred until that follow-up turn closes.
+        // Even an early background-task drain cannot restart the provider
+        // before its self-invoked follow-up turn closes.
         state.on_event(
             "background-restart",
             AgentEvent::BackgroundTasksChanged { count: 0 },
@@ -5452,15 +5450,8 @@ fn timeline_load_retries_when_append_watermark_moves() {
     });
 }
 
-/// The T3 Code regression this app must not inherit: send a message, hit
-/// stop, get an error, then immediately open a new thread and send — and the
-/// new thread's FIRST user message must be in its timeline (T3 loses the
-/// bubble while the turn keeps working underneath).
-///
-/// The guarantees this pins: a message is folded into the timeline at the
-/// moment it is dispatched (not asynchronously after), the fold only accepts
-/// events whose session id matches the active session, and the interrupted
-/// session's error cannot leak into the new thread.
+/// After stopping one thread, the next thread's first accepted message must
+/// remain visible and durable without inheriting the interrupted thread's error.
 #[test]
 fn stop_then_new_thread_keeps_the_first_message_visible() {
     let cx = &mut TestAppContext::default();
@@ -5951,8 +5942,6 @@ fn switching_threads_parks_a_working_session_instead_of_killing_it() {
             EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "queued follow-up"
         )));
 
-        // The second turn completes with nothing queued: NOW the provider
-        // shuts down — work finished, not reaped.
         state.on_event(
             &id_a,
             AgentEvent::TurnCompleted {

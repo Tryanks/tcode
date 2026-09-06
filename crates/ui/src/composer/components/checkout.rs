@@ -58,7 +58,6 @@ impl Composer {
                 .anchor(Anchor::BottomRight)
                 .trigger(trigger)
                 .on_open_change(move |open, _window, cx| {
-                    // Load branches lazily each time the popover opens.
                     if *open {
                         store_open.update(cx, |store, _cx| store.load_branches());
                     }
@@ -128,7 +127,6 @@ impl Composer {
                                         let branch_name = branch_name.clone();
                                         store_pick.update(cx, |store, _cx| {
                                             if worktree_mode {
-                                                // Choose the worktree's base branch.
                                                 store.set_draft_workspace(
                                                     WorkspaceMode::NewWorktree {
                                                         base: branch_name,
@@ -154,8 +152,6 @@ impl Composer {
                 .into_any_element()
         };
 
-        // Left: the workspace-mode chip. A draft can pick "Local checkout" vs
-        // "New worktree"; a started session shows its locked workspace.
         let left =
             self.render_workspace_chip(is_draft, worktree_mode, worktree.is_some(), &branch, cx);
 
@@ -190,7 +186,6 @@ impl Composer {
             crate::tr!("composer.local_checkout")
         };
 
-        // Started sessions show a static, locked workspace label.
         if !is_draft {
             return h_flex()
                 .gap_1p5()

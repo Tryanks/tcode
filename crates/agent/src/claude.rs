@@ -912,17 +912,13 @@ async fn handle_command(
             // residual race: a steer written microseconds before that status
             // may actually miss the request, but the CLI protocol exposes no
             // stronger acknowledgement, so we accept it at that checkpoint.
-            //
-            // Verified live (examples/steer_probe.rs): 1 `TurnStarted`,
-            // 1 `TurnCompleted` across a steered turn.
             let text = turn_text(text, mapper.ultrathink);
             let msg = user_message(&text, &attachments);
             write_steering_message(stdin, &msg, request_id, mapper, event_tx).await;
             ControlFlow::Continue(())
         }
         SessionCommand::Shutdown => {
-            // Settle any pending AskUserQuestion prompts: deny the callback with
-            // T3's cancel message and emit an empty resolution (S2 §4.2).
+            // Settle pending AskUserQuestion callbacks before closing stdin.
             for (request_id, response) in mapper.cancel_pending_user_input() {
                 let _ = write_line(stdin, &response).await;
                 let _ = event_tx
@@ -1041,10 +1037,6 @@ fn user_message(text: &str, attachments: &[Attachment]) -> Value {
     })
 }
 
-// ---------------------------------------------------------------------------
-// Message mapping (pure, unit-testable)
-// ---------------------------------------------------------------------------
-
 /// Remembers what kind of tool-use item a `tool_use_id` refers to, so that when
 /// the matching `tool_result` arrives we can emit the right `ItemCompleted`.
 enum ToolItem {
@@ -1088,7 +1080,7 @@ struct PendingApproval {
     input: Value,
     /// `permission_suggestions` from the `can_use_tool` control_request,
     /// forwarded unchanged as `updatedPermissions` on `ApproveForSession` when
-    /// the SDK supplied a non-empty array (S2 §4.3).
+    /// the SDK supplied a non-empty array.
     suggestions: Option<Value>,
 }
 
@@ -1371,10 +1363,8 @@ impl Mapper {
                 "updatedInput": pending.input,
             }),
             ApprovalDecision::ApproveForSession => {
-                // T3 does not synthesize a rule: it forwards the SDK's
-                // `permission_suggestions` verbatim as `updatedPermissions`,
-                // and only when they were supplied (S2 §4.3). Absent
-                // suggestions, this is wire-equivalent to a one-time allow.
+                // Forward only SDK-supplied permission rules. Without suggestions,
+                // session approval is wire-equivalent to a one-time allow.
                 match &pending.suggestions {
                     Some(suggestions) => json!({
                         "behavior": "allow",
@@ -1400,8 +1390,8 @@ impl Mapper {
     }
 
     /// Build the `control_response` allowing a pending `AskUserQuestion` prompt,
-    /// echoing the original `questions` alongside the collected `answers`
-    /// (S2 §1.2 / §2.3). Returns `None` for an unknown request id.
+    /// echoing the original `questions` alongside the collected `answers`.
+    /// Returns `None` for an unknown request id.
     fn build_user_input_response(
         &mut self,
         request_id: &str,
@@ -1418,7 +1408,7 @@ impl Mapper {
     }
 
     /// Drain every pending `AskUserQuestion`, producing `(request_id, deny
-    /// control_response)` pairs with T3's cancel message (S2 §1.2 abort path).
+    /// control_response)` pairs with the cancellation message.
     fn cancel_pending_user_input(&mut self) -> Vec<(String, Value)> {
         self.pending_user_input
             .drain()
@@ -1819,7 +1809,6 @@ impl Mapper {
                 let mut events = self.observe_stop_reason(
                     event.pointer("/delta/stop_reason").and_then(Value::as_str),
                 );
-                // Live usage growth; nice-to-have for token display.
                 if let Some(usage) = event.get("usage") {
                     let tu = map_usage(usage, None);
                     events.push(AgentEvent::TokenUsage(tu));
@@ -2318,8 +2307,8 @@ impl Mapper {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // (a) AskUserQuestion → structured user-input flow, in ALL access modes
-        // (its branch precedes the full-access allow branch; S2 §1.1/§1.2).
+        // Questions require an answer even in full-access mode, so handle them
+        // before ordinary tool auto-approval.
         if tool_name == "AskUserQuestion" {
             let questions_raw = input.get("questions").cloned().unwrap_or_else(|| json!([]));
             let questions = parse_ask_user_questions(&input);
@@ -2331,9 +2320,8 @@ impl Mapper {
             }];
         }
 
-        // (b) ExitPlanMode: capture the plan (deduped against the assistant-block
-        // capture via the shared `tool_use_id`), then auto-deny with T3's exact
-        // message rather than surfacing an approval to the user.
+        // Capture one plan per turn, then deny the tool so the user can accept
+        // the proposed plan through tcode's plan flow.
         if tool_name == "ExitPlanMode" {
             let tool_use_id = request
                 .get("tool_use_id")
@@ -2352,10 +2340,9 @@ impl Mapper {
             return events;
         }
 
-        // (c) Classify per the T3 substring matrix (S2 §1.3).
         let request_type = classify_claude_tool(&tool_name);
 
-        // (d) Full-access allows ordinary tools; read-only allows native reads.
+        // Full-access allows ordinary tools; read-only allows native reads.
         let read_only_allow = self.approval_mode == ApprovalMode::ReadOnly
             && request_type == ClaudeRequestType::FileRead;
         if self.approval_mode == ApprovalMode::FullAccess || read_only_allow {
@@ -2366,7 +2353,6 @@ impl Mapper {
             return Vec::new();
         }
 
-        // (e) Everything else becomes a user-visible approval request.
         let detail = approval_detail(&tool_name, &input);
         let kind = match request_type {
             ClaudeRequestType::FileRead => ApprovalKind::FileRead { detail },
@@ -2503,10 +2489,7 @@ fn one_line_summary(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The reduced canonical request type our approval kinds distinguish. T3's
-/// item classification has more buckets (collab/mcp/web-search/image) but its
-/// request conversion collapses everything except read-only, command, and
-/// file-change into the dynamic fallback (S2 §1.3).
+/// Approval categories; tools without a dedicated category use `ToolUse`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClaudeRequestType {
     FileRead,
@@ -2515,7 +2498,6 @@ enum ClaudeRequestType {
     ToolUse,
 }
 
-/// Whether a tool name classifies as a collab/subagent item (S2 §1.3 rule 1).
 fn is_agent_tool(normalized: &str) -> bool {
     normalized.contains("agent") || normalized == "task"
 }
@@ -2535,12 +2517,9 @@ fn subagent_description(input: &Value) -> String {
         })
 }
 
-/// Classify a tool name into its canonical approval request type using T3's
-/// ordered, substring-based matcher (S2 §1.3). The read-only predicate is
-/// checked first (so `WebSearch` → `FileRead` via `"search"`), then the ordered
-/// item classification; only command and file-change buckets get a dedicated
-/// kind — agent / mcp / web-search / image / default all fall through to the
-/// dynamic `ToolUse`.
+/// Classify approvals with an ordered substring matcher. Read-only matches
+/// take precedence (`WebSearch` → `FileRead`); agent tools use `ToolUse` even
+/// when their names also match command or file-change substrings.
 fn classify_claude_tool(name: &str) -> ClaudeRequestType {
     let n = name.to_lowercase();
     if n == "read"
@@ -2569,14 +2548,11 @@ fn classify_claude_tool(name: &str) -> ClaudeRequestType {
     {
         return ClaudeRequestType::FileChange;
     }
-    // "mcp" / "websearch" / "web search" / "image" all resolve to the dynamic
-    // fallback after request conversion.
     ClaudeRequestType::ToolUse
 }
 
-/// Construct the approval `detail` string per the S2 §1.3 ordered rules.
+/// Summarize a command, subagent brief, or tool input for its approval prompt.
 fn approval_detail(tool_name: &str, input: &Value) -> String {
-    // 1. A command string (`command` or `cmd`).
     if let Some(cmd) = input
         .get("command")
         .or_else(|| input.get("cmd"))
@@ -2585,8 +2561,6 @@ fn approval_detail(tool_name: &str, input: &Value) -> String {
         let clipped: String = cmd.trim().chars().take(400).collect();
         return format!("{tool_name}: {clipped}");
     }
-    // 2. Collab/subagent item: description, else first 200 chars of prompt,
-    //    prefixed with `subagent_type: ` when present.
     if is_agent_tool(&tool_name.to_lowercase()) {
         let body = subagent_description(input);
         return match input
@@ -2598,7 +2572,6 @@ fn approval_detail(tool_name: &str, input: &Value) -> String {
             None => body,
         };
     }
-    // 3. Serialize the full input, clipping to 400 chars with an ellipsis.
     let json = serde_json::to_string(input).unwrap_or_default();
     if json.chars().count() <= 400 {
         format!("{tool_name}: {json}")
@@ -2609,7 +2582,7 @@ fn approval_detail(tool_name: &str, input: &Value) -> String {
 }
 
 /// Parse `AskUserQuestion` tool input into canonical [`UserInputQuestion`]s
-/// (S2 §1.2). `id` is the complete question text (falling back to `q-<index>`);
+/// with the complete question text as `id` (falling back to `q-<index>`);
 /// options and empty labels are preserved (the Claude side does not filter).
 fn parse_ask_user_questions(input: &Value) -> Vec<UserInputQuestion> {
     let questions = match input.get("questions").and_then(Value::as_array) {
@@ -2859,10 +2832,6 @@ fn parse_provider_commands(init: &Value) -> Vec<ProviderCommand> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Plan / todo extraction
-// ---------------------------------------------------------------------------
-
 fn is_todo_tool(name: &str) -> bool {
     name.to_lowercase().contains("todowrite")
 }
@@ -2907,10 +2876,6 @@ fn extract_exit_plan_markdown(input: &Value) -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
 }
-
-// ---------------------------------------------------------------------------
-// Model catalog + effort mapping
-// ---------------------------------------------------------------------------
 
 fn has_boolean_option(spec: &ModelSpec, id: &str) -> bool {
     spec.options
@@ -3032,7 +2997,7 @@ fn model(id: &str, display_name: &str, options: Vec<OptionDescriptor>) -> ModelS
 }
 
 /// The full static Claude catalog (unfiltered by version). Mirrors T3's
-/// `BUILT_IN_MODELS` (S1 §2).
+/// `BUILT_IN_MODELS`.
 fn built_in_models() -> Vec<ModelSpec> {
     vec![
         model(

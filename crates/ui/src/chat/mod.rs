@@ -343,7 +343,7 @@ pub struct ChatView {
     session_key: Option<String>,
     /// Turn selected from a command-palette content hit.
     highlighted_turn: Option<usize>,
-    /// 1s ticker kept alive while a turn is running (drives live "Working for Ns").
+    /// 100ms ticker kept alive while a turn runs, driving the elapsed-time label.
     _tick: Option<Task<()>>,
     /// 1s ticker kept alive while an error card shows a scheduled resume.
     _limit_tick: Option<Task<()>>,
@@ -891,8 +891,6 @@ impl ChatView {
         auto.expanded
     }
 
-    // -- turn rendering -----------------------------------------------------
-
     /// Render one turn as chronological messages, errors, and Work Log runs.
     ///
     /// `pinned` carries the ids of the last user / last assistant message in the
@@ -1096,7 +1094,6 @@ impl ChatView {
             }
         }
 
-        // Proposed-plan card (the captured plan for this turn).
         if let Some((item_id, markdown)) = self
             .workspace_store
             .read(cx)
@@ -1166,7 +1163,6 @@ impl ChatView {
                 cx,
             ));
         } else if let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts)) {
-            // 5. Turn timestamp row (finished turns with a known end time).
             let requested_model = self.workspace_store.read(cx).chat_requested_model();
             column = column.child(components::indicator::finished_turn_time(
                 ts,
@@ -1620,8 +1616,7 @@ impl ChatView {
         )
     }
 
-    /// Show the "Copied!" confirmation on the copy button identified by `key` for
-    /// 2s (T3's confirmation). One at a time: a second copy re-arms the timer.
+    /// Show the "Copied!" confirmation on `key` for 2s; a second copy re-arms the timer.
     fn mark_copied(&mut self, key: String, cx: &mut Context<Self>) {
         self.copied = Some(key.clone());
         self._copied_task = Some(cx.spawn(async move |this, cx| {
@@ -1635,8 +1630,6 @@ impl ChatView {
         }));
         cx.notify();
     }
-
-    // -- top-level surfaces -------------------------------------------------
 
     fn render_header(
         &self,
@@ -1821,15 +1814,12 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The adaptive Git quick-action split-button (left of Open): the primary
-    /// action follows the background git status (Commit / Commit & push / Push /
-    /// Pull / Publish branch / Initialize Git, or a disabled status hint); the
-    /// chevron lists the applicable subset. Ported from T3's `GitActionsControl`.
+    /// Git quick-action split button adapted from T3 Code's `GitActionsControl`.
+    /// The primary action and dropdown choices follow the current git status.
     fn render_git_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (quick, items) = self.workspace_store.read(cx).chat_git_controls()?;
         let border = cx.theme().border;
 
-        // Main action segment.
         let label: SharedString = crate::tr!(git_action_label_key(quick.label))
             .into_owned()
             .into();
@@ -1994,9 +1984,7 @@ impl ChatView {
         });
     }
 
-    /// The bordered "Open" split-button: main click opens the session cwd in
-    /// Zed; the chevron opens a menu (Zed / Finder / Copy path). Matches T3's
-    /// header control.
+    /// Open the session cwd in Zed, or choose a directory action from the menu.
     fn render_open_button(&self, cwd: PathBuf, cx: &mut Context<Self>) -> AnyElement {
         let border = cx.theme().border;
         let main_cwd = cwd.clone();
@@ -2117,7 +2105,7 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The phone's "new thread" empty state (§3.4): which project the thread
+    /// The phone's "new thread" empty state: which project the thread
     /// starts in, and which provider/model the first message reaches.
     fn render_compact_draft_empty(
         &self,
@@ -2164,10 +2152,8 @@ impl ChatView {
     }
 
     fn render_empty_state(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // The phone never shows the desktop launcher here: no "Add project"
-        // button and no Ctrl+K hint (docs/mobile-design.md §3.0 forbids desktop
-        // shortcut copy). Reaching this state on a phone means the host has no
-        // threads to open yet.
+        // A phone reaches this state when the host has no threads. Project
+        // creation and desktop shortcut hints belong to the desktop launcher.
         if self.window_state.read(cx).compact {
             return crate::material::empty_state(
                 Icon::new(IconName::Folder),
@@ -2396,7 +2382,7 @@ impl Render for ChatView {
         let active = self.workspace_store.read(cx).chat_active_session();
 
         let compact = self.window_state.read(cx).compact;
-        // The phone reads on T1 paper (§3.0); the desktop keeps the glass canvas.
+        // The phone reads on T1 paper; the desktop keeps the glass canvas.
         let root = v_flex().size_full().min_w_0().bg(if compact {
             crate::material::content_surface(cx)
         } else {
@@ -2506,8 +2492,7 @@ impl Render for ChatView {
         .min_h_0()
         .py_4();
 
-        // A fresh phone draft gets the spec'd empty state instead of a blank
-        // scroller (§3.4); the composer below it is already focused.
+        // A fresh phone draft shows its project/model context above the focused composer.
         let timeline: AnyElement = if compact && is_draft && item_count == 0 {
             self.render_compact_draft_empty(&cwd, cx)
         } else {
@@ -2544,7 +2529,7 @@ impl Render for ChatView {
                     ),
             )
             // A faded hairline plus 8pt of air separates the phone's timeline
-            // from its composer (§3.4); the desktop separates by rhythm alone.
+            // from its composer; the desktop separates by rhythm alone.
             .when(compact, |el| {
                 el.child(crate::material::faded_hairline(cx))
                     .child(div().h(px(8.)).flex_none())
@@ -2586,12 +2571,6 @@ impl Render for ChatView {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Launch `zed <cwd>` detached; surface a notification if the CLI is missing.
-/// The leading icon for a git quick-action.
 fn git_action_icon(action: GitAction) -> Icon {
     match action {
         GitAction::Push => Icon::new(IconName::ArrowUp),

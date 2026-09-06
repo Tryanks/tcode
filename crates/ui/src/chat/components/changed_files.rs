@@ -24,8 +24,7 @@ pub(crate) struct ChangedFilesHandlers {
     pub(crate) open_files: Vec<ClickHandler>,
 }
 
-/// The changed-file evidence: a quiet header line and a chip row, sitting bare
-/// in the flow under a hairline that separates it from the trace above.
+/// Finished-turn file summary with diff counts and file actions.
 pub(crate) fn changed_files(
     index: usize,
     cwd: &Path,
@@ -93,8 +92,6 @@ pub(crate) fn changed_files(
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
         });
 
-    // Whitespace and the quiet header are separation enough; a full-width
-    // rule here reads as a section divider, not evidence grouping.
     let mut content = v_flex().w_full().gap_1p5().pt(px(2.)).child(header);
 
     let visible = if show_all {
@@ -171,9 +168,6 @@ pub(crate) fn changed_files(
     content.into_any_element()
 }
 
-/// A quiet text control in the chip row: no fill, no border, muted until it is
-/// hovered. Every switch next to the file chips wears this, so none of them
-/// competes with the chips for the eye.
 fn quiet_control(
     id: impl Into<ElementId>,
     label: SharedString,
@@ -211,7 +205,6 @@ fn diff_counts_colored(
         .child(div().text_color(deleted_color).child(format!("-{deleted}")))
 }
 
-/// The theme tokens a file-edit row needs.
 #[derive(Clone)]
 pub(crate) struct FileEditRowStyle {
     muted: gpui::Hsla,
@@ -490,7 +483,6 @@ mod tests {
             });
         };
 
-        // A comfortable width the path fits in: the single-line baseline.
         cx.simulate_resize(size(px(900.), px(80.)));
         draw(cx);
         let baseline = cx.debug_bounds("file-edit-row").expect("row bounds");
@@ -518,12 +510,10 @@ mod tests {
                 counts.left() >= path.right(),
                 "+/- counts overlapped the path at {width}px: path={path:?}, counts={counts:?}"
             );
-            // `flex_none`: the counts never give up width to the path.
             assert_eq!(
                 counts.size.width, baseline_counts.size.width,
                 "+/- counts were squeezed at {width}px: {counts:?}"
             );
-            // The path truncates instead of wrapping the row onto a second line.
             assert_eq!(
                 row.size.height, baseline.size.height,
                 "row grew taller at {width}px, so the long path wrapped: row={row:?}"

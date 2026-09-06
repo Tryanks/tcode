@@ -1,12 +1,11 @@
 //! On-disk persistence for tcode sessions.
 //!
 //! Layout (under the platform data dir, e.g. `~/Library/Application Support/tcode/`):
-//!   * `sessions.json` — a JSON array of [`SessionMeta`], the session index.
-//!   * `<id>.jsonl`     — one line per received [`AgentEvent`] (append-only).
+//!   * `sessions.json` — an [`IndexFile`] containing projects and sessions.
+//!   * `<id>.jsonl` — append-only `{ ts, event }` records.
 //!
-//! Replaying a session = read its `.jsonl`, parse each line into an
-//! [`AgentEvent`], and fold them with [`tcode_core::session::fold_events`] into a
-//! [`tcode_core::session::Timeline`].
+//! Replay accepts timestamped records and legacy bare [`AgentEvent`] lines,
+//! then folds [`StoredEvent`]s into a [`tcode_core::session::Timeline`].
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -501,7 +500,7 @@ mod tests {
     fn reader_tolerates_legacy_bare_events_and_envelopes() {
         let store = SessionStore::open_at(temp_root()).unwrap();
         let id = "mixed";
-        // A pre-M3 bare event, a new envelope, a blank line, and a corrupt line.
+        // A legacy bare event, a timestamped envelope, a blank line, and a corrupt line.
         let contents = concat!(
             r#"{"type":"turn_started","turn_id":"legacy"}"#,
             "\n",

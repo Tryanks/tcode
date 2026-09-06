@@ -1,11 +1,5 @@
 //! Headless end-to-end probe for provider clients.
 //!
-//! Old examples map to this one as follows:
-//! - `interrupt_probe P [cwd]` → `probe P <prompt> [cwd] --interrupt-after 5`
-//! - `steer_probe P [cwd]` → `probe P <prompt> [cwd] --steer <message>`
-//! - `image_probe P image [prompt] [cwd]` → `probe P <prompt> [cwd] --image image`
-//! - `acp_probe cwd prompt command [args…]` → `probe acp prompt cwd supervised command [args…]`
-//!
 //! Catalog mode: `probe --list-models <codex|claude|pi|opencode>`.
 //! Turn mode: `probe <provider> <prompt> [cwd] [approval] [acp-command args…] [flags]`.
 //! Flags are `--mode plan`, `--effort <value>`, `--interrupt-after <seconds>`,

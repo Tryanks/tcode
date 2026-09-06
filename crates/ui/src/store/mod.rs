@@ -1473,10 +1473,8 @@ impl WorkspaceStore {
         )
     }
 
-    /// Starts the typed import command, then returns a client-local
-    /// receiver fed by the single construction-time progress bus. See
-    /// the local host import route for the remote replacement
-    /// (correlated progress events).
+    /// Start an import and return its correlated progress stream when local
+    /// import routing is available.
     #[cfg(feature = "desktop")]
     pub fn start_external_import(
         &self,
@@ -1745,8 +1743,7 @@ impl WorkspaceStore {
         )
     }
 
-    /// Consumes a prefill already delivered by the typed
-    /// `NativeRewindPrefill` event; no backend consuming read remains.
+    /// Consume the active session's prefill delivered by `NativeRewindPrefill`.
     pub fn take_native_rewind_prefill(&mut self) -> Option<String> {
         let active_id = self.session_status_replica.as_ref()?.session_id.clone();
         let prefill = self.native_rewind_prefills.remove(&active_id)?;

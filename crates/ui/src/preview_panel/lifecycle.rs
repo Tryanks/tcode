@@ -148,9 +148,8 @@ impl BrowserLifecycle {
 
     /// Get or lazily create the browser for `key`.
     ///
-    /// `initial_url` is retained by the Windows queued/in-flight adapter so the
-    /// newest navigation can be replayed after asynchronous construction. The
-    /// synchronous adapter still starts at `about:blank`, as before.
+    /// Windows retains the newest URL while asynchronous creation runs.
+    /// The synchronous adapter starts at `about:blank`.
     pub fn ensure(
         &mut self,
         key: &str,

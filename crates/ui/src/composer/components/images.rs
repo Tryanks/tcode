@@ -6,7 +6,6 @@ use super::super::*;
 pub(in super::super) struct PendingImage {
     /// On-disk path of the persisted copy (also the thumbnail image source).
     pub(in super::super) path: PathBuf,
-    /// Display name.
     pub(in super::super) name: String,
 }
 

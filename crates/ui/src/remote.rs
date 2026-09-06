@@ -30,7 +30,7 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
 
-/// Default listen port (`docs/plans/remote-and-mobile.md`, decision 3).
+/// Default port advertised by desktop hosting.
 pub const DEFAULT_REMOTE_PORT: u16 = 47_420;
 
 /// How this process is wired to a host.
@@ -507,8 +507,6 @@ impl RemotePanel {
         .detach();
     }
 
-    // -- shared row chrome (mirrors the settings page's row language) --------
-
     fn section_caption(&self, label: SharedString, cx: &Context<Self>) -> AnyElement {
         div()
             .pl_3()
@@ -559,8 +557,6 @@ impl RemotePanel {
             .child(text)
             .into_any_element()
     }
-
-    // -- host this computer --------------------------------------------------
 
     fn render_hosting(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let hosting = cx
@@ -834,8 +830,6 @@ impl RemotePanel {
             .child(group)
             .into_any_element()
     }
-
-    // -- connect to another host --------------------------------------------
 
     fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let mode = cx

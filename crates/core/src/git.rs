@@ -4,7 +4,7 @@
 //!
 //! This core owns status parsing, the adaptive quick-action state machine,
 //! path-spec selection, slug generation, and prompt builders. Process-backed
-//! execution remains in the application compatibility module.
+//! execution lives in `crates/services/src/git.rs`.
 
 use std::collections::HashSet;
 
@@ -35,10 +35,6 @@ pub fn merge_file_changes_by_path<'a>(
     }
     merged
 }
-
-// ---------------------------------------------------------------------------
-// Status model
-// ---------------------------------------------------------------------------
 
 /// One changed file in the working tree (staged and/or unstaged), with its
 /// combined line delta (0/0 for untracked files with no numstat).
@@ -84,10 +80,6 @@ impl GitStatus {
         self.ahead > 0 && self.behind > 0
     }
 }
-
-// ---------------------------------------------------------------------------
-// Quick-action state machine
-// ---------------------------------------------------------------------------
 
 /// An executable git operation behind the quick-action button / dropdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -301,10 +293,6 @@ fn pull_disabled_hint(status: &GitStatus) -> GitHint {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Path-spec selection
-// ---------------------------------------------------------------------------
-
 /// The path-spec to stage for a commit given the changed files and the set of
 /// user-*excluded* (unchecked) paths.
 ///
@@ -323,10 +311,6 @@ pub fn included_paths(all: &[GitFileEntry], excluded: &HashSet<String>) -> Optio
             .collect(),
     )
 }
-
-// ---------------------------------------------------------------------------
-// Slug / feature-branch name
-// ---------------------------------------------------------------------------
 
 /// Sanitize an arbitrary string into a lowercase git ref fragment (T3's
 /// `sanitizeBranchFragment`): strip quotes, collapse separators, cap at 48
@@ -385,11 +369,7 @@ pub fn feature_branch_name(subject: &str) -> String {
     format!("tcode/{}", sanitize_branch_fragment(subject))
 }
 
-// ---------------------------------------------------------------------------
-// AI commit-message prompt + sanitizer
-// ---------------------------------------------------------------------------
-
-/// Max chars of the patch fed to the model (keeps the headless call cheap).
+/// Maximum UTF-8 bytes of patch content included in a commit-message prompt.
 const COMMIT_PATCH_MAX: usize = 8_000;
 
 /// Build the plain-text prompt for the headless commit-message generation
@@ -453,15 +433,11 @@ pub fn sanitize_commit_message(raw: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Status parsing (pure)
-// ---------------------------------------------------------------------------
-
 /// Parse `git status --porcelain=2 --branch` output plus the numstat map into
 /// the local part of a [`GitStatus`]. `default_branch` is the short name from
 /// `origin/HEAD` (or `None`); `has_origin_remote` from `git remote`.
 ///
-/// The caller fills `is_repo` (true here) — this parser assumes a repo.
+/// This parser assumes a repository and sets `is_repo` to true.
 pub fn parse_status(
     porcelain: &str,
     numstat: &[(String, u32, u32)],

@@ -232,8 +232,7 @@ impl AppState {
                             // holds text the user typed but that was never
                             // sent. It stays visible in the queue strip and
                             // flushes on the next successful start; clearing it
-                            // would destroy their words along with the process
-                            // (the T3 bug family this app tests against).
+                            // would destroy their words along with the process.
                             if let Some(resident) = state.resident_mut(&session_id) {
                                 resident.runtime = Runtime::Idle;
                                 resident.delivery_in_flight = None;

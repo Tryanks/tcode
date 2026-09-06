@@ -15,9 +15,8 @@
 //! plus `gtk::main_iteration_do` pumped on the UI thread), while gpui's Linux
 //! backend runs calloop/xcb and never pumps GTK — the webview would panic at
 //! construction and could never be driven. So `wry`/`gpui-wry` are not even
-//! dependencies on Linux (see the `[target.'cfg(not(target_os = "linux"))']`
-//! table in Cargo.toml); the tab renders a placeholder and every `preview_*` MCP
-//! tool answers with an error. The MCP server itself still starts, harmlessly.
+//! dependencies on Linux; the tab renders a placeholder and preview MCP tools
+//! report unavailable. The MCP server can still start.
 //!
 //! Windows creation is deliberately asynchronous. WebView2 construction is
 //! asynchronous underneath, but wry's synchronous `build_as_child` waits by
@@ -35,9 +34,7 @@
 //! dialog that overlaps its bounds. We mitigate the common case by hiding the
 //! WebView whenever its owning Preview panel closes, another right-panel tab or
 //! conversation is selected, the command palette opens, or we leave the chat
-//! route. A fully general fix (hiding on every popover) would need popover-layer
-//! state we don't currently track, so overlapping in-webview popovers are a
-//! known limitation (documented, not fixed).
+//! route. Other overlapping GPUI popovers can still be covered by the native view.
 
 #[cfg(any(not(target_os = "linux"), test))]
 use crate::window_state::Route;
@@ -313,8 +310,6 @@ mod native {
                 .update(cx, |lifecycle, cx| lifecycle.eval_fire(key, script, cx));
         }
 
-        // ---- chrome actions -------------------------------------------------
-
         fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
             if let Some(id) = self.active_key(cx)
                 && let Availability::Ready(view) = self.ensure_webview(&id, window, cx)
@@ -384,8 +379,6 @@ mod native {
             })
             .detach();
         }
-
-        // ---- broker bridge --------------------------------------------------
 
         /// Resolve one automation op from the MCP server against the active WebView.
         /// Answers `reply` immediately for actions, or from the JS callback for
@@ -861,7 +854,6 @@ mod native {
             }
             let active = self.active_key(cx);
 
-            // Mirror the active session's URL into the address bar when it changes.
             if active != self.mirrored {
                 let value = active
                     .as_ref()
@@ -1025,7 +1017,6 @@ mod native {
                         .tooltip(crate::tr!("preview.close"))
                         .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
-                // Last child, so the chrome's own controls stay to its left.
                 .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
         }
 

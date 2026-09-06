@@ -368,7 +368,7 @@ impl GridEmulator {
     /// Apply the local viewport behavior associated with user input.
     ///
     /// This scrolls to the bottom and clears any selection; the bytes
-    /// themselves still belong on the host-side [`crate::PtyHandle`].
+    /// themselves must still be sent to the host PTY.
     pub fn prepare_input(&self) {
         self.prepare_input_if_changed();
     }

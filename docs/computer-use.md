@@ -4,9 +4,12 @@ tcode gives MCP-capable providers (Claude Code, Codex, OpenCode, and ACP agents 
 advertise `mcpCapabilities.http`) a set of desktop computer-use tools, served by the
 in-process `tcode_computer_use` MCP server. pi has no MCP client, so its provider card
 and model-picker rows identify computer use, preview, and orchestrate as unavailable
-before a session starts. The design follows
-[pi-computer-use](https://github.com/injaneity/pi-computer-use): accessibility-tree-first,
-state-scoped observation, transactional actions — not blind pixel clicking.
+before a session starts. Tools observe an accessibility tree, then apply actions
+against the returned state. Native backends are available on macOS and Windows;
+other platforms return an unsupported-platform error.
+
+The tool design was informed by
+[pi-computer-use](https://github.com/injaneity/pi-computer-use).
 
 ## Tool surface
 
@@ -21,7 +24,7 @@ state-scoped observation, transactional actions — not blind pixel clicking.
 | `read_text` | Page through long text owned by a state ref. |
 | `wait_for` | Wait for a text/role condition to become present or absent. |
 
-Core contract, inherited from pi-computer-use:
+Tool contract:
 
 - **State-scoped refs.** Every `@e` ref belongs to the `state_id` that produced it. Observations
   are immutable and stored in a bounded LRU (default 8). Acting from an evicted or stale state is
@@ -36,36 +39,20 @@ Core contract, inherited from pi-computer-use:
 - **Bounded output.** Model-visible text is capped; oversized results return a preview plus a
   continuation ref for `read_text`.
 
-The sole remaining tool-surface deviation from pi-computer-use is the absence of CDP browser
-roots: browser automation stays on the `tcode_preview` server and the embedded WebView. The
-earlier Windows/UIAutomation gap is resolved by the Windows backend, and text-sparse
-accessibility trees use raw-image pass-through. By maintainer decision the image fallback does
-not run OCR or synthesize `pictureOnly` nodes; the model reads the attached pixels directly.
+Browser automation belongs to the separate `tcode_preview` server and embedded
+WebView; this server exposes desktop windows, not CDP browser roots.
 
-## Architecture
+## Implementation boundary
 
-- `crates/computer-use-mcp` — the whole feature:
-  - `outline.rs` — platform-neutral UI tree model, folding, search ranking.
-  - `state.rs` — bounded immutable state store, `state_id` allocation, staleness checks.
-  - `tools.rs` — rmcp `ToolRouter` (same streamable-HTTP + bearer-token shape as
-    `preview-mcp` / `orchestrate-mcp`).
-  - `backend/` — platform dispatch plus shared contracts. `backend/macos/` uses the AX C API
-    (`AXUIElement*`), per-process CGEvent input synthesis, and `screencapture -l <windowid>`
-    capture.
-    `backend/windows/` is a thin adapter over the `uiautomation` crate for COM setup, Control View
-    traversal, patterns, input, and GDI-backed screenshot capture. Other platforms get a stub
-    backend whose tools return a clear "unsupported platform" error.
-  - `permissions.rs` — TCC checks/requests (see below), public API also consumed by the
-    settings UI.
-- Registration: `SessionOptions.computer_use_server: Option<McpRegistration>` threaded exactly
-  like `orchestrate_server` — Claude via `--mcp-config`, Codex via `-c mcp_servers.*`, OpenCode
-  via its server config, and ACP via `session/new` `mcpServers` (HTTP-capability-gated).
-  Enabled/disabled per
-  `Settings.computer_use.enabled`.
+[crates/computer-use-mcp](../crates/computer-use-mcp/src/lib.rs) owns the outline,
+immutable state store, tool router, platform backends and permission facade.
+Providers receive its streamable-HTTP MCP registration when computer use is
+enabled. Claude, Codex and OpenCode use their native MCP configuration; ACP
+registration is gated on the agent's HTTP MCP capability. The Settings UI
+consumes the same permission facade.
 
-Unlike pi-computer-use, tcode needs **no helper app**: tcode is itself a signed `.app`, so
-Accessibility and Screen Recording grants attach directly to tcode. That removes helper
-install/signing/attribution handling entirely.
+The server runs inside tcode, so macOS permissions apply to the running app;
+there is no separately installed helper app.
 
 ## Text-sparse image fallback
 
@@ -91,49 +78,28 @@ PNG and is labeled `image/png`. The fallback is intentionally OCR-free and does 
 
 ## macOS background input delivery
 
-AX-first actions remain background-safe: `AXPress`, setting `AXValue`, and setting `AXFocused`
-are attempted before synthesized input. Coordinate, pointer, scroll, drag, and keyboard fallbacks
-use `CGEventPostToPid` instead of the global HID tap. Every event is stamped with the target pid,
-window number, and private window-routing field. Mouse events additionally carry click state,
-pressure, and both window-under-pointer fields. When SkyLight's optional
-`CGEventSetWindowLocation` symbol is available, events also receive a window-local point computed
-directly from the AX top-left screen coordinates. Missing private symbols are treated as an
-optional capability, not a crash condition. Because these events are never posted globally, the
-system cursor does not move.
+The macOS backend tries AX actions before synthesizing input. Pointer actions
+and keyboard fallbacks normally post events to the target process. A background
+activation guard suppresses focus changes while delivering them; the system
+cursor stays in place. The implementation uses optional private routing APIs,
+so callers must handle failed or unknown outcomes rather than assuming delivery
+means the application changed.
 
-When the target is not already frontmost, a `BackgroundActivation` guard installs one per-pid
-event tap for the current app and one for the target on a dedicated CFRunLoop thread. While armed,
-the current-app tap drops only focus-message event types 13, 19, and 20; other events and all
-target-tap events pass through. The guard then sends the target window an AppKit-defined
-application-activated event (subtype 1) and a PID-directed down/up click at the window center as a
-readiness primer. On teardown it sends application-deactivated subtype 2 when the target is still
-backgrounded, invalidates the taps, stops the run loop, joins its thread, and only then releases
-the callback contexts. A nil NSEvent or unavailable private API is logged and skipped; inability
-to establish safe focus suppression makes the action return `didnt` unless an eligible foreground
-keyboard fallback is enabled.
+`allow_foreground_fallback` defaults to `false`. When enabled, only `type_text`
+and `keypress` may retry through foreground activation and HID delivery after a
+background failure. Pointer actions do not take that fallback. `show_agent_cursor`
+defaults to `true` and controls a separate macOS action overlay; it is visible
+only while the target app is frontmost and does not move the system cursor.
 
-`allow_foreground_fallback` defaults to `false`. When enabled, only `type_text` and `keypress` may
-retry through the legacy activate/raise foreground HID path, and only after background setup or
-delivery fails. Pointer action kinds never activate or raise an app. `show_agent_cursor` defaults
-to `true` and is persisted/plumbed through the computer-use configuration as the seam for the
-later overlay work; this part does not render an overlay.
-
-## Chromium accessibility activation
-
-Before walking a Chromium/Electron AX tree (bundle id contains `chrome`, `chromium`, or `electron`,
-case-insensitively), the backend best-effort sets `AXManualAccessibility` and
-`AXEnhancedUserInterface` on the application element. A pid whose earlier tree was text-sparse is
-also activated on its next observation, covering branded Electron apps whose bundle id does not
-advertise the runtime. The first activation per pid creates a persistent AX observer, attaches its
-source to a dedicated process-lifetime run loop, and subscribes to focus, application visibility,
-window create/move/resize, value/title/selection, and layout notifications. It prefers the optional
-remote-check registration symbol and falls back to public `AXObserverAddNotification`, then waits
-about 300 ms before the first walk so the renderer can publish its complete tree.
+Before walking Chromium/Electron windows, the backend best-effort enables their
+accessibility exposure. It also retries activation for processes whose earlier
+trees were text-sparse, accommodating branded Electron apps. This may make a
+later observation richer than the first; it does not guarantee every app exposes
+a complete tree.
 
 ## Windows backend
 
-The Windows backend uses `uiautomation` 0.25 rather than the earlier hand-rolled UIAutomation COM
-attempt. The crate initializes COM in a multithreaded apartment and owns the UIA client, Control
+The Windows backend uses the `uiautomation` crate. The crate initializes COM in a multithreaded apartment and owns the UIA client, Control
 View walker, pattern wrappers, and input/screenshot plumbing. The backend enumerates visible
 top-level elements in the stable sibling order returned by the crate (the crate does not expose
 Win32 z-order). It walks each root into the same platform-neutral `UiNode` tree used on macOS,
@@ -164,7 +130,7 @@ available.
 | Accessibility | reading AX trees, posting CGEvents | `AXIsProcessTrusted` | `AXIsProcessTrustedWithOptions(prompt)` |
 | Screen Recording | computer-use screenshots | `CGPreflightScreenCaptureAccess` | `CGRequestScreenCaptureAccess` |
 
-Settings gains two pages:
+The relevant Settings pages are:
 
 - **Browser** — enable/disable the embedded preview browser, default home URL, and
   allow-JS-evaluate toggle. Its in-process WKWebView snapshot tool needs no TCC permission.
@@ -187,25 +153,23 @@ own "Quit & Reopen" dialog. tcode therefore preserves Screen Recording flows acr
 1. Before a Screen Recording request, tcode writes a temporary `relaunch.json` marker into the
    data dir: `{ reopen_settings: "computer_use", active_session: <id> }`. Accessibility does not
    need this marker. Returning without a grant clears it.
-2. Session timelines are already continuously persisted (JSONL + resume cursors), so an
-   externally-initiated quit loses nothing.
+2. Session events and resume cursors are persisted continuously. The marker
+   records a navigation destination; it is not a backup of in-flight provider work.
 3. On startup, a present marker is consumed and validated against the current Screen Recording
-   status. After a real grant, the previous active session is reopened, the Settings window is
+   status. After a real grant, the previous active session is reopened, Settings is
    reopened on the recorded page, and permissions are rechecked automatically. A denied or stale
    marker is discarded without changing the launch route.
 4. The Computer Use page also offers an explicit **Relaunch tcode** button (shown when a grant
    was detected as pending-restart) that writes the same marker and relaunches via
    `open -n <bundle>`.
 
-## Dev & testing
+## Validation
 
-- `tcode --cu-permissions` prints the permission status as JSON and exits.
-- Because developing computer use on the dev machine would require the very permissions being
-  developed (and granting them mid-development churns TCC state), end-to-end testing runs in a
-  **tart VM**: build on the host, copy the binary in, drive the VM's screen/keyboard over VNC,
-  grant permissions inside the VM, then inspect permission status via SSH.
-- CI (macOS/Linux/Windows) builds the platform fallback paths and runs the platform-neutral unit
-  tests:
-  outline folding, search ranking, text-sparse fallback decisions and observation shape,
-  state-store eviction and staleness, tool schemas, settings serde round-trips, and MCP
-  registration wiring for all three provider paths.
+Use [CONTRIBUTING.md](../CONTRIBUTING.md) and CI for build and test commands.
+The platform-neutral tests exercise outline/state handling and tool behavior;
+compilation does not establish native permission or input-delivery behavior.
+For backend changes, exercise observation, the affected action and its successor
+state on the target platform. For macOS permission changes, also check denial,
+return from System Settings, grant, restart continuity and revocation. Use an
+isolated test environment when changing permission state would disrupt the
+working desktop; keep evidence in the PR rather than a machine-specific run log.

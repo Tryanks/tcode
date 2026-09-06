@@ -590,12 +590,12 @@ fn is_executable(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
-/// A chosen option value, persisted per session.
+/// A chosen option value, persisted per session as a select string or boolean.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionSelection {
     pub id: String,
     pub value: serde_json::Value,
-} // string or bool
+}
 
 #[cfg(feature = "process")]
 fn selection_str(selections: &[OptionSelection], id: &str) -> Option<String> {
@@ -730,8 +730,7 @@ pub enum ApprovalMode {
     AutoAcceptEdits,
     /// Allow commands and edits without prompts.
     ///
-    /// This is the default, mirroring T3 Code (S1 §4). Smoke mode overrides it
-    /// back to `Supervised` so the approval path stays exercised.
+    /// Default for sessions without an explicit permission mode.
     #[default]
     FullAccess,
 }
@@ -894,10 +893,6 @@ pub async fn start_session(
         ProviderKind::Acp => acp::start(opts).await,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Canonical event model: one normalized stream all providers map into
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1416,8 +1411,7 @@ pub enum ApprovalKind {
         reason: Option<String>,
     },
     /// A read-only file/search operation (Claude's `file_read_approval` family:
-    /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary
-    /// (see the S2 §1.3 "Approval detail" rules).
+    /// Read/View/Grep/Glob/…/WebSearch). `detail` is the pre-rendered summary.
     FileRead { detail: String },
     FileChange {
         changes: Vec<FileChange>,
@@ -1425,7 +1419,7 @@ pub enum ApprovalKind {
     },
     /// Dynamic fallback for any tool that doesn't classify as command / file
     /// read / file change (agent, mcp, image, …). `detail` is the pre-rendered
-    /// summary per the S2 §1.3 rules.
+    /// summary.
     ToolUse {
         name: String,
         input: serde_json::Value,
@@ -1650,8 +1644,6 @@ mod resolve_binary_tests {
         assert!(matches!(err, AgentError::Spawn(msg) if msg.contains("not found on PATH")));
     }
 
-    // ---- the Unix branch ----------------------------------------------------
-
     #[cfg(unix)]
     #[test]
     fn unix_resolves_an_extensionless_file_with_the_exec_bit() {
@@ -1689,8 +1681,6 @@ mod resolve_binary_tests {
         assert_eq!(path_extensions(), Vec::<String>::new());
         assert_eq!(candidate_names("claude", &[]), vec!["claude".to_string()]);
     }
-
-    // ---- the Windows branch (exercised from any host) ------------------------
 
     /// The resolved file name, lowercased: the extension comes from `PATHEXT`
     /// (conventionally uppercase: `.EXE`), while the file on disk is usually

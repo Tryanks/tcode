@@ -1,10 +1,4 @@
-//! Full-page settings route (V2-M6). Replaces the old settings dialog.
-//!
-//! When [`crate::Route::Settings`] is active, the whole window shows this
-//! page: a left nav (same width as the sidebar) listing sections + a pinned
-//! "← Back", and a content column of setting rows (bold title + muted
-//! description on the left, a control on the right), matching reference shots
-//! 40-settings.png / 41-settings-connections.png.
+//! Full-page settings route with section navigation and editable settings.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -52,7 +46,6 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
 const TRAFFIC_LIGHT_INSET: f32 = 8.;
 
-/// Width of the settings left-nav column (matches the sidebar width).
 const NAV_WIDTH: f32 = 255.;
 /// Max width of the settings content column — matches the chat timeline column
 /// (`chat::CONTENT_MAX_WIDTH`) so the reading measure is identical across routes.
@@ -334,7 +327,6 @@ impl SettingsPage {
         page
     }
 
-    /// Persist the Browser "Home URL" field (empty → `None`).
     fn commit_home_url(&self, cx: &mut Context<Self>) {
         let value = self.home_url_input.read(cx).value().trim().to_string();
         let home_url = (!value.is_empty()).then_some(value);
@@ -375,7 +367,6 @@ impl SettingsPage {
         );
     }
 
-    /// (Re)build the provider cards from current settings.
     fn build_provider_cards(&mut self, cx: &mut Context<Self>) {
         let profiles = self.store.read(cx).all_provider_profiles();
         self.provider_cards = profiles
@@ -431,8 +422,6 @@ impl SettingsPage {
     fn dispatch_settings(&self, intent: impl FnOnce(&mut WorkspaceStore), cx: &mut Context<Self>) {
         self.store.update(cx, |store, _cx| intent(store));
     }
-
-    // -- left nav -----------------------------------------------------------
 
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let nav_item = |this: &Self,
@@ -522,8 +511,6 @@ impl SettingsPage {
                     window,
                     cx,
                 )
-                // Same brand chrome as the main sidebar's app row (DEV pill
-                // included) so the settings nav reads as the same family.
                 .child(crate::material::brand_wordmark(cx)),
             )
             .child(
@@ -567,8 +554,8 @@ impl SettingsPage {
                         Section::Browser,
                         cx,
                     ))
-                    // Computer use drives THIS machine's desktop; a remote link
-                    // has no local affordances to grant (P4 of the remote plan).
+                    // Computer use controls this machine, so remote clients cannot
+                    // grant its local permissions.
                     .when(!remote, |tabs| {
                         tabs.child(nav_item(
                             self,
@@ -606,8 +593,6 @@ impl SettingsPage {
                         crate::tr!("settings.back"),
                         cx,
                     )
-                    // Mirror the main sidebar footer (the "Settings" entry that
-                    // enters this route): same 40px height, muted leading icon.
                     .h(px(40.))
                     .items_center()
                     .gap_2()
@@ -631,8 +616,6 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    // -- content ------------------------------------------------------------
-
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Windows: the settings route replaces the workspace, so this header is
         // the window's top-right corner and hosts the caption buttons. The
@@ -647,9 +630,7 @@ impl SettingsPage {
             right_panel_open,
             right_tab,
         );
-        // The 52px strip spans the paper full-width (drag area), but its title
-        // and actions ride the same centered 768px column as the content below,
-        // the way the chat header aligns with its timeline column.
+        // Align the header title and actions with the centered content column.
         window_drag_area(
             "settings-header-drag",
             gpui_base::h_flex()
@@ -801,9 +782,6 @@ impl SettingsPage {
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.store.read(cx).settings();
-        // One mega-group on empty paper reads generic. Split the rows into three
-        // semantic groups (System-Settings rhythm): 20-24px between groups, each
-        // under an 11px caption.
         let appearance = vec![
             self.language_row(settings.language.as_deref(), cx),
             self.theme_row(settings.theme_mode, cx),
@@ -1079,7 +1057,6 @@ impl SettingsPage {
         let release_url = status.release_url.unwrap_or_default();
 
         crate::material::overlay_popover("tcode-update-popover")
-            // Prose card, not a menu: keep the roomier panel padding.
             .p_3()
             .trigger(
                 Button::new("tcode-update-available")
@@ -1193,8 +1170,6 @@ impl SettingsPage {
                 })),
         );
 
-        // Native providers form one grouped list; each card is a compact row
-        // whose gear / body click opens the per-profile settings dialog.
         let provider_rows: Vec<AnyElement> = self
             .provider_cards
             .iter()
@@ -1206,17 +1181,14 @@ impl SettingsPage {
             .gap_3()
             .child(header)
             .child(crate::material::grouped(provider_rows, cx));
-        // ACP agent cards keep their own component styling (defined outside this
-        // file); they sit beneath the native providers in the same section.
         for (_, card) in &self.acp_cards {
             section = section.child(card.clone());
         }
         section
     }
 
-    /// Usage: one card per enabled Codex / Claude Code profile listing the
-    /// account rate-limit windows the provider reported — never more, never a
-    /// synthesized one (a Codex Pro account genuinely has no 5h window).
+    /// Show the rate-limit windows each enabled Codex / Claude Code profile
+    /// reports; missing windows are not synthesized.
     fn render_usage(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let store = self.store.read(cx);
         let profiles: Vec<_> = store
@@ -1328,7 +1300,6 @@ impl SettingsPage {
         section
     }
 
-    /// A usage card's title row: provider glyph + profile name + plan chip.
     fn usage_card_header(
         &self,
         name: &str,
@@ -1363,8 +1334,6 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// One rate-limit window: label + "resets in …" on the left, percent on
-    /// the right, a 6px bar underneath.
     fn usage_window_row(
         &self,
         window: &tcode_core::usage::UsageWindow,
@@ -1423,8 +1392,6 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// A muted status row inside a usage card ("Checking…", "No usage data
-    /// yet", or "Usage unavailable" over the provider's own error text).
     fn usage_note_row(
         &self,
         label: String,
@@ -1444,8 +1411,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Archived Threads: archived sessions grouped by project, each with
-    /// Unarchive + Delete-permanently controls (Group A).
+    /// Archived sessions grouped by project with restore and permanent-delete actions.
     fn render_archived(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let groups = self.store.read(cx).archived_groups();
         let settings = self.store.read(cx).settings();
@@ -1561,7 +1527,6 @@ impl SettingsPage {
 
         let now = now_secs();
         let mut key = 0usize;
-        // Each project becomes its own grouped list, spaced from the next.
         let mut col = v_flex()
             .gap(px(20.))
             .child(controls)
@@ -1624,7 +1589,6 @@ impl SettingsPage {
         col
     }
 
-    /// Confirm and permanently delete an archived thread.
     fn confirm_delete_archived(
         &self,
         session_id: &str,
@@ -1657,8 +1621,6 @@ impl SettingsPage {
                 })
         });
     }
-
-    // -- Computer Use & Browser pages --------------------------------------
 
     fn render_computer_use(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let settings = self.store.read(cx).settings();
@@ -2082,9 +2044,6 @@ impl SettingsPage {
         window.dispatch_action(Box::new(Quit), cx);
     }
 
-    // -- row builders -------------------------------------------------------
-
-    /// A group's header: 11px muted caption sitting above its container.
     fn section_label(&self, label: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
         div()
             .pl_3()
@@ -2096,9 +2055,7 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    /// Assemble rows into a group with NO dividers — chat separates content
-    /// with breathing room, not rules. The default for sparse settings surfaces
-    /// (General, Browser, Computer Use, Archived, permissions).
+    /// Group sparse settings rows with spacing between them.
     fn grouped_plain(&self, rows: Vec<AnyElement>, cx: &Context<Self>) -> gpui::Div {
         let mut group = crate::material::group(cx);
         for row in rows {
@@ -2175,8 +2132,6 @@ impl SettingsPage {
             .w_full()
             .min_h(px(44.))
             .px_3()
-            // Divider-less cards lean on row air for separation: a touch more
-            // vertical padding gives neighbours room to breathe.
             .py_2p5()
             .gap_3()
             .items_center()
@@ -2254,9 +2209,6 @@ impl SettingsPage {
         label: impl Into<SharedString>,
         cx: &Context<Self>,
     ) -> Button {
-        // Ghost fill (transparent at rest, light tint on hover) over a hairline
-        // outline — the same quiet trigger the composer's model picker uses, but
-        // bordered so it reads as a dropdown rather than plain text.
         Button::new(id).ghost().outline().compact().child(
             gpui_base::h_flex()
                 .w(px(160.))
@@ -2475,8 +2427,6 @@ impl Render for SettingsPage {
                     .min_w_0()
                     .h_full()
                     .bg(crate::material::content_surface(cx))
-                    // T1 paper floats above the glass canvas — the same shadow
-                    // the chat column carries, so the reading plane is identical.
                     .shadow_sm()
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
