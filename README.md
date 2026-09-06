@@ -91,9 +91,15 @@ speaks ACP.
 ## Remote work mode
 
 One tcode is the **host**: it runs the agents and keeps your projects and
-threads. Any other tcode — another desktop, your phone, a browser tab — is a
-screen for that host. Everything travels over your own LAN or overlay network
-(Tailscale, EasyTier); there is no relay service.
+threads. Any other tcode — another desktop, your phone or tablet, a browser tab —
+is a screen for that host. Everything travels over your own LAN or overlay
+network (Tailscale, EasyTier); there is no relay service.
+
+Every screen runs the *same* app. There is no reduced phone build: the layout
+follows the window's width — under 900px it becomes a hosts → threads → thread
+stack, above it the desktop split — and what actually differs between clients is
+which operations they can perform locally, like opening a native file dialog or
+driving the embedded preview browser.
 
 **Host from the desktop.** Settings → Remote → **Host this computer**. Share the
 pairing code or QR code with the device you want to connect. Codes are
@@ -110,11 +116,11 @@ tcode-headless pair      # prints a fresh pairing code and QR code
 
 Release builds also serve the browser client at `https://<host>:47420/`.
 
-**Connect a screen.** Desktop: Settings → Remote → pair by code or pick a nearby
-host, then **Connect**. Phone: **Pair a host**, scan the QR code or enter the
-address and code. Browser: open the host's HTTPS URL, verify its certificate in
-the browser, and enter the code. See [pairing and certificate trust](docs/remote.md)
-for the native and browser flows.
+**Connect a screen.** It is the same panel everywhere — Settings → Remote on the
+desktop, the opening screen on a phone or a fresh browser tab: pair by code or
+pick a nearby host, then **Connect**. Browser: open the host's HTTPS URL and
+verify its certificate in the browser first. See
+[pairing and certificate trust](docs/remote.md) for the native and browser flows.
 
 **Security.** Connections use TLS with a per-host self-signed certificate that
 native clients pin at pairing. Pairing issues a device token you can revoke on
@@ -145,7 +151,7 @@ also include a `SHA256SUMS.txt` file.
 | Windows, x64 / arm64 | Desktop or headless `.zip` |
 | Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
 | Android, arm64 | `tcode-<version>-android-arm64-debug.apk` — debug build; install with adb |
-| iOS, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned debug build; re-sign before installing |
+| iOS / iPadOS, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned debug build; re-sign before installing |
 | Browser | Embedded in the headless release; open its HTTPS URL. No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
@@ -166,7 +172,13 @@ lives under your platform's app-data directory.
 ## Building from source
 
 Build instructions, platform prerequisites, workspace layout, tests and provider
-probes are in [CONTRIBUTING.md](CONTRIBUTING.md).
+probes are in [CONTRIBUTING.md](CONTRIBUTING.md). To review the compact layout
+without a device, open the shared shell at phone geometry:
+
+```sh
+cargo run -p tcode-ui --example phone              # 393×852
+cargo run -p tcode-ui --example phone -- --android # 412×915
+```
 
 The editable macOS 26 source is
 [`assets/icons/app/tcode.icon`](assets/icons/app/tcode.icon). Icon Composer's

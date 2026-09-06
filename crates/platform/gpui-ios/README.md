@@ -110,7 +110,7 @@ xcrun simctl install booted crates/ios/host/build/Build/Products/Debug-iphonesim
 xcrun simctl launch booted com.tryanks.tcode
 ```
 
-See [mobile design](../../../docs/mobile-design.md) for application behavior and
+See [the design spec](../../../docs/DESIGN.md#compact-layout) for application behavior and
 platform verification, and [remote work mode](../../../docs/remote.md) for
 pairing with a host.
 

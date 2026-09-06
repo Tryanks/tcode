@@ -2,7 +2,34 @@
 
 The visual and interaction contract for tcode. Update it deliberately when a
 product decision changes; historical design drafts are not additional rules.
-Phone and browser adaptations are in [mobile design](mobile-design.md).
+There is one shell, described here; **Compact layout** below covers the narrow
+end of it.
+
+## One shell, one layout rule
+
+Desktop, iOS, Android and the browser run the same shell. It has exactly one
+layout rule:
+
+> **Compact iff the available logical content width — the viewport width minus
+> whatever the system occludes on its left and right — is under 900px.** At
+> exactly 900 the layout is wide.
+
+Nothing else decides it. Not the operating system, not the input device, not a
+saved preference: a desktop window dragged narrow is compact, an iPad in
+landscape is wide, and rotating a phone changes the layout the same way
+dragging a window edge does. The rule is never persisted, because a window
+width is not a setting.
+
+Input-device behavior is a separate question with a separate answer. Whether
+Enter submits follows the *keyboard*, not the width: a wide tablet still types
+on glass, and a narrow desktop window still has a hardware Enter key.
+
+Crossing the breakpoint is a layout change and nothing else. It never detaches
+from the host, never reconnects, and never rebuilds a view that holds user
+state. The selected thread, the composer draft and its selection, pending
+attachments, approvals, scroll position and focus all survive in both
+directions, and the sidebar and right-panel widths come back as they were left
+when the window widens again.
 
 ## Capability-appropriate UI
 
@@ -29,8 +56,11 @@ The embedded [theme](../themes/tcode.json) owns colors and font choices;
 geometry and radii. Use those definitions rather than maintaining a second
 palette in documentation.
 
-DM Sans is bundled for UI text. Desktop monospace text uses the configured
-system family; mobile font registration is described in [mobile design](mobile-design.md).
+DM Sans is bundled for UI text and comes from the same font resource on every
+client. Desktop monospace text uses the configured system family; Android
+registers the bundled Lilex in its place and adds the packaged Noto Color Emoji
+fallback. Native debug builds embed fonts and SVGs in the package rather than
+reading a development machine's asset path.
 The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.
@@ -94,11 +124,95 @@ details. A bounded flex column with `overflow` on the same node is not an
 acceptable substitute: flexbox can shrink its rows until no scrollable overflow
 remains.
 
-Those heights are desktop design sizes, and the same views now open in phone and
-browser viewports. Each is capped to what the window can actually show, so a
-short window scrolls the list instead of pushing the footer off-screen. Dialogs
-are capped the same way — width and height — because a dialog wider than the
-viewport is also positioned off-centre.
+Those heights are desktop design sizes, and the same views open at every width.
+Each is capped to what the window can actually show, so a short window scrolls
+the list instead of pushing the footer off-screen. Dialogs are capped the same
+way — width and height — because a dialog wider than the viewport is also
+positioned off-centre.
+
+## Compact layout
+
+### Destinations
+
+Compact replaces the split with a navigation stack:
+
+**Hosts → Threads → Thread → Panel**, pushed and popped with a 200ms lateral
+transition.
+
+- **Hosts** — the same **Settings → Remote** panel: saved hosts, discovery, the
+  pair form, certificate repair and removal. A window with no attachment shows
+  only this, at any width.
+- **Threads** — the shared sidebar under a nav bar naming the attached host,
+  with new-thread and settings actions. New thread starts a draft directly when
+  the host has one project and otherwise opens the command palette, which
+  already owns "new thread in ‹project›" and can search.
+- **Thread** — the shared chat view. Its desktop header is replaced by the nav
+  bar; the timeline, composer, approvals and user-input panels are the same
+  entities the wide layout uses.
+- **Panel** — the terminal, diff, plan and preview at full width, chosen from a
+  segmented control. They are the same entities the wide layout puts in the
+  split: a compact window has less room, not less product. Export and the
+  per-thread actions stay on the thread row's context menu.
+
+Settings is a full-window route at every width (see **Settings** below).
+
+Back — the Android system gesture, and every Back control — unwinds in one
+order: the software keyboard or composition, then the topmost dismissible
+overlay (dialog, menu, palette), then the settings route, then the panel
+destination, then the navigation stack. It reports "not consumed" only at the
+root, where the platform closes the app. Non-dismissible dialogs, such as import
+progress and approval prompts, keep refusing dismissal.
+
+**Thread → Threads keeps the connection.** Only **Threads → Hosts** detaches,
+and it does so explicitly. Resizing never detaches.
+
+### The window seam
+
+A window is not always the rectangle it reports: a status bar, a notch, a home
+indicator or a software keyboard can cover part of it. Those edges belong to the
+*window*, not to the host the workspace is attached to.
+
+There is one safe content rectangle, shared by pages, the palette, dialogs and
+toasts. Bottom avoidance is **max(safe area, keyboard)**, never their sum — a
+keyboard that already covers the home indicator does not need it counted twice.
+Backgrounds paint edge to edge; only interactive content is constrained, and
+only once. The browser canvas is already resized around its on-screen keyboard,
+so the client adds no inset of its own there and takes its size from the actual
+canvas.
+
+Insets change without a timer: the platform schedules a frame when they move, so
+the layout follows the keyboard immediately.
+
+### Touch and typography
+
+- Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.
+  Icon buttons have a 44×44pt touch target and use the shared stroke icons in
+  the foreground color.
+- The compact composer's radius is 16pt. Other shared components keep their own
+  material radii.
+- Empty states are an icon, a title, a short explanation and any necessary
+  primary action, centered and width-limited; they show no desktop shortcuts.
+- Nothing depends on hover. Long text, model lists and variable-length option
+  sets wrap or scroll rather than truncating a choice away.
+- Compact approval cards default to expanded, with deny and allow on one row and
+  every other available action on its own; user questions keep their options,
+  free text and editor prefill.
+
+### Connection states
+
+| State | Presentation |
+| --- | --- |
+| Connecting | The initial index has not arrived; the thread list shows a loading skeleton |
+| Connected | Index ready and the link healthy; no status banner |
+| Reconnecting | Content is kept; the banner names the retry attempt |
+| Offline | Shown after 30 seconds disconnected; transient failures keep retrying quietly |
+| Certificate changed | An explicit error and a re-pair entry point outrank every other status; native clients stop retrying that identity |
+
+Offline keeps the last received replica readable and disables writes; visited
+threads keep their events, and unvisited ones may have only their list summary.
+Reconnecting resubscribes to the current thread. A native app returning to the
+foreground, or a browser page becoming visible again, interrupts the backoff and
+retries at once.
 
 ## Surface anatomy
 

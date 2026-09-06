@@ -78,7 +78,7 @@ the script's defaults are Homebrew paths. `CARGO_NDK_PLATFORM` defaults to 26.
 The debug build embeds the shared font/SVG assets so it does not depend on
 source paths from the development machine.
 
-See [mobile design](../../../docs/mobile-design.md) for application behavior and
+See [the design spec](../../../docs/DESIGN.md#compact-layout) for application behavior and
 platform verification, and [remote work mode](../../../docs/remote.md) for
 pairing with a host. Android emulator loopback is the emulator itself; use a
 host address reachable from the device.

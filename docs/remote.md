@@ -171,7 +171,9 @@ flag. The resulting executable is `target/release/tcode-headless`.
 
 The host serves the browser app at `/` over HTTPS, on the same port as pairing
 and secure WebSockets. Without `web`, static requests return 404 while native
-clients can still pair and connect. The browser app uses the compact phone UI.
+clients can still pair and connect. The browser runs the same shell the desktop
+does; it lays itself out from the canvas size, so a wide tab gets the desktop
+split and a narrow one the compact stack.
 
 ## Connecting
 
@@ -208,21 +210,28 @@ tcode --connect HOST_ID
 `--connect` accepts a saved host ID, not an address or WebSocket URL. Use the
 same client data directory for pairing and connecting.
 
-### Phone
+### Phone and tablet
 
 1. Install the Android debug APK or re-sign and install the unsigned iOS IPA.
-2. Open **Hosts → Pair a host**. Choose **Scan QR code** and scan the host's QR
-   code, or enter **Address**, **Port** and **Pairing code**. Selecting an entry
-   under **Nearby hosts** fills the address, port and fingerprint; enter the
-   pairing code to continue. Allow camera or local-network access when needed.
-3. Choose **Pair** for manual entry. Compare the fingerprint on the confirmation
-   screen with the host, then choose **Connect to host**.
-4. Open a thread from **Threads**, or use **New thread** and choose a project.
-   Read replies, send or queue a message, steer a running turn, stop it, and
-   answer approval requests from the chat screen.
-5. Open **Settings** from the thread list to change appearance, language or
-   **Device name**, or choose **Disconnect**. Return to **Hosts** to select
-   another host. You connect to one host at a time.
+2. The app opens on **Hosts** — the same **Settings → Remote** panel every
+   client has. Scan the host's QR code, or fill in the address, port and pairing
+   code. Selecting a host under **Discover** fills the address, port and
+   fingerprint; you still enter the code. Allow camera or local-network access
+   when the system asks. Native QR scanning uses AVFoundation on iOS and
+   CameraX/ML Kit on Android; a simulator's permission and cancel flows do not
+   prove that real camera recognition works.
+3. Choose **Pair**. Compare the displayed fingerprint with the host through a
+   trusted channel, then choose **Connect**.
+4. Open a thread from the list, or use **+** to start one. Read replies, send or
+   queue a message, steer a running turn, stop it, and answer approvals — the
+   same views the desktop shows, laid out for the width.
+5. **Settings** is the full settings page, not a reduced copy. **Back** returns
+   list → hosts, which disconnects; leaving a thread keeps the connection. You
+   connect to one host at a time.
+
+A tablet wide enough for the split gets the split, and rotating it back to
+portrait returns to the stack with the same thread and draft. See
+[the layout rule](DESIGN.md#one-shell-one-layout-rule).
 
 ### Browser
 
@@ -232,16 +241,26 @@ same client data directory for pairing and connecting.
    fingerprint with the host through a trusted channel. Accept the self-signed
    certificate exception for this host. Acceptance is normally needed once in
    that browser profile, not a guarantee that warnings never recur.
-3. Choose **Pair a host**, enter the pairing code and choose **Pair**. The page
-   fixes the address and port to its own origin; you enter only the code.
-4. Check the displayed fingerprint and choose **Connect to host**. Use the
-   thread list and chat as on the phone. To use a different host, open that
-   host's HTTPS URL.
+3. Enter the pairing code and choose **Pair**. The page fixes the address and
+   port to its own origin, so you enter only the code, and it hides discovery:
+   a browser can only reach the origin that served it.
+4. Check the displayed fingerprint and choose **Connect**. The page is the same
+   client as the desktop app; resizing the window moves it between the split and
+   the compact stack. To use a different host, open that host's HTTPS URL.
 
 The browser stores paired hosts and tokens in this origin's `localStorage`
 under `tcode.hosts`, and the last host under `tcode.last_host`. Clearing site
 data requires pairing again. The in-page fingerprint is a display value from
 the host; JavaScript does not verify or pin the browser's TLS certificate.
+
+### Client preferences
+
+Appearance, language and device name belong to the client, not the host: an
+explicit client choice overrides the attached host's replicated setting, and
+restoring that row reveals the host's setting again. Native clients keep them
+next to `hosts.json` in their own data directory; the browser keeps them in
+`localStorage`. iOS seeds the device name from the device name, Android from the
+device model.
 
 ## Networking
 
@@ -353,15 +372,15 @@ add encryption to them.
 
 **Connecting…** means the client is establishing its view. **Reconnecting ·
 attempt N** means it is retrying a lost connection. Retry delays grow from one
-to thirty seconds. The phone and browser UI shows **Offline** after thirty
-seconds disconnected, but transport retries continue. Bring the phone to the
-foreground or make the browser page visible to retry promptly.
+to thirty seconds. A remote client shows **Offline** after thirty seconds
+disconnected, but transport retries continue. Bring the app to the foreground or
+make the browser page visible to retry promptly.
 
-Phone and browser screens keep the available cached thread content for reading
-and disable writes while disconnected; unvisited threads may have only cached
-list information. After reconnecting, subscriptions resume and thread records
-catch up. A certificate mismatch is different from a temporary network failure:
-it stops the native connection until you resolve the identity change.
+A disconnected client keeps the cached thread content it has for reading and
+disables writes; unvisited threads may have only cached list information. After
+reconnecting, subscriptions resume and thread records catch up. A certificate
+mismatch is different from a temporary network failure: it stops the native
+connection until you resolve the identity change.
 
 ## Limits
 
@@ -375,11 +394,16 @@ it stops the native connection until you resolve the identity change.
 - Desktop preview needs LAN- or overlay-reachable dev servers. There is no TCP
   tunnel for preview pages. Preview rewriting uses the first saved host address,
   which may differ from an address chosen by transport reconnection.
-- Phone and browser clients do not run providers locally. Their compact UI is
-  for threads, chat, approvals and starting work in existing projects. It hides
-  terminal, preview and diff panels, file pickers, attachment upload and voice
-  input. Prepare projects and provider installations on the host. See the
-  [mobile design](mobile-design.md) for the phone's scope.
+- Phone, tablet and browser clients do not run providers, terminals or project
+  files locally; the host does. Every product view is present on them — threads,
+  chat, approvals, the terminal, diff, plan, preview, search, import and export —
+  and what differs is which *operations* the client can perform. A native file
+  dialog, an embedded preview browser, macOS permission grants, dictation and
+  "open in editor" need a capability the client either has or does not; where it
+  does not, the view says which machine can do it and offers what it can
+  (open externally, copy, type the value). Prepare projects and provider
+  installations on the host. See
+  [capability-appropriate UI](DESIGN.md#capability-appropriate-ui).
 - Mobile release artifacts are development builds: the Android arm64 APK is a
   debug build, and the iOS arm64 IPA is an unsigned debug build. Re-sign the IPA
   with your own signing identity and provisioning profile before device
