@@ -19,7 +19,7 @@ gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
 tcode-ui = { path = "../ui", default-features = false }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
-gpui-base = "0.6.0"
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" } # 0.6.0 on crates.io pulls an unused gpui-pre-platform that breaks iOS/Android; switch back once 0.6.1 ships
 chrono = "0.4"
 tcode-client = { path = "../client" }
 async-channel = "2"
