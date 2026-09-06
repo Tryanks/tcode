@@ -319,8 +319,12 @@ warning. Remote setup is documented in [remote work mode](remote.md), and
 permissions in [computer use](computer-use.md).
 
 Orchestrate uses one provider-neutral workflow, refreshed on each explicit
-`/orchestrate` message. It describes framing, cross-provider peer discussion,
-execution routing, and independent acceptance.
+`/orchestrate` message. The main thread frames and decides, routes concrete work
+to execution models across the enabled provider fleet, and independently accepts
+or rejects the actual integrated result. Small tasks reduce coordination overhead,
+not execution ownership. Optional peer discussion remains separate from execution.
+A child report informs the main thread's judgment but is not itself acceptance;
+the main thread retains discretion over proportionate verification.
 
 Settings show two model lists: **Collaboration models**, bundled
 with GPT-6 Astra and Claude Fable 5.1, and **Execution models**, bundled with
