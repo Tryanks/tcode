@@ -426,6 +426,8 @@ struct CodexSubagent {
     agent_type: String,
     description: String,
     child_item_id: String,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 async fn run_actor(
@@ -1555,6 +1557,8 @@ impl Actor {
                             description: subagent.description.clone(),
                             status,
                             summary: summary.clone(),
+                            model: subagent.model.clone(),
+                            effort: subagent.effort.clone(),
                         };
                         if method == "item/completed" {
                             self.events
@@ -1566,6 +1570,8 @@ impl Actor {
                                         description: "child thread".into(),
                                         status,
                                         summary,
+                                        model: subagent.model.clone(),
+                                        effort: subagent.effort.clone(),
                                     },
                                 }))
                                 .await;
@@ -1712,12 +1718,17 @@ impl Actor {
             .or_else(|| activity.get("agentPath"))
             .and_then(Value::as_str)
             .unwrap_or("subagent");
-        let (agent_type, description) = self
+        let spawn_input = self
             .items
             .get(&parent_id)
             .or_else(|| self.items.get(activity_id))
             .and_then(|item| match &item.content {
-                ItemContent::ToolCall { input, .. } => Some((
+                ItemContent::ToolCall { input, .. } => Some(input),
+                _ => None,
+            });
+        let (agent_type, description) = spawn_input
+            .map(|input| {
+                (
                     input
                         .get("agent_type")
                         .or_else(|| input.get("subagent_type"))
@@ -1730,8 +1741,7 @@ impl Actor {
                         .and_then(Value::as_str)
                         .unwrap_or(path)
                         .to_owned(),
-                )),
-                _ => None,
+                )
             })
             .unwrap_or_else(|| {
                 (
@@ -1739,6 +1749,17 @@ impl Actor {
                     path.to_owned(),
                 )
             });
+        // spawn_agent only carries overrides; a child without them inherits the
+        // parent thread's model and effort.
+        let override_str = |key: &str| {
+            spawn_input
+                .and_then(|input| input.get(key))
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let model = override_str("model").or_else(|| self.model.clone());
+        let effort = override_str("reasoning_effort").or_else(|| self.effort.clone());
         let child_item_id = format!("{parent_id}:{thread_id}");
         let subagent = self
             .subagents
@@ -1747,6 +1768,8 @@ impl Actor {
                 agent_type,
                 description,
                 child_item_id,
+                model,
+                effort,
             })
             .clone();
         let status = match kind {
@@ -1762,6 +1785,8 @@ impl Actor {
                 description: subagent.description.clone(),
                 status,
                 summary: None,
+                model: subagent.model.clone(),
+                effort: subagent.effort.clone(),
             },
         };
         self.items.insert(parent_id.clone(), parent.clone());
@@ -1785,6 +1810,8 @@ impl Actor {
                 },
                 status,
                 summary: None,
+                model: subagent.model,
+                effort: subagent.effort,
             },
         };
         let event = match kind {
@@ -3349,7 +3376,7 @@ mod tests {
                     parent_item_id: None,
                     content: ItemContent::ToolCall {
                         name: "spawnAgent".into(),
-                        input: json!({"prompt":"Inspect protocol"}),
+                        input: json!({"prompt":"Inspect protocol", "reasoning_effort":"high"}),
                         output: None,
                         status: ItemStatus::Completed,
                     },
@@ -3363,17 +3390,22 @@ mod tests {
                 "kind": "started"
             }});
             actor.handle_notification("item/started", &started).await;
+            // Effort comes from the spawn override; the model is inherited from
+            // the parent thread because spawn_agent did not override it.
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::ItemUpdated(ThreadItem {
                     id,
                     content: ItemContent::Subagent {
                         status: ItemStatus::InProgress,
+                        model: Some(model),
+                        effort: Some(effort),
                         ..
                     },
                     ..
-                }) if id == "call_spawn"
+                }) if id == "call_spawn" && model == "gpt-5-codex" && effort == "high"
             ));
+
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::ItemStarted(ThreadItem {
