@@ -1080,12 +1080,17 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             description,
             status,
             summary,
+            model,
+            effort,
         }) => {
             agent_type.len().hash(hash);
             description.len().hash(hash);
             std::mem::discriminant(status).hash(hash);
             summary.as_ref().map(String::len).hash(hash);
+            model.as_ref().map(String::len).hash(hash);
+            effort.as_ref().map(String::len).hash(hash);
         }
+
         EntryContent::Error {
             message,
             limit_resets_at,
@@ -1512,9 +1517,12 @@ mod tests {
                 description: "Inspect the protocol".into(),
                 status: ItemStatus::InProgress,
                 summary: None,
+                model: None,
+                effort: None,
             }),
         )];
         let running = index_turns(&turns, &entries, None, &HashSet::new());
+
         let mut completed_entries = entries;
         if let EntryContent::Item(ItemContent::Subagent {
             status, summary, ..
