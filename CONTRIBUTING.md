@@ -82,21 +82,22 @@ crates/core              pure domain types and semantics
 crates/services          persistence, filesystem, process, git, import, and probes
 crates/runtime           session and provider lifecycle, queues, orchestration,
                          terminals, and semantic events
-crates/i18n              the sole translation backend
+crates/ui/src/i18n.rs     translation backend
 crates/ui                GPUI views, assets, presentation, and localized rendering
-crates/app/src/main.rs   the sole binary and composition root
+crates/app/src/main.rs   desktop binary and composition root
+crates/headless          headless host binary
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
 crates/term              terminal implementation (PTY)
 crates/preview-mcp       MCP server exposing the preview browser to the agent
 crates/orchestrate-mcp   MCP server for orchestration tools
 ```
 
-The dependency direction is strictly downward: `app -> ui/runtime/services/i18n`;
-`ui -> runtime/core/i18n`; `runtime -> services/core` and lower adapters such as
+The dependency direction is strictly downward: `app -> ui/runtime/services`;
+`ui -> runtime/core`; `runtime -> services/core` and lower adapters such as
 `agent` and `term`; and `services -> core`. No lower layer depends upward.
 Runtime emits semantic events; UI owns their localization and presentation.
-`crates/app/src/main.rs` is the sole binary and composition root, so the normal
-workspace command remains `cargo run`.
+`crates/app/src/main.rs` composes the desktop app. It is the default workspace
+binary, so the normal source command remains `cargo run`.
 
 `crates/agent/src/lib.rs` is the contract between the two halves: every provider
 normalizes into one `AgentEvent` stream and accepts one `SessionCommand` enum, so

@@ -1,14 +1,12 @@
 //! Workspace-entry filtering for the `@`-mention popover.
 
+#[cfg(not(any(feature = "desktop", feature = "remote")))]
 use std::path::Path;
 
 use tcode_protocol::PathEntry;
 
-/// Display `path` relative to the active workspace when it is nested beneath it.
 #[cfg(any(feature = "desktop", feature = "remote"))]
-pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
-    tcode_services::user_files::relativize_to_workspace(path, cwd)
-}
+pub use tcode_services::user_files::relativize_to_workspace;
 
 /// Portable equivalent of the services helper. Canonicalization gracefully
 /// falls back to the supplied root on targets without a native filesystem.

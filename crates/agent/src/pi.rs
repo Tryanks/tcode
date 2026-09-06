@@ -1195,7 +1195,11 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
             status,
         },
     };
-    crate::normalize::thread_item(id, content)
+    ThreadItem {
+        id: id.into(),
+        parent_item_id: None,
+        content,
+    }
 }
 
 fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
@@ -1408,14 +1412,13 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
     let input = crate::json_u64(usage.get("input"));
     let output = crate::json_u64(usage.get("output"));
     let cache_read = crate::json_u64(usage.get("cacheRead"));
-    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(
-        crate::normalize::token_usage(
-            input,
-            cache_read,
-            output,
-            crate::json_u64(usage.get("totalTokens")),
-        ),
-    )
+    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cache_read,
+        output_tokens: output,
+        used_tokens: crate::json_u64(usage.get("totalTokens")),
+        ..TokenUsage::default()
+    })
 }
 
 fn attach_images(request: &mut Value, attachments: Vec<Attachment>) {

@@ -75,7 +75,7 @@ impl QueuedMessage {
 /// user's (empty) text plus the attachments.
 pub(super) fn wire_text_with_placeholder(text: String, attachments: &[Attachment]) -> String {
     if text.trim().is_empty() && !attachments.is_empty() {
-        tcode_core::attachments::image_only_message().to_string()
+        tcode_core::attachments::IMAGE_ONLY_MESSAGE.to_string()
     } else {
         text
     }
@@ -353,11 +353,6 @@ impl ActiveSession {
         matches!(self.runtime, Runtime::Live(_)) && self.meta.provider.caps().supports_steering
     }
 
-    /// Whether a turn is currently running, i.e. Enter queues rather than sends.
-    pub(crate) fn is_turn_running(&self) -> bool {
-        self.turn_in_flight
-    }
-
     /// Whether this session owns work which must stay live and surface as
     /// "Working", regardless of whether it is active or parked.
     pub(super) fn has_work(&self) -> bool {
@@ -370,7 +365,7 @@ impl ActiveSession {
     /// Where a send gesture should go, given what the session is doing right
     /// now. This is the whole steering-vs-queueing policy in one place.
     pub(super) fn route(&self, steer: bool) -> SendRouting {
-        if !self.is_turn_running() {
+        if !self.turn_in_flight {
             // Nothing to steer into: ⌘Enter and Enter are the same thing.
             SendRouting::Send
         } else if !steer {
@@ -448,25 +443,8 @@ impl ActiveSession {
         attachments: Vec<Attachment>,
         not_before: SystemTime,
     ) -> u64 {
-        self.idle_since = None;
-        let id = self.next_queue_id;
-        self.next_queue_id += 1;
-        let options = self.turn_options();
-        let ultrathink = std::mem::take(&mut self.pending_ultrathink);
-        let context_len = std::mem::take(&mut self.pending_context_len);
-        let context_window_changed = self.context_window_change();
-        self.queue.push(QueuedMessage {
-            id,
-            text,
-            relay_transcript: None,
-            attachments,
-            not_before: Some(not_before),
-            options,
-            ultrathink,
-            context_len,
-            context_window_changed,
-            kind: QueuedMessageKind::User,
-        });
+        let id = self.push_queued(text, attachments);
+        self.queue.last_mut().unwrap().not_before = Some(not_before);
         id
     }
 

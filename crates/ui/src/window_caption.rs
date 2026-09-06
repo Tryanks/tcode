@@ -38,6 +38,7 @@ pub(crate) const CAPTION_STRIP_HEIGHT: f32 = 52.;
 const CAPTION_BUTTON_WIDTH: f32 = 46.;
 /// Horizontal space the whole cluster occupies, for surfaces that must reserve
 /// room for it rather than simply place it last in a row.
+#[cfg(feature = "desktop")]
 pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");

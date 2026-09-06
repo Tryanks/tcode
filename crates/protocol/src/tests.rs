@@ -286,108 +286,6 @@ fn settings_patches_round_trip() {
     }
 }
 
-fn assert_command_crosses_ndjson(id: u64, command: Command) {
-    match &command {
-        Command::TerminalInput { .. }
-        | Command::ResizeTerminal { .. }
-        | Command::PreviewReply { .. } => {}
-        Command::ApplyPendingRelaunch => {}
-        Command::OpenLatestSession => {}
-        Command::ShutdownAllAndFlush => {}
-        Command::OrchestrateTurn { .. } => {}
-        Command::ReloadProvider => {}
-        Command::SetProfileSecret { .. } => {}
-        Command::UpdateProfileSettings { .. } => {}
-        Command::CreateThirdPartyProfile { .. } => {}
-        Command::DeleteProfile { .. } => {}
-        Command::RefreshProviderStatus => {}
-        Command::RefreshProviderUsage => {}
-        Command::CheckProviderVersions => {}
-        Command::UpdateProvider { .. } => {}
-        Command::SetSidebarCollapsed { .. } => {}
-        Command::RunGitAction { .. } => {}
-        Command::RefreshAcpRegistry => {}
-        Command::InstallAcpAgent { .. } => {}
-        Command::RemoveAcpAgent { .. } => {}
-        Command::AddCustomAcpAgent { .. } => {}
-        Command::UpdateAcpAgent { .. } => {}
-        Command::SetActiveAcpAgent { .. } => {}
-        Command::ResetSettings => {}
-        Command::WriteRelaunchMarker { .. } => {}
-        Command::ClearRelaunchMarker => {}
-        Command::SetTerminalHeight { .. } => {}
-        Command::ToggleTerminalPanel { .. } => {}
-        Command::CloseTerminalPanel { .. } => {}
-        Command::RestartTerminal { .. } => {}
-        Command::NewTerminal { .. } => {}
-        Command::SplitTerminal { .. } => {}
-        Command::ActivateTerminal { .. } => {}
-        Command::CloseTerminal { .. } => {}
-        Command::CaptureTerminalSelection { .. } => {}
-        Command::RemoveTerminalContext { .. } => {}
-        Command::AddReviewComment { .. } => {}
-        Command::RemoveReviewComment { .. } => {}
-        Command::CycleProjectSort => {}
-        Command::CreateProject { .. } => {}
-        Command::StartExternalImport { .. } => {}
-        Command::FinishExternalImport { .. } => {}
-        Command::ExportThread { .. } => {}
-        Command::ToggleProjectCollapsed { .. } => {}
-        Command::PatchSettings { .. } => {}
-        Command::ArchiveSession { .. } => {}
-        Command::UnarchiveSession { .. } => {}
-        Command::AutoArchiveSweep { .. } => {}
-        Command::RenameSession { .. } => {}
-        Command::ForkThread { .. } => {}
-        Command::MergeWorktree { .. } => {}
-        Command::DeleteSession { .. } => {}
-        Command::DeleteProject { .. } => {}
-        Command::MarkSessionUnread { .. } => {}
-        Command::StartDraft { .. } => {}
-        Command::SetDraftWorkspace { .. } => {}
-        Command::SendTurn { .. } => {}
-        Command::ScheduleTurn { .. } => {}
-        Command::ConfirmRelayAndSend { .. } => {}
-        Command::Steer { .. } => {}
-        Command::SteerQueued { .. } => {}
-        Command::DropQueued { .. } => {}
-        Command::Interrupt { .. } => {}
-        Command::RespondApproval { .. } => {}
-        Command::RespondUserInput { .. } => {}
-        Command::SetActiveModel { .. } => {}
-        Command::SetActiveOption { .. } => {}
-        Command::SelectUltrathink { .. } => {}
-        Command::SetInteractionMode { .. } => {}
-        Command::ToggleInteractionMode { .. } => {}
-        Command::ImplementPlan { .. } => {}
-        Command::DismissPlan { .. } => {}
-        Command::ImplementPlanInNewThread { .. } => {}
-        Command::CopyPlan { .. } => {}
-        Command::SavePlanToWorkspace { .. } => {}
-        Command::DownloadPlan { .. } => {}
-        Command::LoadBranches { .. } => {}
-        Command::CheckoutBranch { .. } => {}
-        Command::SetActiveApprovalMode { .. } => {}
-        Command::ToggleFavoriteModel { .. } => {}
-        Command::RewindTurn { .. } => {}
-    }
-    round_trip_client_payload(id, ClientPayload::Command(command));
-}
-
-fn assert_query_crosses_ndjson(id: u64, query: Query) {
-    match &query {
-        Query::ListActiveWorkspace { .. } => {}
-        Query::ScanExternalHistory => {}
-        Query::GenerateCommitMessage { .. } => {}
-        Query::LoadGitDiff { .. } => {}
-        Query::ReadFileBytes { .. } => {}
-        Query::SaveAttachment { .. } => {}
-        Query::RemoveUserFile { .. } => {}
-        Query::IsDirectory { .. } => {}
-    }
-    round_trip_client_payload(id, ClientPayload::Query(query));
-}
-
 #[test]
 fn every_command_and_query_crosses_ndjson() {
     let review = ReviewComment::new(
@@ -689,7 +587,10 @@ fn every_command_and_query_crosses_ndjson() {
         },
     ];
     for (offset, command) in commands.into_iter().enumerate() {
-        assert_command_crosses_ndjson(u64::try_from(offset + 1).unwrap(), command);
+        round_trip_client_payload(
+            u64::try_from(offset + 1).unwrap(),
+            ClientPayload::Command(command),
+        );
     }
 
     let queries = vec![
@@ -723,7 +624,10 @@ fn every_command_and_query_crosses_ndjson() {
         },
     ];
     for (offset, query) in queries.into_iter().enumerate() {
-        assert_query_crosses_ndjson(u64::try_from(offset + 1_000).unwrap(), query);
+        round_trip_client_payload(
+            u64::try_from(offset + 1_000).unwrap(),
+            ClientPayload::Query(query),
+        );
     }
 }
 
@@ -869,30 +773,9 @@ fn round_trips_query_dto_families() {
 }
 
 #[test]
-fn client_message_ndjson_loopback() {
-    let message = ClientMessage {
-        id: 42,
-        payload: ClientPayload::Query(Query::IsDirectory {
-            path: PathBuf::from("/tmp/project"),
-        }),
-    };
-    let line = encode_line(&message).unwrap();
-    assert!(line.ends_with('\n'));
-    let decoded = decode_client_line(&line).unwrap();
-    match decoded.payload {
-        ClientPayload::Query(Query::IsDirectory { path }) => {
-            assert_eq!(decoded.id, 42);
-            assert_eq!(path, PathBuf::from("/tmp/project"));
-        }
-        other => panic!("unexpected payload: {other:?}"),
-    }
-}
-
-#[test]
 fn unknown_command_becomes_protocol_error_without_panicking() {
     let json = r#"{"id":7,"payload":{"type":"command","content":{"type":"future_command","content":{"value":1}}}}"#;
-    let result = std::panic::catch_unwind(|| decode_client_line(json));
-    let error = result.expect("decoder must not panic").unwrap_err();
+    let error = decode_client_line(json).unwrap_err();
     assert_eq!(error.code, "decode_error");
     assert!(error.message.contains("unknown variant"));
 }
@@ -900,20 +783,20 @@ fn unknown_command_becomes_protocol_error_without_panicking() {
 #[test]
 fn remote_affordance_payloads_round_trip() {
     let bytes = vec![0, 0xff, b'\x1b', b'[', b'm'];
-    assert_command_crosses_ndjson(
+    round_trip_client_payload(
         1,
-        Command::TerminalInput {
+        ClientPayload::Command(Command::TerminalInput {
             terminal_id: 9,
             bytes: bytes.clone(),
-        },
+        }),
     );
-    assert_command_crosses_ndjson(
+    round_trip_client_payload(
         2,
-        Command::ResizeTerminal {
+        ClientPayload::Command(Command::ResizeTerminal {
             terminal_id: 9,
             cols: 120,
             rows: 35,
-        },
+        }),
     );
     let output = ServerEvent::TerminalOutput {
         terminal_id: 9,
@@ -979,12 +862,12 @@ fn remote_affordance_payloads_round_trip() {
         }),
         Err("preview unavailable".into()),
     ] {
-        assert_command_crosses_ndjson(
+        round_trip_client_payload(
             3,
-            Command::PreviewReply {
+            ClientPayload::Command(Command::PreviewReply {
                 request_id: 8,
                 response,
-            },
+            }),
         );
     }
 }

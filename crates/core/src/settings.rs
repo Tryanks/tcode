@@ -1127,16 +1127,6 @@ impl Settings {
         out
     }
 
-    /// Like [`Self::profiles_for_kind`], but only the profiles whose `enabled`
-    /// switch is on. This is what the new-session model/profile pickers iterate;
-    /// a disabled profile stays configurable in Settings but is not offered.
-    pub fn enabled_profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
-        self.profiles_for_kind(kind)
-            .into_iter()
-            .filter(|profile| profile.settings.enabled)
-            .collect()
-    }
-
     /// A profile's card title: its display-name override, else — for built-ins —
     /// the driver label, else the id. Used by the sidebar / picker / status row.
     pub fn profile_display_name(&self, id: &str) -> String {
@@ -1310,47 +1300,6 @@ mod tests {
         .unwrap();
         assert!(!legacy_patch.pi.trust_project_extensions);
         assert!(!legacy_patch.pi.native_approvals);
-    }
-
-    #[test]
-    fn enabled_profiles_for_kind_drops_disabled_profiles() {
-        let mut settings = Settings::default();
-        // The built-in Claude profile is enabled; add one enabled and one
-        // disabled user profile of the same kind.
-        settings.profiles.insert(
-            "on".into(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    enabled: true,
-                    ..ProviderSettings::default()
-                },
-            },
-        );
-        settings.profiles.insert(
-            "off".into(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    enabled: false,
-                    ..ProviderSettings::default()
-                },
-            },
-        );
-        let ids: Vec<_> = settings
-            .enabled_profiles_for_kind(ProviderKind::ClaudeCode)
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect();
-        assert_eq!(ids, ["claude", "on"]);
-        // Disabling the built-in removes it from the enabled set too.
-        settings.provider_mut(ProviderKind::ClaudeCode).enabled = false;
-        let ids: Vec<_> = settings
-            .enabled_profiles_for_kind(ProviderKind::ClaudeCode)
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect();
-        assert_eq!(ids, ["on"]);
     }
 
     #[test]

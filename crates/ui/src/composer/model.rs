@@ -496,7 +496,7 @@ pub(super) fn current_model_name(catalog: &[ModelSpec], model: Option<&str>) -> 
 /// The picker button's label: the resolved row's name (so a custom slug shows
 /// its own name), else the catalog's, else the raw id.
 pub(super) fn current_model_name_resolved(
-    resolved: &[crate::provider_models::ResolvedModel],
+    resolved: &[tcode_core::provider_models::ResolvedModel],
     catalog: &[ModelSpec],
     model: Option<&str>,
 ) -> String {

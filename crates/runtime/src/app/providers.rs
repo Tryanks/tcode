@@ -347,19 +347,6 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
-    // -- provider status snapshots (Settings → Providers card) --------------
-
-    #[allow(dead_code)]
-    pub(crate) fn profile_snapshot(&self, id: &str) -> Option<&ProviderSnapshot> {
-        self.providers.provider_snapshots.get(id)
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn provider_snapshot(&self, provider: ProviderKind) -> Option<&ProviderSnapshot> {
-        self.profile_snapshot(Settings::builtin_profile_id(provider))
-    }
-
-    /// The most recent probe time across providers (the section's "Checked …").
     /// Probe every provider profile: is the CLI there, what version, and who is signed
     /// in? Runs the same `--version` call the version check uses, plus the
     /// provider's own auth surface where one is unambiguous (`claude auth

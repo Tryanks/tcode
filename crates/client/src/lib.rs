@@ -41,38 +41,8 @@ pub struct HostLink {
     inner: Arc<HostLinkInner>,
 }
 
-/// Receiver for decoded host events. Correlated responses never enter this stream.
-#[derive(Clone)]
-pub struct HostEventReceiver {
-    receiver: async_channel::Receiver<EventEnvelope>,
-}
-
 pub type CommandFuture =
     Pin<Box<dyn Future<Output = Result<CommandResponse, ProtocolError>> + Send + 'static>>;
-
-#[derive(Debug)]
-pub enum HostEventTryRecvError {
-    Empty,
-    Closed,
-}
-
-impl HostEventReceiver {
-    pub async fn recv(&self) -> Result<EventEnvelope, ProtocolError> {
-        self.receiver.recv().await.map_err(transport_error)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn recv_blocking(&self) -> Result<EventEnvelope, ProtocolError> {
-        self.receiver.recv_blocking().map_err(transport_error)
-    }
-
-    pub fn try_recv(&self) -> Result<EventEnvelope, HostEventTryRecvError> {
-        self.receiver.try_recv().map_err(|error| match error {
-            async_channel::TryRecvError::Empty => HostEventTryRecvError::Empty,
-            async_channel::TryRecvError::Closed => HostEventTryRecvError::Closed,
-        })
-    }
-}
 
 impl HostLink {
     pub fn new(
@@ -130,7 +100,7 @@ impl HostLink {
         self.inner.events_tx.close();
     }
 
-    pub fn next_id(&self) -> u64 {
+    fn next_id(&self) -> u64 {
         self.inner.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -285,10 +255,9 @@ impl HostLink {
             .collect()
     }
 
-    pub fn events(&self) -> HostEventReceiver {
-        HostEventReceiver {
-            receiver: self.inner.events_rx.clone(),
-        }
+    /// Decoded host events. Correlated responses never enter this stream.
+    pub fn events(&self) -> async_channel::Receiver<EventEnvelope> {
+        self.inner.events_rx.clone()
     }
 
     pub fn subscribed_topics(&self) -> Vec<Topic> {

@@ -2314,46 +2314,6 @@ fn launch_env_merges_secrets_for_sensitive_rows() {
 }
 
 #[test]
-fn provider_snapshots_are_isolated_by_profile() {
-    let test_store = TestStore::new("tcode-profile-snapshot-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-    state.providers.provider_snapshots.insert(
-        "claude".into(),
-        ProviderSnapshot {
-            version: Some("1.0.0".into()),
-            ..ProviderSnapshot::default()
-        },
-    );
-    state.providers.provider_snapshots.insert(
-        "kimi".into(),
-        ProviderSnapshot {
-            version: Some("2.0.0".into()),
-            ..ProviderSnapshot::default()
-        },
-    );
-
-    assert_eq!(
-        state
-            .profile_snapshot("kimi")
-            .and_then(|snapshot| snapshot.version.as_deref()),
-        Some("2.0.0")
-    );
-    assert_eq!(
-        state
-            .profile_snapshot("claude")
-            .and_then(|snapshot| snapshot.version.as_deref()),
-        Some("1.0.0")
-    );
-    assert_eq!(
-        state
-            .provider_snapshot(ProviderKind::ClaudeCode)
-            .and_then(|snapshot| snapshot.version.as_deref()),
-        Some("1.0.0")
-    );
-}
-
-#[test]
 fn profile_binary_override_wins_over_path_lookup() {
     let test_store = TestStore::new("tcode-profile-binary-test");
     let store = (*test_store).clone();
@@ -4734,7 +4694,7 @@ fn image_only_message_gets_placeholder_on_the_wire_only() {
             attachments,
             ..
         }) => {
-            assert_eq!(text, tcode_core::attachments::image_only_message());
+            assert_eq!(text, tcode_core::attachments::IMAGE_ONLY_MESSAGE);
             assert_eq!(attachments, vec![attachment]);
             delivery_id
         }

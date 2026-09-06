@@ -190,34 +190,6 @@ impl AppShell {
         let preview = cx
             .new(|cx| PreviewPanel::new(workspace_store.clone(), window_state.clone(), window, cx));
 
-        // Pump preview automation requests from the MCP server into the live
-        // WebView. The receiver is taken once; requests are resolved on the gpui
-        // main thread (WKWebView `evaluate_script` must run there).
-        #[cfg(all(feature = "local-host", feature = "desktop"))]
-        let requests = workspace_store.update(cx, |store, _cx| store.take_preview_requests());
-        #[cfg(all(feature = "local-host", feature = "desktop"))]
-        if let Some(requests) = requests {
-            let preview = preview.clone();
-            cx.spawn_in(window, async move |_, cx| {
-                while let Ok(request) = requests.recv().await {
-                    let preview_mcp::BrokerRequest {
-                        session_id,
-                        op,
-                        reply,
-                    } = request;
-                    if preview
-                        .update_in(cx, |panel, window, cx| {
-                            panel.handle_op(session_id, op, reply, window, cx)
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .detach();
-        }
-
         #[cfg(feature = "desktop")]
         {
             let requests = workspace_store.read(cx).remote_preview_requests();

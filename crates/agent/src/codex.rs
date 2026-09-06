@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::pending::{PendingRequests, drain_resolved};
 use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -409,10 +408,10 @@ struct Actor {
     approvals: HashMap<String, Value>,
     /// Pending `item/tool/requestUserInput` requests: canonical request_id → the
     /// server-to-client JSON-RPC id we must reply to.
-    user_inputs: PendingRequests<String, Value>,
+    user_inputs: HashMap<String, Value>,
     /// Pending `mcpServer/elicitation/request`s: canonical request_id → the
     /// JSON-RPC id and field typing needed to rebuild a typed response.
-    elicitations: PendingRequests<String, PendingElicitation>,
+    elicitations: HashMap<String, PendingElicitation>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
@@ -1814,25 +1813,21 @@ impl Actor {
     /// Settle every outstanding native user-input request and MCP elicitation
     /// on teardown, replying with the protocol's empty/cancel outcome.
     async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let mut pending = drain_resolved(&mut self.user_inputs)
-            .into_iter()
-            .map(|(request_id, rpc_id, event)| {
-                (request_id, rpc_id, json!({ "answers": {} }), event)
-            })
-            .collect::<Vec<_>>();
-        pending.extend(drain_resolved(&mut self.elicitations).into_iter().map(
-            |(request_id, pending, event)| {
-                (
-                    request_id,
-                    pending.rpc_id,
-                    json!({ "action": "cancel" }),
-                    event,
-                )
-            },
-        ));
-        for (_request_id, rpc_id, result, event) in pending {
+        let pending = self
+            .user_inputs
+            .drain()
+            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
+            .chain(self.elicitations.drain().map(|(request_id, pending)| {
+                (request_id, pending.rpc_id, json!({ "action": "cancel" }))
+            }));
+        for (request_id, rpc_id, result) in pending {
             let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
-            self.events.emit(event).await;
+            self.events
+                .emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: serde_json::Map::new(),
+                })
+                .await;
         }
     }
 
@@ -2409,14 +2404,14 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
         }
         _ => FileChangeKind::Modify,
     };
-    Some(crate::normalize::file_change(
-        change.get("path").and_then(Value::as_str)?,
+    Some(FileChange {
+        path: change.get("path").and_then(Value::as_str)?.to_owned(),
         kind,
-        change
+        diff: change
             .get("diff")
             .and_then(Value::as_str)
             .map(str::to_owned),
-    ))
+    })
 }
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
@@ -2426,12 +2421,11 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         context_window: value.get("modelContextWindow").and_then(Value::as_u64),
         total_processed_tokens,
-        ..crate::normalize::token_usage(
-            last.get("inputTokens").and_then(Value::as_u64),
-            last.get("cachedInputTokens").and_then(Value::as_u64),
-            last.get("outputTokens").and_then(Value::as_u64),
-            last.get("totalTokens").and_then(Value::as_u64),
-        )
+        input_tokens: last.get("inputTokens").and_then(Value::as_u64),
+        cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_u64),
+        output_tokens: last.get("outputTokens").and_then(Value::as_u64),
+        used_tokens: last.get("totalTokens").and_then(Value::as_u64),
+        ..TokenUsage::default()
     })
 }
 

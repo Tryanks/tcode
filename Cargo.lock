@@ -8797,18 +8797,15 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
- "async-channel",
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
  "qrcode",
- "serde",
  "serde_json",
  "tcode-protocol",
  "tcode-remote",
  "tcode-runtime",
  "tcode-services",
- "ureq",
 ]
 
 [[package]]
@@ -8826,7 +8823,6 @@ dependencies = [
 name = "tcode-mobile"
 version = "0.1.0"
 dependencies = [
- "agent",
  "async-channel",
  "chrono",
  "dirs 6.0.0",
@@ -8979,9 +8975,6 @@ dependencies = [
 [[package]]
 name = "tcode-voice"
 version = "0.1.0"
-dependencies = [
- "log",
-]
 
 [[package]]
 name = "tcode-web"

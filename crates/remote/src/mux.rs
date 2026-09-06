@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use async_channel::{Receiver, Sender};
 
@@ -71,7 +71,7 @@ impl HostMux {
 async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Receiver<Ingress>) {
     let mut clients = HashMap::<u64, Sender<String>>::new();
     let mut subscriptions = HashMap::<u64, HashSet<String>>::new();
-    let routes = Arc::new(Mutex::new(HashMap::<u64, (u64, u64)>::new()));
+    let mut routes = HashMap::<u64, (u64, u64)>::new();
     let mut next_global_id = 1_u64;
 
     loop {
@@ -103,7 +103,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                         }
                     }
                 }
-                routes.lock().unwrap().retain(|_, route| route.0 != id);
+                routes.retain(|_, route| route.0 != id);
             }
             Input::Client(Ok(Ingress::Line(connection_id, line))) => {
                 if let Some((kind, topic)) = subscription_change(&line) {
@@ -130,10 +130,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 let Some((rewritten, local_id)) = rewrite_client_id(&line, next_global_id) else {
                     continue;
                 };
-                routes
-                    .lock()
-                    .unwrap()
-                    .insert(next_global_id, (connection_id, local_id));
+                routes.insert(next_global_id, (connection_id, local_id));
                 next_global_id = next_global_id.wrapping_add(1).max(1);
                 if to_host.send(rewritten).await.is_err() {
                     break;
@@ -161,7 +158,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                             .and_then(serde_json::Value::as_u64)
                         {
                             if let Some((connection_id, local_id)) =
-                                routes.lock().unwrap().get(&request_id).copied()
+                                routes.get(&request_id).copied()
                                 && subscriptions
                                     .get(&connection_id)
                                     .is_some_and(|topics| topics.contains(&topic))
@@ -190,9 +187,7 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                         else {
                             continue;
                         };
-                        let Some((connection_id, local_id)) =
-                            routes.lock().unwrap().remove(&global_id)
-                        else {
+                        let Some((connection_id, local_id)) = routes.remove(&global_id) else {
                             continue;
                         };
                         let Some(rewritten) = rewrite_host_id(&line, local_id) else {
@@ -210,7 +205,6 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
             }
         }
     }
-    clients.clear();
 }
 
 fn subscription_change(line: &str) -> Option<(String, String)> {

@@ -35,7 +35,6 @@ pub use crate::claude_context::{
     format_context_window, native_context_window, parse_context_window_tokens,
     resolved_context_window,
 };
-use crate::pending::{PendingRequests, drain_resolved};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
     Attachment, ClassifierCategory, DeltaKind, FileChange, FileChangeKind, InteractionMode,
@@ -1130,7 +1129,7 @@ pub(crate) struct Mapper {
     pending_approvals: HashMap<String, PendingApproval>,
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
-    pending_user_input: PendingRequests<String, Value>,
+    pending_user_input: HashMap<String, Value>,
     /// Canonical session access policy. FullAccess auto-allows every ordinary
     /// tool; ReadOnly auto-allows only classified file reads. Special tools are
     /// handled before either policy.
@@ -1421,9 +1420,9 @@ impl Mapper {
     /// Drain every pending `AskUserQuestion`, producing `(request_id, deny
     /// control_response)` pairs with T3's cancel message (S2 §1.2 abort path).
     fn cancel_pending_user_input(&mut self) -> Vec<(String, Value)> {
-        drain_resolved(&mut self.pending_user_input)
-            .into_iter()
-            .map(|(request_id, _questions, _event)| {
+        self.pending_user_input
+            .drain()
+            .map(|(request_id, _questions)| {
                 let response = control_response(
                     &request_id,
                     json!({
@@ -2826,9 +2825,13 @@ fn map_usage(usage: &Value, model_usage: Option<&Value>) -> TokenUsage {
 
     TokenUsage {
         context_window,
+        input_tokens: input,
+        cached_input_tokens: cache_read,
+        output_tokens: output,
+        used_tokens,
         // Session-cumulative total is stamped by the caller (`on_result`); the
         // streaming/partial usage path leaves it unset.
-        ..crate::normalize::token_usage(input, cache_read, output, used_tokens)
+        ..TokenUsage::default()
     }
 }
 

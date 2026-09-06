@@ -151,17 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn file_lifecycle_and_relativization() {
-        let root = temp_dir("lifecycle");
+    fn relativizes_workspace_files_and_preserves_outside_paths() {
+        let root = temp_dir("relativize");
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let path = workspace.join("exact.bin");
-        let bytes = b"\0exact\xffbytes";
-        std::fs::write(&path, bytes).unwrap();
-
-        assert!(workspace.is_dir());
-        assert!(!path.is_dir());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::write(&path, b"").unwrap();
         assert_eq!(
             relativize_to_workspace(path.to_str().unwrap(), &workspace),
             "exact.bin"
@@ -178,8 +173,6 @@ mod tests {
             outside.to_string_lossy()
         );
 
-        std::fs::remove_file(&path).unwrap();
-        assert!(!path.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

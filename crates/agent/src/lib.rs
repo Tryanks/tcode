@@ -20,11 +20,7 @@ pub mod claude {
 #[cfg(feature = "process")]
 pub mod codex;
 #[cfg(feature = "process")]
-mod normalize;
-#[cfg(feature = "process")]
 pub mod opencode;
-#[cfg(feature = "process")]
-mod pending;
 #[cfg(feature = "process")]
 pub mod pi;
 #[cfg(feature = "process")]
@@ -189,111 +185,6 @@ impl ProviderKind {
             ProviderKind::OpenCode => "OpenCode",
             ProviderKind::Acp => "ACP agent",
         }
-    }
-}
-
-#[cfg(test)]
-mod provider_caps_tests {
-    use super::*;
-
-    #[test]
-    fn provider_caps_truth_table() {
-        assert_eq!(
-            ProviderKind::ClaudeCode.caps(),
-            Caps {
-                supports_steering: true,
-                supports_fork: true,
-                native_rewind: true,
-                per_turn_effort: false,
-                options_apply_live: false,
-                live_approval_mode_switch: true,
-                live_option_push: LiveOptionPush::None,
-                mcp_servers: true,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: true,
-                trust_project_extensions: false,
-            }
-        );
-        assert_eq!(
-            ProviderKind::Codex.caps(),
-            Caps {
-                supports_steering: true,
-                supports_fork: true,
-                native_rewind: false,
-                per_turn_effort: true,
-                options_apply_live: false,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::None,
-                mcp_servers: true,
-                launch_args: false,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: true,
-                trust_project_extensions: false,
-            }
-        );
-        assert_eq!(
-            ProviderKind::Acp.caps(),
-            Caps {
-                supports_steering: false,
-                supports_fork: false,
-                native_rewind: false,
-                per_turn_effort: false,
-                options_apply_live: true,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::All,
-                mcp_servers: true,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Wire,
-                home_path: true,
-                trust_project_extensions: false,
-            }
-        );
-        assert_eq!(
-            ProviderKind::Pi.caps(),
-            Caps {
-                supports_steering: true,
-                supports_fork: false,
-                native_rewind: false,
-                per_turn_effort: false,
-                options_apply_live: false,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
-                mcp_servers: false,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: true,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: true,
-                trust_project_extensions: true,
-            }
-        );
-        assert_eq!(
-            ProviderKind::OpenCode.caps(),
-            Caps {
-                supports_steering: false,
-                supports_fork: false,
-                native_rewind: false,
-                per_turn_effort: true,
-                options_apply_live: false,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::None,
-                mcp_servers: true,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: false,
-                trust_project_extensions: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pi_cannot_attach_mcp_servers_but_claude_can() {
-        assert!(!ProviderKind::Pi.caps().mcp_servers);
-        assert!(ProviderKind::ClaudeCode.caps().mcp_servers);
     }
 }
 

@@ -1276,15 +1276,6 @@ impl AppState {
         }
         self.refresh_git_status(&session_id, cx);
     }
-
-    /// Open the most recently updated stored session (replay only). Used by the
-    /// hidden `--open-latest` launch flag. No-op when there are no sessions.
-    pub fn open_latest_session(&mut self, cx: &mut HostCx) {
-        // `sessions` is kept sorted newest-first by `load_index`.
-        if let Some(id) = self.sessions.first().map(|m| m.id.clone()) {
-            self.select_session(&id, cx);
-        }
-    }
 }
 
 pub(super) fn descendant_session_ids(sessions: &[SessionMeta], root_id: &str) -> Vec<String> {

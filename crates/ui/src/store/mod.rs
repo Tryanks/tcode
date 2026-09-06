@@ -102,8 +102,6 @@ pub struct LocalAffordances {
     #[cfg(feature = "terminal")]
     pub terminals: LocalTerminalRegistry,
     #[cfg(feature = "desktop")]
-    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
-    #[cfg(feature = "desktop")]
     pub import_routes: ImportRoutes,
 }
 
@@ -123,8 +121,6 @@ pub struct WorkspaceStore {
     remote_address: Option<String>,
     #[cfg(all(feature = "local-host", feature = "terminal"))]
     terminal_registry: Option<LocalTerminalRegistry>,
-    #[cfg(all(feature = "local-host", feature = "desktop"))]
-    preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     #[cfg(all(feature = "local-host", feature = "desktop"))]
     import_routes: Option<ImportRoutes>,
     /// Name of the remote host this store is a client of. `None` means the host
@@ -225,8 +221,6 @@ impl WorkspaceStore {
             #[cfg(all(feature = "local-host", feature = "terminal"))]
             terminal_registry: None,
             #[cfg(all(feature = "local-host", feature = "desktop"))]
-            preview_requests: None,
-            #[cfg(all(feature = "local-host", feature = "desktop"))]
             import_routes: None,
             remote_host: None,
             connection_state: ConnectionState::Connected,
@@ -294,10 +288,10 @@ impl WorkspaceStore {
                             store.apply_domain_event(&envelope);
                         }
                     }
-                    Err(tcode_client::HostEventTryRecvError::Empty) => {
+                    Err(async_channel::TryRecvError::Empty) => {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                    Err(tcode_client::HostEventTryRecvError::Closed) => break,
+                    Err(async_channel::TryRecvError::Closed) => break,
                 }
             }
             if seeded.len() != seed_topics.len() {
@@ -345,8 +339,6 @@ impl WorkspaceStore {
             #[cfg(feature = "terminal")]
             terminals: host.terminals.clone(),
             #[cfg(feature = "desktop")]
-            preview_requests: host.preview_requests.clone(),
-            #[cfg(feature = "desktop")]
             import_routes: host.import_routes.clone(),
         });
         store
@@ -362,7 +354,6 @@ impl WorkspaceStore {
         }
         #[cfg(feature = "desktop")]
         {
-            self.preview_requests = local.preview_requests;
             self.import_routes = Some(local.import_routes);
         }
     }
@@ -1281,7 +1272,7 @@ impl WorkspaceStore {
     }
 
     /// Only the native preview panel prunes by liveness; Linux compiles it out.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
         let mut keys = self
             .index_replica
@@ -1302,18 +1293,6 @@ impl WorkspaceStore {
 
     pub fn preview_browser_settings(&self) -> BrowserSettings {
         self.settings_replica.browser.clone()
-    }
-
-    /// Local-handle crossing: take the preview broker receiver exactly once.
-    ///
-    /// Commands and preview registration metadata remain typed; this
-    /// receiver carries native WebView reply senders and is the deliberate
-    /// reverse-RPC affordance documented by the local host seam.
-    #[cfg(all(feature = "local-host", feature = "desktop"))]
-    pub fn take_preview_requests(
-        &mut self,
-    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.preview_requests.take()
     }
 
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {

@@ -21,12 +21,6 @@ pub enum HostEvent {
 
 pub(crate) type HostFn = Box<dyn FnOnce(&mut AppState, &mut HostCx) + Send + 'static>;
 
-/// The single mailbox consumed by the thread that owns [`AppState`].
-pub(crate) enum HostMsg {
-    /// Runtime-internal completion posted by [`HostCx::enqueue`].
-    Enqueued(HostFn),
-}
-
 /// A runtime task handle independent of any UI executor.
 pub type HostTask<T> = smol::Task<T>;
 
@@ -37,13 +31,13 @@ pub type HostTask<T> = smol::Task<T>;
 /// stream.
 #[derive(Clone)]
 pub struct HostCx {
-    mailbox: smol::channel::Sender<HostMsg>,
+    mailbox: smol::channel::Sender<HostFn>,
     events: smol::channel::Sender<String>,
 }
 
 impl HostCx {
     pub(crate) fn new(
-        mailbox: smol::channel::Sender<HostMsg>,
+        mailbox: smol::channel::Sender<HostFn>,
         events: smol::channel::Sender<String>,
     ) -> Self {
         Self { mailbox, events }
@@ -52,15 +46,11 @@ impl HostCx {
     pub fn emit(&mut self, event: HostEvent) {
         let envelope = match event {
             HostEvent::Domain(envelope) => envelope,
-            HostEvent::Runtime(notification) => {
-                let envelope = EventEnvelope {
-                    request_id: None,
-                    topic: Topic::RuntimeEvents,
-                    event: ServerEvent::Runtime(notification),
-                };
-                self.send_message(HostMessage::Event(envelope));
-                return;
-            }
+            HostEvent::Runtime(notification) => EventEnvelope {
+                request_id: None,
+                topic: Topic::RuntimeEvents,
+                event: ServerEvent::Runtime(notification),
+            },
         };
         self.send_message(HostMessage::Event(envelope));
     }
@@ -92,7 +82,7 @@ impl HostCx {
     }
 
     pub fn enqueue(&self, f: impl FnOnce(&mut AppState, &mut HostCx) + Send + 'static) {
-        let _ = self.mailbox.try_send(HostMsg::Enqueued(Box::new(f)));
+        let _ = self.mailbox.try_send(Box::new(f));
     }
 
     pub(crate) async fn enqueue_and_wait<R: Send + 'static>(
@@ -101,9 +91,9 @@ impl HostCx {
     ) -> Result<R, ()> {
         let (sender, receiver) = smol::channel::bounded(1);
         self.mailbox
-            .send(HostMsg::Enqueued(Box::new(move |state, cx| {
+            .send(Box::new(move |state, cx| {
                 let _ = sender.try_send(f(state, cx));
-            })))
+            }))
             .await
             .map_err(|_| ())?;
         receiver.recv().await.map_err(|_| ())

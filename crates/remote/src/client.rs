@@ -1,7 +1,7 @@
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest as _, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -249,10 +249,7 @@ async fn connection_loop(
                 }
                 Err(error) if error.contains(CERT_CHANGED) => {
                     *reason.lock().unwrap() = Some(OfflineReason::CertificateChanged);
-                    CERT_ERRORS
-                        .lock()
-                        .unwrap()
-                        .insert(host.host_id.clone(), true);
+                    CERT_ERRORS.lock().unwrap().insert(host.host_id.clone());
                     let _ = state.send(ConnectionState::Offline).await;
                     incoming.close();
                     return;
@@ -534,12 +531,11 @@ pub const CERT_CHANGED: &str = "host certificate changed; pair again";
 static PIN_MIGRATION: Mutex<()> = Mutex::new(());
 static HOST_PATHS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static CERT_ERRORS: LazyLock<Mutex<HashMap<String, bool>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CERT_ERRORS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 /// The shared ConnectionState stays transport-neutral; Offline carries this
 /// distinguishable reason through the native host's status accessor.
 pub fn certificate_changed(host_id: &str) -> bool {
-    CERT_ERRORS.lock().unwrap().contains_key(host_id)
+    CERT_ERRORS.lock().unwrap().contains(host_id)
 }
 
 fn tls_error(error: io::Error) -> String {

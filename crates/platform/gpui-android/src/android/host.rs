@@ -169,23 +169,23 @@ pub(crate) fn write_clipboard(text: String) {
     }));
 }
 
-pub(super) fn commit_text(text: String) {
+pub fn commit_text(text: String) {
     enqueue(HostEvent::CommitText(text));
 }
 
-pub(super) fn set_composing_text(text: String) {
+pub fn set_composing_text(text: String) {
     enqueue(HostEvent::SetComposingText(text));
 }
 
-pub(super) fn finish_composing_text() {
+pub fn finish_composing_text() {
     enqueue(HostEvent::FinishComposing);
 }
 
-pub(super) fn delete_backward() {
+pub fn delete_backward() {
     enqueue(HostEvent::DeleteBackward);
 }
 
-pub(super) fn key_event(key_code: i32, down: bool, unicode_code_point: i32, meta_state: i32) {
+pub fn key_event(key_code: i32, down: bool, unicode_code_point: i32, meta_state: i32) {
     enqueue(HostEvent::Key {
         key_code,
         down,
@@ -194,7 +194,7 @@ pub(super) fn key_event(key_code: i32, down: bool, unicode_code_point: i32, meta
     });
 }
 
-pub(super) fn on_insets(left: i32, top: i32, right: i32, bottom: i32, ime_bottom: i32) {
+pub fn on_insets(left: i32, top: i32, right: i32, bottom: i32, ime_bottom: i32) {
     enqueue(HostEvent::Insets {
         left,
         top,
@@ -204,6 +204,6 @@ pub(super) fn on_insets(left: i32, top: i32, right: i32, bottom: i32, ime_bottom
     });
 }
 
-pub(super) fn on_back() {
+pub fn on_back() {
     enqueue(HostEvent::Back);
 }

@@ -32,7 +32,6 @@ pub enum DictationEvent {
 
 /// A running dictation session. Dropping it cancels recognition.
 pub struct DictationSession {
-    #[allow(dead_code)]
     imp: imp::Session,
 }
 

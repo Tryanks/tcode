@@ -297,6 +297,7 @@ pub(crate) struct ChatPanelState {
     pub plan_showing: bool,
     pub preview_showing: bool,
     pub terminal_open: bool,
+    #[cfg(feature = "terminal")]
     pub terminal_height: f32,
 }
 
@@ -309,6 +310,7 @@ pub(crate) fn chat_panel_state(ui: Option<&ConversationUiState>) -> ChatPanelSta
         plan_showing: right_panel_open && right_tab == RightTab::Plan,
         preview_showing: right_panel_open && right_tab == RightTab::Preview,
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
+        #[cfg(feature = "terminal")]
         terminal_height: ui.map_or(240., |ui| ui.terminal_height),
     }
 }
@@ -503,6 +505,7 @@ mod tests {
         assert!(plan.plan_showing);
         assert!(!plan.preview_showing);
         assert!(plan.terminal_open);
+        #[cfg(feature = "terminal")]
         assert_eq!(plan.terminal_height, 320.);
 
         ui.right_tab = RightTab::Preview;

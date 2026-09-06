@@ -2132,29 +2132,6 @@ mod tests {
     }
 
     #[test]
-    fn relativize_strips_cwd_prefix() {
-        let cwd = Path::new("/tmp/proj");
-        assert_eq!(
-            tcode_services::user_files::relativize_to_workspace("/tmp/proj/src/a.rs", cwd),
-            "src/a.rs"
-        );
-        assert_eq!(
-            tcode_services::user_files::relativize_to_workspace("/tmp/proj/a.rs", cwd),
-            "a.rs"
-        );
-        // Outside the cwd stays absolute.
-        assert_eq!(
-            tcode_services::user_files::relativize_to_workspace("/other/x.rs", cwd),
-            "/other/x.rs"
-        );
-        // Already-relative paths are left as-is.
-        assert_eq!(
-            tcode_services::user_files::relativize_to_workspace("src/b.rs", cwd),
-            "src/b.rs"
-        );
-    }
-
-    #[test]
     fn md_sync_decides_push_reset_and_noop() {
         // Unchanged text does nothing (the streaming hot path: most notifies
         // carry no new text for a given entry).

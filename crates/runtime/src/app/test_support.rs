@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 
-use crate::host::HostMsg;
+use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
 pub(super) struct TestStore(SessionStore);
@@ -32,11 +32,11 @@ impl Drop for TestStore {
 /// Plain smol/mailbox replacement for the former gpui test context.
 ///
 /// Tests still exercise the exact production [`HostCx`] seam: background
-/// completions must re-enter through `HostMsg::Enqueued`, and
+/// completions must re-enter through the host mailbox, and
 /// `run_until_parked` is the only code that mutates the owned `AppState`.
 pub(super) struct TestAppContext {
-    mailbox_tx: smol::channel::Sender<HostMsg>,
-    mailbox_rx: smol::channel::Receiver<HostMsg>,
+    mailbox_tx: smol::channel::Sender<HostFn>,
+    mailbox_rx: smol::channel::Receiver<HostFn>,
     outgoing_tx: smol::channel::Sender<String>,
     pub(super) outgoing_rx: smol::channel::Receiver<String>,
     outgoing: Vec<String>,
@@ -90,14 +90,10 @@ impl TestAppContext {
             let mut had_work = false;
             while let Ok(message) = self.mailbox_rx.try_recv() {
                 had_work = true;
-                match message {
-                    HostMsg::Enqueued(completion) => {
-                        let mut host_cx = self.host_cx();
-                        let mut state = state.borrow_mut();
-                        completion(&mut state, &mut host_cx);
-                        state.sync_terminal_handles();
-                    }
-                }
+                let mut host_cx = self.host_cx();
+                let mut state = state.borrow_mut();
+                message(&mut state, &mut host_cx);
+                state.sync_terminal_handles();
             }
             while let Ok(line) = self.outgoing_rx.try_recv() {
                 self.outgoing.push(line);

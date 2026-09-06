@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use smol::channel::Receiver;
+pub(crate) use smol::unblock;
 
 use crate::AgentError;
 
@@ -33,10 +34,6 @@ pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
 /// exposes no `creation_flags`, so the flag rides in through the `From` impl.
 pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
     smol::process::Command::from(command(program))
-}
-
-pub(crate) async fn unblock<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
-    smol::unblock(f).await
 }
 
 pub(crate) async fn probe_version(

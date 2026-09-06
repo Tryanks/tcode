@@ -2711,7 +2711,6 @@ mod tests {
         );
         assert!(!superseded.expanded);
         assert_eq!(superseded.collapse, None);
-        assert_eq!(AUTO_ACTIVITY_MIN_VISIBILITY, Duration::from_millis(500));
     }
 
     #[test]

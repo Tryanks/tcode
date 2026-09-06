@@ -237,7 +237,7 @@ impl Terminal {
 
     fn from_pty(pty: PtyHandle) -> io::Result<Self> {
         let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
-        Self::from_parts(pty, emulator)
+        Self::from_parts(pty, emulator, None)
     }
 
     pub fn grid(&self) -> &GridEmulator {
@@ -251,14 +251,10 @@ impl Terminal {
         let pty = PtyHandle::spawn(cwd)?;
         let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
         let (tx, rx) = async_channel::unbounded();
-        Ok((Self::from_parts_with_output(pty, emulator, Some(tx))?, rx))
+        Ok((Self::from_parts(pty, emulator, Some(tx))?, rx))
     }
 
-    fn from_parts(pty: PtyHandle, emulator: GridEmulator) -> io::Result<Self> {
-        Self::from_parts_with_output(pty, emulator, None)
-    }
-
-    fn from_parts_with_output(
+    fn from_parts(
         pty: PtyHandle,
         emulator: GridEmulator,
         output: Option<async_channel::Sender<Vec<u8>>>,
@@ -376,16 +372,6 @@ impl Terminal {
 
     pub fn resize(&self, cols: usize, rows: usize) {
         if self.emulator.resize_if_changed(cols, rows) {
-            let _ = self.pty.resize(self.emulator.window_size());
-        }
-    }
-
-    /// Update the physical pixel dimensions of one terminal cell.
-    ///
-    /// This updates rio's graphics sizing and the host PTY pixel winsize even
-    /// when the grid's row and column counts stay unchanged.
-    pub fn set_cell_size(&self, width_px: u32, height_px: u32) {
-        if self.emulator.set_cell_size(width_px, height_px) {
             let _ = self.pty.resize(self.emulator.window_size());
         }
     }

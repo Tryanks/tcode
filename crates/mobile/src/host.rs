@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Edges, Pixels, WindowInsets};
+use gpui::{App, WindowInsets};
 pub use tcode_client::ConnectionState;
 pub use tcode_client::pairing::{
     PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
@@ -144,18 +144,9 @@ pub trait MobileHost: 'static {
         done(Err("unsupported".into()), cx);
     }
 
-    /// Status bar / home indicator / display cutout insets in logical pixels.
-    fn safe_area(&self) -> Edges<Pixels> {
-        Edges::default()
-    }
-
-    /// All system-obscured regions in logical pixels. The default preserves
-    /// compatibility with hosts which only provide a safe area.
+    /// All system-obscured regions in logical pixels.
     fn insets(&self) -> WindowInsets {
-        WindowInsets {
-            safe_area: self.safe_area(),
-            ..WindowInsets::default()
-        }
+        WindowInsets::default()
     }
 }
 
@@ -168,7 +159,7 @@ pub use native::NativeHost;
 mod native {
     use std::path::PathBuf;
 
-    use gpui::{App, Edges, Pixels, WindowInsets};
+    use gpui::{App, WindowInsets};
 
     use super::{
         BrowseDone, MobileHost, MobilePreferences, PairDone, PairRequest, PairedHost, ScanDone,
@@ -401,10 +392,6 @@ mod native {
             } else {
                 done(Err("unsupported".into()), cx);
             }
-        }
-
-        fn safe_area(&self) -> Edges<Pixels> {
-            self.insets().safe_area
         }
 
         fn insets(&self) -> WindowInsets {

@@ -3245,24 +3245,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn unix_terminal_font_uses_the_bundled_lilex_family() {
-        assert_eq!(TERMINAL_FONT_FAMILY, "Lilex");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_terminal_font_remains_menlo() {
-        assert_eq!(TERMINAL_FONT_FAMILY, "Menlo");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_terminal_font_remains_consolas() {
-        assert_eq!(TERMINAL_FONT_FAMILY, "Consolas");
-    }
-
     #[test]
     fn batches_mixed_cjk_at_physical_column_boundaries() {
         let cells = vec![

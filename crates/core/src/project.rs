@@ -609,6 +609,9 @@ mod tests {
         });
         let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
         assert!(!meta.pending_fork);
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(!json.contains("forked_from"));
+        assert!(!json.contains("pending_fork"));
 
         let mut meta = meta;
         meta.pending_fork = true;

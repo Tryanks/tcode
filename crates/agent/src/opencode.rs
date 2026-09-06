@@ -942,7 +942,11 @@ fn open_code_tool_item(
             status,
         }
     };
-    crate::normalize::thread_item(id, content)
+    ThreadItem {
+        id: id.into(),
+        parent_item_id: None,
+        content,
+    }
 }
 
 fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
@@ -1122,18 +1126,17 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
         crate::json_u64(tokens.get("output")).map(|output| output.saturating_add(reasoning));
     let cache_read = crate::json_u64(tokens.pointer("/cache/read"));
     let cache_write = crate::json_u64(tokens.pointer("/cache/write")).unwrap_or(0);
-    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(
-        crate::normalize::token_usage(
-            input,
-            cache_read,
-            output,
-            input
-                .unwrap_or(0)
-                .checked_add(output.unwrap_or(0))
-                .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
-                .and_then(|total| total.checked_add(cache_write)),
-        ),
-    )
+    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cache_read,
+        output_tokens: output,
+        used_tokens: input
+            .unwrap_or(0)
+            .checked_add(output.unwrap_or(0))
+            .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
+            .and_then(|total| total.checked_add(cache_write)),
+        ..TokenUsage::default()
+    })
 }
 
 fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
@@ -1148,11 +1151,11 @@ fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
                 Some("deleted") => FileChangeKind::Delete,
                 _ => FileChangeKind::Modify,
             };
-            Some(crate::normalize::file_change(
+            Some(FileChange {
                 path,
                 kind,
-                diff.get("patch").and_then(Value::as_str).map(str::to_owned),
-            ))
+                diff: diff.get("patch").and_then(Value::as_str).map(str::to_owned),
+            })
         })
         .collect()
 }

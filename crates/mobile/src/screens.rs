@@ -494,10 +494,10 @@ impl MobileRoot {
             Sheet::Projects => self.render_projects(cx),
             Sheet::Settings => self.render_settings(cx),
         };
-        let safe_bottom = self.host.safe_area().bottom;
+        let safe_area = self.host.insets().safe_area;
+        let safe_bottom = safe_area.bottom;
         let max_height =
-            (window.viewport_size().height - px(70.) - self.host.safe_area().top - safe_bottom)
-                .max(px(180.));
+            (window.viewport_size().height - px(70.) - safe_area.top - safe_bottom).max(px(180.));
 
         Some(
             div()

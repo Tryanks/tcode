@@ -4,8 +4,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tcode_client::HostLink;
-#[cfg(test)]
-use tcode_client::{HostEventReceiver, HostEventTryRecvError};
 use tcode_protocol::{
     ClientMessage, ClientPayload, Command, CommandResponse, HostMessage, ProtocolError, Query,
     QueryResponse, decode_client_line,
@@ -16,7 +14,7 @@ use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
-use crate::host::{HostCx, HostEvent, HostMsg};
+use crate::host::{HostCx, HostEvent, HostFn};
 use crate::terminal::LocalTerminalRegistry;
 
 /// Optional process-local services attached before the host starts accepting
@@ -48,12 +46,10 @@ pub struct SpawnedHost {
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
     pub terminals: LocalTerminalRegistry,
-    /// Legacy local affordance; new hosts route preview requests through the link.
-    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     pub import_routes: ImportRoutes,
     link: Arc<OnceLock<HostLink>>,
     #[cfg(any(test, feature = "test-support"))]
-    test_mailbox: async_channel::Sender<HostMsg>,
+    test_mailbox: async_channel::Sender<HostFn>,
 }
 
 impl SpawnedHost {
@@ -87,10 +83,10 @@ impl SpawnedHost {
     {
         let (sender, receiver) = smol::channel::bounded(1);
         self.test_mailbox
-            .send(HostMsg::Enqueued(Box::new(move |state, cx| {
+            .send(Box::new(move |state, cx| {
                 let result = update(state, cx);
                 let _ = sender.try_send(result);
-            })))
+            }))
             .await
             .map_err(transport_error)?;
         receiver.recv().await.map_err(transport_error)
@@ -145,7 +141,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     let (client_tx, client_rx) = async_channel::unbounded::<String>();
     let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
-    let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostMsg>();
+    let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostFn>();
     let terminals = LocalTerminalRegistry::default();
     // The host owns the broker, including when started without a desktop.
     // Both local and remote WebViews answer the same serialized reverse RPC.
@@ -158,8 +154,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
-    let broker_requests = preview_requests;
-    let preview_requests = None;
     let import_routes = ImportRoutes::default();
     let host_terminals = terminals.clone();
     let host_import_routes = import_routes.clone();
@@ -186,7 +180,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_orchestrate_requests(&mut cx);
-            state.pump_preview_requests(broker_requests, &mut cx);
+            state.pump_preview_requests(preview_requests, &mut cx);
             if services.background_startup_probes {
                 state.recover_orphaned_worktrees(&mut cx);
                 state.refresh_model_catalogs(&mut cx);
@@ -219,7 +213,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         from_host: event_rx,
         stopped: stopped_rx,
         terminals,
-        preview_requests,
         import_routes,
         link: Arc::new(OnceLock::new()),
         #[cfg(any(test, feature = "test-support"))]
@@ -231,14 +224,14 @@ async fn host_loop(
     mut state: AppState,
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
-    mailbox: smol::channel::Receiver<HostMsg>,
+    mailbox: smol::channel::Receiver<HostFn>,
     import_routes: ImportRoutes,
 ) {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
         enum Input {
             Client(Result<String, smol::channel::RecvError>),
-            Internal(Result<HostMsg, smol::channel::RecvError>),
+            Internal(Result<HostFn, smol::channel::RecvError>),
         }
         match smol::future::race(async { Input::Client(client.recv().await) }, async {
             Input::Internal(mailbox.recv().await)
@@ -258,7 +251,7 @@ async fn host_loop(
                 Err(_) => break,
             },
             Input::Internal(message) => match message {
-                Ok(HostMsg::Enqueued(operation)) => operation(&mut state, &mut cx),
+                Ok(operation) => operation(&mut state, &mut cx),
                 Err(_) => break,
             },
         }
@@ -726,7 +719,7 @@ mod tests {
     use super::*;
 
     pub(super) fn next_event(
-        events: &HostEventReceiver,
+        events: &async_channel::Receiver<EventEnvelope>,
         ready: impl Fn(&EventEnvelope) -> bool,
     ) -> EventEnvelope {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -737,10 +730,10 @@ mod tests {
                         return envelope;
                     }
                 }
-                Err(HostEventTryRecvError::Empty) => {
+                Err(async_channel::TryRecvError::Empty) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                Err(HostEventTryRecvError::Closed) => {
+                Err(async_channel::TryRecvError::Closed) => {
                     panic!("host event stream closed before the expected event")
                 }
             }

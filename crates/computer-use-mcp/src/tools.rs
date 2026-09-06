@@ -921,7 +921,7 @@ mod dispatch {
             observation.root.ref_id,
             escaped(&observation.root.app_name),
             escaped(&observation.root.title),
-            count_nodes(&observation.tree),
+            observation.tree.node_count(),
             outline::interactive_count(&observation.tree)
         );
         if text_sparse {
@@ -1102,10 +1102,6 @@ mod dispatch {
             UiActionKind::Drag => "drag",
             UiActionKind::MoveMouse => "move_mouse",
         }
-    }
-
-    fn count_nodes(node: &UiNode) -> usize {
-        1 + node.children.iter().map(count_nodes).sum::<usize>()
     }
 
     fn escaped(value: &str) -> String {

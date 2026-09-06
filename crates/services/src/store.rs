@@ -663,24 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_pending_fork_is_legacy_safe_and_roundtrip() {
-        let legacy = serde_json::json!({
-            "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "forked_from": "source", "created_at": 1, "updated_at": 10
-        });
-        let mut meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert!(!meta.pending_fork);
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("forked_from"));
-        assert!(!json.contains("pending_fork"));
-
-        meta.pending_fork = true;
-        let back: SessionMeta =
-            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
-        assert!(back.pending_fork);
-    }
-
-    #[test]
     fn orchestration_fields_are_legacy_safe_and_roundtrip() {
         let legacy = serde_json::json!({
             "id": "s1", "title": "One", "provider": "codex",
