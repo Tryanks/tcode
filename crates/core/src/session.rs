@@ -1365,6 +1365,8 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
         (
             EntryContent::Item(ItemContent::Subagent {
                 summary: old_summary,
+                model: old_model,
+                effort: old_effort,
                 ..
             }),
             EntryContent::Item(ItemContent::Subagent {
@@ -1372,12 +1374,16 @@ fn merge_content(existing: EntryContent, incoming: EntryContent) -> EntryContent
                 description,
                 status,
                 summary,
+                model,
+                effort,
             }),
         ) => EntryContent::Item(ItemContent::Subagent {
             agent_type,
             description,
             status,
             summary: summary.or(old_summary),
+            model: model.or(old_model),
+            effort: effort.or(old_effort),
         }),
         (_, incoming) => incoming,
     }
@@ -2683,6 +2689,8 @@ mod tests {
                 description: "Ping test".into(),
                 status: ItemStatus::InProgress,
                 summary: None,
+                model: Some("opus".into()),
+                effort: None,
             },
         };
         let child = ThreadItem {
@@ -2700,6 +2708,8 @@ mod tests {
                 description: "Ping test".into(),
                 status: ItemStatus::Completed,
                 summary: Some("pong".into()),
+                model: None,
+                effort: Some("high".into()),
             },
             ..spawn.clone()
         };
@@ -2712,8 +2722,13 @@ mod tests {
         assert_eq!(timeline.entries[0].id, "spawn");
         assert!(matches!(
             &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. })
-                if summary == "pong"
+            EntryContent::Item(ItemContent::Subagent {
+                status: ItemStatus::Completed,
+                summary: Some(summary),
+                model: Some(model),
+                effort: Some(effort),
+                ..
+            }) if summary == "pong" && model == "opus" && effort == "high"
         ));
     }
 
@@ -2863,6 +2878,8 @@ mod tests {
                 description: "look around".into(),
                 status,
                 summary: None,
+                model: None,
+                effort: None,
             },
         }
     }

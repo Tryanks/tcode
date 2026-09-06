@@ -381,6 +381,8 @@ fn subagent_entry(id: &str, status: ItemStatus, summary: Option<&str>) -> Timeli
             description: "Review the extracted component fixtures".into(),
             status,
             summary: summary.map(str::to_string),
+            model: None,
+            effort: None,
         },
     )
 }

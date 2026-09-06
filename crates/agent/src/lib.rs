@@ -1257,7 +1257,14 @@ pub enum ItemContent {
         status: ItemStatus,
         /// Final one-line summary when finished.
         summary: Option<String>,
+        /// Model the provider ran the subagent on, once known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Reasoning effort the subagent ran with, once known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
+
     WebSearch {
         query: String,
     },

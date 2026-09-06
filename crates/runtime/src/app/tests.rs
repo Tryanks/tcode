@@ -48,6 +48,8 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
                     description: "Inspect event routing\nand report".into(),
                     status: ItemStatus::InProgress,
                     summary: None,
+                    model: None,
+                    effort: None,
                 },
             }),
             cx,
@@ -95,6 +97,8 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
                     description: "Inspect event routing\nand report".into(),
                     status: ItemStatus::Completed,
                     summary: Some("routing verified".into()),
+                    model: None,
+                    effort: None,
                 },
             }),
             cx,
@@ -293,6 +297,8 @@ fn native_mirror_parent_item(status: ItemStatus) -> AgentEvent {
             description: "Inspect routing".into(),
             status,
             summary: None,
+            model: None,
+            effort: None,
         },
     };
     if status == ItemStatus::InProgress {

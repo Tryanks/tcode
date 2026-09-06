@@ -538,6 +538,7 @@ async fn actor_loop(
     );
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
+    let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentModelNotice>();
 
     // Set when the child died on its own (stdout EOF): only then do its exit
     // status and stderr tail belong in the close reason.
@@ -545,12 +546,26 @@ async fn actor_loop(
     let closed_reason: Option<String> = loop {
         // Race a UI command against the next stdout line. `or` biases toward the
         // command channel, which is fine: both channels make independent progress.
-        let sel = smol::future::or(async { Sel::Cmd(cmd_rx.recv().await.ok()) }, async {
-            Sel::Line(line_rx.recv().await.ok())
-        })
+        let sel = smol::future::or(
+            async { Sel::Cmd(cmd_rx.recv().await.ok()) },
+            smol::future::or(async { Sel::Line(line_rx.recv().await.ok()) }, async {
+                Sel::Tail(tail_rx.recv().await.ok())
+            }),
+        )
         .await;
 
         match sel {
+            Sel::Tail(notice) => {
+                // The sender side is owned by this loop, so it can't close.
+                let Some(notice) = notice else { continue };
+                for ev in mapper.note_subagent_model(&notice.parent_id, notice.model, notice.effort)
+                {
+                    if event_tx.send(ev).await.is_err() {
+                        let _ = child.kill();
+                        return;
+                    }
+                }
+            }
             Sel::Cmd(Some(command)) => {
                 if let ControlFlow::Break(reason) =
                     handle_command(command, &mut mapper, &mut stdin, &event_tx, &mut child).await
@@ -588,6 +603,7 @@ async fn actor_loop(
                     &mut tailers,
                     claude_dir.as_deref(),
                     &event_tx,
+                    &tail_tx,
                 )
                 .await;
             }
@@ -633,6 +649,15 @@ async fn actor_loop(
 enum Sel {
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
+    Tail(Option<SubagentModelNotice>),
+}
+
+/// Model/effort observed in a tailed subagent transcript, handed back to the
+/// actor so the parent Subagent item is updated with its live status.
+pub(crate) struct SubagentModelNotice {
+    pub(crate) parent_id: String,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
 }
 
 enum TailControl {
@@ -645,6 +670,7 @@ async fn process_tail_requests(
     tailers: &mut HashMap<String, smol::channel::Sender<TailControl>>,
     claude_dir: Option<&Path>,
     event_tx: &smol::channel::Sender<AgentEvent>,
+    tail_tx: &smol::channel::Sender<SubagentModelNotice>,
 ) {
     for request in requests {
         match request {
@@ -660,8 +686,9 @@ async fn process_tail_requests(
                 tailers.insert(parent_id.clone(), control_tx);
                 let claude_dir = claude_dir.map(Path::to_path_buf);
                 let events = event_tx.clone();
+                let notices = tail_tx.clone();
                 smol::spawn(run_subagent_tail(
-                    parent_id, task_id, session_id, claude_dir, control_rx, events,
+                    parent_id, task_id, session_id, claude_dir, control_rx, events, notices,
                 ))
                 .detach();
             }
@@ -686,6 +713,7 @@ async fn run_subagent_tail(
     claude_dir: Option<PathBuf>,
     controls: smol::channel::Receiver<TailControl>,
     events: smol::channel::Sender<AgentEvent>,
+    notices: smol::channel::Sender<SubagentModelNotice>,
 ) {
     let mut path = None;
     let mut reader = None;
@@ -723,6 +751,15 @@ async fn run_subagent_tail(
                         if events.send(event).await.is_err() {
                             return;
                         }
+                    }
+                    if let Some((model, effort)) = reader.take_model() {
+                        let _ = notices
+                            .send(SubagentModelNotice {
+                                parent_id: parent_id.clone(),
+                                model,
+                                effort,
+                            })
+                            .await;
                     }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1054,7 +1091,10 @@ enum ToolItem {
     Subagent {
         agent_type: String,
         description: String,
+        status: ItemStatus,
         summary: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
     },
 }
 
@@ -1451,11 +1491,17 @@ impl Mapper {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         {
-            return self
-                .child_mappers
-                .entry(parent_id.to_owned())
-                .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
-                .map_value(&msg);
+            let mut events = match crate::subagent_tail::model_and_effort(&msg) {
+                Some((model, effort)) => self.note_subagent_model(parent_id, model, effort),
+                None => Vec::new(),
+            };
+            events.extend(
+                self.child_mappers
+                    .entry(parent_id.to_owned())
+                    .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
+                    .map_value(&msg),
+            );
+            return events;
         }
         match msg.get("type").and_then(Value::as_str) {
             Some("system") => self.on_system(&msg),
@@ -1739,7 +1785,10 @@ impl Mapper {
         let Some(ToolItem::Subagent {
             agent_type,
             description,
+            status: saved_status,
             summary: saved_summary,
+            model,
+            effort,
         }) = self.tool_items.get_mut(tool_use_id)
         else {
             return Vec::new();
@@ -1747,6 +1796,7 @@ impl Mapper {
         if summary.is_some() {
             *saved_summary = summary;
         }
+        *saved_status = status;
         vec![AgentEvent::ItemUpdated(ThreadItem {
             id: tool_use_id.to_owned(),
             parent_item_id: None,
@@ -1755,8 +1805,38 @@ impl Mapper {
                 description: description.clone(),
                 status,
                 summary: saved_summary.clone(),
+                model: model.clone(),
+                effort: effort.clone(),
             },
         })]
+    }
+
+    /// Record the model/effort a child transcript reports for its spawn item
+    /// and re-emit the item when either changed.
+    pub(crate) fn note_subagent_model(
+        &mut self,
+        tool_use_id: &str,
+        model: Option<String>,
+        effort: Option<String>,
+    ) -> Vec<AgentEvent> {
+        let Some(ToolItem::Subagent {
+            status,
+            model: saved_model,
+            effort: saved_effort,
+            ..
+        }) = self.tool_items.get_mut(tool_use_id)
+        else {
+            return Vec::new();
+        };
+        let model = model.or_else(|| saved_model.clone());
+        let effort = effort.or_else(|| saved_effort.clone());
+        if model == *saved_model && effort == *saved_effort {
+            return Vec::new();
+        }
+        *saved_model = model;
+        *saved_effort = effort;
+        let status = *status;
+        self.update_subagent(tool_use_id, status, None)
     }
 
     fn on_stream_event(&mut self, msg: &Value) -> Vec<AgentEvent> {
@@ -1999,17 +2079,30 @@ impl Mapper {
                 .unwrap_or("subagent")
                 .to_owned();
             let description = subagent_description(&input);
+            // The Agent tool only carries a model alias when the caller picked
+            // one; the resolved model and effort arrive with the child's first
+            // assistant message.
+            let model = input
+                .get("model")
+                .and_then(Value::as_str)
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned);
             (
                 ToolItem::Subagent {
                     agent_type: agent_type.clone(),
                     description: description.clone(),
+                    status: ItemStatus::InProgress,
                     summary: None,
+                    model: model.clone(),
+                    effort: None,
                 },
                 ItemContent::Subagent {
                     agent_type,
                     description,
                     status: ItemStatus::InProgress,
                     summary: None,
+                    model,
+                    effort: None,
                 },
             )
         } else if name == "Bash" {
@@ -2169,12 +2262,17 @@ impl Mapper {
                     agent_type,
                     description,
                     summary,
+                    model,
+                    effort,
+                    ..
                 } => ItemContent::Subagent {
                     agent_type,
                     description,
                     status,
                     summary: summary
                         .or_else(|| (!output.trim().is_empty()).then(|| one_line_summary(&output))),
+                    model,
+                    effort,
                 },
             };
             let event = if matches!(
@@ -4962,12 +5060,25 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(spawn_events.len(), 5);
+        assert_eq!(spawn_events.len(), 6);
         assert!(matches!(
             &spawn_events[0].content,
-            ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None }
+            ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None, model: None, effort: None }
                 if agent_type == "general-purpose" && description == "Ping test"
         ));
+        // The child's first assistant message reveals the model and effort the
+        // subagent actually ran with; the spawn item re-emits with them.
+        assert!(matches!(
+            &spawn_events[2].content,
+            ItemContent::Subagent { status: ItemStatus::InProgress, model: Some(model), effort: Some(effort), .. }
+                if model == "claude-sonnet-5" && effort == "high"
+        ));
+        assert!(matches!(
+            &spawn_events.last().unwrap().content,
+            ItemContent::Subagent { model: Some(model), effort: Some(effort), .. }
+                if model == "claude-sonnet-5" && effort == "high"
+        ));
+
         assert!(spawn_events.iter().any(|item| matches!(
             &item.content,
             ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }
@@ -4992,11 +5103,16 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(children.len(), 1);
+        assert_eq!(children.len(), 2);
         assert!(matches!(
             &children[0].content,
             ItemContent::UserMessage { text, .. } if text.contains("Reply with pong")
         ));
+        assert!(matches!(
+            &children[1].content,
+            ItemContent::AssistantMessage { text } if text == "pong"
+        ));
+
         assert!(events.iter().all(|event| match event {
             AgentEvent::ItemStarted(item)
             | AgentEvent::ItemUpdated(item)

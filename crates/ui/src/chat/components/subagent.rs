@@ -18,6 +18,15 @@ use super::super::model::one_line;
 
 pub(crate) type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
+/// `model · effort` label for the row chip; `None` when neither is known.
+fn model_chip(model: &Option<String>, effort: &Option<String>) -> Option<String> {
+    let parts: Vec<&str> = [model, effort]
+        .into_iter()
+        .filter_map(|part| part.as_deref())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 pub(crate) fn subagent_row(
     entry: &TimelineEntry,
     on_open: Option<ClickHandler>,
@@ -28,6 +37,8 @@ pub(crate) fn subagent_row(
         description,
         status,
         summary,
+        model,
+        effort,
     }) = &entry.content
     else {
         log::error!(
@@ -108,6 +119,19 @@ pub(crate) fn subagent_row(
         .text_size(px(13.))
         .child(lifecycle)
         .child(div().flex_none().font_medium().child(agent_type.clone()))
+        .when_some(model_chip(model, effort), |row, chip| {
+            row.child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .rounded(crate::material::radius_chip())
+                    .bg(cx.theme().muted.opacity(0.4))
+                    .text_color(muted)
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.5))
+                    .child(chip),
+            )
+        })
         .child(
             div()
                 .min_w_0()
