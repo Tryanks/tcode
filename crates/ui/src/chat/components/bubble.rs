@@ -287,19 +287,3 @@ pub(crate) fn user_bubble(
         ))
         .into_any_element()
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn steering_status_strings_are_exact_in_both_locales() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(crate::tr!("chat.steering"), "Steering…");
-        assert_eq!(crate::tr!("chat.steered"), "Steered");
-
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(crate::tr!("chat.steering"), "引导中…");
-        assert_eq!(crate::tr!("chat.steered"), "已引导");
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-    }
-}

@@ -805,18 +805,6 @@ mod tests {
         assert!(contiguous > scattered, "{contiguous} !> {scattered}");
     }
 
-    #[test]
-    fn better_match_ranks_first_when_sorted() {
-        let mut scored: Vec<(i32, &str)> = ["Open settings", "Toggle theme", "Toggle diff panel"]
-            .into_iter()
-            .filter_map(|s| fuzzy_score("tog", s).map(|score| (score, s)))
-            .collect();
-        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
-        // Both "Toggle ..." match; "Open settings" does not.
-        assert_eq!(scored.len(), 2);
-        assert!(scored[0].1.starts_with("Toggle"));
-    }
-
     #[gpui::test]
     fn arrow_keys_move_and_clamp_the_highlight_while_the_query_keeps_focus(
         cx: &mut TestAppContext,

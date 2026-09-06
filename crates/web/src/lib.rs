@@ -92,7 +92,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
                 ])
                 .expect("failed to load browser fonts");
-            tcode_mobile::run_with_host(cx, Rc::new(WebHost::new()));
+            tcode_mobile::run_with_host(cx, Rc::new(WebHost));
             if let Some(document) = window().document() {
                 if let Some(loading) = document.get_element_by_id("loading") {
                     loading.remove();

@@ -12,8 +12,6 @@ use std::time::Duration;
 pub struct Spinner {
     size: Size,
     icon: Icon,
-    speed: Duration,
-    easing: Box<dyn Fn(f32) -> f32>,
     color: Option<Hsla>,
 }
 
@@ -21,8 +19,6 @@ impl Spinner {
     pub fn new() -> Self {
         Self {
             size: Size::Medium,
-            speed: Duration::from_secs_f64(0.8),
-            easing: Box::new(ease_in_out),
             icon: Icon::new(IconName::Loader),
             color: None,
         }
@@ -35,11 +31,6 @@ impl Spinner {
 
     pub fn color(mut self, color: Hsla) -> Self {
         self.color = Some(color);
-        self
-    }
-
-    pub fn ease(mut self, easing: impl Fn(f32) -> f32 + 'static) -> Self {
-        self.easing = Box::new(easing);
         self
     }
 }
@@ -65,7 +56,9 @@ impl RenderOnce for Spinner {
                 .when_some(self.color, |icon, color| icon.text_color(color))
                 .with_animation(
                     "circle",
-                    Animation::new(self.speed).repeat().with_easing(self.easing),
+                    Animation::new(Duration::from_secs_f64(0.8))
+                        .repeat()
+                        .with_easing(ease_in_out),
                     |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
                 ),
         )

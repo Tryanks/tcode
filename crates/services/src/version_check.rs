@@ -49,23 +49,12 @@ pub enum FetchError {
     ResponseTooLarge,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Assessment {
-    UpToDate {
-        current: String,
-        latest: String,
-        release_url: String,
-    },
-    UpdateAvailable {
-        current: String,
-        latest: String,
-        release_url: String,
-    },
-    Unknown {
-        current: String,
-        latest: Option<String>,
-        release_url: Option<String>,
-    },
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Assessment {
+    pub latest: Option<String>,
+    pub release_url: Option<String>,
+    /// True only when a parsed release is newer and permitted by prerelease policy.
+    pub update_available: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,42 +78,27 @@ struct Version {
 /// in the app's stable/prerelease update policy. Provider CLI output is looser
 /// and is parsed independently in `provider_updates`.
 pub fn check(current: &str, fetched_release_json: Result<&[u8], FetchError>) -> Assessment {
-    let bytes = match fetched_release_json {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return Assessment::Unknown {
-                current: current.to_string(),
-                latest: None,
-                release_url: None,
-            };
-        }
+    let Some(release) = fetched_release_json
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Release>(bytes).ok())
+    else {
+        return Assessment::default();
     };
-    let release: Release = match serde_json::from_slice(bytes) {
-        Ok(release) => release,
-        Err(_) => {
-            return Assessment::Unknown {
-                current: current.to_string(),
-                latest: None,
-                release_url: None,
-            };
-        }
-    };
-    let latest = release.tag_name.trim_start_matches('v').to_string();
-    let unknown = || Assessment::Unknown {
-        current: current.to_string(),
-        latest: Some(latest.clone()),
-        release_url: Some(release.html_url.clone()),
+    let mut assessment = Assessment {
+        latest: Some(release.tag_name.trim_start_matches('v').to_string()),
+        release_url: Some(release.html_url),
+        update_available: false,
     };
     let Some(current_version) = parse_app_version(current) else {
-        return unknown();
+        return assessment;
     };
     let Some(latest_version) = parse_app_version(&release.tag_name) else {
-        return unknown();
+        return assessment;
     };
 
     // Preserve the release-metadata policy as well as the tag-based policy:
     // stable builds do not opt into releases GitHub marks as prereleases.
-    let update_available = (!release.prerelease || current.contains('-'))
+    assessment.update_available = (!release.prerelease || current.contains('-'))
         && if latest_version.prerelease && !current_version.prerelease {
             false
         } else {
@@ -137,19 +111,7 @@ pub fn check(current: &str, fetched_release_json: Result<&[u8], FetchError>) -> 
             }
         };
 
-    if update_available {
-        Assessment::UpdateAvailable {
-            current: current.to_string(),
-            latest,
-            release_url: release.html_url,
-        }
-    } else {
-        Assessment::UpToDate {
-            current: current.to_string(),
-            latest,
-            release_url: release.html_url,
-        }
-    }
+    assessment
 }
 
 fn parse_app_version(raw: &str) -> Option<Version> {
@@ -173,12 +135,6 @@ fn parse_app_version(raw: &str) -> Option<Version> {
     })
 }
 
-/// Internal compatibility seam used by provider probing. Update assessments
-/// and their tests use [`provider_updates::check`] directly.
-pub(crate) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
-    provider_updates::parse_version(text)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,65 +149,47 @@ mod tests {
     }
 
     #[test]
-    fn assesses_release_comparisons_through_check() {
-        assert!(matches!(
-            check("0.4.0", Ok(&release("v0.4.0", false))),
-            Assessment::UpToDate { latest, .. } if latest == "0.4.0"
-        ));
-        assert!(matches!(
-            check("0.4.0", Ok(&release("v0.4.1", false))),
-            Assessment::UpdateAvailable { latest, release_url, .. }
-                if latest == "0.4.1" && release_url == RELEASE_URL
-        ));
-        assert!(matches!(
-            check("0.4.1", Ok(&release("v0.4.0", false))),
-            Assessment::UpToDate { .. }
-        ));
+    fn assesses_release_comparisons_and_prerelease_policy() {
+        for (current, latest, prerelease, available) in [
+            ("0.4.0", "v0.4.0", false, false),
+            ("0.4.0", "v0.4.1", false, true),
+            ("0.4.1", "v0.4.0", false, false),
+            ("0.4.0", "v0.5.0-beta.1", true, false),
+            ("0.5.0-beta.1", "v0.5.0", false, true),
+            ("0.5.0-beta.1", "v0.6.0-beta.1", true, true),
+        ] {
+            let assessment = check(current, Ok(&release(latest, prerelease)));
+            assert_eq!(
+                assessment.update_available, available,
+                "{current} -> {latest}"
+            );
+            assert_eq!(
+                assessment.latest.as_deref(),
+                Some(latest.trim_start_matches('v'))
+            );
+            assert_eq!(assessment.release_url.as_deref(), Some(RELEASE_URL));
+        }
     }
 
     #[test]
-    fn applies_prerelease_policy_through_check() {
-        assert!(matches!(
-            check("0.4.0", Ok(&release("v0.5.0-beta.1", true))),
-            Assessment::UpToDate { .. }
-        ));
-        assert!(matches!(
-            check("0.5.0-beta.1", Ok(&release("v0.5.0", false))),
-            Assessment::UpdateAvailable { .. }
-        ));
-        assert!(matches!(
-            check("0.5.0-beta.1", Ok(&release("v0.6.0-beta.1", true))),
-            Assessment::UpdateAvailable { .. }
-        ));
+    fn malformed_versions_preserve_release_details_without_announcing_updates() {
+        for (current, latest) in [("0.4", "v0.4.1"), ("0.4.0", "latest")] {
+            let assessment = check(current, Ok(&release(latest, false)));
+            assert!(!assessment.update_available);
+            assert_eq!(
+                assessment.latest.as_deref(),
+                Some(latest.trim_start_matches('v'))
+            );
+            assert_eq!(assessment.release_url.as_deref(), Some(RELEASE_URL));
+        }
     }
 
     #[test]
-    fn malformed_versions_are_unknown_through_check() {
-        assert!(matches!(
-            check("0.4", Ok(&release("v0.4.1", false))),
-            Assessment::Unknown {
-                latest: Some(latest),
-                ..
-            } if latest == "0.4.1"
-        ));
-        assert!(matches!(
-            check("0.4.0", Ok(&release("latest", false))),
-            Assessment::Unknown {
-                latest: Some(latest),
-                ..
-            } if latest == "latest"
-        ));
-    }
-
-    #[test]
-    fn fetch_and_json_failures_are_unknown() {
-        assert!(matches!(
+    fn fetch_and_json_failures_leave_no_release_details() {
+        assert_eq!(
             check("0.4.0", Err(FetchError::Network)),
-            Assessment::Unknown { latest: None, .. }
-        ));
-        assert!(matches!(
-            check("0.4.0", Ok(b"not json")),
-            Assessment::Unknown { .. }
-        ));
+            Assessment::default()
+        );
+        assert_eq!(check("0.4.0", Ok(b"not json")), Assessment::default());
     }
 }

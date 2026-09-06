@@ -372,13 +372,3 @@ pub(super) fn status_window_level() -> isize {
     // SAFETY: STATUS_WINDOW_LEVEL_KEY is a documented CGWindowLevelKey value.
     unsafe { CGWindowLevelForKey(STATUS_WINDOW_LEVEL_KEY) as isize }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn libdispatch_main_queue_symbol_is_available() {
-        assert!(!dispatch_get_main_queue().is_null());
-    }
-}

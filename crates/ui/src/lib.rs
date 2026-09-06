@@ -1,9 +1,11 @@
+#[cfg(feature = "desktop")]
 mod acp_panel;
 #[cfg(feature = "desktop")]
 mod add_project_dialog;
 #[cfg(not(feature = "desktop"))]
 #[path = "add_project_dialog_portable.rs"]
 mod add_project_dialog;
+#[cfg(feature = "desktop")]
 mod app_activation;
 pub mod assets;
 mod attachments;
@@ -24,6 +26,7 @@ pub mod markdown;
 // The phone shell paints with the same material tiers as the desktop
 // (docs/mobile-design.md §3.0), so the module is part of the crate API.
 pub mod material;
+#[cfg(feature = "desktop")]
 mod orchestrate_settings;
 pub mod overlay;
 pub mod palette;
@@ -35,9 +38,13 @@ mod preview_panel;
 #[path = "preview_panel_portable.rs"]
 mod preview_panel;
 pub(crate) mod provider_card;
+#[cfg(feature = "desktop")]
 mod provider_dialog;
+#[cfg(feature = "desktop")]
 mod provider_model_picker;
+#[cfg(feature = "desktop")]
 pub(crate) mod provider_models;
+#[cfg(feature = "desktop")]
 pub(crate) mod provider_status;
 #[cfg(feature = "remote")]
 pub mod remote;

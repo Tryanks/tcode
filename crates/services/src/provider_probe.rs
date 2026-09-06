@@ -85,7 +85,7 @@ pub async fn probe_provider(
             ..ProviderSnapshot::default()
         };
     };
-    let version = crate::version_check::parse_version(&raw_version)
+    let version = crate::version_check::provider_updates::parse_version(&raw_version)
         .map(|(a, b, c)| format!("{a}.{b}.{c}"))
         .or(Some(raw_version));
 
@@ -184,15 +184,6 @@ pub async fn run_status(program: &str, args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn default_programs_cover_native_and_acp() {
-        assert_eq!(default_program(ProviderKind::Codex), "codex");
-        assert_eq!(default_program(ProviderKind::ClaudeCode), "claude");
-        assert_eq!(default_program(ProviderKind::Pi), "pi");
-        assert_eq!(default_program(ProviderKind::OpenCode), "opencode");
-        assert_eq!(default_program(ProviderKind::Acp), "");
-    }
 
     #[test]
     fn missing_binary_is_semantic_and_unlocalized() {

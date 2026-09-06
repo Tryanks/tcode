@@ -12,7 +12,4 @@ rio-vt = { version = "0.5.24", features = ["graphics"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-] }
+portable-pty = "0.9"

@@ -23,78 +23,29 @@ pub struct CheckInput<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Assessment {
-    UpToDate {
-        current: String,
-        latest: String,
-        install_source: InstallSource,
-    },
-    UpdateAvailable {
-        current: String,
-        latest: String,
-        install_source: InstallSource,
-    },
-    Unknown {
-        current: Option<String>,
-        latest: Option<String>,
-        install_source: InstallSource,
-    },
+pub struct Assessment {
+    pub current: Option<String>,
+    pub latest: Option<String>,
+    pub install_source: InstallSource,
+    /// True only when both versions were parsed and latest is newer.
+    pub update_available: bool,
 }
 
-/// Assess a provider update from facts gathered by the runtime's approved
-/// process helpers. This owns source inference, parsing, normalization, and
-/// comparison, but never spawns a process.
+/// Assess a provider update from process-runner facts without spawning a process.
+/// Unparseable output is retained for display, but never announces an update.
 pub fn check(input: CheckInput<'_>) -> Assessment {
-    let install_source = input
-        .binary_path
-        .map(detect_install_source)
-        .unwrap_or_default();
-    let current = input.installed_output.map(normalize_version);
-    let latest = input.latest_output.map(normalize_version);
-
-    let Some(installed_output) = input.installed_output else {
-        return Assessment::Unknown {
-            current,
-            latest,
-            install_source,
-        };
-    };
-    let Some(latest_output) = input.latest_output else {
-        return Assessment::Unknown {
-            current,
-            latest,
-            install_source,
-        };
-    };
-    let Some(installed_version) = parse_version(installed_output) else {
-        return Assessment::Unknown {
-            current,
-            latest,
-            install_source,
-        };
-    };
-    let Some(latest_version) = parse_version(latest_output) else {
-        return Assessment::Unknown {
-            current,
-            latest,
-            install_source,
-        };
-    };
-    let current = format_version(installed_version);
-    let latest = format_version(latest_version);
-
-    if latest_version > installed_version {
-        Assessment::UpdateAvailable {
-            current,
-            latest,
-            install_source,
-        }
-    } else {
-        Assessment::UpToDate {
-            current,
-            latest,
-            install_source,
-        }
+    let installed_version = input.installed_output.and_then(parse_version);
+    let latest_version = input.latest_output.and_then(parse_version);
+    Assessment {
+        current: input.installed_output.map(normalize_version),
+        latest: input.latest_output.map(normalize_version),
+        install_source: input
+            .binary_path
+            .map(detect_install_source)
+            .unwrap_or_default(),
+        update_available: installed_version
+            .zip(latest_version)
+            .is_some_and(|(installed, latest)| latest > installed),
     }
 }
 
@@ -188,7 +139,7 @@ pub fn update_command_string(provider: ProviderKind, source: InstallSource) -> O
 /// Unlike app release tags, provider CLIs historically accept `MAJOR.MINOR`
 /// and default the absent patch to zero. That behavior predates this refactor
 /// and is preserved for compatibility with provider output shapes.
-pub(super) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     text.split_whitespace().find_map(parse_version_token)
 }
 
@@ -237,50 +188,24 @@ mod tests {
         ];
         for (installed, latest, available, normalized) in cases {
             let assessment = check(input(Some(installed), Some(latest)));
-            match assessment {
-                Assessment::UpdateAvailable { current, .. } if available => {
-                    assert_eq!(current, normalized)
-                }
-                Assessment::UpToDate { current, .. } if !available => {
-                    assert_eq!(current, normalized)
-                }
-                other => panic!("unexpected assessment for {installed}: {other:?}"),
-            }
+            assert_eq!(assessment.update_available, available, "{installed}");
+            assert_eq!(assessment.current.as_deref(), Some(normalized));
         }
     }
 
     #[test]
     fn invalid_and_missing_outputs_are_unknown() {
-        assert!(matches!(
-            check(input(None, Some("2.0.0"))),
-            Assessment::Unknown {
-                current: None,
-                latest: Some(latest),
-                ..
-            } if latest == "2.0.0"
-        ));
-        assert!(matches!(
-            check(input(Some("1.0.0"), None)),
-            Assessment::Unknown {
-                current: Some(current),
-                latest: None,
-                ..
-            } if current == "1.0.0"
-        ));
-        assert!(matches!(
-            check(input(Some("build 5"), Some("2.0.0"))),
-            Assessment::Unknown {
-                current: Some(current),
-                ..
-            } if current == "build 5"
-        ));
-        assert!(matches!(
-            check(input(Some("1.0.0"), Some("nonsense"))),
-            Assessment::Unknown {
-                latest: Some(latest),
-                ..
-            } if latest == "nonsense"
-        ));
+        for (installed, latest) in [
+            (None, Some("2.0.0")),
+            (Some("1.0.0"), None),
+            (Some("build 5"), Some("2.0.0")),
+            (Some("1.0.0"), Some("nonsense")),
+        ] {
+            let assessment = check(input(installed, latest));
+            assert!(!assessment.update_available);
+            assert_eq!(assessment.current.as_deref(), installed);
+            assert_eq!(assessment.latest.as_deref(), latest);
+        }
     }
 
     #[test]
@@ -316,10 +241,7 @@ mod tests {
                 installed_output: Some("1.0.0"),
                 latest_output: Some("1.0.0"),
             });
-            assert!(matches!(
-                assessment,
-                Assessment::UpToDate { install_source, .. } if install_source == expected
-            ));
+            assert_eq!(assessment.install_source, expected, "{path:?}");
         }
     }
 
@@ -413,13 +335,7 @@ mod tests {
             installed_output: Some("1.0.0"),
             latest_output: Some("1.0.0"),
         });
-        assert!(matches!(
-            assessment,
-            Assessment::UpToDate {
-                install_source: InstallSource::Npm,
-                ..
-            }
-        ));
+        assert_eq!(assessment.install_source, InstallSource::Npm);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

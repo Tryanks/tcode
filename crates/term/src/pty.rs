@@ -1,8 +1,7 @@
 //! Host-side pseudoterminal ownership and raw byte transport.
 
 use std::{
-    collections::VecDeque,
-    io::{self, ErrorKind, Read as _, Write as _},
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -13,14 +12,23 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+mod windows;
+
 #[cfg(unix)]
 use rio_vt::corcovado::unix::UnixReady;
+use rio_vt::event::WindowSize;
+#[cfg(unix)]
 use rio_vt::{
     corcovado::{Events, Poll, PollOpt, Ready, Token, channel},
-    event::WindowSize,
     teletypewriter::{
         self as tty, ChildEvent, EventedPty as _, ProcessReadWrite as _, WinsizeBuilder,
     },
+};
+#[cfg(unix)]
+use std::{
+    collections::VecDeque,
+    io::{Read as _, Write as _},
 };
 
 use crate::{
@@ -28,6 +36,7 @@ use crate::{
     sync::MutexExt as _,
 };
 
+#[cfg(unix)]
 const READ_BUFFER_SIZE: usize = 0x10_0000;
 
 fn initial_window_size() -> WindowSize {
@@ -66,7 +75,6 @@ struct Shared {
     process_name: Option<String>,
     working_directory: Option<PathBuf>,
     exited: bool,
-    exit_code: Option<i32>,
     command_line: String,
     command_label: Option<String>,
 }
@@ -113,11 +121,13 @@ impl PtyHandle {
     ) -> io::Result<Self> {
         let cwd = cwd.as_ref().to_path_buf();
         let size = initial_window_size();
+        #[cfg(unix)]
         let environment = Some(vec![
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("COLORTERM".to_string(), "truecolor".to_string()),
             ("TERM_PROGRAM".to_string(), "tcode".to_string()),
         ]);
+        #[cfg(unix)]
         let working_directory = Some(cwd.to_string_lossy().into_owned());
         #[cfg(unix)]
         let mut pty = with_pty_creation(|| {
@@ -132,17 +142,6 @@ impl PtyHandle {
                 size.height,
             )
         })?;
-        #[cfg(windows)]
-        let pty = with_pty_creation(|| {
-            tty::create_pty(
-                Some(&program),
-                args,
-                &working_directory,
-                environment,
-                size.cols,
-                size.rows,
-            )
-        })?;
         #[cfg(unix)]
         let pty_info = Arc::new(pty_info::PtyInfo::new(
             pty.reader().try_clone()?,
@@ -154,28 +153,39 @@ impl PtyHandle {
             process_name: None,
             working_directory: Some(cwd.clone()),
             exited: false,
-            exit_code: None,
             command_line: String::new(),
             command_label: None,
         }));
         let refresh_running = Arc::new(AtomicBool::new(false));
         let (notifications, events) = async_channel::unbounded();
-        let (sender, receiver) = channel::channel();
-        let poll = Poll::new()?;
-        let command_sender = PtyCommandSender { sender };
-        let event_loop = RawPtyEventLoop {
-            pty,
-            poll,
-            receiver,
-            notifications: notifications.clone(),
-            shared: shared.clone(),
-            pty_info: pty_info.clone(),
-            refresh_running: refresh_running.clone(),
-            drain_on_exit: true,
+        #[cfg(unix)]
+        let command_sender = {
+            let (sender, receiver) = channel::channel();
+            let poll = Poll::new()?;
+            let command_sender = PtyCommandSender { sender };
+            let event_loop = RawPtyEventLoop {
+                pty,
+                poll,
+                receiver,
+                notifications: notifications.clone(),
+                shared: shared.clone(),
+                pty_info: pty_info.clone(),
+                refresh_running: refresh_running.clone(),
+            };
+            thread::Builder::new()
+                .name("tcode-pty-io".into())
+                .spawn(move || event_loop.run())?;
+            command_sender
         };
-        thread::Builder::new()
-            .name("tcode-pty-io".into())
-            .spawn(move || event_loop.run())?;
+        #[cfg(windows)]
+        let command_sender = windows::spawn(
+            &cwd,
+            program,
+            args,
+            size,
+            shared.clone(),
+            notifications.clone(),
+        )?;
 
         schedule_process_refresh(
             pty_info.clone(),
@@ -243,10 +253,6 @@ impl PtyHandle {
         self.shared.lock_recover().exited
     }
 
-    pub fn exit_code(&self) -> Option<i32> {
-        self.shared.lock_recover().exit_code
-    }
-
     pub(crate) fn write_input_inner(&self, bytes: Vec<u8>) -> io::Result<bool> {
         let label_changed = {
             let mut shared = self.shared.lock_recover();
@@ -308,11 +314,18 @@ enum PtyCommand {
     Resize(WindowSize),
     Kill,
     Shutdown,
+    #[cfg(windows)]
+    ChildExited,
+    #[cfg(windows)]
+    OutputClosed,
 }
 
 #[derive(Clone)]
 struct PtyCommandSender {
+    #[cfg(unix)]
     sender: channel::Sender<PtyCommand>,
+    #[cfg(windows)]
+    sender: mpsc::Sender<PtyCommand>,
 }
 
 impl PtyCommandSender {
@@ -323,6 +336,7 @@ impl PtyCommandSender {
     }
 }
 
+#[cfg(unix)]
 struct RawPtyEventLoop {
     pty: tty::Pty,
     poll: Poll,
@@ -331,9 +345,9 @@ struct RawPtyEventLoop {
     shared: Arc<Mutex<Shared>>,
     pty_info: Arc<pty_info::PtyInfo>,
     refresh_running: Arc<AtomicBool>,
-    drain_on_exit: bool,
 }
 
+#[cfg(unix)]
 impl RawPtyEventLoop {
     fn run(mut self) {
         let mut tokens = (0..).map(Token::from);
@@ -385,10 +399,8 @@ impl RawPtyEventLoop {
                 }
                 if token == self.pty.child_event_token() {
                     if let Some(ChildEvent::Exited(exit_code)) = self.pty.next_child_event() {
-                        if self.drain_on_exit {
-                            let _ = self.read_output(&mut buffer);
-                        }
-                        self.record_exit(exit_code);
+                        let _ = self.read_output(&mut buffer);
+                        record_exit(&self.shared, &self.notifications, exit_code);
                         break 'event_loop;
                     }
                 } else if token == self.pty.read_token() || token == self.pty.write_token() {
@@ -518,22 +530,27 @@ impl RawPtyEventLoop {
         }
         Ok(())
     }
-
-    fn record_exit(&self, exit_code: Option<i32>) {
-        let mut shared = self.shared.lock_recover();
-        shared.exited = true;
-        shared.exit_code = exit_code;
-        shared.command_label = None;
-        drop(shared);
-        let _ = self.notifications.try_send(PtyEvent::Exited { exit_code });
-    }
 }
 
+fn record_exit(
+    shared: &Mutex<Shared>,
+    notifications: &async_channel::Sender<PtyEvent>,
+    exit_code: Option<i32>,
+) {
+    let mut shared = shared.lock_recover();
+    shared.exited = true;
+    shared.command_label = None;
+    drop(shared);
+    let _ = notifications.try_send(PtyEvent::Exited { exit_code });
+}
+
+#[cfg(unix)]
 struct PendingWrite {
     bytes: Vec<u8>,
     written: usize,
 }
 
+#[cfg(unix)]
 impl PendingWrite {
     fn new(bytes: Vec<u8>) -> Self {
         Self { bytes, written: 0 }
@@ -548,18 +565,6 @@ impl PendingWrite {
 fn terminate_pty(pty: &tty::Pty) -> io::Result<()> {
     tty::kill_pid(*pty.child.pid);
     Ok(())
-}
-
-#[cfg(windows)]
-fn terminate_pty(pty: &tty::Pty) -> io::Result<()> {
-    let result = unsafe {
-        windows_sys::Win32::System::Threading::TerminateProcess(pty.child_watcher().raw_handle(), 1)
-    };
-    if result != 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
 }
 
 fn refresh_process_info(
@@ -686,7 +691,7 @@ pub(crate) fn with_pty_creation<T>(create: impl FnOnce() -> T) -> T {
     result
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn with_pty_creation<T>(create: impl FnOnce() -> T) -> T {
     create()
 }

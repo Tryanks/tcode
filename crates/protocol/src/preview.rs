@@ -1,4 +1,4 @@
-//! Portable preview reverse-RPC payloads, mirrored from preview-mcp.
+//! Shared preview reverse-RPC payloads used by clients and the MCP broker.
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PreviewRequest {

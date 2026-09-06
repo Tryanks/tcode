@@ -24,25 +24,6 @@ pub(crate) fn activity_row(
     compact: bool,
     live_reasoning: bool,
     expanded: bool,
-    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> AnyElement {
-    activity_row_with_command_detail(
-        entry,
-        compact,
-        live_reasoning,
-        expanded,
-        None,
-        on_toggle,
-        cx,
-    )
-}
-
-pub(crate) fn activity_row_with_command_detail(
-    entry: &TimelineEntry,
-    compact: bool,
-    live_reasoning: bool,
-    expanded: bool,
     command_detail: Option<AnyElement>,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
@@ -235,7 +216,6 @@ fn activity_detail(
     cx: &App,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
-    let mono = cx.theme().mono_font_family.clone();
     let detail = match &entry.content {
         EntryContent::Item(ItemContent::CommandExecution {
             command, output, ..
@@ -255,16 +235,14 @@ fn activity_detail(
                     crate::tr!("chat.input").into_owned(),
                     input_brief,
                     true,
-                    mono,
-                    muted,
+                    cx,
                 ))
                 .when_some(output.clone(), |detail, output| {
                     detail.child(activity_detail_section(
                         crate::tr!("chat.output").into_owned(),
-                        truncate_chars(&one_line(&output), 240),
+                        truncate_chars(&output, 240),
                         false,
-                        String::new().into(),
-                        muted,
+                        cx,
                     ))
                 })
                 .into_any_element()
@@ -329,26 +307,8 @@ fn activity_status_icon(icon: Icon, status: ItemStatus, cx: &App) -> AnyElement 
         .into_any_element()
 }
 
-fn activity_detail_section(
-    label: String,
-    text: String,
-    monospace: bool,
-    mono: SharedString,
-    muted: gpui::Hsla,
-) -> Div {
-    let lines = text
-        .split('\n')
-        .map(|line| {
-            div()
-                .w_full()
-                .line_height(px(18.))
-                .child(if line.is_empty() {
-                    " ".to_string()
-                } else {
-                    line.to_string()
-                })
-        })
-        .collect::<Vec<_>>();
+fn activity_detail_section(label: String, text: String, monospace: bool, cx: &App) -> Div {
+    let muted = cx.theme().muted_foreground;
     v_flex()
         .w_full()
         .gap_1()
@@ -360,12 +320,19 @@ fn activity_detail_section(
                 .child(crate::material::tracked_uppercase(&label)),
         )
         .child(
-            v_flex()
+            div()
                 .w_full()
+                .line_height(px(18.))
                 .text_size(px(11.5))
                 .text_color(muted)
-                .when(monospace, |body| body.font_family(mono))
-                .children(lines),
+                .when(monospace, |body| {
+                    body.font_family(cx.theme().mono_font_family.clone())
+                })
+                .child(if text.is_empty() {
+                    " ".to_string()
+                } else {
+                    text
+                }),
         )
 }
 

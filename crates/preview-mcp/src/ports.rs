@@ -1,8 +1,7 @@
 //! Localhost dev-server discovery for the preview chrome's port quick-picks.
 //!
 //! We probe a fixed list of common dev ports by attempting a short loopback TCP
-//! connect (no extra deps, no `lsof`), plus a pure helper to turn a port into a
-//! URL.
+//! connect (no extra deps, no `lsof`).
 
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -25,19 +24,4 @@ pub fn scan_listening() -> Vec<u16> {
         .copied()
         .filter(|&port| is_listening(port))
         .collect()
-}
-
-/// The loopback URL for a dev-server port.
-pub fn url_for_port(port: u16) -> String {
-    format!("http://localhost:{port}/")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn url_for_port_formats_loopback() {
-        assert_eq!(url_for_port(3000), "http://localhost:3000/");
-    }
 }

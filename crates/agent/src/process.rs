@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use smol::channel::Receiver;
+pub(crate) use smol::unblock;
 
 use crate::AgentError;
 
@@ -33,10 +34,6 @@ pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
 /// exposes no `creation_flags`, so the flag rides in through the `From` impl.
 pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
     smol::process::Command::from(command(program))
-}
-
-pub(crate) async fn unblock<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
-    smol::unblock(f).await
 }
 
 pub(crate) async fn probe_version(
@@ -164,6 +161,7 @@ impl StderrTail {
         lines.push(line);
     }
 
+    /// Joins spawned readers; stop or reap their child before collecting diagnostics.
     pub(crate) fn append_to(&self, mut message: String, separator: &str) -> String {
         let tail = self.text();
         if !tail.trim().is_empty() {
@@ -179,5 +177,26 @@ impl StderrTail {
             let _ = reader.join();
         }
         self.lines.lock().unwrap().join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_reader_preserves_unicode_separators_inside_json_records() {
+        let record = "{\"text\":\"a\u{2028}b\"}";
+        let (lines, spawned) = spawn_line_reader(
+            std::io::Cursor::new(format!("{record}\n").into_bytes()),
+            "test-json-lines",
+            None,
+            true,
+        );
+        spawned.unwrap();
+        assert!(
+            matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == record)
+        );
+        assert!(matches!(lines.recv_blocking().unwrap(), ChildOutput::Eof));
     }
 }

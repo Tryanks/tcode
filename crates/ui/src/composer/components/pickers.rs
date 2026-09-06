@@ -80,10 +80,11 @@ impl Composer {
         // are gone, custom slugs are present, and the persisted order (plus
         // favorites-first) decides the sequence. When a third-party profile is
         // active, resolve against *its* card so its custom models are named.
-        let resolved = match &active_profile {
-            Some(id) => store.picker_models_for_profile(id),
-            None => composer_state.picker_models(provider),
-        };
+        let resolved = store.picker_models_for_profile(
+            active_profile
+                .as_deref()
+                .unwrap_or_else(|| tcode_core::settings::Settings::builtin_profile_id(provider)),
+        );
         let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
 
         // Build the filtered row list for the current frame. Favorites open
@@ -177,7 +178,7 @@ impl Composer {
             .collect();
         // Only the built-in profiles have a probed catalog that can still be
         // loading; a third-party profile shows its own slugs immediately.
-        let loading = composer_state.models_loading(provider)
+        let loading = store.models_loading(provider)
             && matches!(&rail, PickerRail::Profile(id) if tcode_core::settings::Settings::is_builtin_profile_id(id))
             && rows.is_empty()
             && query.is_empty();

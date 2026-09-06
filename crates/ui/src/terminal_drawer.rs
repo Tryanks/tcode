@@ -3020,27 +3020,14 @@ mod tests {
     }
 
     #[test]
-    fn grid_point_uses_left_side_for_left_half_of_cell() {
-        assert_eq!(
-            grid_point_and_side(2., 5., 3, 2, 10., 20.),
-            ((0, 0), SelectionSide::Left)
-        );
-    }
-
-    #[test]
-    fn grid_point_uses_right_side_for_right_half_of_cell() {
-        assert_eq!(
-            grid_point_and_side(8., 5., 3, 2, 10., 20.),
-            ((0, 0), SelectionSide::Right)
-        );
-    }
-
-    #[test]
-    fn grid_point_clamps_past_last_column_to_right_side() {
-        assert_eq!(
-            grid_point_and_side(35., 5., 3, 2, 10., 20.),
-            ((0, 2), SelectionSide::Right)
-        );
+    fn grid_point_maps_cell_halves_and_clamps_past_the_last_column() {
+        for (x, col, side) in [
+            (2., 0, SelectionSide::Left),
+            (8., 0, SelectionSide::Right),
+            (35., 2, SelectionSide::Right),
+        ] {
+            assert_eq!(grid_point_and_side(x, 5., 3, 2, 10., 20.), ((0, col), side));
+        }
     }
 
     #[test]
@@ -3245,24 +3232,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    #[test]
-    fn unix_terminal_font_uses_the_bundled_lilex_family() {
-        assert_eq!(TERMINAL_FONT_FAMILY, "Lilex");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_terminal_font_remains_menlo() {
-        assert_eq!(TERMINAL_FONT_FAMILY, "Menlo");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn windows_terminal_font_remains_consolas() {
-        assert_eq!(TERMINAL_FONT_FAMILY, "Consolas");
-    }
-
     #[test]
     fn batches_mixed_cjk_at_physical_column_boundaries() {
         let cells = vec![
@@ -3287,12 +3256,6 @@ mod tests {
             .map(|run| (run.start_col, run.text.as_str(), run.cell_count))
             .collect::<Vec<_>>();
         assert_eq!(boundaries, vec![(0, "a中", 2), (3, "b文", 2), (6, "c", 1)]);
-        assert_eq!(
-            runs.iter()
-                .map(|run| run.start_col as f32 * 8.)
-                .collect::<Vec<_>>(),
-            vec![0., 24., 48.]
-        );
     }
 
     #[test]

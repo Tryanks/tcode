@@ -209,53 +209,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_granted_maps_kinds() {
-        let status = PermissionStatus {
-            accessibility: true,
-            screen_recording: false,
-        };
-        assert!(status.granted(PermissionKind::Accessibility));
-        assert!(!status.granted(PermissionKind::ScreenRecording));
-        assert!(!status.all_granted());
-    }
-
-    #[test]
-    fn kind_serializes_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&PermissionKind::ScreenRecording).unwrap(),
-            "\"screen_recording\""
-        );
-    }
-
-    #[test]
-    fn first_grant_action_requests_permission() {
+    fn each_permission_requests_once_before_offering_settings() {
         let mut flow = PermissionGrantFlow::default();
-
-        assert_eq!(
-            flow.advance(PermissionKind::ScreenRecording),
-            PermissionGrantAction::Request
-        );
-    }
-
-    #[test]
-    fn repeated_grant_action_opens_settings() {
-        let mut flow = PermissionGrantFlow::default();
-        let _ = flow.advance(PermissionKind::ScreenRecording);
-
-        assert_eq!(
-            flow.advance(PermissionKind::ScreenRecording),
-            PermissionGrantAction::OpenSettings
-        );
-    }
-
-    #[test]
-    fn grant_flow_exposes_the_next_action() {
-        let mut flow = PermissionGrantFlow::default();
-        let _ = flow.advance(PermissionKind::ScreenRecording);
-
-        assert_eq!(
-            flow.action(PermissionKind::ScreenRecording),
-            PermissionGrantAction::OpenSettings
-        );
+        for kind in [
+            PermissionKind::Accessibility,
+            PermissionKind::ScreenRecording,
+        ] {
+            assert_eq!(flow.action(kind), PermissionGrantAction::Request);
+            assert_eq!(flow.advance(kind), PermissionGrantAction::Request);
+            assert_eq!(flow.action(kind), PermissionGrantAction::OpenSettings);
+            assert_eq!(flow.advance(kind), PermissionGrantAction::OpenSettings);
+        }
     }
 }

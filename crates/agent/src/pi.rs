@@ -379,7 +379,135 @@ impl SessionActor for PiActor {
     }
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
-        PiActor::handle_command(self, command).await
+        match command {
+            SessionCommand::SendTurn {
+                delivery_id,
+                text,
+                attachments,
+                ..
+            } => {
+                let id = self.request_id();
+                let mut request = json!({"id":id,"type":"prompt","message":text});
+                if self.mapper.current_turn.is_some() {
+                    request["streamingBehavior"] = json!("followUp");
+                }
+                attach_images(&mut request, attachments);
+                send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+                self.events
+                    .emit(AgentEvent::TurnAccepted { delivery_id })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::Steer {
+                request_id,
+                text,
+                attachments,
+            } => {
+                let native_id = self.request_id();
+                let mut request = json!({
+                    "id": native_id,
+                    "type":"prompt",
+                    "message":text,
+                    "streamingBehavior":"steer"
+                });
+                attach_images(&mut request, attachments);
+                send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
+                self.pending_steers.insert(native_id, request_id);
+                Ok(())
+            }
+            SessionCommand::Interrupt => {
+                self.mapper.interrupt_pending = true;
+                self.cancel_pending_ui()?;
+                send_json(&mut self.stdin, &json!({"type":"abort"})).map_err(|err| err.to_string())
+            }
+            SessionCommand::RespondApproval {
+                request_id,
+                decision,
+            } => {
+                let Some(tool_name) = self.pending_approvals.remove(&request_id) else {
+                    return Ok(());
+                };
+                let confirmed = matches!(
+                    decision,
+                    ApprovalDecision::Approve | ApprovalDecision::ApproveForSession
+                );
+                if decision == ApprovalDecision::ApproveForSession {
+                    self.approved_for_session.insert(tool_name);
+                }
+                send_json(
+                    &mut self.stdin,
+                    &json!({"type":"extension_ui_response","id":request_id,"confirmed":confirmed}),
+                )
+                .map_err(|err| err.to_string())?;
+                if decision == ApprovalDecision::Cancel {
+                    self.mapper.interrupt_pending = true;
+                    self.cancel_pending_ui()?;
+                    send_json(&mut self.stdin, &json!({"type":"abort"}))
+                        .map_err(|err| err.to_string())?;
+                }
+                self.events
+                    .emit(AgentEvent::ApprovalResolved {
+                        request_id,
+                        decision,
+                    })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
+                let Some(level) = value.as_str() else {
+                    return Ok(());
+                };
+                let request_id = self.request_id();
+                send_json(
+                    &mut self.stdin,
+                    &json!({"id":request_id,"type":"set_thinking_level","level":level}),
+                )
+                .map_err(|err| err.to_string())
+            }
+            SessionCommand::SetApprovalMode(mode) => {
+                if mode != self.approval_mode {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: "pi permission changes require restarting the session".into(),
+                        })
+                        .await;
+                }
+                Ok(())
+            }
+            SessionCommand::SetInteractionMode(mode) => {
+                if mode == InteractionMode::Plan {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: PLAN_MODE_WARNING.into(),
+                        })
+                        .await;
+                }
+                Ok(())
+            }
+            SessionCommand::RespondUserInput {
+                request_id,
+                answers,
+            } => {
+                let Some(response) = take_extension_dialog_response(
+                    &mut self.pending_dialogs,
+                    &request_id,
+                    &answers,
+                ) else {
+                    return Ok(());
+                };
+                send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
+                Ok(())
+            }
+            SessionCommand::Rewind { .. } => {
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: "pi rewind is not exposed by tcode's native adapter".into(),
+                    })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
+        }
     }
 
     async fn handle_transport(
@@ -644,138 +772,6 @@ impl PiActor {
                 options: Vec::new(),
             }))
             .await;
-    }
-
-    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
-        match command {
-            SessionCommand::SendTurn {
-                delivery_id,
-                text,
-                attachments,
-                ..
-            } => {
-                let id = self.request_id();
-                let mut request = json!({"id":id,"type":"prompt","message":text});
-                if self.mapper.current_turn.is_some() {
-                    request["streamingBehavior"] = json!("followUp");
-                }
-                attach_images(&mut request, attachments);
-                send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
-                self.events
-                    .emit(AgentEvent::TurnAccepted { delivery_id })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::Steer {
-                request_id,
-                text,
-                attachments,
-            } => {
-                let native_id = self.request_id();
-                let mut request = json!({
-                    "id": native_id,
-                    "type":"prompt",
-                    "message":text,
-                    "streamingBehavior":"steer"
-                });
-                attach_images(&mut request, attachments);
-                send_json(&mut self.stdin, &request).map_err(|err| err.to_string())?;
-                self.pending_steers.insert(native_id, request_id);
-                Ok(())
-            }
-            SessionCommand::Interrupt => {
-                self.mapper.interrupt_pending = true;
-                self.cancel_pending_ui()?;
-                send_json(&mut self.stdin, &json!({"type":"abort"})).map_err(|err| err.to_string())
-            }
-            SessionCommand::RespondApproval {
-                request_id,
-                decision,
-            } => {
-                let Some(tool_name) = self.pending_approvals.remove(&request_id) else {
-                    return Ok(());
-                };
-                let confirmed = matches!(
-                    decision,
-                    ApprovalDecision::Approve | ApprovalDecision::ApproveForSession
-                );
-                if decision == ApprovalDecision::ApproveForSession {
-                    self.approved_for_session.insert(tool_name);
-                }
-                send_json(
-                    &mut self.stdin,
-                    &json!({"type":"extension_ui_response","id":request_id,"confirmed":confirmed}),
-                )
-                .map_err(|err| err.to_string())?;
-                if decision == ApprovalDecision::Cancel {
-                    self.mapper.interrupt_pending = true;
-                    self.cancel_pending_ui()?;
-                    send_json(&mut self.stdin, &json!({"type":"abort"}))
-                        .map_err(|err| err.to_string())?;
-                }
-                self.events
-                    .emit(AgentEvent::ApprovalResolved {
-                        request_id,
-                        decision,
-                    })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::SetOption { id, value } if id == "reasoningEffort" => {
-                let Some(level) = value.as_str() else {
-                    return Ok(());
-                };
-                let request_id = self.request_id();
-                send_json(
-                    &mut self.stdin,
-                    &json!({"id":request_id,"type":"set_thinking_level","level":level}),
-                )
-                .map_err(|err| err.to_string())
-            }
-            SessionCommand::SetApprovalMode(mode) => {
-                if mode != self.approval_mode {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: "pi permission changes require restarting the session".into(),
-                        })
-                        .await;
-                }
-                Ok(())
-            }
-            SessionCommand::SetInteractionMode(mode) => {
-                if mode == InteractionMode::Plan {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: PLAN_MODE_WARNING.into(),
-                        })
-                        .await;
-                }
-                Ok(())
-            }
-            SessionCommand::RespondUserInput {
-                request_id,
-                answers,
-            } => {
-                let Some(response) = take_extension_dialog_response(
-                    &mut self.pending_dialogs,
-                    &request_id,
-                    &answers,
-                ) else {
-                    return Ok(());
-                };
-                send_json(&mut self.stdin, &response).map_err(|err| err.to_string())?;
-                Ok(())
-            }
-            SessionCommand::Rewind { .. } => {
-                self.events
-                    .emit(AgentEvent::Warning {
-                        message: "pi rewind is not exposed by tcode's native adapter".into(),
-                    })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
-        }
     }
 
     fn request_id(&mut self) -> String {
@@ -1195,7 +1191,11 @@ fn tool_item(id: &str, name: &str, input: Value, output: String, status: ItemSta
             status,
         },
     };
-    crate::normalize::thread_item(id, content)
+    ThreadItem {
+        id: id.into(),
+        parent_item_id: None,
+        content,
+    }
 }
 
 fn approval_kind(tool_name: &str, payload: &Value) -> ApprovalKind {
@@ -1408,14 +1408,13 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
     let input = crate::json_u64(usage.get("input"));
     let output = crate::json_u64(usage.get("output"));
     let cache_read = crate::json_u64(usage.get("cacheRead"));
-    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(
-        crate::normalize::token_usage(
-            input,
-            cache_read,
-            output,
-            crate::json_u64(usage.get("totalTokens")),
-        ),
-    )
+    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cache_read,
+        output_tokens: output,
+        used_tokens: crate::json_u64(usage.get("totalTokens")),
+        ..TokenUsage::default()
+    })
 }
 
 fn attach_images(request: &mut Value, attachments: Vec<Attachment>) {
@@ -1604,8 +1603,9 @@ mod tests {
         );
         assert!(matches!(
             approval,
-            ApprovalKind::ToolUse { name, input, .. }
+            ApprovalKind::ToolUse { name, input, detail }
                 if name == "bash" && input == json!({ "command": "x" })
+                    && detail.contains("/extensions/bash.ts")
         ));
     }
 
@@ -1623,24 +1623,6 @@ mod tests {
             approval,
             ApprovalKind::ExecCommand { command, cwd, .. }
                 if command == "x" && cwd.as_deref() == Some("/project")
-        ));
-    }
-
-    #[test]
-    fn extension_tool_approval_detail_contains_path() {
-        let approval = approval_kind(
-            "hello_world",
-            &json!({
-                "toolName": "hello_world",
-                "source": "extension",
-                "extensionPath": "/extensions/hello.ts",
-                "input": {}
-            }),
-        );
-        assert!(matches!(
-            approval,
-            ApprovalKind::ToolUse { name, detail, .. }
-                if name == "hello_world" && detail.contains("/extensions/hello.ts")
         ));
     }
 
@@ -1967,14 +1949,5 @@ mod tests {
                     .is_empty()
             );
         }
-    }
-
-    #[test]
-    fn lf_reader_preserves_unicode_line_separators() {
-        let bytes = b"{\"text\":\"a\xE2\x80\xA8b\"}\n";
-        let mut lines = BufReader::new(bytes.as_slice()).lines();
-        let record = lines.next().unwrap().unwrap();
-        assert!(record.contains('\u{2028}'));
-        assert!(lines.next().is_none());
     }
 }

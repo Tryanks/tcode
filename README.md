@@ -196,9 +196,10 @@ crates/core              pure domain types and semantics
 crates/services          persistence, filesystem, process, git, import, and probes
 crates/runtime           sessions, providers, queues, orchestration, terminals,
                          and semantic events
-crates/i18n              the sole translation backend
+crates/ui/src/i18n.rs     translation backend
 crates/ui                GPUI views, assets, presentation, and localized rendering
-crates/app/src/main.rs   the sole binary and composition root
+crates/app/src/main.rs   desktop binary and composition root
+crates/headless          headless host binary
 crates/agent             provider clients and their canonical event model
 crates/term              terminal implementation (PTY, alacritty)
 crates/preview-mcp       MCP server exposing the preview browser to the agent

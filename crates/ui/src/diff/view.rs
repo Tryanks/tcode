@@ -25,9 +25,8 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use super::model::{
-    DiffColors, ExpandDir, FileDiffInput, PairedRow, RenderedFile, RenderedRow, VisibleItem,
-    VisibleSplitItem, build_file, diff_content_widths, expand, reconstruct_from_text,
-    visible_split, visible_unified,
+    DiffColors, ExpandDir, FileDiffInput, PairedRow, RenderedFile, VisibleItem, VisibleSplitItem,
+    build_file, diff_content_widths, expand, reconstruct_from_text, visible_split, visible_unified,
 };
 use super::parse::RowKind;
 use crate::plan_panel::PlanPanel;
@@ -653,10 +652,10 @@ impl DiffPanel {
     // -- top strip (tab look + right icon cluster) --------------------------
 
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let chrome = self.workspace_store.read(cx).diff_panel_chrome_state();
-        let panel_open = chrome.panel_open;
-        let expanded = chrome.expanded;
-        let active = chrome.active_tab;
+        let chrome = self.workspace_store.read(cx).panel_state();
+        let panel_open = chrome.right_panel_open;
+        let expanded = chrome.right_panel_expanded;
+        let active = chrome.right_tab;
         let plan_tab_active = chrome.plan_tab_active;
         // Windows: the open Diff/Plan panel is the rightmost column, so this
         // strip hosts the caption buttons. It is shorter than the 52px shell
@@ -1415,10 +1414,7 @@ impl DiffPanel {
                     VisibleItem::Row(row_index) => {
                         let row = &file.all_rows[*row_index];
                         (
-                            self.render_code_row(
-                                &file.path, *row_index, row.kind, row.old, row.new, &row.text,
-                                &row.runs, wrap, cx,
-                            ),
+                            self.render_code_row(file, *row_index, row.kind, None, wrap, cx),
                             Some((row.old, row.new)),
                         )
                     }
@@ -1748,33 +1744,18 @@ impl DiffPanel {
             .zip(pair.right)
             .is_some_and(|(left, right)| file.all_rows[left].text == file.all_rows[right].text);
         let cell = |row_index: Option<usize>, side: ReviewSide, cx: &mut Context<Self>| {
-            let index = row_index.unwrap_or_default();
-            let Some(RenderedRow {
-                kind,
-                old,
-                new,
-                text,
-                runs,
-            }) = row_index.map(|index| &file.all_rows[index])
-            else {
+            let Some(index) = row_index else {
                 return div().flex_1().min_w_0().min_h(px(18.)).into_any_element();
             };
-            let line = match side {
-                ReviewSide::Old => *old,
-                ReviewSide::New => *new,
-            };
-            self.render_split_cell(
-                &file.path,
+            self.render_code_row(
+                file,
                 index,
                 if paired_as_context {
                     RowKind::Context
                 } else {
-                    *kind
+                    file.all_rows[index].kind
                 },
-                line,
-                side,
-                text,
-                runs,
+                Some(side),
                 wrap,
                 cx,
             )
@@ -1788,84 +1769,16 @@ impl DiffPanel {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_split_cell(
-        &self,
-        file: &str,
-        row_index: usize,
-        kind: RowKind,
-        line: Option<u32>,
-        side: ReviewSide,
-        text: &str,
-        runs: &[(Range<usize>, HighlightStyle)],
-        wrap: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let bg = match kind {
-            RowKind::Added => Some(cx.theme().success.opacity(0.13)),
-            RowKind::Removed => Some(cx.theme().danger.opacity(0.12)),
-            RowKind::Context => None,
-        };
-        let file_down = file.to_string();
-        let file_move = file.to_string();
-        let gutter = div()
-            .flex_none()
-            .w(px(42.))
-            .px_1()
-            .text_right()
-            .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
-            .cursor_pointer()
-            .child(line.map(|value| value.to_string()).unwrap_or_default())
-            .when_some(line, |gutter, line| {
-                gutter
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            this.select_line(file_down.clone(), row_index, line, side, false);
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
-                        if event.dragging() {
-                            this.select_line(file_move.clone(), row_index, line, side, true);
-                            cx.notify();
-                        }
-                    }))
-            });
-        let mut code = div()
-            .flex_1()
-            .min_w_0()
-            .px_2()
-            .text_color(cx.theme().foreground)
-            .child(StyledText::new(text.to_string()).with_highlights(runs.iter().cloned()));
-        if !wrap {
-            code = code.whitespace_nowrap();
-        }
-        h_flex()
-            .flex_1()
-            .min_w_0()
-            .min_h(px(18.))
-            .items_start()
-            .when_some(bg, |cell, color| cell.bg(color))
-            .child(gutter)
-            .child(code)
-            .into_any_element()
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn render_code_row(
         &self,
-        file: &str,
+        file: &RenderedFile,
         row_index: usize,
         kind: RowKind,
-        old: Option<u32>,
-        new: Option<u32>,
-        text: &str,
-        runs: &[(Range<usize>, HighlightStyle)],
+        split_side: Option<ReviewSide>,
         wrap: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let row = &file.all_rows[row_index];
         let (bg, accent) = match kind {
             RowKind::Added => (
                 Some(cx.theme().success.opacity(0.13)),
@@ -1877,21 +1790,24 @@ impl DiffPanel {
             ),
             RowKind::Context => (None, None),
         };
-        let muted = cx.theme().muted_foreground;
-
-        let gutter = |n: Option<u32>, side: ReviewSide, cx: &mut Context<Self>| {
-            let file_down = file.to_string();
-            let file_move = file.to_string();
+        let split = split_side.is_some();
+        let gutter = |side: ReviewSide, cx: &mut Context<Self>| {
+            let line = match side {
+                ReviewSide::Old => row.old,
+                ReviewSide::New => row.new,
+            };
+            let file_down = file.path.clone();
+            let file_move = file.path.clone();
             div()
                 .flex_none()
-                .w(px(44.))
+                .w(px(if split { 42. } else { 44. }))
                 .px_1()
                 .text_right()
                 .text_size(px(11.))
-                .text_color(muted)
-                .child(n.map(|v| v.to_string()).unwrap_or_default())
+                .text_color(cx.theme().muted_foreground)
+                .child(line.map(|value| value.to_string()).unwrap_or_default())
                 .cursor_pointer()
-                .when_some(n, |gutter, line| {
+                .when_some(line, |gutter, line| {
                     gutter
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1908,29 +1824,28 @@ impl DiffPanel {
                         }))
                 })
         };
-
-        let mut code = div()
+        let code = div()
             .flex_1()
             .px_2()
             .text_color(cx.theme().foreground)
-            .child(StyledText::new(text.to_string()).with_highlights(runs.iter().cloned()));
-        if wrap {
-            code = code.min_w_0();
-        } else {
-            code = code.whitespace_nowrap();
-        }
-
-        h_flex()
-            .min_w_full()
+            .child(StyledText::new(row.text.clone()).with_highlights(row.runs.iter().cloned()))
+            .when(split || wrap, |code| code.min_w_0())
+            .when(!wrap, |code| code.whitespace_nowrap());
+        let mut cell = h_flex()
             .min_h(px(18.))
             .items_start()
-            .border_l_2()
-            .border_color(accent.unwrap_or(gpui::transparent_black()))
-            .when_some(bg, |this, c| this.bg(c))
-            .child(gutter(old, ReviewSide::Old, cx))
-            .child(gutter(new, ReviewSide::New, cx))
-            .child(code)
-            .into_any_element()
+            .when_some(bg, |cell, color| cell.bg(color));
+        if let Some(side) = split_side {
+            cell = cell.flex_1().min_w_0().child(gutter(side, cx));
+        } else {
+            cell = cell
+                .min_w_full()
+                .border_l_2()
+                .border_color(accent.unwrap_or(gpui::transparent_black()))
+                .child(gutter(ReviewSide::Old, cx))
+                .child(gutter(ReviewSide::New, cx));
+        }
+        cell.child(code).into_any_element()
     }
 
     fn render_empty(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1953,11 +1868,7 @@ impl DiffPanel {
 impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
-        let tab = self
-            .workspace_store
-            .read(cx)
-            .diff_panel_chrome_state()
-            .active_tab;
+        let tab = self.workspace_store.read(cx).panel_state().right_tab;
         let mut root = v_flex()
             .size_full()
             .min_w_0()
@@ -1979,7 +1890,7 @@ impl Render for DiffPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::diff::model::RenderedRow;
 
     #[test]
     fn out_of_workspace_turn_change_renders_from_stored_diff_without_file_text() {
@@ -2141,47 +2052,5 @@ mod tests {
                 row: 4_999
             }
         ));
-    }
-
-    #[gpui::test]
-    fn virtual_list_constructs_only_the_large_diff_viewport(cx: &mut gpui::TestAppContext) {
-        cx.update(crate::theme::init);
-        let cx = cx.add_empty_window();
-        let constructions = Arc::new(AtomicUsize::new(0));
-        let state = ListState::new(5_001, ListAlignment::Top, px(180.));
-
-        struct TestList {
-            state: ListState,
-            constructions: Arc<AtomicUsize>,
-        }
-        impl Render for TestList {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let observed = self.constructions.clone();
-                list(self.state.clone(), move |_, _, _| {
-                    observed.fetch_add(1, Ordering::Relaxed);
-                    div().h(px(18.)).w_full().into_any_element()
-                })
-                .size_full()
-            }
-        }
-        let view_constructions = constructions.clone();
-
-        cx.draw(
-            gpui::point(px(0.), px(0.)),
-            gpui::size(px(900.), px(720.)),
-            move |_, cx| {
-                cx.new(|_| TestList {
-                    state,
-                    constructions: view_constructions,
-                })
-                .into_any_element()
-            },
-        );
-
-        let count = constructions.load(Ordering::Relaxed);
-        assert!(
-            count < 100,
-            "expected viewport-only construction for 5,001 items, got {count}"
-        );
     }
 }

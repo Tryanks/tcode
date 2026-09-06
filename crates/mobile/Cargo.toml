@@ -19,7 +19,6 @@ gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
 tcode-ui = { path = "../ui", default-features = false }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
-agent = { path = "../agent", default-features = false }
 gpui-base = "0.6.0"
 chrono = "0.4"
 tcode-client = { path = "../client" }

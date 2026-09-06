@@ -54,7 +54,7 @@ pub async fn list_models(
             &[],
         )?;
         let result = (|| {
-            server.wait_healthy()?;
+            server.wait_healthy(Duration::from_secs(15))?;
             let provider_state = server.http.get_json("/provider")?;
             let mut catalog = server.http.get_json("/config/providers")?;
             reconcile_provider_catalog(&mut catalog, &provider_state);
@@ -86,7 +86,7 @@ async fn run_actor(
             return;
         }
     };
-    if let Err(err) = server.wait_healthy() {
+    if let Err(err) = server.wait_healthy(Duration::from_secs(15)) {
         server.stop();
         let _ = ready.send(Err(err)).await;
         return;
@@ -218,82 +218,6 @@ impl SessionActor for OpenCodeActor {
 
     fn command_failure_reason(&self) -> &'static str {
         "OpenCode REST command failed"
-    }
-
-    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
-        OpenCodeActor::handle_command(self, command).await
-    }
-
-    async fn handle_transport(
-        &mut self,
-        item: Result<SseOutput, smol::channel::RecvError>,
-    ) -> TransportOutcome {
-        match item {
-            Ok(SseOutput::Event(event)) => {
-                self.handle_event(&event).await;
-                TransportOutcome::Continue
-            }
-            Ok(SseOutput::Error(err)) => TransportOutcome::Fatal(err),
-            Ok(SseOutput::Eof) | Err(_) => {
-                TransportOutcome::Closed("OpenCode SSE stream closed".into())
-            }
-        }
-    }
-
-    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
-        self.shutdown().await;
-        reason.map(|reason| {
-            self.server
-                .stderr_tail
-                .append_to(reason, "\nserver output:\n")
-        })
-    }
-}
-
-impl OpenCodeActor {
-    async fn handle_event(&mut self, event: &Value) {
-        let mapped = self.mapper.on_event(event);
-        for request_id in mapped.permission_ids {
-            self.pending_permissions.insert(request_id);
-        }
-        for (request_id, question_ids) in mapped.question_requests {
-            self.pending_questions.insert(request_id, question_ids);
-        }
-        for (request_id, answers) in mapped.question_resolutions {
-            let Some(question_ids) = self.pending_questions.remove(&request_id) else {
-                continue;
-            };
-            self.events
-                .emit(AgentEvent::UserInputResolved {
-                    request_id,
-                    answers: answers
-                        .map(|answers| canonical_question_answers(&question_ids, &answers))
-                        .unwrap_or_default(),
-                })
-                .await;
-        }
-        let turn_completed = mapped
-            .events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
-        for event in mapped.events {
-            self.events.emit(event).await;
-        }
-        if turn_completed {
-            self.cancel_pending_questions().await;
-        }
-        if mapped.fetch_diff {
-            match self.fetch_diff() {
-                Ok(event) => self.events.emit(event).await,
-                Err(err) => {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: format!("failed to fetch OpenCode session diff: {err}"),
-                        })
-                        .await
-                }
-            }
-        }
     }
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
@@ -461,6 +385,78 @@ impl OpenCodeActor {
                 Ok(())
             }
             SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
+        }
+    }
+
+    async fn handle_transport(
+        &mut self,
+        item: Result<SseOutput, smol::channel::RecvError>,
+    ) -> TransportOutcome {
+        match item {
+            Ok(SseOutput::Event(event)) => {
+                self.handle_event(&event).await;
+                TransportOutcome::Continue
+            }
+            Ok(SseOutput::Error(err)) => TransportOutcome::Fatal(err),
+            Ok(SseOutput::Eof) | Err(_) => {
+                TransportOutcome::Closed("OpenCode SSE stream closed".into())
+            }
+        }
+    }
+
+    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
+        self.shutdown().await;
+        reason.map(|reason| {
+            self.server
+                .stderr_tail
+                .append_to(reason, "\nserver output:\n")
+        })
+    }
+}
+
+impl OpenCodeActor {
+    async fn handle_event(&mut self, event: &Value) {
+        let mapped = self.mapper.on_event(event);
+        for request_id in mapped.permission_ids {
+            self.pending_permissions.insert(request_id);
+        }
+        for (request_id, question_ids) in mapped.question_requests {
+            self.pending_questions.insert(request_id, question_ids);
+        }
+        for (request_id, answers) in mapped.question_resolutions {
+            let Some(question_ids) = self.pending_questions.remove(&request_id) else {
+                continue;
+            };
+            self.events
+                .emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: answers
+                        .map(|answers| canonical_question_answers(&question_ids, &answers))
+                        .unwrap_or_default(),
+                })
+                .await;
+        }
+        let turn_completed = mapped
+            .events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
+        for event in mapped.events {
+            self.events.emit(event).await;
+        }
+        if turn_completed {
+            self.cancel_pending_questions().await;
+        }
+        if mapped.fetch_diff {
+            match self.fetch_diff() {
+                Ok(event) => self.events.emit(event).await,
+                Err(err) => {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("failed to fetch OpenCode session diff: {err}"),
+                        })
+                        .await
+                }
+            }
         }
     }
 
@@ -942,7 +938,11 @@ fn open_code_tool_item(
             status,
         }
     };
-    crate::normalize::thread_item(id, content)
+    ThreadItem {
+        id: id.into(),
+        parent_item_id: None,
+        content,
+    }
 }
 
 fn map_permission(properties: &Value) -> Option<ApprovalRequest> {
@@ -1122,18 +1122,17 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
         crate::json_u64(tokens.get("output")).map(|output| output.saturating_add(reasoning));
     let cache_read = crate::json_u64(tokens.pointer("/cache/read"));
     let cache_write = crate::json_u64(tokens.pointer("/cache/write")).unwrap_or(0);
-    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(
-        crate::normalize::token_usage(
-            input,
-            cache_read,
-            output,
-            input
-                .unwrap_or(0)
-                .checked_add(output.unwrap_or(0))
-                .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
-                .and_then(|total| total.checked_add(cache_write)),
-        ),
-    )
+    (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cache_read,
+        output_tokens: output,
+        used_tokens: input
+            .unwrap_or(0)
+            .checked_add(output.unwrap_or(0))
+            .and_then(|total| total.checked_add(cache_read.unwrap_or(0)))
+            .and_then(|total| total.checked_add(cache_write)),
+        ..TokenUsage::default()
+    })
 }
 
 fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
@@ -1148,11 +1147,11 @@ fn map_snapshot_diffs(value: &Value) -> Vec<FileChange> {
                 Some("deleted") => FileChangeKind::Delete,
                 _ => FileChangeKind::Modify,
             };
-            Some(crate::normalize::file_change(
+            Some(FileChange {
                 path,
                 kind,
-                diff.get("patch").and_then(Value::as_str).map(str::to_owned),
-            ))
+                diff: diff.get("patch").and_then(Value::as_str).map(str::to_owned),
+            })
         })
         .collect()
 }
@@ -1427,8 +1426,8 @@ impl OpenCodeServer {
         })
     }
 
-    fn wait_healthy(&mut self) -> Result<(), AgentError> {
-        let deadline = Instant::now() + Duration::from_secs(15);
+    fn wait_healthy(&mut self, timeout: Duration) -> Result<(), AgentError> {
+        let deadline = Instant::now() + timeout;
         let mut last_error = None;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
@@ -1452,6 +1451,8 @@ impl OpenCodeServer {
             }
             std::thread::sleep(Duration::from_millis(75));
         }
+        // Tail readers need EOF before append_to joins them for final diagnostics.
+        self.stop();
         Err(AgentError::Protocol(self.stderr_tail.append_to(
             format!(
                 "timed out waiting for OpenCode health: {}",
@@ -1744,6 +1745,58 @@ fn opencode_config_content(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn health_timeout_stops_the_child_before_draining_its_output() {
+        let dir =
+            std::env::temp_dir().join(format!("agent-opencode-health-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // OpenCodeServer passes `serve` as argv[1]; sh reads this script without
+        // needing a generated executable. The final line is flushed only at EOF.
+        std::fs::write(
+            dir.join("serve"),
+            "printf 'OpenCode health stalled\nfinal startup detail' >&2\n: > ready\nexec sleep 5\n",
+        )
+        .unwrap();
+        let mut server = OpenCodeServer::spawn(
+            Some(Path::new("/bin/sh")),
+            &dir,
+            &LaunchEnv::default(),
+            ApprovalMode::FullAccess,
+            &[],
+            &[],
+        )
+        .unwrap();
+        let started = Instant::now();
+        while !dir.join("ready").exists() {
+            if started.elapsed() > Duration::from_secs(2) {
+                server.stop();
+                std::fs::remove_dir_all(&dir).unwrap();
+                panic!("test child did not reach its startup stall");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let error = server.wait_healthy(Duration::from_millis(100)).unwrap_err();
+        let status = server.child.try_wait().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // The child has a finite lifetime so a regression fails within five
+        // seconds instead of leaving the test stuck in the output-reader join.
+        assert!(
+            status.is_some_and(|status| !status.success()),
+            "stalled child was not stopped"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("timed out waiting for OpenCode health"),
+            "{message}"
+        );
+        assert!(
+            message.contains("OpenCode health stalled\nfinal startup detail"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn maps_recorded_sse_fixture_and_filters_other_sessions() {
         let mut mapper = OpenCodeMapper::new("ses_target".into());
@@ -1933,7 +1986,7 @@ mod tests {
     }
 
     #[test]
-    fn translates_ordered_multi_question_answers_and_cancellation() {
+    fn orders_multi_question_answers_and_ignores_unrelated_questions() {
         let question_ids = vec!["que_1:0".into(), "que_1:1".into(), "que_1:2".into()];
         let answers = serde_json::Map::from_iter([
             ("que_1:2".into(), json!("free text")),
@@ -1941,18 +1994,8 @@ mod tests {
             ("unrelated".into(), json!("ignored")),
         ]);
         assert_eq!(
-            (!answers.is_empty()).then(|| native_question_answers(&question_ids, &answers)),
-            Some(vec![
-                vec!["Agent".into(), "Core".into()],
-                Vec::new(),
-                vec!["free text".into()]
-            ])
-        );
-        let empty_answers = serde_json::Map::new();
-        assert_eq!(
-            (!empty_answers.is_empty())
-                .then(|| native_question_answers(&question_ids, &empty_answers)),
-            None
+            native_question_answers(&question_ids, &answers),
+            vec![vec!["Agent", "Core"], Vec::new(), vec!["free text"]]
         );
     }
 

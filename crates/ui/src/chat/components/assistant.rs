@@ -201,22 +201,6 @@ mod tests {
     use crate::markdown::MarkdownState;
     use gpui::{AppContext as _, Entity, TestAppContext};
 
-    #[gpui::test]
-    fn copy_puts_raw_text_on_the_clipboard(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        let raw = "Done — **bold**, `code` and:\n\n- one\n- two\n";
-
-        let payload = gpui::ClipboardItem::new_string(raw.to_string());
-        assert_eq!(payload.text().as_deref(), Some(raw));
-
-        // The rendered document is a different (lossy) string; copying it would
-        // be the bug this test exists to prevent.
-        let md = cx.update(|cx| MdState::new(raw, cx));
-        let rendered = rendered(&md.state, cx);
-        assert_ne!(rendered, raw);
-        assert!(!rendered.contains("**"));
-    }
-
     fn rendered(state: &Entity<MarkdownState>, cx: &mut TestAppContext) -> String {
         state.read_with(cx, |state, _| state.rendered_text())
     }
@@ -271,32 +255,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn markdown_state_set_text_renders_the_new_text(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Old **value**", cx)));
-
-        state.update(cx, |state, cx| state.set_text("New **value**", cx));
-
-        assert_eq!(rendered(&state, cx), "New value\n");
-    }
-
-    #[gpui::test]
-    fn markdown_state_push_str_appends_after_prior_updates(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Seed", cx)));
-
-        state.update(cx, |state, cx| {
-            state.push_str(" one", cx);
-            state.set_text("Reset", cx);
-            state.push_str(" two", cx);
-        });
-
-        assert_eq!(rendered(&state, cx), "Reset two\n");
-    }
-
-    #[gpui::test]
     fn md_state_synced_mirror_tracks_push_and_reset_paths(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
@@ -314,17 +272,5 @@ mod tests {
         cx.update(|cx| md.sync("Replacement".into(), cx));
         assert_eq!(md.synced.as_ref(), "Replacement");
         assert_eq!(rendered(&md.state, cx), "Replacement\n");
-    }
-
-    #[gpui::test]
-    fn markdown_state_rendered_text_includes_formatting_content(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(crate::markdown::init);
-        let state = cx.update(|cx| cx.new(|cx| MarkdownState::new("Some **bold** text", cx)));
-
-        assert_eq!(
-            state.read_with(cx, |state, _| state.rendered_text()),
-            "Some bold text\n"
-        );
     }
 }

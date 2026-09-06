@@ -59,12 +59,23 @@ impl RootInfo {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[schemars(rename = "FindRootsParams")]
 pub struct RootFilters {
+    /// Text to match against application and window titles.
+    #[serde(default)]
     pub text: Option<String>,
+    /// Application name to match.
+    #[serde(default)]
     pub app: Option<String>,
+    /// Application bundle identifier to match.
+    #[serde(default)]
     pub bundle_id: Option<String>,
+    /// Process identifier to match.
+    #[serde(default)]
     pub pid: Option<u32>,
+    /// Desktop root kind to match.
+    #[serde(default)]
     pub kind: Option<RootKind>,
 }
 
@@ -234,6 +245,11 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+#[cfg(target_os = "macos")]
+pub use macos::{observe, perform_action};
+#[cfg(target_os = "windows")]
+pub use windows::{observe, perform_action};
+
 /// Enumerate desktop roots. The host process is never a root: in-process
 /// accessibility queries run the host's own accessibility callbacks on the
 /// calling (non-main) thread, which aborts the app.
@@ -246,9 +262,9 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
         ));
     }
     #[cfg(target_os = "macos")]
-    let roots = macos::MacosBackend.list_roots(filters);
+    let roots = macos::list_roots(filters);
     #[cfg(target_os = "windows")]
-    let roots = windows::WindowsBackend.list_roots(filters);
+    let roots = windows::list_roots(filters);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let roots: Result<Vec<RootInfo>, BackendError> = Err(BackendError::unsupported());
     let mut roots = roots?;
@@ -256,39 +272,20 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
     Ok(roots)
 }
 
-pub fn observe(root: &RootInfo, request: ObserveRequest) -> Result<RootObservation, BackendError> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::MacosBackend.observe(root, request)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        windows::WindowsBackend.observe(root, request)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (root, request);
-        Err(BackendError::unsupported())
-    }
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn observe(
+    _root: &RootInfo,
+    _request: ObserveRequest,
+) -> Result<RootObservation, BackendError> {
+    Err(BackendError::unsupported())
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn perform_action(
-    root: &RootInfo,
-    request: &ActionRequest,
+    _root: &RootInfo,
+    _request: &ActionRequest,
 ) -> Result<ActionResult, BackendError> {
-    #[cfg(target_os = "macos")]
-    {
-        macos::MacosBackend.perform_action(root, request)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        windows::WindowsBackend.perform_action(root, request)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (root, request);
-        Err(BackendError::unsupported())
-    }
+    Err(BackendError::unsupported())
 }
 
 /// Process identifier of the currently frontmost macOS application.
@@ -502,7 +499,7 @@ pub fn windows_keycode_for_name(name: &str) -> Option<u16> {
     })
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bool {
     if filters.pid.is_some_and(|pid| root.pid != pid)
         || filters.kind.is_some_and(|kind| root.kind != kind)
@@ -527,7 +524,7 @@ pub(super) fn matches_root_filters(root: &RootInfo, filters: &RootFilters) -> bo
     })
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
@@ -537,7 +534,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delivery_serializes_as_snake_case() {
+    fn delivery_uses_stable_mcp_wire_labels() {
         for (delivery, expected) in [
             (Delivery::Ax, "ax"),
             (Delivery::BackgroundPid, "background_pid"),
@@ -546,6 +543,16 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(delivery).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn list_roots_rejects_the_host_process_before_platform_access() {
+        let error = list_roots(&RootFilters {
+            pid: Some(std::process::id()),
+            ..RootFilters::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code, BackendErrorCode::RootNotFound);
     }
 
     #[test]

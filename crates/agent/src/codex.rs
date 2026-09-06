@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use smol::channel::{Receiver, Sender};
 
 use crate::actor::{self, EventSenderExt as _, SessionActor, TransportOutcome};
-use crate::pending::{PendingRequests, drain_resolved};
 use crate::process::{ChildOutput, StderrTail, send_json as write_json, spawn_line_reader};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
@@ -392,6 +391,7 @@ enum ElicitFieldKind {
 
 struct Actor {
     child: Child,
+    stderr_tail: StderrTail,
     stdin: BufWriter<ChildStdin>,
     lines: Receiver<ChildOutput>,
     events: Sender<AgentEvent>,
@@ -409,10 +409,10 @@ struct Actor {
     approvals: HashMap<String, Value>,
     /// Pending `item/tool/requestUserInput` requests: canonical request_id → the
     /// server-to-client JSON-RPC id we must reply to.
-    user_inputs: PendingRequests<String, Value>,
+    user_inputs: HashMap<String, Value>,
     /// Pending `mcpServer/elicitation/request`s: canonical request_id → the
     /// JSON-RPC id and field typing needed to rebuild a typed response.
-    elicitations: PendingRequests<String, PendingElicitation>,
+    elicitations: HashMap<String, PendingElicitation>,
     items: HashMap<String, ThreadItem>,
     subagents: HashMap<String, CodexSubagent>,
     /// Stable parent capsule for each provider-native child thread. Codex 0.150
@@ -424,11 +424,6 @@ struct Actor {
     seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
-}
-
-struct CodexSessionActor {
-    actor: Actor,
-    stderr_tail: StderrTail,
 }
 
 #[derive(Debug, Clone)]
@@ -473,6 +468,7 @@ async fn run_actor(
 
     let mut actor = Actor {
         child,
+        stderr_tail,
         stdin,
         lines,
         events,
@@ -519,18 +515,18 @@ async fn run_actor(
         return;
     }
 
-    actor::run(CodexSessionActor { actor, stderr_tail }, &commands).await;
+    actor::run(actor, &commands).await;
 }
 
-impl SessionActor for CodexSessionActor {
+impl SessionActor for Actor {
     type TransportItem = ChildOutput;
 
     fn transport(&self) -> &Receiver<Self::TransportItem> {
-        &self.actor.lines
+        &self.lines
     }
 
     fn events(&self) -> &Sender<AgentEvent> {
-        &self.actor.events
+        &self.events
     }
 
     fn command_failure_reason(&self) -> &'static str {
@@ -538,7 +534,192 @@ impl SessionActor for CodexSessionActor {
     }
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
-        self.actor.handle_command(command).await
+        match command {
+            SessionCommand::SendTurn {
+                delivery_id,
+                text,
+                options,
+                attachments,
+            } => {
+                let params = self.build_turn_params(&text, options.as_ref(), &attachments);
+                self.request("turn/start", params, PendingRequest::TurnStart)?;
+                self.events
+                    .emit(AgentEvent::TurnAccepted { delivery_id })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::SetInteractionMode(mode) => {
+                // Turn-scoped in the protocol: store it; it applies on the next
+                // `turn/start.collaborationMode`.
+                self.interaction_mode = mode;
+                Ok(())
+            }
+            SessionCommand::Interrupt => {
+                let Some(turn_id) = self.active_turn.clone() else {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: "cannot interrupt: no active Codex turn".into(),
+                        })
+                        .await;
+                    return Ok(());
+                };
+                let thread_id = self.thread_id.clone();
+                self.request(
+                    "turn/interrupt",
+                    json!({ "threadId": thread_id, "turnId": turn_id }),
+                    PendingRequest::Interrupt,
+                )
+            }
+            SessionCommand::RespondApproval {
+                request_id,
+                decision,
+            } => {
+                let Some(json_rpc_id) = self.approvals.remove(&request_id) else {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("unknown Codex approval request id: {request_id}"),
+                        })
+                        .await;
+                    return Ok(());
+                };
+                // `cancel` is protocol-defined as deny + immediate turn
+                // interruption (S2 §4.2); the others map 1:1.
+                let wire_decision = match decision {
+                    ApprovalDecision::Approve => "accept",
+                    ApprovalDecision::ApproveForSession => "acceptForSession",
+                    ApprovalDecision::Deny => "decline",
+                    ApprovalDecision::Cancel => "cancel",
+                    // Agent-supplied option ids are an ACP concept; codex's
+                    // approvals are the fixed four. Treat as a decline so the
+                    // turn cannot hang on an unanswered request.
+                    ApprovalDecision::Option(ref id) => {
+                        log::warn!("codex: unexpected ACP option decision {id}; declining");
+                        "decline"
+                    }
+                };
+                send_json(
+                    &mut self.stdin,
+                    &json!({ "id": json_rpc_id, "result": { "decision": wire_decision } }),
+                )
+                .map_err(|e| e.to_string())?;
+                self.events
+                    .emit(AgentEvent::ApprovalResolved {
+                        request_id,
+                        decision,
+                    })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::RespondUserInput {
+                request_id,
+                answers,
+            } => {
+                if let Some(json_rpc_id) = self.user_inputs.remove(&request_id) {
+                    // Native result shape: `{answers: {<qid>: {answers: [<strings>]}}}`
+                    // — a single string is wrapped into a 1-element array (S2 §3.2).
+                    let mut wire_answers = serde_json::Map::new();
+                    for (qid, value) in &answers {
+                        wire_answers
+                            .insert(qid.clone(), json!({ "answers": strings(Some(value)) }));
+                    }
+                    send_json(
+                        &mut self.stdin,
+                        &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else if let Some(pending) = self.elicitations.remove(&request_id) {
+                    let result = elicitation_result(&pending.fields, &answers);
+                    send_json(
+                        &mut self.stdin,
+                        &json!({ "id": pending.rpc_id, "result": result }),
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("unknown Codex user-input request id: {request_id}"),
+                        })
+                        .await;
+                    return Ok(());
+                }
+                self.events
+                    .emit(AgentEvent::UserInputResolved {
+                        request_id,
+                        answers,
+                    })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::SetApprovalMode(mode) => {
+                // The app-server binds approvalPolicy × sandbox at thread
+                // start/resume; there is no thread-level permissions-update
+                // request. Signal the UI to fall back to a resume-restart (the
+                // fresh thread/resume carries the new mode), mirroring the
+                // model-switch path.
+                self.events
+                    .emit(AgentEvent::Warning {
+                        message: format!(
+                            "codex: applying approval mode {mode:?} requires a session restart"
+                        ),
+                    })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::SetOption { id, .. } => {
+                log::debug!("codex: ignoring ACP-only SetOption {id}");
+                Ok(())
+            }
+            SessionCommand::Steer {
+                request_id,
+                text,
+                attachments,
+            } => {
+                // Native same-turn steering: `turn/steer` injects the message
+                // into the ALREADY-RUNNING turn (the model picks it up at its
+                // next input checkpoint) and resolves with the *same* turnId —
+                // no new turn is started, so there is no extra `turn/started`
+                // and our turn accounting stays intact.
+                //
+                // `expectedTurnId` is a required precondition: the app-server
+                // rejects the request when it does not match the active turn,
+                // which is exactly the race we want to lose loudly rather than
+                // silently start a second turn.
+                let Some(turn_id) = self.active_turn.clone() else {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: "cannot steer: no active Codex turn".into(),
+                        })
+                        .await;
+                    return Ok(());
+                };
+                let thread_id = self.thread_id.clone();
+                self.request(
+                    "turn/steer",
+                    json!({
+                        "threadId": thread_id,
+                        "expectedTurnId": turn_id,
+                        "input": user_input(&text, &attachments),
+                    }),
+                    PendingRequest::Steer(request_id),
+                )
+            }
+            SessionCommand::Rewind {
+                checkpoint_id,
+                mode,
+            } => {
+                self.events
+                    .emit(AgentEvent::RewindFailed {
+                        checkpoint_id,
+                        mode,
+                        error:
+                            "Codex app-server has no stable native file-and-conversation rewind API"
+                                .into(),
+                    })
+                    .await;
+                Ok(())
+            }
+            SessionCommand::Shutdown => Ok(()),
+        }
     }
 
     async fn handle_transport(
@@ -547,11 +728,11 @@ impl SessionActor for CodexSessionActor {
     ) -> TransportOutcome {
         match item {
             Ok(ChildOutput::Line(line)) => {
-                self.actor.handle_line(&line).await;
+                self.handle_line(&line).await;
                 TransportOutcome::Continue
             }
             Ok(ChildOutput::Eof) | Err(_) => {
-                let status = self.actor.child.try_wait().ok().flatten();
+                let status = self.child.try_wait().ok().flatten();
                 TransportOutcome::Closed(match status {
                     Some(status) => format!("codex app-server exited with {status}"),
                     None => "codex app-server closed stdout".into(),
@@ -562,11 +743,11 @@ impl SessionActor for CodexSessionActor {
     }
 
     async fn settle_shutdown(&mut self) {
-        self.actor.settle_pending_user_inputs_on_shutdown().await;
+        self.settle_pending_user_inputs_on_shutdown().await;
     }
 
     async fn teardown(mut self, reason: Option<String>) -> Option<String> {
-        stop_child(&mut self.actor.child, self.actor.stdin);
+        stop_child(&mut self.child, self.stdin);
         reason.map(|reason| describe_child_failure(reason, None, &mut self.stderr_tail))
     }
 }
@@ -1024,195 +1205,6 @@ impl Actor {
             self.service_tier
         );
         params
-    }
-
-    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
-        match command {
-            SessionCommand::SendTurn {
-                delivery_id,
-                text,
-                options,
-                attachments,
-            } => {
-                let params = self.build_turn_params(&text, options.as_ref(), &attachments);
-                self.request("turn/start", params, PendingRequest::TurnStart)?;
-                self.events
-                    .emit(AgentEvent::TurnAccepted { delivery_id })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::SetInteractionMode(mode) => {
-                // Turn-scoped in the protocol: store it; it applies on the next
-                // `turn/start.collaborationMode`.
-                self.interaction_mode = mode;
-                Ok(())
-            }
-            SessionCommand::Interrupt => {
-                let Some(turn_id) = self.active_turn.clone() else {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: "cannot interrupt: no active Codex turn".into(),
-                        })
-                        .await;
-                    return Ok(());
-                };
-                let thread_id = self.thread_id.clone();
-                self.request(
-                    "turn/interrupt",
-                    json!({ "threadId": thread_id, "turnId": turn_id }),
-                    PendingRequest::Interrupt,
-                )
-            }
-            SessionCommand::RespondApproval {
-                request_id,
-                decision,
-            } => {
-                let Some(json_rpc_id) = self.approvals.remove(&request_id) else {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: format!("unknown Codex approval request id: {request_id}"),
-                        })
-                        .await;
-                    return Ok(());
-                };
-                // `cancel` is protocol-defined as deny + immediate turn
-                // interruption (S2 §4.2); the others map 1:1.
-                let wire_decision = match decision {
-                    ApprovalDecision::Approve => "accept",
-                    ApprovalDecision::ApproveForSession => "acceptForSession",
-                    ApprovalDecision::Deny => "decline",
-                    ApprovalDecision::Cancel => "cancel",
-                    // Agent-supplied option ids are an ACP concept; codex's
-                    // approvals are the fixed four. Treat as a decline so the
-                    // turn cannot hang on an unanswered request.
-                    ApprovalDecision::Option(ref id) => {
-                        log::warn!("codex: unexpected ACP option decision {id}; declining");
-                        "decline"
-                    }
-                };
-                send_json(
-                    &mut self.stdin,
-                    &json!({ "id": json_rpc_id, "result": { "decision": wire_decision } }),
-                )
-                .map_err(|e| e.to_string())?;
-                self.events
-                    .emit(AgentEvent::ApprovalResolved {
-                        request_id,
-                        decision,
-                    })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::RespondUserInput {
-                request_id,
-                answers,
-            } => {
-                if let Some(json_rpc_id) = self.user_inputs.remove(&request_id) {
-                    // Native result shape: `{answers: {<qid>: {answers: [<strings>]}}}`
-                    // — a single string is wrapped into a 1-element array (S2 §3.2).
-                    let mut wire_answers = serde_json::Map::new();
-                    for (qid, value) in &answers {
-                        wire_answers
-                            .insert(qid.clone(), json!({ "answers": strings(Some(value)) }));
-                    }
-                    send_json(
-                        &mut self.stdin,
-                        &json!({ "id": json_rpc_id, "result": { "answers": wire_answers } }),
-                    )
-                    .map_err(|e| e.to_string())?;
-                } else if let Some(pending) = self.elicitations.remove(&request_id) {
-                    let result = elicitation_result(&pending.fields, &answers);
-                    send_json(
-                        &mut self.stdin,
-                        &json!({ "id": pending.rpc_id, "result": result }),
-                    )
-                    .map_err(|e| e.to_string())?;
-                } else {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: format!("unknown Codex user-input request id: {request_id}"),
-                        })
-                        .await;
-                    return Ok(());
-                }
-                self.events
-                    .emit(AgentEvent::UserInputResolved {
-                        request_id,
-                        answers,
-                    })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::SetApprovalMode(mode) => {
-                // The app-server binds approvalPolicy × sandbox at thread
-                // start/resume; there is no thread-level permissions-update
-                // request. Signal the UI to fall back to a resume-restart (the
-                // fresh thread/resume carries the new mode), mirroring the
-                // model-switch path.
-                self.events
-                    .emit(AgentEvent::Warning {
-                        message: format!(
-                            "codex: applying approval mode {mode:?} requires a session restart"
-                        ),
-                    })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::SetOption { id, .. } => {
-                log::debug!("codex: ignoring ACP-only SetOption {id}");
-                Ok(())
-            }
-            SessionCommand::Steer {
-                request_id,
-                text,
-                attachments,
-            } => {
-                // Native same-turn steering: `turn/steer` injects the message
-                // into the ALREADY-RUNNING turn (the model picks it up at its
-                // next input checkpoint) and resolves with the *same* turnId —
-                // no new turn is started, so there is no extra `turn/started`
-                // and our turn accounting stays intact.
-                //
-                // `expectedTurnId` is a required precondition: the app-server
-                // rejects the request when it does not match the active turn,
-                // which is exactly the race we want to lose loudly rather than
-                // silently start a second turn.
-                let Some(turn_id) = self.active_turn.clone() else {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: "cannot steer: no active Codex turn".into(),
-                        })
-                        .await;
-                    return Ok(());
-                };
-                let thread_id = self.thread_id.clone();
-                self.request(
-                    "turn/steer",
-                    json!({
-                        "threadId": thread_id,
-                        "expectedTurnId": turn_id,
-                        "input": user_input(&text, &attachments),
-                    }),
-                    PendingRequest::Steer(request_id),
-                )
-            }
-            SessionCommand::Rewind {
-                checkpoint_id,
-                mode,
-            } => {
-                self.events
-                    .emit(AgentEvent::RewindFailed {
-                        checkpoint_id,
-                        mode,
-                        error:
-                            "Codex app-server has no stable native file-and-conversation rewind API"
-                                .into(),
-                    })
-                    .await;
-                Ok(())
-            }
-            SessionCommand::Shutdown => Ok(()),
-        }
     }
 
     async fn handle_line(&mut self, line: &str) {
@@ -1814,25 +1806,21 @@ impl Actor {
     /// Settle every outstanding native user-input request and MCP elicitation
     /// on teardown, replying with the protocol's empty/cancel outcome.
     async fn settle_pending_user_inputs_on_shutdown(&mut self) {
-        let mut pending = drain_resolved(&mut self.user_inputs)
-            .into_iter()
-            .map(|(request_id, rpc_id, event)| {
-                (request_id, rpc_id, json!({ "answers": {} }), event)
-            })
-            .collect::<Vec<_>>();
-        pending.extend(drain_resolved(&mut self.elicitations).into_iter().map(
-            |(request_id, pending, event)| {
-                (
-                    request_id,
-                    pending.rpc_id,
-                    json!({ "action": "cancel" }),
-                    event,
-                )
-            },
-        ));
-        for (_request_id, rpc_id, result, event) in pending {
+        let pending = self
+            .user_inputs
+            .drain()
+            .map(|(request_id, rpc_id)| (request_id, rpc_id, json!({ "answers": {} })))
+            .chain(self.elicitations.drain().map(|(request_id, pending)| {
+                (request_id, pending.rpc_id, json!({ "action": "cancel" }))
+            }));
+        for (request_id, rpc_id, result) in pending {
             let _ = send_json(&mut self.stdin, &json!({ "id": rpc_id, "result": result }));
-            self.events.emit(event).await;
+            self.events
+                .emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: serde_json::Map::new(),
+                })
+                .await;
         }
     }
 
@@ -2409,14 +2397,14 @@ fn map_file_change(change: &Value) -> Option<FileChange> {
         }
         _ => FileChangeKind::Modify,
     };
-    Some(crate::normalize::file_change(
-        change.get("path").and_then(Value::as_str)?,
+    Some(FileChange {
+        path: change.get("path").and_then(Value::as_str)?.to_owned(),
         kind,
-        change
+        diff: change
             .get("diff")
             .and_then(Value::as_str)
             .map(str::to_owned),
-    ))
+    })
 }
 
 fn map_usage(value: &Value) -> Option<TokenUsage> {
@@ -2426,12 +2414,11 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         context_window: value.get("modelContextWindow").and_then(Value::as_u64),
         total_processed_tokens,
-        ..crate::normalize::token_usage(
-            last.get("inputTokens").and_then(Value::as_u64),
-            last.get("cachedInputTokens").and_then(Value::as_u64),
-            last.get("outputTokens").and_then(Value::as_u64),
-            last.get("totalTokens").and_then(Value::as_u64),
-        )
+        input_tokens: last.get("inputTokens").and_then(Value::as_u64),
+        cached_input_tokens: last.get("cachedInputTokens").and_then(Value::as_u64),
+        output_tokens: last.get("outputTokens").and_then(Value::as_u64),
+        used_tokens: last.get("totalTokens").and_then(Value::as_u64),
+        ..TokenUsage::default()
     })
 }
 
@@ -2514,6 +2501,7 @@ mod tests {
         (
             Actor {
                 child,
+                stderr_tail: StderrTail::default(),
                 stdin,
                 lines: line_rx,
                 events: event_tx,
@@ -3023,22 +3011,18 @@ mod tests {
 
     #[test]
     fn turn_input_carries_image_entries() {
-        let (mut actor, _events) = test_actor();
-        actor.model = Some("gpt-5-codex".into());
         let attachments = vec![Attachment {
             media_type: "image/png".into(),
             data_base64: "AAAA".into(),
             source_path: None,
         }];
-        let params = actor.build_turn_params("what color?", None, &attachments);
-        let input = params["input"].as_array().unwrap();
+        let payload = user_input("what color?", &attachments);
+        let input = payload.as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "text");
         assert_eq!(input[0]["text"], "what color?");
         assert_eq!(input[1]["type"], "image");
         assert_eq!(input[1]["url"], "data:image/png;base64,AAAA");
-        let _ = actor.child.kill();
-        let _ = actor.child.wait();
     }
 
     #[test]
@@ -3160,19 +3144,6 @@ mod tests {
         assert!(message.contains("Cannot find module"), "{message}");
         assert!(message.contains("exit status: 1"), "{message}");
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn token_usage_reads_total_processed() {
-        let usage = map_usage(&json!({
-            "last": {"inputTokens": 100, "outputTokens": 20, "totalTokens": 120},
-            "total": {"totalTokens": 5000},
-            "modelContextWindow": 200000
-        }))
-        .unwrap();
-        assert_eq!(usage.used_tokens, Some(120));
-        assert_eq!(usage.total_processed_tokens, Some(5000));
-        assert_eq!(usage.context_window, Some(200000));
     }
 
     #[test]
@@ -3620,6 +3591,7 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, Some(2));
         assert_eq!(usage.output_tokens, Some(4));
         assert_eq!(usage.used_tokens, Some(12));
+        assert_eq!(usage.total_processed_tokens, Some(123));
         assert_eq!(usage.context_window, Some(200000));
     }
 

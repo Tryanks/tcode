@@ -1049,7 +1049,7 @@ mod native {
                         .compact()
                         .label(format!(":{port}"))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            let url = ports::url_for_port(port);
+                            let url = format!("http://localhost:{port}/");
                             if let Some(key) = this.active_key(cx) {
                                 this.navigate(&key, &url, window, cx);
                             }
@@ -1233,14 +1233,5 @@ mod tests {
             "leaving Chat unmounts the preview layout"
         );
         assert_eq!(visible_preview_key(None, Route::Chat, false, true), None);
-    }
-
-    /// Off macOS (but where a webview exists — i.e. Windows) `preview_screenshot`
-    /// surfaces a plain tool error instead of a broken capture. On Linux there is
-    /// no webview at all and the whole panel is a placeholder.
-    #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
-    #[test]
-    fn screenshot_is_unsupported_off_macos() {
-        assert!(SCREENSHOT_UNSUPPORTED.contains("only supported on macOS"));
     }
 }

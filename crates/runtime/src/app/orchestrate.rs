@@ -50,13 +50,6 @@ impl AppState {
     ) {
         self.next_preview_request += 1;
         let request_id = self.next_preview_request;
-        let request = match serde_json::to_value(broker.op).and_then(serde_json::from_value) {
-            Ok(request) => request,
-            Err(error) => {
-                let _ = broker.reply.try_send(Err(error.to_string()));
-                return;
-            }
-        };
         self.preview_pending.insert(request_id, broker.reply);
         cx.emit(HostEvent::Domain(EventEnvelope {
             request_id: None,
@@ -66,7 +59,7 @@ impl AppState {
             event: ServerEvent::PreviewRequest {
                 request_id,
                 session_id: broker.session_id,
-                request,
+                request: broker.op,
             },
         }));
         let host = cx.clone();
@@ -87,11 +80,6 @@ impl AppState {
         response: Result<tcode_protocol::PreviewResponse, String>,
     ) {
         if let Some(reply) = self.preview_pending.remove(&request_id) {
-            let response = response.and_then(|response| {
-                serde_json::to_value(response)
-                    .and_then(serde_json::from_value)
-                    .map_err(|error| error.to_string())
-            });
             let _ = reply.try_send(response);
         }
     }
@@ -809,11 +797,7 @@ impl AppState {
         child.meta = meta;
         child.draft = false;
         self.residents.parked.insert(thread_id.clone(), child);
-        self.schedule_timeline_load(
-            thread_id,
-            TimelineLoadTarget::Background { mark_idle: true },
-            cx,
-        );
+        self.schedule_timeline_load(thread_id, TimelineLoadTarget::Background, cx);
     }
 
     pub(super) fn handle_orchestrate_status(

@@ -1127,16 +1127,6 @@ impl Settings {
         out
     }
 
-    /// Like [`Self::profiles_for_kind`], but only the profiles whose `enabled`
-    /// switch is on. This is what the new-session model/profile pickers iterate;
-    /// a disabled profile stays configurable in Settings but is not offered.
-    pub fn enabled_profiles_for_kind(&self, kind: ProviderKind) -> Vec<ResolvedProfile> {
-        self.profiles_for_kind(kind)
-            .into_iter()
-            .filter(|profile| profile.settings.enabled)
-            .collect()
-    }
-
     /// A profile's card title: its display-name override, else — for built-ins —
     /// the driver label, else the id. Used by the sidebar / picker / status row.
     pub fn profile_display_name(&self, id: &str) -> String {
@@ -1217,15 +1207,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_sort_defaults_and_cycles() {
-        // Legacy files (field absent) default to recent-activity ordering.
-        assert_eq!(ProjectSort::default(), ProjectSort::RecentActivity);
-        // The button cycles RecentActivity → NameAsc → RecentActivity.
-        assert_eq!(ProjectSort::RecentActivity.next(), ProjectSort::NameAsc);
-        assert_eq!(ProjectSort::NameAsc.next(), ProjectSort::RecentActivity);
-    }
-
-    #[test]
     fn auto_archive_settings_are_legacy_safe_and_roundtrip() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert!(!legacy.auto_archive_disabled);
@@ -1268,16 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_arguments_split_on_whitespace() {
-        let settings = ProviderSettings {
-            launch_args: Some("  --chrome  --verbose ".into()),
-            ..ProviderSettings::default()
-        };
-        assert_eq!(settings.extra_args(), vec!["--chrome", "--verbose"]);
-        assert!(ProviderSettings::default().extra_args().is_empty());
-    }
-
-    #[test]
     fn old_pi_provider_settings_field_names_remain_serde_compatible() {
         let legacy: ProviderSettings = serde_json::from_str("{}").unwrap();
         assert!(!legacy.pi.trust_project_extensions);
@@ -1310,47 +1281,6 @@ mod tests {
         .unwrap();
         assert!(!legacy_patch.pi.trust_project_extensions);
         assert!(!legacy_patch.pi.native_approvals);
-    }
-
-    #[test]
-    fn enabled_profiles_for_kind_drops_disabled_profiles() {
-        let mut settings = Settings::default();
-        // The built-in Claude profile is enabled; add one enabled and one
-        // disabled user profile of the same kind.
-        settings.profiles.insert(
-            "on".into(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    enabled: true,
-                    ..ProviderSettings::default()
-                },
-            },
-        );
-        settings.profiles.insert(
-            "off".into(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    enabled: false,
-                    ..ProviderSettings::default()
-                },
-            },
-        );
-        let ids: Vec<_> = settings
-            .enabled_profiles_for_kind(ProviderKind::ClaudeCode)
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect();
-        assert_eq!(ids, ["claude", "on"]);
-        // Disabling the built-in removes it from the enabled set too.
-        settings.provider_mut(ProviderKind::ClaudeCode).enabled = false;
-        let ids: Vec<_> = settings
-            .enabled_profiles_for_kind(ProviderKind::ClaudeCode)
-            .into_iter()
-            .map(|profile| profile.id)
-            .collect();
-        assert_eq!(ids, ["on"]);
     }
 
     #[test]

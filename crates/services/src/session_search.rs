@@ -174,9 +174,7 @@ fn searchable_item_text(content: &ItemContent) -> Option<String> {
         ItemContent::FileChange { changes, .. } => Some(join_parts(
             changes.iter().map(|change| change.path.as_str()),
         )),
-        ItemContent::ToolCall { name, input, .. } => {
-            Some(format!("{name} {}", compact_json(input)))
-        }
+        ItemContent::ToolCall { name, input, .. } => Some(format!("{name} {input}")),
         ItemContent::Subagent {
             agent_type,
             description,
@@ -194,10 +192,6 @@ fn searchable_item_text(content: &ItemContent) -> Option<String> {
         } => Some(format!("{provider_kind} {summary}")),
         ItemContent::Reasoning { .. } => None,
     }
-}
-
-fn compact_json(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_default()
 }
 
 fn join_parts<'a>(parts: impl Iterator<Item = &'a str>) -> String {

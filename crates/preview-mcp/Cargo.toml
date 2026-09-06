@@ -16,6 +16,7 @@ serde_json = "1"
 schemars = "1"
 log = "0.4"
 mcp-host = { path = "../mcp-host" }
+tcode-protocol = { path = "../protocol", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }

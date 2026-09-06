@@ -35,14 +35,8 @@ impl AppState {
         let commit_draft = self.resident(target_id).is_some_and(|active| {
             active.draft && !matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. })
         });
-        if commit_draft && let Err(err) = self.commit_draft(target_id, cx) {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
+        if commit_draft {
+            self.commit_draft(target_id, cx);
         }
 
         let Some(active) = self.resident_mut(target_id) else {
@@ -237,17 +231,7 @@ impl AppState {
 
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
-        if self.active_is_draft(target_id)
-            && let Err(err) = self.commit_draft(target_id, cx)
-        {
-            self.report_error(
-                RuntimeError::PersistSession {
-                    error: err.to_string(),
-                },
-                cx,
-            );
-            return;
-        }
+        self.commit_draft(target_id, cx);
 
         let Some(active) = self.resident_mut(target_id) else {
             return;

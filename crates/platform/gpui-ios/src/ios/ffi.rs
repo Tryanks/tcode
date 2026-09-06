@@ -249,11 +249,6 @@ pub fn insets() -> WindowInsets {
     host_metrics().insets()
 }
 
-/// Current UIKit safe-area insets in logical points.
-pub fn safe_area() -> Edges<gpui::Pixels> {
-    insets().safe_area
-}
-
 /// Shows or hides the UIKit software-keyboard proxy.
 pub fn set_keyboard_visible(visible: bool) {
     if visible {

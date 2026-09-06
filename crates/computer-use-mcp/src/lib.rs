@@ -14,9 +14,7 @@ pub mod state;
 pub mod tools;
 
 /// Return the frontmost application pid on macOS, or `None` elsewhere.
-pub fn frontmost_pid() -> Option<u32> {
-    backend::frontmost_pid()
-}
+pub use backend::frontmost_pid;
 
 /// A running computer-use MCP server and the bearer token required to access it.
 pub struct ComputerUseMcpServer {

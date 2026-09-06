@@ -1,6 +1,6 @@
 //! Persisted application settings presentation with core-owned semantics.
 
-pub use crate::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE};
+pub use crate::{LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, apply_locale};
 
 #[cfg(test)]
 static TEST_LOCALE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -26,12 +26,6 @@ impl Drop for TestLocaleGuard {
     fn drop(&mut self) {
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
-}
-
-/// Resolve the persisted override against the current system preference and
-/// update tcode's process-global locale.
-pub fn apply_locale(override_locale: Option<&str>) {
-    crate::apply_locale(override_locale);
 }
 
 pub use tcode_core::settings::{

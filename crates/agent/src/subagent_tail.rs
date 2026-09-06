@@ -337,7 +337,13 @@ mod tests {
                 if parent == "spawn-1" && text == "do it"
         ));
 
-        writeln!(file, r#"{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"working"}}]}}}}"#).unwrap();
+        write!(file, r#"{{"type":"assistant","message":{{"id":"m1","content":[{{"type":"text","text":"working"}}]}}}}"#).unwrap();
+        file.flush().unwrap();
+        assert!(
+            tail.read_appended().unwrap().is_empty(),
+            "partial record must wait for LF"
+        );
+        writeln!(file).unwrap();
         file.flush().unwrap();
         let second = tail.read_appended().unwrap();
         assert_eq!(second.len(), 1);

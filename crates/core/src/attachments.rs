@@ -62,9 +62,7 @@ pub fn validate_attachment(
 }
 
 /// Synthetic text sent when a message carries only images.
-pub fn image_only_message() -> &'static str {
-    "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]"
-}
+pub const IMAGE_ONLY_MESSAGE: &str = "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 
 #[cfg(test)]
 mod tests {

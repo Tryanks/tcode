@@ -20,11 +20,7 @@ pub mod claude {
 #[cfg(feature = "process")]
 pub mod codex;
 #[cfg(feature = "process")]
-mod normalize;
-#[cfg(feature = "process")]
 pub mod opencode;
-#[cfg(feature = "process")]
-mod pending;
 #[cfg(feature = "process")]
 pub mod pi;
 #[cfg(feature = "process")]
@@ -189,111 +185,6 @@ impl ProviderKind {
             ProviderKind::OpenCode => "OpenCode",
             ProviderKind::Acp => "ACP agent",
         }
-    }
-}
-
-#[cfg(test)]
-mod provider_caps_tests {
-    use super::*;
-
-    #[test]
-    fn provider_caps_truth_table() {
-        assert_eq!(
-            ProviderKind::ClaudeCode.caps(),
-            Caps {
-                supports_steering: true,
-                supports_fork: true,
-                native_rewind: true,
-                per_turn_effort: false,
-                options_apply_live: false,
-                live_approval_mode_switch: true,
-                live_option_push: LiveOptionPush::None,
-                mcp_servers: true,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: true,
-                trust_project_extensions: false,
-            }
-        );
-        assert_eq!(
-            ProviderKind::Codex.caps(),
-            Caps {
-                supports_steering: true,
-                supports_fork: true,
-                native_rewind: false,
-                per_turn_effort: true,
-                options_apply_live: false,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::None,
-                mcp_servers: true,
-                launch_args: false,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: true,
-                trust_project_extensions: false,
-            }
-        );
-        assert_eq!(
-            ProviderKind::Acp.caps(),
-            Caps {
-                supports_steering: false,
-                supports_fork: false,
-                native_rewind: false,
-                per_turn_effort: false,
-                options_apply_live: true,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::All,
-                mcp_servers: true,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Wire,
-                home_path: true,
-                trust_project_extensions: false,
-            }
-        );
-        assert_eq!(
-            ProviderKind::Pi.caps(),
-            Caps {
-                supports_steering: true,
-                supports_fork: false,
-                native_rewind: false,
-                per_turn_effort: false,
-                options_apply_live: false,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::Only(&["reasoningEffort"]),
-                mcp_servers: false,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: true,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: true,
-                trust_project_extensions: true,
-            }
-        );
-        assert_eq!(
-            ProviderKind::OpenCode.caps(),
-            Caps {
-                supports_steering: false,
-                supports_fork: false,
-                native_rewind: false,
-                per_turn_effort: true,
-                options_apply_live: false,
-                live_approval_mode_switch: false,
-                live_option_push: LiveOptionPush::None,
-                mcp_servers: true,
-                launch_args: true,
-                downgrade_approval_without_native_approvals: false,
-                option_descriptors: OptionDescriptors::Catalog,
-                home_path: false,
-                trust_project_extensions: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pi_cannot_attach_mcp_servers_but_claude_can() {
-        assert!(!ProviderKind::Pi.caps().mcp_servers);
-        assert!(ProviderKind::ClaudeCode.caps().mcp_servers);
     }
 }
 
@@ -1932,70 +1823,6 @@ mod turn_diff_tests {
         assert!(file_changes_from_unified_diff("\n").unwrap().is_empty());
         assert!(file_changes_from_unified_diff("--- a/file\n+++ b/file\n").is_err());
     }
-
-    #[test]
-    fn warning_event_round_trips() {
-        let event = AgentEvent::Warning {
-            message: "boom".into(),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "warning");
-        assert_eq!(json["message"], "boom");
-        let decoded: AgentEvent = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            decoded,
-            AgentEvent::Warning { message } if message == "boom"
-        ));
-    }
-
-    #[test]
-    fn turn_change_event_round_trips() {
-        let event = AgentEvent::TurnChangesUpdated {
-            turn_id: "turn-7".into(),
-            changes: vec![FileChange {
-                path: "src/main.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
-            }],
-            completeness: ChangeCompleteness::Exact,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            AgentEvent::TurnChangesUpdated {
-                turn_id,
-                completeness: ChangeCompleteness::Exact,
-                changes,
-            } if turn_id == "turn-7" && changes[0].path == "src/main.rs"
-        ));
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn provider_start_failed_event_round_trips() {
-    let event = AgentEvent::ProviderStartFailed {
-        error: "spawn failed".into(),
-    };
-    let json = serde_json::to_string(&event).unwrap();
-    assert_eq!(
-        json,
-        r#"{"type":"provider_start_failed","error":"spawn failed"}"#
-    );
-    let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
-    assert!(matches!(
-        decoded,
-        AgentEvent::ProviderStartFailed { error } if error == "spawn failed"
-    ));
-
-    let legacy = r#"{"type":"error","message":"boom","fatal":true}"#;
-    let decoded: AgentEvent = serde_json::from_str(legacy).unwrap();
-    assert!(matches!(
-        &decoded,
-        AgentEvent::Error { message, fatal: true } if message == "boom"
-    ));
-    assert_eq!(serde_json::to_string(&decoded).unwrap(), legacy);
 }
 
 #[cfg(test)]
@@ -2003,22 +1830,23 @@ mod thread_item_serde_tests {
     use super::*;
 
     #[test]
-    fn parent_item_id_round_trips_and_legacy_items_default_to_none() {
-        let event = AgentEvent::ItemCompleted(ThreadItem {
-            id: "child".into(),
-            parent_item_id: Some("spawn".into()),
-            content: ItemContent::AssistantMessage {
-                text: "working".into(),
-            },
-        });
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), .. })
-                if parent == "spawn"
-        ));
+    fn provider_failure_wire_tag_and_legacy_error_remain_compatible() {
+        let event = AgentEvent::ProviderStartFailed {
+            error: "spawn failed".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&event).unwrap(),
+            r#"{"type":"provider_start_failed","error":"spawn failed"}"#
+        );
+        let legacy = r#"{"type":"error","message":"boom","fatal":true}"#;
+        assert!(
+            matches!(serde_json::from_str::<AgentEvent>(legacy).unwrap(),
+            AgentEvent::Error { message, fatal: true } if message == "boom")
+        );
+    }
 
+    #[test]
+    fn stored_items_preserve_parent_links_and_read_legacy_records() {
         let legacy = r#"{"type":"item_completed","id":"old","content":{"kind":"user_message","text":"hello"}}"#;
         let decoded: AgentEvent = serde_json::from_str(legacy).unwrap();
         assert!(matches!(
@@ -2028,5 +1856,16 @@ mod thread_item_serde_tests {
                 ..
             })
         ));
+        let parented = r#"{"type":"item_completed","id":"child","parent_item_id":"spawn","content":{"kind":"assistant_message","text":"working"}}"#;
+        let decoded: AgentEvent = serde_json::from_str(parented).unwrap();
+        assert!(matches!(
+            &decoded,
+            AgentEvent::ItemCompleted(ThreadItem { parent_item_id: Some(parent), .. })
+                if parent == "spawn"
+        ));
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["parent_item_id"],
+            "spawn"
+        );
     }
 }

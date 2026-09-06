@@ -3,14 +3,7 @@ use tcode_mobile::host::{MobileHost, PairDone, PairRequest, PairedHost, Transpor
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-#[derive(Default)]
 pub struct WebHost;
-
-impl WebHost {
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 pub(crate) fn window() -> web_sys::Window {
     web_sys::window().expect("tcode-web requires a browser window")

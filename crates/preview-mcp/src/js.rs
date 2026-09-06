@@ -282,73 +282,41 @@ fn json_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn parse_plain_object() {
-        let v = parse_result(r#"{"url":"https://x","loading":false}"#);
-        assert_eq!(v["url"], "https://x");
-        assert_eq!(v["loading"], false);
+    fn webview_results_decode_once_or_twice_without_losing_plain_strings() {
+        for (raw, expected) in [
+            (
+                r#"{"url":"https://x","loading":false}"#,
+                json!({"url":"https://x","loading":false}),
+            ),
+            (r#""{\"ok\":true}""#, json!({"ok":true})),
+            (r#""hello""#, json!("hello")),
+            ("undefined", json!("undefined")),
+        ] {
+            assert_eq!(parse_result(raw), expected, "{raw}");
+        }
     }
 
     #[test]
-    fn parse_double_encoded_object() {
-        // WKWebView sometimes hands back the JSON as a quoted string.
-        let v = parse_result(r#""{\"ok\":true}""#);
-        assert_eq!(v["ok"], true);
-    }
-
-    #[test]
-    fn parse_bare_string_stays_string() {
-        let v = parse_result(r#""hello""#);
-        assert_eq!(v, serde_json::Value::String("hello".into()));
-    }
-
-    #[test]
-    fn parse_non_json_falls_back_to_string() {
-        let v = parse_result("undefined");
-        assert_eq!(v, serde_json::Value::String("undefined".into()));
-    }
-
-    #[test]
-    fn click_snippet_embeds_escaped_selector() {
-        let js = click("a.link[data-x=\"1\"]");
-        assert!(js.contains("querySelector"));
-        // The selector must be a valid embedded JSON string literal.
-        assert!(js.contains(r#""a.link[data-x=\"1\"]""#));
-    }
-
-    #[test]
-    fn type_snippet_embeds_text_and_selector() {
-        let js = type_text("#in", "he\"llo");
-        assert!(js.contains(r##""#in""##));
-        assert!(js.contains(r#""he\"llo""#));
-    }
-
-    #[test]
-    fn press_snippet_embeds_key_and_modifiers() {
-        let js = press("\"", &["Control".into(), "Shift".into()]);
-        assert!(js.contains(r#""\"""#));
-        assert!(js.contains("ctrlKey: true"));
-        assert!(js.contains("shiftKey: true"));
-        assert!(js.contains("requestSubmit"));
-    }
-
-    #[test]
-    fn scroll_snippet_targets_selector_and_deltas() {
-        let js = scroll(12.5, -40.0, Some("#feed"));
-        assert!(js.contains(r##""#feed""##));
-        assert!(js.contains("left: 12.5"));
-        assert!(js.contains("top: -40"));
-        assert!(js.contains("scrollLeft"));
-    }
-
-    #[test]
-    fn wait_probe_embeds_each_condition() {
-        let js = wait_for_probe(Some(".ready"), Some("Done"), Some("/result"));
-        assert!(js.contains(r#"".ready""#));
-        assert!(js.contains(r#""Done""#));
-        assert!(js.contains(r#""/result""#));
-        assert!(js.contains(r#"pending.push("selector")"#));
-        assert!(js.contains(r#"pending.push("urlIncludes")"#));
+    fn generated_scripts_escape_each_selector_text_and_key_input() {
+        let input = "\"\n\\';throw 1;//";
+        let escaped = r#""\"\n\\';throw 1;//""#;
+        // Each case puts the hostile value into one argument independently, so
+        // an escaped sibling cannot conceal an unescaped interpolation.
+        for script in [
+            click(input),
+            type_text(input, "text"),
+            type_text("#input", input),
+            press(input, &[]),
+            scroll(1.0, 2.0, Some(input)),
+            wait_for_probe(Some(input), None, None),
+            wait_for_probe(None, Some(input), None),
+            wait_for_probe(None, None, Some(input)),
+        ] {
+            assert!(script.contains(escaped), "{script}");
+            assert!(!script.contains(input), "unescaped input: {script}");
+        }
     }
 }

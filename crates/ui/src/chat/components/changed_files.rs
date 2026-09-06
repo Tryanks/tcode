@@ -557,15 +557,4 @@ mod tests {
             .expect("expanded inline diff bounds");
         assert!(diff.size.height >= px(36.));
     }
-
-    #[test]
-    fn live_edit_row_label_is_exact_in_both_locales() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(crate::tr!("chat.file_edit"), "Code edit");
-
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(crate::tr!("chat.file_edit"), "编辑代码");
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-    }
 }

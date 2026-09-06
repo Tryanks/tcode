@@ -7,7 +7,7 @@ use rmcp::model::{
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
 use crate::{Broker, OrchestrateOp, ThreadPurpose};
@@ -136,12 +136,10 @@ impl OrchestrateTools {
     #[tool(
         description = "Dispatch concrete execution work to an enabled execution-model profile in a new child tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
     )]
-    async fn dispatch(
-        &self,
-        Parameters(p): Parameters<DispatchParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Dispatch {
+    async fn dispatch(&self, Parameters(p): Parameters<DispatchParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Dispatch {
                 purpose: ThreadPurpose::Execution,
                 parent_id: self.parent_id.clone(),
                 provider: p.provider,
@@ -156,19 +154,18 @@ impl OrchestrateTools {
                 archive_on_complete: p.archive_on_complete,
                 result_max_chars: p.result_max_chars,
                 fast: p.fast,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(
         description = "Open a peer discussion with an enabled collaboration model from Settings → Orchestrate (bundled: Astra and Fable 5.1). Use for independent approaches, architecture, assumptions, and review of decisions. This is a read-only consultation, not an implementation assignment; dispatch concrete work to execution models. Prefer a complementary provider when it adds a useful perspective. Returns thread_id; use send for further discussion. The peer's report arrives through the normal completion callback."
     )]
-    async fn collaborate(
-        &self,
-        Parameters(p): Parameters<CollaborateParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Dispatch {
+    async fn collaborate(&self, Parameters(p): Parameters<CollaborateParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Dispatch {
                 purpose: ThreadPurpose::Collaboration,
                 parent_id: self.parent_id.clone(),
                 provider: p.provider,
@@ -183,100 +180,91 @@ impl OrchestrateTools {
                 archive_on_complete: None,
                 result_max_chars: Some(0),
                 fast: None,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(description = "List child thread status, optionally for one thread.")]
-    async fn status(
-        &self,
-        Parameters(p): Parameters<StatusParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Status {
+    async fn status(&self, Parameters(p): Parameters<StatusParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Status {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(
         description = "Send a follow-up message to one of this session's child threads. If the child has a turn in flight the message is steered into it immediately; otherwise it is queued and sent as the child's next turn. The response reports which (delivery: steered | queued)."
     )]
-    async fn send(
-        &self,
-        Parameters(p): Parameters<SendParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Send {
+    async fn send(&self, Parameters(p): Parameters<SendParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Send {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
                 message: p.message,
                 fast: p.fast,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(description = "Read a finished child thread's final assistant message.")]
-    async fn result(
-        &self,
-        Parameters(p): Parameters<ThreadParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Result {
+    async fn result(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Result {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(description = "Cancel and shut down one of this session's child threads.")]
-    async fn cancel(
-        &self,
-        Parameters(p): Parameters<ThreadParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Cancel {
+    async fn cancel(&self, Parameters(p): Parameters<ThreadParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Cancel {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(
         description = "Archive a batch of this session's child threads by id. Completed children are auto-archived by default, so this is mainly for failed children you will not retry and children dispatched with archive_on_complete: false. Archived threads vanish from the user's sidebar but are fully recoverable in Settings → Archived Threads, and their transcripts remain readable via status/result. Archiving a running child shuts it down; cancel first for a clean stop."
     )]
-    async fn archive(
-        &self,
-        Parameters(p): Parameters<ArchiveParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Archive {
+    async fn archive(&self, Parameters(p): Parameters<ArchiveParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Archive {
                 parent_id: self.parent_id.clone(),
                 thread_ids: p.thread_ids,
-            })
-            .await)
+            },
+        )
+        .await
     }
 
     #[tool(
         description = "Answer a child thread's pending permission approval. decision is one of approve (this request only), approve_for_session (stop asking for similar requests this session), or deny. request_id may be omitted when the child has exactly one pending request."
     )]
-    async fn approve(
-        &self,
-        Parameters(p): Parameters<ApproveParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(OrchestrateOp::Approve {
+    async fn approve(&self, Parameters(p): Parameters<ApproveParams>) -> CallToolResult {
+        run_op(
+            &self.broker,
+            OrchestrateOp::Approve {
                 parent_id: self.parent_id.clone(),
                 thread_id: p.thread_id,
                 request_id: p.request_id,
                 decision: p.decision,
-            })
-            .await)
-    }
-
-    async fn run(&self, op: OrchestrateOp) -> CallToolResult {
-        run_op(&self.broker, op).await
+            },
+        )
+        .await
     }
 }
 
@@ -311,18 +299,15 @@ impl ChildReportTools {
     #[tool(
         description = "Send your complete final report (RESULT) to the thread that initiated this work or discussion. This is the orchestrator's only view of your work — it cannot see your transcript — so make the report self-contained: your reasoning, recommendations, disagreements, and open questions for a discussion; files changed and commands actually run with outcomes for execution; evidence for your conclusions in either case. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). Only if this call fails, write the same complete report as your final message instead — it is sent back as the fallback, truncated when long."
     )]
-    async fn report_result(
-        &self,
-        Parameters(p): Parameters<ReportResultParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(run_op(
+    async fn report_result(&self, Parameters(p): Parameters<ReportResultParams>) -> CallToolResult {
+        run_op(
             &self.broker,
             OrchestrateOp::ReportResult {
                 child_id: self.child_id.clone(),
                 text: p.text,
             },
         )
-        .await)
+        .await
     }
 }
 
@@ -398,27 +383,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broker_op_reply_roundtrip_preserves_parent() {
-        let (tx, rx) = async_channel::unbounded();
-        let broker = broker(tx, std::time::Duration::from_secs(2));
-        let resolver = tokio::spawn(async move {
-            let request = rx.recv().await.unwrap();
-            assert!(
-                matches!(request.op, OrchestrateOp::Status { parent_id, thread_id: None } if parent_id == "parent")
-            );
-            request.reply.send(Ok(serde_json::json!([]))).await.unwrap();
-        });
-        let result = OrchestrateTools::new(broker, "parent".into())
-            .run(OrchestrateOp::Status {
-                parent_id: "parent".into(),
-                thread_id: None,
-            })
-            .await;
-        assert_eq!(result.is_error, Some(false));
-        resolver.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn collaboration_tool_routes_peer_purpose_with_read_only_defaults() {
         let (tx, rx) = async_channel::unbounded();
         let broker = broker(tx, std::time::Duration::from_secs(2));
@@ -443,8 +407,7 @@ mod tests {
                 title: "Design discussion".into(),
                 brief: "Compare the alternatives".into(),
             }))
-            .await
-            .unwrap();
+            .await;
         assert_eq!(result.is_error, Some(false));
         resolver.await.unwrap();
     }
@@ -460,33 +423,6 @@ mod tests {
         for effort in ["low", "xhigh", "max", "ultra"] {
             assert!(serde_json::from_value::<CollaborateParams>(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).is_err());
         }
-    }
-
-    #[test]
-    fn all_tools_are_registered() {
-        let (tx, _rx) = async_channel::unbounded();
-        let tools =
-            OrchestrateTools::new(broker(tx, std::time::Duration::from_secs(1)), "p".into());
-        let mut names: Vec<_> = tools
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            [
-                "approve",
-                "archive",
-                "cancel",
-                "collaborate",
-                "dispatch",
-                "result",
-                "send",
-                "status"
-            ]
-        );
     }
 
     #[test]
@@ -525,8 +461,7 @@ mod tests {
             .report_result(Parameters(ReportResultParams {
                 text: "full report".into(),
             }))
-            .await
-            .unwrap();
+            .await;
         assert_eq!(result.is_error, Some(false));
         resolver.await.unwrap();
     }
