@@ -181,15 +181,14 @@ pub enum Command {
     CreateProject {
         root: PathBuf,
     },
-    /// The command itself is ordinary serialized protocol traffic. Its
-    /// progress is routed by request id over the one local bus installed at
-    /// host construction; a remote transport must replace it with events.
+    /// Start an import run. Progress, completion and the finalized index are
+    /// host-owned: subscribe to [`crate::Topic::ExternalImport`] before sending
+    /// this, and read the outcome from that replicated status. Returns
+    /// [`CommandResponse::ExternalImportStarted(false)`] for an unknown
+    /// project, and an `import_in_progress` error for a second concurrent run.
     StartExternalImport {
         project_id: String,
         threads: Vec<ExternalThread>,
-    },
-    FinishExternalImport {
-        project_id: String,
     },
     ExportThread {
         session_id: String,

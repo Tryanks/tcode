@@ -409,7 +409,6 @@ fn main() {
                 match (&host, &remote) {
                     (Some(host), _) => store.attach_local(tcode_ui::store::LocalAffordances {
                         terminals: host.terminals.clone(),
-                        import_routes: host.import_routes.clone(),
                     }),
                     (None, Some((_, name))) => store.attach_remote(name.clone(), cx),
                     (None, None) => {}

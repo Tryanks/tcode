@@ -1,7 +1,6 @@
 //! NDJSON in-process client/host pipe with typed endpoint APIs.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
 use tcode_protocol::{
@@ -10,7 +9,6 @@ use tcode_protocol::{
 };
 #[cfg(test)]
 use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
-use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
@@ -37,16 +35,12 @@ pub struct HostServices {
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
 
-#[derive(Clone, Default)]
-pub struct ImportRoutes(Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>);
-
 #[derive(Clone)]
 pub struct SpawnedHost {
     pub to_host: async_channel::Sender<String>,
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
     pub terminals: LocalTerminalRegistry,
-    pub import_routes: ImportRoutes,
     link: Arc<OnceLock<HostLink>>,
     #[cfg(any(test, feature = "test-support"))]
     test_mailbox: async_channel::Sender<HostFn>,
@@ -93,38 +87,6 @@ impl SpawnedHost {
     }
 }
 
-pub async fn start_external_import(
-    link: &HostLink,
-    routes: &ImportRoutes,
-    project_id: String,
-    threads: Vec<tcode_protocol::ExternalThread>,
-) -> Result<Option<async_channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
-    let (id, response) = link.command_with_id(Command::StartExternalImport {
-        project_id,
-        threads,
-    });
-    let (sender, receiver) = async_channel::unbounded();
-    routes.0.lock().unwrap().insert(id, sender);
-    match response.await {
-        Ok(CommandResponse::ExternalImportStarted(true)) => Ok(Some(receiver)),
-        Ok(CommandResponse::ExternalImportStarted(false)) => {
-            routes.0.lock().unwrap().remove(&id);
-            Ok(None)
-        }
-        Ok(other) => {
-            routes.0.lock().unwrap().remove(&id);
-            Err(ProtocolError {
-                code: "unexpected_response".into(),
-                message: format!("expected external-import started result, got {other:?}"),
-            })
-        }
-        Err(error) => {
-            routes.0.lock().unwrap().remove(&id);
-            Err(error)
-        }
-    }
-}
-
 #[cfg(any(test, feature = "test-support"))]
 fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError {
@@ -154,9 +116,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
-    let import_routes = ImportRoutes::default();
     let host_terminals = terminals.clone();
-    let host_import_routes = import_routes.clone();
     #[cfg(any(test, feature = "test-support"))]
     let test_mailbox = mailbox_tx.clone();
 
@@ -192,13 +152,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(());
-            smol::block_on(host_loop(
-                state,
-                cx,
-                client_rx,
-                mailbox_rx,
-                host_import_routes,
-            ));
+            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -213,7 +167,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         from_host: event_rx,
         stopped: stopped_rx,
         terminals,
-        import_routes,
         link: Arc::new(OnceLock::new()),
         #[cfg(any(test, feature = "test-support"))]
         test_mailbox,
@@ -225,7 +178,6 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostFn>,
-    import_routes: ImportRoutes,
 ) {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
@@ -240,9 +192,7 @@ async fn host_loop(
         {
             Input::Client(message) => match message {
                 Ok(line) => match decode_client_line(&line) {
-                    Ok(message) => {
-                        handle_client_message(&mut state, &mut cx, message, &import_routes)
-                    }
+                    Ok(message) => handle_client_message(&mut state, &mut cx, message),
                     Err(error) => cx.send_message(HostMessage::Ack {
                         id: malformed_message_id(&line).unwrap_or(0),
                         result: Err(error),
@@ -268,16 +218,11 @@ fn malformed_message_id(line: &str) -> Option<u64> {
         .as_u64()
 }
 
-fn handle_client_message(
-    state: &mut AppState,
-    cx: &mut HostCx,
-    message: ClientMessage,
-    import_routes: &ImportRoutes,
-) {
+pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, message: ClientMessage) {
     let ClientMessage { id, payload } = message;
     match payload {
         ClientPayload::Command(command) => {
-            let outcome = dispatch_command(state, cx, id, command, import_routes);
+            let outcome = dispatch_command(state, cx, command);
             match outcome {
                 CommandOutcome::Immediate(result) => {
                     cx.send_message(HostMessage::Ack { id, result })
@@ -329,27 +274,12 @@ fn handle_client_message(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn handle_client_message_for_test(
-    state: &mut AppState,
-    cx: &mut HostCx,
-    message: ClientMessage,
-) {
-    handle_client_message(state, cx, message, &ImportRoutes::default());
-}
-
 enum CommandOutcome {
     Immediate(Result<CommandResponse, ProtocolError>),
     StoreBarrier(smol::channel::Receiver<()>),
 }
 
-fn dispatch_command(
-    app: &mut AppState,
-    cx: &mut HostCx,
-    request_id: u64,
-    command: Command,
-    import_routes: &ImportRoutes,
-) -> CommandOutcome {
+fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
@@ -483,27 +413,10 @@ fn dispatch_command(
         Command::StartExternalImport {
             project_id,
             threads,
-        } => {
-            let receiver = app.start_external_import(&project_id, threads, cx);
-            response = CommandResponse::ExternalImportStarted(receiver.is_some());
-            if let Some(receiver) = receiver {
-                let route = import_routes.0.lock().unwrap().get(&request_id).cloned();
-                let import_routes = import_routes.clone();
-                cx.spawn_detached(async move {
-                    if let Some(route) = route {
-                        while let Ok(update) = receiver.recv().await {
-                            if route.send(update).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    import_routes.0.lock().unwrap().remove(&request_id);
-                });
-            } else {
-                import_routes.0.lock().unwrap().remove(&request_id);
-            }
-        }
-        Command::FinishExternalImport { project_id } => app.finish_external_import(&project_id, cx),
+        } => match app.start_external_import(&project_id, threads, cx) {
+            Ok(started) => response = CommandResponse::ExternalImportStarted(started),
+            Err(error) => return CommandOutcome::Immediate(Err(error)),
+        },
         Command::ExportThread {
             session_id,
             destination,
@@ -704,6 +617,10 @@ fn dispatch_query(
             let task = cx.unblock(move || path.is_dir());
             cx.spawn_background(async move { Ok(QueryResponse::IsDirectory(task.await)) })
         }
+        Query::SearchSessionContent { query, limit } => {
+            let task = app.search_session_content(query, limit, cx);
+            cx.spawn_background(async move { Ok(QueryResponse::SessionContentHits(task.await)) })
+        }
     }
 }
 
@@ -815,32 +732,61 @@ mod tests {
                 .any(|project| project.id == project_id && project.root == project_root)
         );
 
-        let import_progress = smol::block_on(start_external_import(
-            &link,
-            &host.import_routes,
-            project_id.clone(),
-            Vec::new(),
-        ))
-        .expect("start import over command")
-        .expect("known project starts an import");
+        // Subscribe before starting: the empty run completes immediately, so a
+        // client that only reacted to a post-start reply could miss it.
+        link.subscribe(Subscription {
+            after: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.clone(),
+            },
+        })
+        .expect("subscribe to import status");
+        assert!(matches!(
+            next_event(&events, |event| matches!(
+                event.topic,
+                Topic::ExternalImport { .. }
+            ))
+            .event,
+            ServerEvent::ExternalImportStatusReplaced { status: None, .. }
+        ));
         assert_eq!(
-            import_progress
-                .recv_blocking()
-                .expect("receive construction-bus progress"),
-            ExternalImportUpdate::Finished {
+            link.command_blocking(Command::StartExternalImport {
+                project_id: project_id.clone(),
+                threads: Vec::new(),
+            })
+            .expect("start import over command"),
+            CommandResponse::ExternalImportStarted(true)
+        );
+        let finished = next_event(&events, |event| {
+            matches!(
+                &event.event,
+                ServerEvent::ExternalImportStatusReplaced {
+                    status: Some(status),
+                    ..
+                } if matches!(status.state, tcode_protocol::ExternalImportState::Finished { .. })
+            )
+        });
+        let ServerEvent::ExternalImportStatusReplaced {
+            status: Some(status),
+            ..
+        } = finished.event
+        else {
+            unreachable!("filtered to finished import statuses")
+        };
+        assert_eq!(
+            status.state,
+            tcode_protocol::ExternalImportState::Finished {
                 imported: 0,
                 skipped: 0,
             }
         );
-        assert!(
-            smol::block_on(start_external_import(
-                &link,
-                &host.import_routes,
-                "missing".into(),
-                Vec::new(),
-            ))
-            .expect("unknown import command response")
-            .is_none()
+        assert_eq!(
+            link.command_blocking(Command::StartExternalImport {
+                project_id: "missing".into(),
+                threads: Vec::new(),
+            })
+            .expect("unknown import command response"),
+            CommandResponse::ExternalImportStarted(false)
         );
 
         assert_eq!(

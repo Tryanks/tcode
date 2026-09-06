@@ -438,9 +438,6 @@ impl WorkspaceStore {
     ) -> Task<Result<CommandResponse, ProtocolError>> {
         self.command(Command::CreateProject { root }, cx)
     }
-    pub fn finish_external_import(&mut self, project_id: String) {
-        self.dispatch(Command::FinishExternalImport { project_id });
-    }
     pub fn export_thread(
         &mut self,
         session_id: String,

@@ -13,15 +13,16 @@ mod wire;
 
 pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
 pub use event::{
-    AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
+    GitStatusStatus, IndexSnapshot, MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord,
+    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    Topic,
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,
-    RecentDir, SourceTool,
+    RecentDir, SessionSearchHit, SourceTool,
 };
 pub use wire::{
     ClientMessage, ClientPayload, HostMessage, ProtocolError, Subscription, decode_client_line,

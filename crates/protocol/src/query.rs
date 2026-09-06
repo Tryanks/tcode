@@ -36,6 +36,12 @@ pub enum Query {
     IsDirectory {
         path: PathBuf,
     },
+    /// Full-text search over the host's own stored session logs. The host owns
+    /// the index, the cache and the session order; clients supply no paths.
+    SearchSessionContent {
+        query: String,
+        limit: u32,
+    },
 }
 
 /// Typed response paired with a [`Query`].
@@ -50,6 +56,19 @@ pub enum QueryResponse {
     SavedAttachment(PathBuf),
     UserFileRemoved,
     IsDirectory(bool),
+    SessionContentHits(Vec<SessionSearchHit>),
+}
+
+/// One content match in a stored session, addressed by the folded timeline
+/// entry it came from. The sole owner of this shape: the search service builds
+/// it and the palette renders it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub session_title: String,
+    pub entry_id: String,
+    pub turn: usize,
+    pub snippet: String,
 }
 
 /// Scope used when loading a Git diff.

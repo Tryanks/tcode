@@ -142,46 +142,188 @@ impl AppState {
         })
     }
 
-    /// Import selected external threads in the background and stream runtime-
-    /// owned progress updates. Returns `None` for an unknown project.
+    /// Import selected external threads in the background, publishing progress
+    /// as replicated host state on [`Topic::ExternalImport`]. Returns `false`
+    /// for an unknown project; a second concurrent run is rejected outright.
+    ///
+    /// Completion is runtime-owned: the importer's last update finalizes the
+    /// index here regardless of whether any client is still subscribed.
     pub fn start_external_import(
-        &self,
+        &mut self,
         project_id: &str,
         threads: Vec<ExternalThread>,
-        executor: &HostCx,
-    ) -> Option<smol::channel::Receiver<ExternalImportUpdate>> {
-        let project = self
+        cx: &mut HostCx,
+    ) -> Result<bool, ProtocolError> {
+        let Some(project) = self
             .projects
             .iter()
-            .find(|project| project.id == project_id)?
-            .clone();
+            .find(|project| project.id == project_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if let Some(status) = self.external_imports.get(project_id)
+            && matches!(status.state, ExternalImportState::Progress { .. })
+        {
+            return Err(ProtocolError {
+                code: "import_in_progress".into(),
+                message: format!("an import is already running for project {project_id}"),
+            });
+        }
+        let run_id = self.next_import_run_id;
+        self.next_import_run_id += 1;
+        let total = threads.len();
+        let tool = threads
+            .first()
+            .map(|thread| thread.source.display_name().to_string())
+            .unwrap_or_default();
+        self.replace_external_import_status(
+            project_id,
+            Some(ExternalImportStatus {
+                run_id,
+                state: ExternalImportState::Progress {
+                    done: 0,
+                    total,
+                    tool,
+                },
+            }),
+            cx,
+        );
+
         let store = self.store.clone();
         let metas = self.sessions.clone();
-        let (sender, receiver) = smol::channel::unbounded();
-        executor
-            .unblock(move || {
-                let total = threads.len();
-                let mut imported = 0;
-                let mut skipped = 0;
-                let mut existing = existing_external_ids(&metas);
-                for (index, thread) in threads.into_iter().enumerate() {
-                    let tool = thread.source.display_name().to_string();
-                    match import_thread(&store, &project, &thread, &mut existing) {
-                        ImportOutcome::Imported => imported += 1,
-                        ImportOutcome::SkippedDuplicate
-                        | ImportOutcome::SkippedEmpty
-                        | ImportOutcome::Failed(_) => skipped += 1,
-                    }
-                    let _ = sender.try_send(ExternalImportUpdate::Progress {
-                        done: index + 1,
-                        total,
-                        tool,
-                    });
+        let id = project_id.to_string();
+        let updates = cx.clone();
+        cx.unblock(move || {
+            let mut imported = 0;
+            let mut skipped = 0;
+            let mut existing = existing_external_ids(&metas);
+            for (index, thread) in threads.into_iter().enumerate() {
+                let tool = thread.source.display_name().to_string();
+                match import_thread(&store, &project, &thread, &mut existing) {
+                    ImportOutcome::Imported => imported += 1,
+                    ImportOutcome::SkippedDuplicate
+                    | ImportOutcome::SkippedEmpty
+                    | ImportOutcome::Failed(_) => skipped += 1,
                 }
-                let _ = sender.try_send(ExternalImportUpdate::Finished { imported, skipped });
-            })
-            .detach();
-        Some(receiver)
+                let (id, done) = (id.clone(), index + 1);
+                updates.enqueue(move |state, cx| {
+                    state.advance_external_import(
+                        &id,
+                        run_id,
+                        ExternalImportState::Progress { done, total, tool },
+                        cx,
+                    );
+                });
+            }
+            updates.enqueue(move |state, cx| {
+                state.complete_external_import(&id, run_id, imported, skipped, cx);
+            });
+        })
+        .detach();
+        Ok(true)
+    }
+
+    /// Publish a status the importer produced, ignoring updates from a run that
+    /// a newer one has already superseded.
+    fn advance_external_import(
+        &mut self,
+        project_id: &str,
+        run_id: u64,
+        state: ExternalImportState,
+        cx: &mut HostCx,
+    ) {
+        if self
+            .external_imports
+            .get(project_id)
+            .map(|status| status.run_id)
+            != Some(run_id)
+        {
+            return;
+        }
+        self.replace_external_import_status(
+            project_id,
+            Some(ExternalImportStatus { run_id, state }),
+            cx,
+        );
+    }
+
+    /// Finalize a finished run. The index is reloaded in this mailbox turn, so
+    /// its replacement reaches clients before the `Finished` status published
+    /// by the follow-up turn — a subscriber never sees `Finished` with a stale
+    /// session list.
+    fn complete_external_import(
+        &mut self,
+        project_id: &str,
+        run_id: u64,
+        imported: usize,
+        skipped: usize,
+        cx: &mut HostCx,
+    ) {
+        if self
+            .external_imports
+            .get(project_id)
+            .map(|status| status.run_id)
+            != Some(run_id)
+        {
+            return;
+        }
+        self.finish_external_import(project_id, cx);
+        let project_id = project_id.to_string();
+        cx.enqueue(move |state, cx| {
+            state.advance_external_import(
+                &project_id,
+                run_id,
+                ExternalImportState::Finished { imported, skipped },
+                cx,
+            );
+        });
+    }
+
+    pub(crate) fn replace_external_import_status(
+        &mut self,
+        project_id: &str,
+        status: Option<ExternalImportStatus>,
+        cx: &mut HostCx,
+    ) {
+        match &status {
+            Some(status) => {
+                self.external_imports
+                    .insert(project_id.to_string(), status.clone());
+            }
+            None => {
+                self.external_imports.remove(project_id);
+            }
+        }
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.to_string(),
+            },
+            event: ServerEvent::ExternalImportStatusReplaced {
+                project_id: project_id.to_string(),
+                status,
+            },
+        }));
+    }
+
+    /// Search this host's own stored sessions in index order. Both the file
+    /// reads and the cache lock stay on the blocking executor.
+    pub fn search_session_content(
+        &self,
+        query: String,
+        limit: u32,
+        executor: &HostCx,
+    ) -> HostTask<Vec<SessionSearchHit>> {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(50);
+        let sessions = self.sessions.clone();
+        let search = self.session_search.clone();
+        executor.unblock(move || {
+            search
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .search(&sessions, &query, limit)
+        })
     }
 
     /// List one replicated session cwd on the background executor.
@@ -195,7 +337,7 @@ impl AppState {
 
     /// Reload sessions written by the external-history importer and expand its
     /// project group.
-    pub fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
+    fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
         self.sessions = self.store.load_index();
         if self
             .settings
@@ -739,6 +881,7 @@ impl AppState {
             .retain(|id| id != project_id);
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
+        self.replace_external_import_status(project_id, None, cx);
     }
 
     /// Whether `session_id` owns live or queued work.

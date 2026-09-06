@@ -37,7 +37,6 @@ agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
-tcode-remote = { path = "../remote", default-features = false, optional = true }
 tcode-runtime = { path = "../runtime", optional = true }
 qrcode = { version = "0.14", default-features = false, optional = true }
 tcode-services = { path = "../services", optional = true }
@@ -66,6 +65,12 @@ imara-diff = "0.2"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1"
+
+# `remote-client` reaches tcode-remote -> smol -> rustix -> errno, which has no
+# wasm32-unknown-unknown build. Declaring the dependency per-target keeps the
+# browser green even if a wasm-facing crate turns the feature on.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tcode-remote = { path = "../remote", default-features = false, optional = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 gpui-wry = { version = "0.6.0", optional = true }

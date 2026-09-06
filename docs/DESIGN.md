@@ -360,8 +360,30 @@ Both add-model popovers reuse the provider/model picker with fixed tabs and a
 
 Centered top-anchored modal over a dim backdrop: search input; grouped results
 — Actions (new thread per project, open settings, toggle theme, toggle diff
-panel) and Threads (fuzzy over titles); footer key hints (↑↓ Navigate · Enter
-Select · Esc Close).
+panel), Threads (fuzzy over titles) and Messages; footer key hints (↑↓ Navigate ·
+Enter Select · Esc Close). A leading `>` restricts results to Actions.
+
+Messages are full-text hits inside stored conversations, shown as the thread
+title over the matching snippet; selecting one opens that thread at the hit's
+turn. The search itself belongs to the host: it indexes its own session logs, in
+its own index order, and clients send only the query text. Every client gets the
+group, including compact ones — there is no local session store to reopen. The
+client owns presentation only: a 150ms debounce and discarding an answer that a
+newer keystroke has already superseded.
+
+### Importing external history
+
+Choosing a directory in **Add project** starts an import and opens a modal,
+non-dismissible progress dialog with a bar, the "n of N" line naming the tool
+being read, and — once finished — an imported/skipped summary and an OK button.
+
+Import progress is host state, not a client-side job. The host keeps the latest
+run per project and publishes it, so closing the window, disconnecting, or
+attaching a second client never abandons the run or loses its outcome: a client
+that attaches after a fast completion still sees the summary. The imported
+threads appear in the sidebar before the dialog reports the run finished. A
+second import of the same project while one is running is refused rather than
+queued.
 
 ### Session lifetime
 

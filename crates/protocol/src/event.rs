@@ -32,6 +32,7 @@ pub enum Topic {
 
     Terminal { terminal_id: u64 },
     Preview { session_id: String },
+    ExternalImport { project_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +112,37 @@ pub enum ServerEvent {
     },
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
+    /// The current (or latest) external-import run for one project. `None`
+    /// means no run has ever started, or the project is gone. Only the latest
+    /// run is retained, so a subscriber that attaches after a fast completion
+    /// still recovers the outcome from the subscription snapshot.
+    ExternalImportStatusReplaced {
+        project_id: String,
+        status: Option<ExternalImportStatus>,
+    },
+}
+
+/// Host-owned progress for one external-history import run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalImportStatus {
+    /// Host-generated, so a late subscriber can tell a replayed older run from
+    /// the run it started.
+    pub run_id: u64,
+    pub state: ExternalImportState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ExternalImportState {
+    Progress {
+        done: usize,
+        total: usize,
+        tool: String,
+    },
+    Finished {
+        imported: usize,
+        skipped: usize,
+    },
 }
 
 /// Full provider/settings-page read projection.

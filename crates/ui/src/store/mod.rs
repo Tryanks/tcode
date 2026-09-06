@@ -17,22 +17,17 @@ use tcode_core::{
     },
     ui::{ConversationDestination, RightTab},
 };
-#[cfg(feature = "desktop")]
-use tcode_protocol::ExternalThread;
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
-    EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, PathEntry, ProviderVersionStatus,
-    ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionStatus, Subscription,
-    Topic,
+    CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
+    GitDiffScope, GitStatusStatus, PathEntry, ProtocolError, ProviderVersionStatus,
+    ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
+    Subscription, Topic,
 };
-#[cfg(all(feature = "local-host", feature = "desktop"))]
-use tcode_runtime::pipe::{ImportRoutes, start_external_import};
 #[cfg(all(feature = "local-host", feature = "terminal"))]
 use tcode_runtime::terminal::LocalTerminalRegistry;
 #[cfg(feature = "terminal")]
 mod terminal;
-#[cfg(feature = "desktop")]
-use tcode_services::import::ExternalImportUpdate;
 #[cfg(feature = "terminal")]
 pub(crate) use terminal::ClientTerminal;
 #[cfg(feature = "terminal")]
@@ -61,6 +56,7 @@ pub enum TopicKind {
     ActiveSession,
     Terminal,
     Preview,
+    ExternalImport,
 }
 
 impl From<&Topic> for TopicKind {
@@ -75,6 +71,7 @@ impl From<&Topic> for TopicKind {
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
             Topic::Preview { .. } => Self::Preview,
+            Topic::ExternalImport { .. } => Self::ExternalImport,
         }
     }
 }
@@ -101,8 +98,6 @@ pub(crate) fn observe_store_topics<V: 'static>(
 pub struct LocalAffordances {
     #[cfg(feature = "terminal")]
     pub terminals: LocalTerminalRegistry,
-    #[cfg(feature = "desktop")]
-    pub import_routes: ImportRoutes,
 }
 
 /// The client-facing projection and command boundary for workspace state.
@@ -121,8 +116,10 @@ pub struct WorkspaceStore {
     remote_address: Option<String>,
     #[cfg(all(feature = "local-host", feature = "terminal"))]
     terminal_registry: Option<LocalTerminalRegistry>,
-    #[cfg(all(feature = "local-host", feature = "desktop"))]
-    import_routes: Option<ImportRoutes>,
+    /// Latest host-published import status per project, replicated from
+    /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
+    /// second events consumer.
+    import_statuses: HashMap<String, Option<ExternalImportStatus>>,
     /// Name of the remote host this store is a client of. `None` means the host
     /// runs in this process, so local affordances are available.
     remote_host: Option<String>,
@@ -220,8 +217,7 @@ impl WorkspaceStore {
             remote_address: None,
             #[cfg(all(feature = "local-host", feature = "terminal"))]
             terminal_registry: None,
-            #[cfg(all(feature = "local-host", feature = "desktop"))]
-            import_routes: None,
+            import_statuses: HashMap::new(),
             remote_host: None,
             connection_state: ConnectionState::Connected,
             index_replica: (Vec::new(), Vec::new()),
@@ -338,23 +334,17 @@ impl WorkspaceStore {
         store.attach_local(LocalAffordances {
             #[cfg(feature = "terminal")]
             terminals: host.terminals.clone(),
-            #[cfg(feature = "desktop")]
-            import_routes: host.import_routes.clone(),
         });
         store
     }
 
     #[cfg(feature = "local-host")]
     pub fn attach_local(&mut self, local: LocalAffordances) {
-        #[cfg(not(any(feature = "terminal", feature = "desktop")))]
+        #[cfg(not(feature = "terminal"))]
         let _ = local;
         #[cfg(feature = "terminal")]
         {
             self.terminal_registry = Some(local.terminals);
-        }
-        #[cfg(feature = "desktop")]
-        {
-            self.import_routes = Some(local.import_routes);
         }
     }
 
@@ -545,8 +535,19 @@ impl WorkspaceStore {
                 self.index_replica
                     .1
                     .retain(|project| project.id != *project_id);
+                self.import_statuses.remove(project_id);
                 self.conversation_ui
                     .remove(&ConversationDestination::ProjectDraft(project_id.clone()));
+            }
+            (
+                Topic::ExternalImport { project_id },
+                ServerEvent::ExternalImportStatusReplaced {
+                    project_id: replaced,
+                    status,
+                },
+            ) if project_id == replaced => {
+                self.import_statuses
+                    .insert(project_id.clone(), status.clone());
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
@@ -1473,34 +1474,76 @@ impl WorkspaceStore {
         )
     }
 
-    /// Start an import and return its correlated progress stream when local
-    /// import routing is available.
-    #[cfg(feature = "desktop")]
+    /// Subscribe to a project's import status. Callers must do this *before*
+    /// starting a run: a fast completion is only recoverable through the
+    /// subscription snapshot, not through the start reply.
+    pub fn watch_external_import(&self, project_id: &str) {
+        if let Err(error) = self.host.subscribe(Subscription {
+            after: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.to_string(),
+            },
+        }) {
+            log::error!("failed to watch import status: {}", error.message);
+        }
+    }
+
+    pub fn unwatch_external_import(&mut self, project_id: &str) {
+        let _ = self.host.unsubscribe(Subscription {
+            after: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.to_string(),
+            },
+        });
+        self.import_statuses.remove(project_id);
+    }
+
+    /// The latest host-published status for a project, or `None` while the
+    /// snapshot is still in flight or no run has ever started.
+    pub fn external_import_status(&self, project_id: &str) -> Option<&ExternalImportStatus> {
+        self.import_statuses.get(project_id)?.as_ref()
+    }
+
     pub fn start_external_import(
         &self,
         project_id: &str,
         threads: Vec<ExternalThread>,
         cx: &mut App,
-    ) -> Task<Result<Option<async_channel::Receiver<ExternalImportUpdate>>, String>> {
-        #[cfg(feature = "local-host")]
-        {
-            let host = self.host.clone();
-            let routes = self.import_routes.clone();
-            let project_id = project_id.to_string();
-            cx.spawn(async move |_| {
-                let Some(routes) = routes else {
-                    return Ok(None);
-                };
-                start_external_import(&host, &routes, project_id, threads)
-                    .await
-                    .map_err(|error| error.message)
-            })
-        }
-        #[cfg(not(feature = "local-host"))]
-        {
-            let _ = (project_id, threads);
-            cx.spawn(async move |_| Ok(None))
-        }
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(
+            tcode_protocol::Command::StartExternalImport {
+                project_id: project_id.to_string(),
+                threads,
+            },
+            cx,
+        )
+    }
+
+    /// Ask the host to search its own stored sessions. The index, cache and
+    /// session order live there; this client keeps only the answer.
+    pub fn search_session_content(
+        &self,
+        query: String,
+        limit: u32,
+        cx: &mut App,
+    ) -> Task<Vec<SessionSearchHit>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::SearchSessionContent { query, limit })
+                .await
+            {
+                Ok(QueryResponse::SessionContentHits(hits)) => hits,
+                Ok(other) => {
+                    log::error!("unexpected session-content response: {other:?}");
+                    Vec::new()
+                }
+                Err(error) => {
+                    log::error!("session-content query failed: {}", error.message);
+                    Vec::new()
+                }
+            }
+        })
     }
 
     pub(crate) fn commit_dialog_state(&self) -> CommitDialogState {

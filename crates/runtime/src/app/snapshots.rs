@@ -197,6 +197,13 @@ impl AppState {
             }
             Topic::RuntimeEvents => return None,
             Topic::Preview { .. } => return None,
+            // Retained latest-run status, so a client that subscribes after a
+            // fast completion still recovers the outcome. `None` means no run
+            // has ever started for this project.
+            Topic::ExternalImport { project_id } => ServerEvent::ExternalImportStatusReplaced {
+                project_id: project_id.clone(),
+                status: self.external_imports.get(project_id).cloned(),
+            },
             Topic::Terminal { terminal_id } => {
                 let terminal = self.terminal_handle(*terminal_id)?;
                 let (cols, rows) = terminal.grid().dimensions();

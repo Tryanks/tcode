@@ -9,9 +9,6 @@
 //!
 //! Title and action search use [`fuzzy_score`]; message search runs through the host.
 
-#[cfg(feature = "desktop")]
-use std::sync::{Arc, Mutex};
-#[cfg(feature = "desktop")]
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -27,19 +24,7 @@ use gpui::{
     Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use tcode_protocol::ThreadExportFormat;
-#[cfg(feature = "desktop")]
-use tcode_services::session_search::{SessionSearch, SessionSearchHit};
-#[cfg(feature = "desktop")]
-use tcode_services::store::SessionStore;
-
-#[cfg(not(feature = "desktop"))]
-struct SessionSearchHit {
-    session_id: String,
-    session_title: String,
-    snippet: String,
-    turn: usize,
-}
+use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
@@ -127,8 +112,6 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
-    #[cfg(feature = "desktop")]
-    content_search: Option<Arc<Mutex<SessionSearch>>>,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
     _search_task: Option<Task<()>>,
@@ -166,16 +149,10 @@ impl CommandPalette {
 
         Self {
             store,
-            window_state: window_state.clone(),
+            window_state,
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
-            #[cfg(feature = "desktop")]
-            content_search: (!window_state.read(cx).compact)
-                .then(SessionStore::open_default)
-                .and_then(Result::ok)
-                .map(SessionSearch::new)
-                .map(|search| Arc::new(Mutex::new(search))),
             content_hits: Vec::new(),
             search_generation: 0,
             _search_task: None,
@@ -193,7 +170,9 @@ impl CommandPalette {
         self.content_hits.clear();
     }
 
-    #[cfg(feature = "desktop")]
+    /// Debounce, then ask the host for content hits. The index, cache and
+    /// session metadata are host-owned; this keeps only the debounce and the
+    /// generation guard that discards an answer a newer query superseded.
     fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
@@ -205,38 +184,34 @@ impl CommandPalette {
             self._search_task = None;
             return;
         }
-        let Some(search) = self.content_search.clone() else {
-            return;
-        };
-        let sessions = self.store.read(cx).sidebar_sessions();
         let query = query.to_string();
+        let store = self.store.clone();
         self._search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            let hits = cx
-                .background_executor()
-                .spawn(async move {
-                    search
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .search(&sessions, &query, 50)
-                })
+            let hits = store
+                .update(cx, |store, cx| store.search_session_content(query, 50, cx))
                 .await;
             let _ = this.update(cx, |palette, cx| {
-                if palette.search_generation == generation {
-                    palette.content_hits = hits;
-                    cx.notify();
-                }
+                palette.apply_content_hits(generation, hits, cx);
             });
         }));
     }
 
-    #[cfg(not(feature = "desktop"))]
-    fn schedule_content_search(&mut self, _cx: &mut Context<Self>) {
-        self.search_generation = self.search_generation.wrapping_add(1);
-        self.content_hits.clear();
-        self._search_task = None;
+    /// Adopt an answer only while it still belongs to the current query. The
+    /// host may answer an earlier keystroke after a later one.
+    fn apply_content_hits(
+        &mut self,
+        generation: u64,
+        hits: Vec<SessionSearchHit>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_generation != generation {
+            return;
+        }
+        self.content_hits = hits;
+        cx.notify();
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -841,6 +816,63 @@ mod tests {
         cx.update(|_, cx| {
             let total = palette.update(cx, |palette, cx| palette.flat_items(cx).len());
             assert_eq!(palette.read(cx).selected, total - 1);
+        });
+
+        drop(palette);
+        drop(workspace_store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn a_host_answer_for_a_superseded_query_is_discarded(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-palette-search-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(root.clone()).expect("open test store");
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let palette_store = workspace_store.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            PaletteHarness::new(palette_store.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let palette = cx.update(|_, cx| harness.read(cx).palette.clone());
+
+        let hit = |snippet: &str| SessionSearchHit {
+            session_id: "session-1".into(),
+            session_title: "Thread".into(),
+            entry_id: "entry-1".into(),
+            turn: 0,
+            snippet: snippet.into(),
+        };
+        let stale = cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.query.update(cx, |state, cx| {
+                    state.set_value("first".to_string(), window, cx)
+                });
+                palette.schedule_content_search(cx);
+                let stale = palette.search_generation;
+                palette.query.update(cx, |state, cx| {
+                    state.set_value("second".to_string(), window, cx)
+                });
+                palette.schedule_content_search(cx);
+                stale
+            })
+        });
+        cx.update(|_, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.apply_content_hits(stale, vec![hit("answer for `first`")], cx);
+                assert!(
+                    palette.content_hits.is_empty(),
+                    "an answer for a superseded query must not be shown"
+                );
+                let current = palette.search_generation;
+                palette.apply_content_hits(current, vec![hit("answer for `second`")], cx);
+                assert_eq!(palette.content_hits.len(), 1);
+                assert_eq!(palette.content_hits[0].snippet, "answer for `second`");
+            });
         });
 
         drop(palette);

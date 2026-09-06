@@ -182,6 +182,165 @@ fn older_messages_default_new_optional_fields() {
     ));
 }
 
+/// Import progress and content search are replicated host state and a host-run
+/// query. Their literal shapes are the contract a non-Rust or older client
+/// depends on, so assert the JSON rather than a round trip.
+#[test]
+fn import_status_and_content_search_use_their_documented_wire_shapes() {
+    let start = ClientMessage {
+        id: 3,
+        payload: ClientPayload::Command(Command::StartExternalImport {
+            project_id: "project-1".into(),
+            threads: vec![ExternalThread {
+                source: SourceTool::ClaudeCode,
+                file: PathBuf::from("/history/a.jsonl"),
+                external_id: "claude:abc".into(),
+                title_hint: None,
+                last_active_ms: 17,
+            }],
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&start).unwrap(),
+        json!({
+            "id": 3,
+            "payload": {
+                "type": "command",
+                "content": {
+                    "type": "start_external_import",
+                    "content": {
+                        "project_id": "project-1",
+                        "threads": [{
+                            "source": "claude_code",
+                            "file": "/history/a.jsonl",
+                            "external_id": "claude:abc",
+                            "title_hint": null,
+                            "last_active_ms": 17,
+                        }],
+                    },
+                },
+            },
+        })
+    );
+    assert_eq!(
+        decode_client_line(&encode_line(&start).unwrap()).unwrap(),
+        start
+    );
+
+    assert_eq!(
+        serde_json::to_value(CommandResponse::ExternalImportStarted(false)).unwrap(),
+        json!({"type": "external_import_started", "content": false})
+    );
+
+    for (status, expected) in [
+        (None, json!(null)),
+        (
+            Some(ExternalImportStatus {
+                run_id: 4,
+                state: ExternalImportState::Progress {
+                    done: 1,
+                    total: 2,
+                    tool: "Codex CLI".into(),
+                },
+            }),
+            json!({
+                "run_id": 4,
+                "state": {
+                    "type": "progress",
+                    "content": {"done": 1, "total": 2, "tool": "Codex CLI"},
+                },
+            }),
+        ),
+        (
+            Some(ExternalImportStatus {
+                run_id: 4,
+                state: ExternalImportState::Finished {
+                    imported: 2,
+                    skipped: 1,
+                },
+            }),
+            json!({
+                "run_id": 4,
+                "state": {
+                    "type": "finished",
+                    "content": {"imported": 2, "skipped": 1},
+                },
+            }),
+        ),
+    ] {
+        let envelope = EventEnvelope {
+            request_id: None,
+            topic: Topic::ExternalImport {
+                project_id: "project-1".into(),
+            },
+            event: ServerEvent::ExternalImportStatusReplaced {
+                project_id: "project-1".into(),
+                status,
+            },
+        };
+        let value = json!({
+            "topic": {"type": "external_import", "content": {"project_id": "project-1"}},
+            "event": {
+                "type": "external_import_status_replaced",
+                "content": {"project_id": "project-1", "status": expected},
+            },
+        });
+        assert_eq!(serde_json::to_value(&envelope).unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<EventEnvelope>(value).unwrap(),
+            envelope
+        );
+    }
+
+    let search = ClientMessage {
+        id: 9,
+        payload: ClientPayload::Query(Query::SearchSessionContent {
+            query: "auth.rs".into(),
+            limit: 50,
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&search).unwrap(),
+        json!({
+            "id": 9,
+            "payload": {
+                "type": "query",
+                "content": {
+                    "type": "search_session_content",
+                    "content": {"query": "auth.rs", "limit": 50},
+                },
+            },
+        })
+    );
+    assert_eq!(
+        decode_client_line(&encode_line(&search).unwrap()).unwrap(),
+        search
+    );
+
+    let hits = QueryResponse::SessionContentHits(vec![SessionSearchHit {
+        session_id: "session-1".into(),
+        session_title: "Authentication cleanup".into(),
+        entry_id: "entry-1".into(),
+        turn: 2,
+        snippet: "…updated auth.rs…".into(),
+    }]);
+    let hits_value = json!({
+        "type": "session_content_hits",
+        "content": [{
+            "session_id": "session-1",
+            "session_title": "Authentication cleanup",
+            "entry_id": "entry-1",
+            "turn": 2,
+            "snippet": "…updated auth.rs…",
+        }],
+    });
+    assert_eq!(serde_json::to_value(&hits).unwrap(), hits_value);
+    assert_eq!(
+        serde_json::from_value::<QueryResponse>(hits_value).unwrap(),
+        hits
+    );
+}
+
 #[test]
 fn unknown_data_variants_and_malformed_records_return_decode_errors() {
     for line in [

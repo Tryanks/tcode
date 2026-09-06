@@ -11,6 +11,7 @@ use std::time::SystemTime;
 use agent::ItemContent;
 use tcode_core::project::SessionMeta;
 use tcode_core::session::{EntryContent, StoredEvent, Timeline};
+use tcode_protocol::SessionSearchHit;
 
 use crate::store::SessionStore;
 
@@ -20,16 +21,6 @@ pub struct SearchableEntry {
     pub entry_id: String,
     pub turn: usize,
     pub text: String,
-}
-
-/// A content match suitable for presentation by a session picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionSearchHit {
-    pub session_id: String,
-    pub session_title: String,
-    pub entry_id: String,
-    pub turn: usize,
-    pub snippet: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
