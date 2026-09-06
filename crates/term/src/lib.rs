@@ -260,9 +260,6 @@ impl Terminal {
         output: Option<async_channel::Sender<Vec<u8>>>,
     ) -> io::Result<Self> {
         emulator.set_fallback_title(pty.label());
-        if pty.exited() {
-            emulator.set_exited(pty.exit_code());
-        }
 
         let (notifications, events) = async_channel::unbounded();
         let pty_events = pty.events();
@@ -450,8 +447,6 @@ impl Terminal {
     pub fn snapshot(&self) -> TermSnapshot {
         let mut snapshot = self.emulator.snapshot();
         snapshot.title = self.label();
-        snapshot.exited = self.pty.exited();
-        snapshot.exit_code = self.pty.exit_code();
         snapshot
     }
 
@@ -931,19 +926,65 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_captures_output_resizes_and_accepts_input() {
-        let output = command("echo hello");
-        let state = wait_until(&output, |state| {
-            state.text().contains("hello") && state.exited
+    fn windows_rejects_invalid_spawn_without_hanging() {
+        let executable = std::env::current_exe().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for (cwd, program) in [
+                (executable.clone(), "cmd.exe".to_string()),
+                (executable.join("missing-project"), "cmd.exe".to_string()),
+                (
+                    std::env::temp_dir(),
+                    executable
+                        .join("missing-shell.exe")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ] {
+                let result = Terminal::spawn_command(cwd, program, vec![], "cmd".into());
+                sender.send(result.is_err()).unwrap();
+            }
         });
-        assert_eq!(state.exit_code, Some(0));
+        for _ in 0..3 {
+            assert!(
+                receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("PTY spawn did not return")
+            );
+        }
+    }
 
-        let resized = command("timeout /t 1 >nul");
-        resized.resize(42, 9);
-        assert_eq!(
-            (resized.snapshot().cols, resized.snapshot().screen_lines),
-            (42, 9)
+    #[cfg(windows)]
+    #[test]
+    fn windows_captures_output_resizes_and_accepts_input() {
+        let output = command(
+            "(for /l %i in (1,1,8192) do @echo terminal-output-%i) & echo tcode-final-line & exit /b 37",
         );
+        let state = wait_until(&output, |state| state.exited);
+        assert!(
+            state.text().contains("tcode-final-line"),
+            "{}",
+            state.text()
+        );
+        assert_eq!(state.exit_code, Some(37));
+
+        let resized = Terminal::spawn_command(
+            std::env::temp_dir(),
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "$null = [Console]::ReadLine(); Write-Output ('size=' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)".into(),
+            ],
+            "powershell".into(),
+        )
+        .unwrap();
+        resized.resize(42, 9);
+        resized.write_input(b"\r".to_vec());
+        let state = wait_until(&resized, |state| state.exited);
+        assert_eq!((state.cols, state.screen_lines), (42, 9));
+        assert!(state.text().contains("size=42x9"), "{}", state.text());
+        assert_eq!(state.exit_code, Some(0));
 
         let input = command("set /p line= && set line");
         input.write_input(b"tcode-term-ok\r".to_vec());
@@ -954,5 +995,16 @@ mod tests {
             state.text()
         );
         assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_kills_child_with_pending_input() {
+        let terminal = command("echo tcode-ready & ping -n 30 127.0.0.1 >nul");
+        wait_until(&terminal, |state| state.text().contains("tcode-ready"));
+        terminal.write_input(vec![b'x'; 1024 * 1024]);
+        terminal.kill();
+        let state = wait_until(&terminal, |state| state.exited);
+        assert_eq!(state.exit_code, Some(1));
     }
 }
