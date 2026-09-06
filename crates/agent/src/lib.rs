@@ -1042,10 +1042,12 @@ pub enum AgentEvent {
     },
     /// Emitted only after the provider has consumed the correlated steer into
     /// its model context (or provided the strongest available consumption
-    /// signal when its protocol has no explicit acknowledgement). Claude uses
-    /// its next `status: requesting` checkpoint; a steer written microseconds
-    /// before that status can still miss the request, but this is the best
-    /// available signal without CLI protocol support.
+    /// signal when its protocol has no explicit acknowledgement). Codex echoes
+    /// the drained input as a `userMessage` item before its next model request;
+    /// the `turn/steer` reply alone only means the input was enqueued. Claude
+    /// uses its next `status: requesting` checkpoint; a steer written
+    /// microseconds before that status can still miss the request, but this is
+    /// the best available signal without CLI protocol support.
     SteerAccepted {
         request_id: String,
     },
