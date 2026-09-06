@@ -221,82 +221,6 @@ impl SessionActor for OpenCodeActor {
     }
 
     async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
-        OpenCodeActor::handle_command(self, command).await
-    }
-
-    async fn handle_transport(
-        &mut self,
-        item: Result<SseOutput, smol::channel::RecvError>,
-    ) -> TransportOutcome {
-        match item {
-            Ok(SseOutput::Event(event)) => {
-                self.handle_event(&event).await;
-                TransportOutcome::Continue
-            }
-            Ok(SseOutput::Error(err)) => TransportOutcome::Fatal(err),
-            Ok(SseOutput::Eof) | Err(_) => {
-                TransportOutcome::Closed("OpenCode SSE stream closed".into())
-            }
-        }
-    }
-
-    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
-        self.shutdown().await;
-        reason.map(|reason| {
-            self.server
-                .stderr_tail
-                .append_to(reason, "\nserver output:\n")
-        })
-    }
-}
-
-impl OpenCodeActor {
-    async fn handle_event(&mut self, event: &Value) {
-        let mapped = self.mapper.on_event(event);
-        for request_id in mapped.permission_ids {
-            self.pending_permissions.insert(request_id);
-        }
-        for (request_id, question_ids) in mapped.question_requests {
-            self.pending_questions.insert(request_id, question_ids);
-        }
-        for (request_id, answers) in mapped.question_resolutions {
-            let Some(question_ids) = self.pending_questions.remove(&request_id) else {
-                continue;
-            };
-            self.events
-                .emit(AgentEvent::UserInputResolved {
-                    request_id,
-                    answers: answers
-                        .map(|answers| canonical_question_answers(&question_ids, &answers))
-                        .unwrap_or_default(),
-                })
-                .await;
-        }
-        let turn_completed = mapped
-            .events
-            .iter()
-            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
-        for event in mapped.events {
-            self.events.emit(event).await;
-        }
-        if turn_completed {
-            self.cancel_pending_questions().await;
-        }
-        if mapped.fetch_diff {
-            match self.fetch_diff() {
-                Ok(event) => self.events.emit(event).await,
-                Err(err) => {
-                    self.events
-                        .emit(AgentEvent::Warning {
-                            message: format!("failed to fetch OpenCode session diff: {err}"),
-                        })
-                        .await
-                }
-            }
-        }
-    }
-
-    async fn handle_command(&mut self, command: SessionCommand) -> Result<(), String> {
         match command {
             SessionCommand::SendTurn {
                 delivery_id,
@@ -461,6 +385,78 @@ impl OpenCodeActor {
                 Ok(())
             }
             SessionCommand::SetOption { .. } | SessionCommand::Shutdown => Ok(()),
+        }
+    }
+
+    async fn handle_transport(
+        &mut self,
+        item: Result<SseOutput, smol::channel::RecvError>,
+    ) -> TransportOutcome {
+        match item {
+            Ok(SseOutput::Event(event)) => {
+                self.handle_event(&event).await;
+                TransportOutcome::Continue
+            }
+            Ok(SseOutput::Error(err)) => TransportOutcome::Fatal(err),
+            Ok(SseOutput::Eof) | Err(_) => {
+                TransportOutcome::Closed("OpenCode SSE stream closed".into())
+            }
+        }
+    }
+
+    async fn teardown(mut self, reason: Option<String>) -> Option<String> {
+        self.shutdown().await;
+        reason.map(|reason| {
+            self.server
+                .stderr_tail
+                .append_to(reason, "\nserver output:\n")
+        })
+    }
+}
+
+impl OpenCodeActor {
+    async fn handle_event(&mut self, event: &Value) {
+        let mapped = self.mapper.on_event(event);
+        for request_id in mapped.permission_ids {
+            self.pending_permissions.insert(request_id);
+        }
+        for (request_id, question_ids) in mapped.question_requests {
+            self.pending_questions.insert(request_id, question_ids);
+        }
+        for (request_id, answers) in mapped.question_resolutions {
+            let Some(question_ids) = self.pending_questions.remove(&request_id) else {
+                continue;
+            };
+            self.events
+                .emit(AgentEvent::UserInputResolved {
+                    request_id,
+                    answers: answers
+                        .map(|answers| canonical_question_answers(&question_ids, &answers))
+                        .unwrap_or_default(),
+                })
+                .await;
+        }
+        let turn_completed = mapped
+            .events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }));
+        for event in mapped.events {
+            self.events.emit(event).await;
+        }
+        if turn_completed {
+            self.cancel_pending_questions().await;
+        }
+        if mapped.fetch_diff {
+            match self.fetch_diff() {
+                Ok(event) => self.events.emit(event).await,
+                Err(err) => {
+                    self.events
+                        .emit(AgentEvent::Warning {
+                            message: format!("failed to fetch OpenCode session diff: {err}"),
+                        })
+                        .await
+                }
+            }
         }
     }
 

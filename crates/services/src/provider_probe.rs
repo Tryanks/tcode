@@ -85,7 +85,7 @@ pub async fn probe_provider(
             ..ProviderSnapshot::default()
         };
     };
-    let version = crate::version_check::parse_version(&raw_version)
+    let version = crate::version_check::provider_updates::parse_version(&raw_version)
         .map(|(a, b, c)| format!("{a}.{b}.{c}"))
         .or(Some(raw_version));
 

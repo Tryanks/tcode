@@ -22,16 +22,10 @@ pub use tcode_client::pairing::{
     PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OfflineReason {
-    CertificateChanged,
-}
-
 pub struct RemoteClient {
     pub to_host: Sender<String>,
     pub from_host: Receiver<String>,
     pub state: Receiver<ConnectionState>,
-    pub reason: Arc<Mutex<Option<OfflineReason>>>,
 }
 
 #[derive(Deserialize)]
@@ -202,8 +196,6 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
     let (to_host, outgoing) = async_channel::unbounded();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
-    let reason = Arc::new(Mutex::new(None));
-    let thread_reason = reason.clone();
     std::thread::Builder::new()
         .name("tcode-remote-client".into())
         .spawn(move || {
@@ -213,7 +205,6 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
                 outgoing,
                 incoming,
                 state_tx,
-                thread_reason,
             ));
         })
         .expect("failed to spawn remote client thread");
@@ -221,7 +212,6 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
         to_host,
         from_host,
         state,
-        reason,
     }
 }
 
@@ -231,7 +221,6 @@ async fn connection_loop(
     outgoing: Receiver<String>,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
-    reason: Arc<Mutex<Option<OfflineReason>>>,
 ) {
     CERT_ERRORS.lock().unwrap().remove(&host.host_id);
     let mut buffered = VecDeque::<String>::new();
@@ -248,7 +237,6 @@ async fn connection_loop(
                     break;
                 }
                 Err(error) if error.contains(CERT_CHANGED) => {
-                    *reason.lock().unwrap() = Some(OfflineReason::CertificateChanged);
                     CERT_ERRORS.lock().unwrap().insert(host.host_id.clone());
                     let _ = state.send(ConnectionState::Offline).await;
                     incoming.close();

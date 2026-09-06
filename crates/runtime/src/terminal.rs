@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 pub use tcode_core::ui::TerminalSplitDirection;
+pub use tcode_protocol::{
+    TerminalContextStatus as TerminalContext, TerminalSplitStatus as TerminalSplit,
+};
 
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.
 /// Globally unique tab ids prevent its geometry, selection, bell, and event
@@ -20,22 +23,6 @@ pub(crate) struct OutputReplay {
 pub struct TerminalEntry {
     pub id: u64,
     pub terminal: Arc<term::Terminal>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalSplit {
-    pub first: u64,
-    pub second: u64,
-    pub direction: TerminalSplitDirection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalContext {
-    pub id: u64,
-    pub terminal_label: String,
-    pub line_start: usize,
-    pub line_end: usize,
-    pub text: String,
 }
 
 pub struct TerminalWorkspace {
@@ -129,26 +116,8 @@ impl TerminalWorkspace {
                 })
                 .collect(),
             active_id: status.active_terminal_id,
-            splits: status
-                .terminal_splits
-                .iter()
-                .map(|split| TerminalSplit {
-                    first: split.first,
-                    second: split.second,
-                    direction: split.direction,
-                })
-                .collect(),
-            contexts: status
-                .terminal_contexts
-                .iter()
-                .map(|context| TerminalContext {
-                    id: context.id,
-                    terminal_label: context.terminal_label.clone(),
-                    line_start: context.line_start,
-                    line_end: context.line_end,
-                    text: context.text.clone(),
-                })
-                .collect(),
+            splits: status.terminal_splits.clone(),
+            contexts: status.terminal_contexts.clone(),
             next_context_id: 1,
         }
     }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_channel::{Receiver, Sender};
+use tcode_protocol::encode_line;
 
 /// One logical client endpoint attached to a [`HostMux`].
 pub struct Connection {
@@ -106,40 +107,40 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                 routes.retain(|_, route| route.0 != id);
             }
             Input::Client(Ok(Ingress::Line(connection_id, line))) => {
-                if let Some((kind, topic)) = subscription_change(&line) {
+                let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let Some(local_id) = value.get("id").and_then(serde_json::Value::as_u64) else {
+                    continue;
+                };
+                if let Some((kind, topic)) = subscription_change(&value) {
                     let topics = subscriptions.entry(connection_id).or_default();
                     if kind == "subscribe" {
                         topics.insert(topic.clone());
                     } else {
                         topics.remove(&topic);
                         if subscriptions.values().any(|topics| topics.contains(&topic)) {
-                            if let Some((_, local_id)) = rewrite_client_id(&line, 0) {
-                                let ack = tcode_protocol::HostMessage::Ack {
-                                    id: local_id,
-                                    result: Ok(tcode_protocol::CommandResponse::Unit),
-                                };
-                                if let Some(sender) = clients.get(&connection_id) {
-                                    let _ =
-                                        sender.try_send(tcode_protocol::encode_line(&ack).unwrap());
-                                }
+                            let ack = tcode_protocol::HostMessage::Ack {
+                                id: local_id,
+                                result: Ok(tcode_protocol::CommandResponse::Unit),
+                            };
+                            if let Some(sender) = clients.get(&connection_id) {
+                                let _ = sender.try_send(encode_line(&ack).unwrap());
                             }
                             continue;
                         }
                     }
                 }
-                let Some((rewritten, local_id)) = rewrite_client_id(&line, next_global_id) else {
-                    continue;
-                };
+                value["id"] = next_global_id.into();
                 routes.insert(next_global_id, (connection_id, local_id));
                 next_global_id = next_global_id.wrapping_add(1).max(1);
-                if to_host.send(rewritten).await.is_err() {
+                if to_host.send(encode_line(&value).unwrap()).await.is_err() {
                     break;
                 }
             }
             Input::Client(Err(_)) | Input::Host(Err(_)) => break,
             Input::Host(Ok(line)) => {
-                let Some(value) = serde_json::from_str::<serde_json::Value>(line.trim_end()).ok()
-                else {
+                let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
                 match value.get("type").and_then(serde_json::Value::as_str) {
@@ -163,10 +164,9 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                                     .get(&connection_id)
                                     .is_some_and(|topics| topics.contains(&topic))
                                 && let Some(sender) = clients.get(&connection_id)
-                                && let Some(line) =
-                                    replace_field(&line, &["content", "request_id"], local_id)
                             {
-                                let _ = sender.try_send(line);
+                                value["content"]["request_id"] = local_id.into();
+                                let _ = sender.try_send(encode_line(&value).unwrap());
                             }
                         } else {
                             for (id, sender) in &clients {
@@ -190,13 +190,10 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
                         let Some((connection_id, local_id)) = routes.remove(&global_id) else {
                             continue;
                         };
-                        let Some(rewritten) = rewrite_host_id(&line, local_id) else {
-                            continue;
-                        };
-                        if clients
-                            .get(&connection_id)
-                            .is_some_and(|sender| sender.try_send(rewritten).is_err())
-                        {
+                        value["content"]["id"] = local_id.into();
+                        if clients.get(&connection_id).is_some_and(|sender| {
+                            sender.try_send(encode_line(&value).unwrap()).is_err()
+                        }) {
                             clients.remove(&connection_id);
                         }
                     }
@@ -207,148 +204,16 @@ async fn pump(to_host: Sender<String>, from_host: Receiver<String>, ingress: Rec
     }
 }
 
-fn subscription_change(line: &str) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+fn subscription_change(value: &serde_json::Value) -> Option<(&str, String)> {
     let payload = value.get("payload")?;
     let kind = payload.get("type")?.as_str()?;
     if !matches!(kind, "subscribe" | "unsubscribe") {
         return None;
     }
     Some((
-        kind.to_string(),
+        kind,
         serde_json::to_string(payload.get("content")?.get("topic")?).ok()?,
     ))
-}
-
-fn rewrite_client_id(line: &str, id: u64) -> Option<(String, u64)> {
-    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
-    let local_id = value.get("id")?.as_u64()?;
-    Some((replace_field(line, &["id"], id)?, local_id))
-}
-
-fn rewrite_host_id(line: &str, id: u64) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
-    value.get("content")?.get("id")?.as_u64()?;
-    replace_field(line, &["content", "id"], id)
-}
-
-/// Locate a field through JSON objects and replace only its value bytes. The
-/// full serde parse above validates the input; this small scanner preserves all
-/// whitespace, ordering, escaping, and the trailing NDJSON newline.
-fn replace_field(line: &str, path: &[&str], id: u64) -> Option<String> {
-    let bytes = line.as_bytes();
-    let mut object_start = skip_space(bytes, 0);
-    let mut span = None;
-    for (index, field) in path.iter().enumerate() {
-        span = object_field_span(bytes, object_start, field);
-        let (start, _) = span?;
-        if index + 1 < path.len() {
-            object_start = skip_space(bytes, start);
-            if bytes.get(object_start) != Some(&b'{') {
-                return None;
-            }
-        }
-    }
-    let (start, end) = span?;
-    let mut result = String::with_capacity(line.len() + 20);
-    result.push_str(&line[..start]);
-    result.push_str(&id.to_string());
-    result.push_str(&line[end..]);
-    Some(result)
-}
-
-fn object_field_span(bytes: &[u8], object_start: usize, wanted: &str) -> Option<(usize, usize)> {
-    if bytes.get(object_start) != Some(&b'{') {
-        return None;
-    }
-    let mut cursor = object_start + 1;
-    loop {
-        cursor = skip_space(bytes, cursor);
-        match bytes.get(cursor)? {
-            b'}' => return None,
-            b',' => {
-                cursor += 1;
-                continue;
-            }
-            b'"' => {}
-            _ => return None,
-        }
-        let key_end = string_end(bytes, cursor)?;
-        let key: String = serde_json::from_slice(&bytes[cursor..key_end]).ok()?;
-        cursor = skip_space(bytes, key_end);
-        if bytes.get(cursor) != Some(&b':') {
-            return None;
-        }
-        let value_start = skip_space(bytes, cursor + 1);
-        let value_end = value_end(bytes, value_start)?;
-        if key == wanted {
-            return Some((value_start, value_end));
-        }
-        cursor = value_end;
-    }
-}
-
-fn skip_space(bytes: &[u8], mut cursor: usize) -> usize {
-    while bytes
-        .get(cursor)
-        .is_some_and(|byte| byte.is_ascii_whitespace())
-    {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut cursor = start + 1;
-    let mut escaped = false;
-    while let Some(byte) = bytes.get(cursor) {
-        cursor += 1;
-        if escaped {
-            escaped = false;
-        } else if *byte == b'\\' {
-            escaped = true;
-        } else if *byte == b'"' {
-            return Some(cursor);
-        }
-    }
-    None
-}
-
-fn value_end(bytes: &[u8], start: usize) -> Option<usize> {
-    match *bytes.get(start)? {
-        b'"' => string_end(bytes, start),
-        b'{' | b'[' => {
-            let opening = bytes[start];
-            let closing = if opening == b'{' { b'}' } else { b']' };
-            let mut depth = 0_u32;
-            let mut cursor = start;
-            while let Some(byte) = bytes.get(cursor) {
-                if *byte == b'"' {
-                    cursor = string_end(bytes, cursor)?;
-                    continue;
-                }
-                if *byte == opening {
-                    depth += 1;
-                } else if *byte == closing {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(cursor + 1);
-                    }
-                }
-                cursor += 1;
-            }
-            None
-        }
-        _ => {
-            let mut cursor = start;
-            while bytes.get(cursor).is_some_and(|byte| {
-                !matches!(byte, b',' | b'}' | b']') && !byte.is_ascii_whitespace()
-            }) {
-                cursor += 1;
-            }
-            (cursor > start).then_some(cursor)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -430,18 +295,49 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_preserves_every_other_byte() {
-        let input = " { \"payload\" : {\"x\": [1, 2]}, \"id\" : 42 }\n";
-        let (rewritten, local) = rewrite_client_id(input, 987).unwrap();
-        assert_eq!(local, 42);
-        assert_eq!(
-            rewritten,
-            " { \"payload\" : {\"x\": [1, 2]}, \"id\" : 987 }\n"
-        );
-        let output = "{\"type\": \"ack\", \"content\": { \"result\": {}, \"id\": 987 }}\n";
-        assert_eq!(
-            rewrite_host_id(output, 42).unwrap(),
-            "{\"type\": \"ack\", \"content\": { \"result\": {}, \"id\": 42 }}\n"
-        );
+    fn routing_changes_only_correlation_ids() {
+        let (to_host, host_rx) = async_channel::unbounded();
+        let (host_tx, from_host) = async_channel::unbounded();
+        let mux = HostMux::new(to_host, from_host);
+        let client = mux.attach();
+        let request = serde_json::json!({
+            "id": u64::MAX,
+            "payload": {
+                "type": "subscribe",
+                "content": {"topic": {"type": "index"}},
+                "extension": {"id": 17, "text": "escapes: \" } ] \\"},
+            },
+        });
+        client
+            .to_host
+            .send_blocking(encode_line(&request).unwrap())
+            .unwrap();
+        let forwarded = host_rx.recv_blocking().unwrap();
+        assert!(forwarded.ends_with('\n'));
+        let mut forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        let global_id = forwarded["id"].as_u64().unwrap();
+        assert_ne!(global_id, u64::MAX);
+        forwarded["id"] = request["id"].clone();
+        assert_eq!(forwarded, request);
+
+        for (kind, id_field) in [("event", "request_id"), ("ack", "id")] {
+            let message = serde_json::json!({
+                "type": kind,
+                "content": {
+                    id_field: global_id,
+                    "topic": {"type": "index"},
+                    "nested": {"id": 123, "request_id": 456, "value": [null, true, "文本"]},
+                },
+            });
+            host_tx
+                .send_blocking(encode_line(&message).unwrap())
+                .unwrap();
+            let reply = client.from_host.recv_blocking().unwrap();
+            assert!(reply.ends_with('\n'));
+            let mut reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(reply["content"][id_field], u64::MAX);
+            reply["content"][id_field] = global_id.into();
+            assert_eq!(reply, message);
+        }
     }
 }

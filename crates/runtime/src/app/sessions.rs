@@ -559,12 +559,6 @@ impl AppState {
             .resident(id)
             .map(|session| (session.meta.clone(), session.turn_in_flight))
             .or_else(|| {
-                self.residents
-                    .parked
-                    .get(id)
-                    .map(|session| (session.meta.clone(), session.turn_in_flight))
-            })
-            .or_else(|| {
                 self.sessions
                     .iter()
                     .find(|meta| meta.id == id)
@@ -1036,14 +1030,9 @@ impl AppState {
         session_id
     }
 
-    /// Whether the active thread is an unsent draft.
-    pub(crate) fn active_is_draft(&self, target_id: &str) -> bool {
-        self.resident(target_id).is_some_and(|a| a.draft)
-    }
-
     /// Persist the active draft as a real session.
     /// The session id is preserved, so its already-recorded events line up.
-    pub(super) fn commit_draft(&mut self, target_id: &str, cx: &mut HostCx) -> std::io::Result<()> {
+    pub(super) fn commit_draft(&mut self, target_id: &str, cx: &mut HostCx) {
         let preference_migration = self.resident(target_id).and_then(|active| {
             active.draft.then(|| {
                 (
@@ -1082,7 +1071,6 @@ impl AppState {
             self.terminal_preferences.insert(session_key, preferences);
             self.write_terminal_preferences(cx);
         }
-        Ok(())
     }
 
     pub(super) fn schedule_timeline_load(
@@ -1120,7 +1108,7 @@ impl AppState {
     ) {
         let intended = match target {
             TimelineLoadTarget::Active { .. } => self.resident(&session_id),
-            TimelineLoadTarget::Background { .. } => self.residents.parked.get(&session_id),
+            TimelineLoadTarget::Background => self.residents.parked.get(&session_id),
         };
         let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
             return;
@@ -1133,11 +1121,8 @@ impl AppState {
                 let stored = store.read_events(&read_id);
                 let mut timeline = Timeline::fold_events(stored.iter().cloned());
                 let (mark_idle, load_branch) = match target {
-                    TimelineLoadTarget::Active {
-                        mark_idle,
-                        read_git_branch,
-                    } => (mark_idle, read_git_branch),
-                    TimelineLoadTarget::Background { mark_idle } => (mark_idle, false),
+                    TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
+                    TimelineLoadTarget::Background => (true, false),
                 };
                 if mark_idle {
                     timeline.mark_idle();
@@ -1155,7 +1140,7 @@ impl AppState {
                     TimelineLoadTarget::Active { .. } => {
                         state.residents.live.contains_key(&session_id)
                     }
-                    TimelineLoadTarget::Background { .. } => {
+                    TimelineLoadTarget::Background => {
                         state.residents.parked.contains_key(&session_id)
                     }
                 };
@@ -1178,20 +1163,10 @@ impl AppState {
                         "timeline load for {session_id} remained racy after {attempt} attempts; applying the last fold"
                     );
                 }
-                match target {
-                    TimelineLoadTarget::Active { .. } => {
-                        if let Some(active) = state.residents.live.get_mut(&session_id) {
-                            active.timeline = timeline;
-                            if let Some(git_branch) = git_branch {
-                                active.git_branch = git_branch;
-                            }
-                        }
-
-                    }
-                    TimelineLoadTarget::Background { .. } => {
-                        if let Some(background) = state.residents.parked.get_mut(&session_id) {
-                            background.timeline = timeline;
-                        }
+                if let Some(session) = state.resident_mut(&session_id) {
+                    session.timeline = timeline;
+                    if let Some(git_branch) = git_branch {
+                        session.git_branch = git_branch;
                     }
                 }
             });
@@ -1227,10 +1202,7 @@ impl AppState {
             self.residents.live.insert(session_id.to_string(), parked);
             self.schedule_timeline_load(
                 session_id.to_string(),
-                TimelineLoadTarget::Active {
-                    mark_idle: false,
-                    read_git_branch: true,
-                },
+                TimelineLoadTarget::Active { mark_idle: false },
                 cx,
             );
             if !restored_terminal {
@@ -1265,10 +1237,7 @@ impl AppState {
         self.residents.live.insert(session_id.clone(), active);
         self.schedule_timeline_load(
             session_id.clone(),
-            TimelineLoadTarget::Active {
-                mark_idle: true,
-                read_git_branch: true,
-            },
+            TimelineLoadTarget::Active { mark_idle: true },
             cx,
         );
         if !restored_terminal {

@@ -408,10 +408,6 @@ fn tls_pinned_handshake_and_tofu_pairing() {
     let client = connect(host, "changed".into());
     wait_state(&client, ConnectionState::Offline);
     assert!(tcode_remote::client::certificate_changed(&id));
-    assert_eq!(
-        *client.reason.lock().unwrap(),
-        Some(tcode_remote::client::OfflineReason::CertificateChanged)
-    );
     other_server.shutdown();
     server.shutdown();
 }

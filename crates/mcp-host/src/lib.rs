@@ -104,10 +104,6 @@ impl<Service> TokenRegistry<Service> {
     pub fn revoke(&self, token: &str) {
         self.services.write().unwrap().remove(token);
     }
-
-    pub fn contains(&self, token: &str) -> bool {
-        self.services.read().unwrap().contains_key(token)
-    }
 }
 
 pub struct Route(Router);
@@ -200,5 +196,23 @@ impl Host {
                 });
             })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_keep_scopes_isolated_and_revoke_independently() {
+        let registry = TokenRegistry::new(|scope| scope);
+        let first = registry.register("session-a");
+        let second = registry.register("session-b");
+        assert_ne!(first, second);
+        assert_eq!(registry.services.read().unwrap()[&first], "session-a");
+        registry.revoke(&first);
+        let services = registry.services.read().unwrap();
+        assert!(!services.contains_key(&first));
+        assert_eq!(services[&second], "session-b");
     }
 }

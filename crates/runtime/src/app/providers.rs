@@ -490,28 +490,6 @@ impl AppState {
                     })
                     .await;
                 host_cx.enqueue(move |state, cx| {
-                    let (installed, latest, source, update_available) = match assessment {
-                        ProviderUpdateAssessment::UpToDate {
-                            current,
-                            latest,
-                            install_source,
-                        } => (Some(current), Some(latest), install_source, false),
-                        ProviderUpdateAssessment::UpdateAvailable {
-                            current,
-                            latest,
-                            install_source,
-                        } => (Some(current), Some(latest), install_source, true),
-                        ProviderUpdateAssessment::Unknown {
-                            current,
-                            latest,
-                            install_source,
-                            ..
-                        } => {
-                            // Unknown is deliberately silent, but it is not
-                            // treated as evidence that the provider is current.
-                            (current, latest, install_source, false)
-                        }
-                    };
                     let already = state
                         .providers
                         .provider_versions
@@ -524,14 +502,14 @@ impl AppState {
                         .entry(provider)
                         .or_default();
                     status.checking = false;
-                    status.install_source = source;
-                    status.installed = installed;
-                    status.latest = latest.clone();
-                    status.update_available = update_available;
+                    status.install_source = assessment.install_source;
+                    status.installed = assessment.current;
+                    status.latest = assessment.latest;
+                    status.update_available = assessment.update_available;
                     // Toast once when an update becomes newly available.
-                    if update_available
+                    if status.update_available
                         && !already
-                        && let Some(version) = &latest
+                        && let Some(version) = &status.latest
                     {
                         emit_runtime(
                             cx,
@@ -560,33 +538,12 @@ impl AppState {
             let assessment = app_releases::check(&current, fetched);
             host_cx.enqueue(move |state, cx| {
                 let already = state.providers.tcode_update.update_available;
-                let (latest, release_url, update_available) = match assessment {
-                    AppReleaseAssessment::UpToDate {
-                        latest,
-                        release_url,
-                        ..
-                    } => (Some(latest), Some(release_url), false),
-                    AppReleaseAssessment::UpdateAvailable {
-                        latest,
-                        release_url,
-                        ..
-                    } => (Some(latest), Some(release_url), true),
-                    AppReleaseAssessment::Unknown {
-                        latest,
-                        release_url,
-                        ..
-                    } => {
-                        // Network, policy-input, and response failures remain
-                        // silent by an explicit runtime choice.
-                        (latest, release_url, false)
-                    }
-                };
                 let status = &mut state.providers.tcode_update;
                 status.checking = false;
-                status.latest = latest;
-                status.release_url = release_url;
-                status.update_available = update_available;
-                if update_available
+                status.latest = assessment.latest;
+                status.release_url = assessment.release_url;
+                status.update_available = assessment.update_available;
+                if status.update_available
                     && !already
                     && let Some(version) = &status.latest
                 {

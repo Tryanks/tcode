@@ -840,18 +840,16 @@ pub fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
     for file in files {
         header_columns = header_columns.max(display_columns(&file.path));
         for row in &file.all_rows {
-            unified_columns = unified_columns.max(display_columns(rendered_row_text(row)));
+            unified_columns = unified_columns.max(display_columns(&row.text));
         }
         for pair in &file.all_split {
             let columns = pair
                 .left
-                .map(|index| rendered_row_text(&file.all_rows[index]))
-                .map(display_columns)
+                .map(|index| display_columns(&file.all_rows[index].text))
                 .unwrap_or(0)
                 + pair
                     .right
-                    .map(|index| rendered_row_text(&file.all_rows[index]))
-                    .map(display_columns)
+                    .map(|index| display_columns(&file.all_rows[index].text))
                     .unwrap_or(0);
             split_columns = split_columns.max(columns);
         }
@@ -861,10 +859,6 @@ pub fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
         (unified_columns as f32 * MONO_ADVANCE + UNIFIED_CHROME).max(header_width),
         (split_columns as f32 * MONO_ADVANCE + SPLIT_CHROME).max(header_width),
     )
-}
-
-pub fn rendered_row_text(row: &RenderedRow) -> &str {
-    &row.text
 }
 
 pub fn display_columns(text: &str) -> usize {

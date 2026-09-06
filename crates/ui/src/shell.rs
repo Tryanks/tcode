@@ -206,21 +206,13 @@ impl AppShell {
                         continue;
                     };
                     let (reply, receiver) = async_channel::bounded(1);
-                    let op = serde_json::to_value(request).and_then(serde_json::from_value);
-                    match op {
-                        Ok(op) => {
-                            if preview
-                                .update_in(cx, |panel, window, cx| {
-                                    panel.handle_op(session_id, op, reply, window, cx)
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            let _ = reply.try_send(Err(error.to_string()));
-                        }
+                    if preview
+                        .update_in(cx, |panel, window, cx| {
+                            panel.handle_op(session_id, request, reply, window, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
                     // Each operation waits independently: a slow wait_for must
                     // not block a second client's navigation or a screenshot.
@@ -230,11 +222,6 @@ impl AppShell {
                             .recv()
                             .await
                             .unwrap_or_else(|_| Err("preview panel dropped request".into()));
-                        let response = response.and_then(|value| {
-                            serde_json::to_value(value)
-                                .and_then(serde_json::from_value)
-                                .map_err(|error| error.to_string())
-                        });
                         store.update(cx, |store, _| store.preview_reply(request_id, response));
                     })
                     .detach();
@@ -456,7 +443,7 @@ impl Render for AppShell {
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let panel = self.store.read(cx).shell_panel_state();
+        let panel = self.store.read(cx).panel_state();
         let diff_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
         let diff_expanded = panel.right_panel_expanded;

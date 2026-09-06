@@ -1529,7 +1529,7 @@ impl ChatView {
             None
         };
         let click_key = key;
-        components::activity::activity_row_with_command_detail(
+        components::activity::activity_row(
             entry,
             compact,
             live_reasoning,
@@ -1738,11 +1738,11 @@ impl ChatView {
         // The right-side cluster (Open split-button + panel toggles) shows for
         // any active thread, including a draft.
         let show_actions = is_draft || title.is_some();
-        let panel = self.workspace_store.read(cx).chat_panel_state();
+        let panel = self.workspace_store.read(cx).panel_state();
         let right_panel_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
-        let plan_showing = panel.plan_showing;
-        let preview_showing = panel.preview_showing;
+        let plan_showing = right_panel_open && right_tab == RightTab::Plan;
+        let preview_showing = right_panel_open && right_tab == RightTab::Preview;
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         let diff_showing = right_panel_open && right_tab == RightTab::Diff;
         window_drag_area("chat-header-drag", base, window, cx)
@@ -2423,7 +2423,7 @@ impl Render for ChatView {
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
         #[cfg(feature = "terminal")]
-        let panel = self.workspace_store.read(cx).chat_panel_state();
+        let panel = self.workspace_store.read(cx).panel_state();
         #[cfg(feature = "terminal")]
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
         #[cfg(feature = "terminal")]

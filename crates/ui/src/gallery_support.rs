@@ -55,7 +55,7 @@ pub fn user_bubble(
 }
 
 pub fn activity(entry: &TimelineEntry, expanded: bool, cx: &App) -> AnyElement {
-    activity::activity_row(entry, false, false, expanded, |_, _, _| {}, cx)
+    activity::activity_row(entry, false, false, expanded, None, |_, _, _| {}, cx)
 }
 
 pub fn work_log(

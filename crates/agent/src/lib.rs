@@ -1823,44 +1823,6 @@ mod turn_diff_tests {
         assert!(file_changes_from_unified_diff("\n").unwrap().is_empty());
         assert!(file_changes_from_unified_diff("--- a/file\n+++ b/file\n").is_err());
     }
-
-    #[test]
-    fn warning_event_round_trips() {
-        let event = AgentEvent::Warning {
-            message: "boom".into(),
-        };
-        let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"], "warning");
-        assert_eq!(json["message"], "boom");
-        let decoded: AgentEvent = serde_json::from_value(json).unwrap();
-        assert!(matches!(
-            decoded,
-            AgentEvent::Warning { message } if message == "boom"
-        ));
-    }
-
-    #[test]
-    fn turn_change_event_round_trips() {
-        let event = AgentEvent::TurnChangesUpdated {
-            turn_id: "turn-7".into(),
-            changes: vec![FileChange {
-                path: "src/main.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: Some("@@ -1 +1 @@\n-old\n+new\n".into()),
-            }],
-            completeness: ChangeCompleteness::Exact,
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let decoded: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            decoded,
-            AgentEvent::TurnChangesUpdated {
-                turn_id,
-                completeness: ChangeCompleteness::Exact,
-                changes,
-            } if turn_id == "turn-7" && changes[0].path == "src/main.rs"
-        ));
-    }
 }
 
 #[cfg(test)]

@@ -295,6 +295,9 @@ as fallback. Word-level changed-token highlights layer over syntax runs;
 collapsed gaps expand without re-diffing, and split rows pair by content.
 Loading, highlighting, and row construction run on background executors, while
 the render path constructs only visible file headers and rows.
+Unified and split rows share syntax highlights and line-number drag selection.
+Unified rows use two 44px gutters and a 2px change-color rail; each split cell
+uses a 42px gutter without the rail. Both retain an 18px minimum row height.
 
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the

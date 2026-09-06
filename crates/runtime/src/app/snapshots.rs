@@ -294,28 +294,8 @@ impl AppState {
                 })
                 .collect(),
             active_terminal_id: session.terminal_workspace.active_id,
-            terminal_splits: session
-                .terminal_workspace
-                .splits
-                .iter()
-                .map(|split| TerminalSplitStatus {
-                    first: split.first,
-                    second: split.second,
-                    direction: split.direction,
-                })
-                .collect(),
-            terminal_contexts: session
-                .terminal_workspace
-                .contexts
-                .iter()
-                .map(|context| TerminalContextStatus {
-                    id: context.id,
-                    terminal_label: context.terminal_label.clone(),
-                    line_start: context.line_start,
-                    line_end: context.line_end,
-                    text: context.text.clone(),
-                })
-                .collect(),
+            terminal_splits: session.terminal_workspace.splits.clone(),
+            terminal_contexts: session.terminal_workspace.contexts.clone(),
             terminal_open: terminal_preferences.is_some_and(|preferences| preferences.open),
             terminal_height: terminal_preferences
                 .map(|preferences| preferences.height.clamp(120., 600.))
