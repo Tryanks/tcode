@@ -8910,6 +8910,7 @@ version = "0.1.0"
 dependencies = [
  "agent",
  "base64 0.23.1",
+ "bitflags 2.13.0",
  "serde",
  "serde_json",
  "tcode-core",
@@ -9110,6 +9111,7 @@ dependencies = [
  "portable-pty",
  "rio-graphics",
  "rio-vt",
+ "tcode-protocol",
 ]
 
 [[package]]

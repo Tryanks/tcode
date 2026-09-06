@@ -9,6 +9,7 @@ mod event;
 mod preview;
 mod query;
 pub use preview::{PreviewRequest, PreviewResponse};
+pub mod terminal;
 mod wire;
 
 pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
@@ -24,6 +25,7 @@ pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,
     RecentDir, SessionSearchHit, SourceTool,
 };
+pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
     ClientMessage, ClientPayload, HostMessage, ProtocolError, Subscription, decode_client_line,
     decode_host_line, encode_line,

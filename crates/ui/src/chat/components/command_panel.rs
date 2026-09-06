@@ -5,9 +5,11 @@ use gpui::{
     Window, canvas, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::ElementExt as _;
-use term::{GridEmulator, TermSnapshot};
+use tcode_protocol::terminal::TerminalFrame;
+use term::GridEmulator;
 
 use crate::highlight;
+use crate::store::terminal::TerminalModel;
 use crate::terminal_drawer::{
     TERMINAL_CELL_HEIGHT, TERMINAL_CELL_WIDTH, TerminalPalette, layout_grid, paint_terminal_grid,
 };
@@ -77,7 +79,7 @@ impl CommandTheme {
 
 struct CachedPanel {
     command: String,
-    command_snapshot: TermSnapshot,
+    command_model: TerminalModel,
     command_rows: usize,
     command_theme: Option<CommandTheme>,
     cols: usize,
@@ -85,7 +87,7 @@ struct CachedPanel {
     output: Vec<u8>,
     fed_start: usize,
     last_fed_was_cr: bool,
-    output_snapshot: TermSnapshot,
+    output_model: TerminalModel,
     output_rows: usize,
 }
 
@@ -95,12 +97,11 @@ impl CachedPanel {
     }
 
     fn with_cols(command: &str, output: &str, cols: usize) -> Self {
-        let (command_snapshot, command_rows) = command_snapshot(command, cols, None);
+        let (command_model, command_rows) = command_model(command, cols, None);
         let output_emulator = GridEmulator::with_size(cols, MAX_ROWS - command_rows);
-        let output_snapshot = output_emulator.snapshot();
         let mut panel = Self {
             command: command.to_string(),
-            command_snapshot,
+            command_model,
             command_rows,
             command_theme: None,
             cols,
@@ -108,7 +109,7 @@ impl CachedPanel {
             output: Vec::new(),
             fed_start: 0,
             last_fed_was_cr: false,
-            output_snapshot,
+            output_model: TerminalModel::new(String::new()),
             output_rows: 0,
         };
         panel.rebuild_output(output.as_bytes());
@@ -118,8 +119,8 @@ impl CachedPanel {
     fn update(&mut self, command: &str, output: &str) {
         if self.command != command {
             self.command = command.to_string();
-            (self.command_snapshot, self.command_rows) =
-                command_snapshot(command, self.cols, self.command_theme.as_ref());
+            (self.command_model, self.command_rows) =
+                command_model(command, self.cols, self.command_theme.as_ref());
             self.rebuild_output(output.as_bytes());
             return;
         }
@@ -132,7 +133,7 @@ impl CachedPanel {
         if append_only && bytes.len().saturating_sub(self.fed_start) <= OUTPUT_TAIL_BYTES {
             self.feed_output(&bytes[self.output.len()..]);
             self.output = bytes.to_vec();
-            self.refresh_output_snapshot();
+            self.refresh_output_model();
         } else {
             self.rebuild_output(bytes);
         }
@@ -144,8 +145,8 @@ impl CachedPanel {
             return false;
         }
         self.cols = cols;
-        (self.command_snapshot, self.command_rows) =
-            command_snapshot(&self.command, cols, self.command_theme.as_ref());
+        (self.command_model, self.command_rows) =
+            command_model(&self.command, cols, self.command_theme.as_ref());
         let output = self.output.clone();
         self.rebuild_output(&output);
         true
@@ -158,7 +159,7 @@ impl CachedPanel {
         self.last_fed_was_cr = self.fed_start > 0 && bytes[self.fed_start - 1] == b'\r';
         self.feed_output(&bytes[self.fed_start..]);
         self.output = bytes.to_vec();
-        self.refresh_output_snapshot();
+        self.refresh_output_model();
     }
 
     fn feed_output(&mut self, bytes: &[u8]) {
@@ -173,13 +174,15 @@ impl CachedPanel {
         self.output_emulator.feed(&normalized);
     }
 
-    fn refresh_output_snapshot(&mut self) {
-        self.output_snapshot = self.output_emulator.snapshot();
-        self.output_rows = trim_snapshot(
-            &mut self.output_snapshot,
+    fn refresh_output_model(&mut self) {
+        let snapshot = self.output_emulator.snapshot();
+        let rows = visible_rows(
+            &snapshot,
             MAX_ROWS.saturating_sub(self.command_rows).max(1),
             0,
         );
+        self.output_model = project(&snapshot, rows);
+        self.output_rows = rows;
     }
 
     fn update_command_theme(&mut self, command_theme: CommandTheme) {
@@ -190,8 +193,8 @@ impl CachedPanel {
         {
             return;
         }
-        (self.command_snapshot, self.command_rows) =
-            command_snapshot(&self.command, self.cols, Some(&command_theme));
+        (self.command_model, self.command_rows) =
+            command_model(&self.command, self.cols, Some(&command_theme));
         self.command_theme = Some(command_theme);
     }
 
@@ -207,14 +210,9 @@ impl CachedPanel {
             background: cx.theme().background,
             selection: cx.theme().primary.opacity(0.28),
         };
-        let command = grid_element(
-            &self.command_snapshot,
-            self.command_rows,
-            self.cols,
-            palette,
-        );
+        let command = grid_element(&self.command_model, self.command_rows, self.cols, palette);
         let output = (self.output_rows > 0)
-            .then(|| grid_element(&self.output_snapshot, self.output_rows, self.cols, palette));
+            .then(|| grid_element(&self.output_model, self.output_rows, self.cols, palette));
         let rendered_cols = self.cols;
         div()
             .w_full()
@@ -238,12 +236,12 @@ impl CachedPanel {
 }
 
 fn grid_element(
-    snapshot: &TermSnapshot,
+    model: &TerminalModel,
     rows: usize,
     cols: usize,
     palette: TerminalPalette,
 ) -> AnyElement {
-    let paint_data = layout_grid(snapshot, palette, false, None, false, false);
+    let paint_data = layout_grid(model, palette, false, None, false, false);
     canvas(
         |_bounds, _window, _cx| (),
         move |bounds, (), window, cx| {
@@ -267,11 +265,11 @@ fn grid_element(
     .into_any_element()
 }
 
-fn command_snapshot(
+fn command_model(
     command: &str,
     cols: usize,
     command_theme: Option<&CommandTheme>,
-) -> (TermSnapshot, usize) {
+) -> (TerminalModel, usize) {
     let emulator = GridEmulator::with_size(cols, MAX_COMMAND_ROWS);
     let command = clamp_command(command, cols);
     if let Some(command_theme) = command_theme {
@@ -279,9 +277,9 @@ fn command_snapshot(
     } else {
         emulator.feed(command.as_bytes());
     }
-    let mut snapshot = emulator.snapshot();
-    let rows = trim_snapshot(&mut snapshot, MAX_COMMAND_ROWS, 1);
-    (snapshot, rows)
+    let snapshot = emulator.snapshot();
+    let rows = visible_rows(&snapshot, MAX_COMMAND_ROWS, 1);
+    (project(&snapshot, rows), rows)
 }
 
 fn highlighted_command(command: &str, theme: &CommandTheme) -> String {
@@ -356,8 +354,29 @@ fn clamp_command(command: &str, cols: usize) -> String {
     result
 }
 
-fn trim_snapshot(snapshot: &mut TermSnapshot, max_rows: usize, minimum: usize) -> usize {
-    let rows = (0..max_rows.min(snapshot.screen_lines))
+/// Stored command output has no host terminal behind it, so it is rendered
+/// through the same replicated model the live drawer uses, projected from a
+/// throwaway local emulator.
+fn project(snapshot: &term::TermSnapshot, rows: usize) -> TerminalModel {
+    let mut projector = term::Projector::default();
+    let visible = (0..rows)
+        .map(|row| projector.visible_row(snapshot, row))
+        .collect();
+    let mut model = TerminalModel::new(String::new());
+    model.apply_frame(TerminalFrame {
+        cols: snapshot.cols.min(u16::MAX as usize) as u16,
+        rows: rows.min(u16::MAX as usize) as u16,
+        styles: projector.into_styles(),
+        visible,
+        cursor: None,
+        ..TerminalFrame::default()
+    });
+    model
+}
+
+/// Trailing blank rows are not rendered; a command block sizes to its content.
+fn visible_rows(snapshot: &term::TermSnapshot, max_rows: usize, minimum: usize) -> usize {
+    (0..max_rows.min(snapshot.screen_lines))
         .rfind(|&row| {
             (0..snapshot.cols).any(|col| {
                 snapshot
@@ -366,18 +385,13 @@ fn trim_snapshot(snapshot: &mut TermSnapshot, max_rows: usize, minimum: usize) -
             })
         })
         .map_or(minimum, |row| row + 1)
-        .max(minimum);
-    snapshot.screen_lines = rows;
-    snapshot.visible_rows.truncate(rows);
-    snapshot.row_damage.truncate(rows);
-    snapshot.cursor = None;
-    rows
+        .max(minimum)
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::rgb;
-    use term::rio_vt::config::colors::AnsiColor;
+    use tcode_protocol::terminal::TerminalColor;
 
     use super::*;
     use crate::terminal_drawer::terminal_color;
@@ -401,7 +415,7 @@ mod tests {
     #[test]
     fn ansi_output_uses_terminal_green() {
         let panel = CachedPanel::new("echo green", "\x1b[32mgreen\x1b[0m");
-        let paint = layout_grid(&panel.output_snapshot, palette(), false, None, false, false);
+        let paint = layout_grid(&panel.output_model, palette(), false, None, false, false);
         let green = paint
             .text_runs
             .iter()
@@ -409,7 +423,7 @@ mod tests {
             .expect("green output run");
         assert_eq!(
             terminal_color(green.style.fg, palette()),
-            terminal_color(AnsiColor::Indexed(2), palette())
+            terminal_color(TerminalColor::Indexed(2), palette())
         );
     }
 
@@ -420,9 +434,9 @@ mod tests {
         assert_eq!(panel.command_rows, MAX_COMMAND_ROWS);
         assert!(
             panel
-                .command_snapshot
-                .cell_text(MAX_COMMAND_ROWS - 1, DEFAULT_COLS - 1)
-                .is_some_and(|text| text == "…")
+                .command_model
+                .cell(MAX_COMMAND_ROWS - 1, DEFAULT_COLS - 1)
+                .is_some_and(|cell| cell.text == "…")
         );
     }
 
@@ -445,23 +459,16 @@ mod tests {
 
         let mut panel = CachedPanel::new(command, "");
         panel.update_command_theme(command_theme);
-        let paint = layout_grid(
-            &panel.command_snapshot,
-            palette(),
-            false,
-            None,
-            false,
-            false,
-        );
+        let paint = layout_grid(&panel.command_model, palette(), false, None, false, false);
         let command = paint
             .text_runs
             .iter()
             .find(|run| run.text.contains("if"))
             .expect("highlighted command run");
-        let AnsiColor::Spec(color) = command.style.fg else {
+        let TerminalColor::Rgb { r, g, b } = command.style.fg else {
             panic!("command keyword should use truecolor foreground");
         };
-        assert_eq!((color.r, color.g, color.b), expected);
+        assert_eq!((r, g, b), expected);
     }
 
     #[test]
@@ -473,14 +480,20 @@ mod tests {
     #[test]
     fn bare_lf_returns_output_to_first_column() {
         let panel = CachedPanel::new("cmd", "a\nb");
-        assert_eq!(panel.output_snapshot.cell_text(1, 0), Some("b".to_string()));
+        assert_eq!(
+            panel.output_model.cell(1, 0).map(|cell| cell.text.clone()),
+            Some("b".into())
+        );
     }
 
     #[test]
     fn split_crlf_is_not_double_converted() {
         let mut panel = CachedPanel::new("cmd", "a\r");
         panel.update("cmd", "a\r\nb");
-        assert_eq!(panel.output_snapshot.cell_text(1, 0), Some("b".to_string()));
+        assert_eq!(
+            panel.output_model.cell(1, 0).map(|cell| cell.text.clone()),
+            Some("b".into())
+        );
         assert_eq!(panel.output_rows, 2);
     }
 
@@ -490,11 +503,14 @@ mod tests {
         let narrow = CachedPanel::with_cols("cmd", output, 20);
         let wide = CachedPanel::with_cols("cmd", output, 40);
         assert_eq!(
-            narrow.output_snapshot.cell_text(1, 0),
-            Some("u".to_string())
+            narrow.output_model.cell(1, 0).map(|cell| cell.text.clone()),
+            Some("u".into())
         );
         assert_eq!(narrow.output_rows, 2);
-        assert_eq!(wide.output_snapshot.cell_text(0, 20), Some("u".to_string()));
+        assert_eq!(
+            wide.output_model.cell(0, 20).map(|cell| cell.text.clone()),
+            Some("u".into())
+        );
         assert_eq!(wide.output_rows, 1);
     }
 }

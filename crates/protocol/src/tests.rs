@@ -143,14 +143,14 @@ fn binary_payloads_use_base64_and_reject_corrupt_input() {
         "/content/bytes",
     );
     assert_binary_wire(
-        ServerEvent::TerminalOutput {
-            terminal_id: 9,
-            bytes: bytes.clone(),
-            reset: true,
-            cols: 80,
-            rows: 24,
+        crate::terminal::TerminalImage {
+            key: 3,
+            width: 1,
+            height: 1,
+            color: crate::terminal::ImageColorType::Rgba,
+            pixels: bytes.clone(),
         },
-        "/content/bytes",
+        "/pixels",
     );
     assert_binary_wire(QueryResponse::FileBytes(bytes), "/content");
 }
@@ -366,4 +366,267 @@ fn unknown_data_variants_and_malformed_records_return_decode_errors() {
         serde_json::from_value::<SourceTool>(json!("future_tool")).unwrap(),
         SourceTool::Unknown
     );
+}
+
+/// The replicated terminal grid is the whole client contract, so its literal
+/// shape is asserted rather than round-tripped. Everything that is at its
+/// default is omitted: a blank cell is `{}` and a blank row is `{}`.
+#[test]
+fn terminal_frame_wire_shape_omits_defaults() {
+    use crate::terminal::{
+        CellWidth, CursorShape, TerminalCell, TerminalColor, TerminalCursor, TerminalFrame,
+        TerminalLink, TerminalModes, TerminalRow, TerminalStyle,
+    };
+
+    let frame = TerminalFrame {
+        cols: 4,
+        rows: 2,
+        modes: TerminalModes {
+            mode: 0b1_0000_0001_0001,
+            keyboard: 1,
+            modify_other_keys: Some(2),
+        },
+        cursor: Some(TerminalCursor {
+            row: 1,
+            col: 2,
+            shape: CursorShape::Beam,
+            blinking: true,
+        }),
+        styles: vec![
+            TerminalStyle::default(),
+            TerminalStyle {
+                fg: TerminalColor::Rgb { r: 1, g: 2, b: 3 },
+                bg: TerminalColor::Indexed(9),
+                underline_color: None,
+                flags: 0b110,
+            },
+        ],
+        visible: vec![
+            TerminalRow {
+                cells: vec![
+                    TerminalCell {
+                        text: "中".into(),
+                        width: CellWidth::Wide,
+                        style: 1,
+                        link: None,
+                    },
+                    TerminalCell {
+                        width: CellWidth::Spacer,
+                        ..TerminalCell::default()
+                    },
+                    TerminalCell {
+                        text: "e\u{301}".into(),
+                        link: Some(TerminalLink {
+                            uri: "https://example.com".into(),
+                            id: None,
+                        }),
+                        ..TerminalCell::default()
+                    },
+                ],
+                wrapped: true,
+            },
+            TerminalRow::default(),
+        ],
+        history: vec![TerminalRow::default()],
+        lines_evicted: 7,
+        title: "zsh".into(),
+        working_directory: Some(PathBuf::from("/tmp/project")),
+        exited: false,
+        exit_code: None,
+        images: Vec::new(),
+        overlays: Vec::new(),
+    };
+    let event = ServerEvent::TerminalFrame {
+        terminal_id: 3,
+        frame: Box::new(frame.clone()),
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "terminal_frame",
+            "content": {
+                "terminal_id": 3,
+                "frame": {
+                    "cols": 4,
+                    "rows": 2,
+                    "modes": {"mode": 4113, "keyboard": 1, "modify_other_keys": 2},
+                    "cursor": {"row": 1, "col": 2, "shape": "beam", "blinking": true},
+                    "styles": [
+                        {"fg": {"type": "foreground"}, "bg": {"type": "background"}},
+                        {
+                            "fg": {"type": "rgb", "content": {"r": 1, "g": 2, "b": 3}},
+                            "bg": {"type": "indexed", "content": 9},
+                            "flags": 6,
+                        },
+                    ],
+                    "visible": [
+                        {
+                            "cells": [
+                                {"text": "中", "width": "wide", "style": 1},
+                                {"width": "spacer"},
+                                {"text": "e\u{301}", "link": {"uri": "https://example.com"}},
+                            ],
+                            "wrapped": true,
+                        },
+                        {},
+                    ],
+                    "history": [{}],
+                    "lines_evicted": 7,
+                    "title": "zsh",
+                    "working_directory": "/tmp/project",
+                },
+            },
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerEvent>(json!({
+            "type": "terminal_frame",
+            "content": {"terminal_id": 3, "frame": serde_json::to_value(&frame).unwrap()},
+        }))
+        .unwrap(),
+        event
+    );
+}
+
+#[test]
+fn terminal_delta_wire_shape_carries_only_what_changed() {
+    use crate::terminal::{
+        TerminalCell, TerminalDelta, TerminalHistoryUpdate, TerminalModes, TerminalRow,
+        TerminalRowUpdate, TerminalStyle,
+    };
+
+    let delta = TerminalDelta {
+        cols: 80,
+        rows: 24,
+        modes: TerminalModes::default(),
+        cursor: None,
+        lines_evicted: 0,
+        styles: vec![TerminalStyle::default()],
+        rows_replaced: vec![TerminalRowUpdate {
+            index: 5,
+            row: TerminalRow {
+                cells: vec![TerminalCell {
+                    text: "y".into(),
+                    ..TerminalCell::default()
+                }],
+                wrapped: false,
+            },
+        }],
+        history: Some(TerminalHistoryUpdate::Appended(
+            vec![TerminalRow::default()],
+        )),
+        title: None,
+        working_directory: None,
+        exit: None,
+        images_added: Vec::new(),
+        images_removed: Vec::new(),
+        overlays: None,
+        bell: true,
+        clipboard: None,
+    };
+    let event = ServerEvent::TerminalDelta {
+        terminal_id: 3,
+        delta: Box::new(delta.clone()),
+    };
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        json!({
+            "type": "terminal_delta",
+            "content": {
+                "terminal_id": 3,
+                "delta": {
+                    "cols": 80,
+                    "rows": 24,
+                    "modes": {"mode": 0, "keyboard": 0},
+                    "styles": [{"fg": {"type": "foreground"}, "bg": {"type": "background"}}],
+                    "rows_replaced": [{"index": 5, "row": {"cells": [{"text": "y"}]}}],
+                    "history": {"type": "appended", "content": [{}]},
+                    "bell": true,
+                },
+            },
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<ServerEvent>(serde_json::to_value(&event).unwrap()).unwrap(),
+        event
+    );
+}
+
+/// A delta advances the frame exactly as the host's own retained projection
+/// does: rows are replaced in place, history appends and trims at the cap, and
+/// message-local style ids are remapped into the frame's own table.
+#[test]
+fn applying_a_delta_replaces_rows_and_trims_history_at_the_cap() {
+    use crate::terminal::{
+        HISTORY_LIMIT, TerminalCell, TerminalColor, TerminalDelta, TerminalFrame,
+        TerminalHistoryUpdate, TerminalRow, TerminalRowUpdate, TerminalStyle,
+    };
+
+    let red = TerminalStyle {
+        fg: TerminalColor::Indexed(1),
+        ..TerminalStyle::default()
+    };
+    let mut frame = TerminalFrame {
+        cols: 2,
+        rows: 2,
+        styles: vec![TerminalStyle::default()],
+        visible: vec![TerminalRow::default(), TerminalRow::default()],
+        history: (0..HISTORY_LIMIT).map(|_| TerminalRow::default()).collect(),
+        ..TerminalFrame::default()
+    };
+    frame.apply(&TerminalDelta {
+        cols: 2,
+        rows: 2,
+        // The delta's own table puts the new style at index 1.
+        styles: vec![TerminalStyle::default(), red],
+        rows_replaced: vec![TerminalRowUpdate {
+            index: 1,
+            row: TerminalRow {
+                cells: vec![TerminalCell {
+                    text: "x".into(),
+                    style: 1,
+                    ..TerminalCell::default()
+                }],
+                wrapped: false,
+            },
+        }],
+        history: Some(TerminalHistoryUpdate::Appended(vec![TerminalRow {
+            cells: vec![TerminalCell {
+                text: "old".into(),
+                ..TerminalCell::default()
+            }],
+            wrapped: false,
+        }])),
+        ..TerminalDelta::default()
+    });
+
+    assert!(frame.visible[0].cells.is_empty());
+    assert_eq!(frame.style(&frame.visible[1].cells[0]), red);
+    assert_eq!(frame.history.len(), HISTORY_LIMIT);
+    assert_eq!(
+        frame.history[HISTORY_LIMIT - 1].cells[0].text,
+        "old",
+        "the newest scrollback row is kept and the oldest dropped"
+    );
+}
+
+/// An image quad wider than its pane is cut to the pane, and its source rect
+/// shrinks with it so the visible slice is the covered part of the image.
+#[test]
+fn clipping_an_overlay_shrinks_its_source_rect_proportionally() {
+    use crate::terminal::TerminalOverlay;
+
+    let overlay = TerminalOverlay {
+        image_key: 1,
+        x: 0.,
+        y: 0.,
+        width: 100.,
+        height: 40.,
+        z_index: -1,
+        source_rect: [0., 0., 1., 1.],
+    };
+    let clipped = overlay.clipped(25., 0., 75., 40.).unwrap();
+    assert_eq!((clipped.x, clipped.width), (25., 50.));
+    assert_eq!(clipped.source_rect, [0.25, 0., 0.75, 1.]);
+    assert_eq!(overlay.clipped(200., 0., 300., 40.), None);
 }

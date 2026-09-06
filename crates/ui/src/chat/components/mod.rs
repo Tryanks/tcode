@@ -2,9 +2,9 @@ pub(crate) mod activity;
 pub(crate) mod assistant;
 pub(crate) mod bubble;
 pub(crate) mod changed_files;
-#[cfg(feature = "terminal")]
+#[cfg(feature = "command-ansi")]
 pub(crate) mod command_panel;
-#[cfg(not(feature = "terminal"))]
+#[cfg(not(feature = "command-ansi"))]
 #[path = "command_panel_portable.rs"]
 pub(crate) mod command_panel;
 pub(crate) mod disclosure;

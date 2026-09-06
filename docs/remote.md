@@ -325,8 +325,8 @@ while the host is running: it holds the device list in memory.
 ### What is encrypted
 
 TLS encrypts pairing traffic, device tokens and the remote WebSocket traffic
-between a client and the host, including thread events, terminal bytes and
-attachment transfers. The embedded browser files are served over HTTPS too.
+between a client and the host, including thread events, terminal grid updates
+and attachment transfers. The embedded browser files are served over HTTPS too.
 The host decrypts this traffic and runs the requested work.
 
 tcode does not encrypt its stored JSON files or project files at rest. mDNS
@@ -366,9 +366,9 @@ it stops the native connection until you resolve the identity change.
   does not change the thread selected on another desktop. Actions still operate
   on the same host projects and threads; selection independence is not access
   isolation.
-- Remote desktop terminal replay contains the last **256 KiB** of raw output
-  per live terminal. It is not complete scrollback or a saved screen image;
-  truncation can start inside a terminal escape sequence or UTF-8 character.
+- A client's terminal scrollback is the host's retained ring, capped at
+  **1000 rows**. Older output is gone from the host too, so no client can
+  scroll further back than that.
 - Desktop preview needs LAN- or overlay-reachable dev servers. There is no TCP
   tunnel for preview pages. Preview rewriting uses the first saved host address,
   which may differ from an address chosen by transport reconnection.

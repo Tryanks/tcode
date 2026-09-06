@@ -7,10 +7,12 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
-    time::Instant,
 };
 
 use rio_graphics::{atlas_image_key, kitty_image_key};
+// rio's synchronized-update deadlines use its own clock, which is `web_time`
+// on wasm; mixing in `std::time::Instant` would not compile there.
+use rio_vt::time::Instant;
 use rio_vt::{
     ansi::{CursorShape as RioCursorShape, KeyboardModes, graphics::UpdateQueues},
     clipboard::ClipboardType,
@@ -428,6 +430,7 @@ impl GridEmulator {
         true
     }
 
+    #[cfg(feature = "pty")]
     pub(crate) fn window_size(&self) -> WindowSize {
         self.core.size.window_size()
     }
@@ -598,7 +601,38 @@ impl GridEmulator {
     }
 
     pub fn snapshot(&self) -> TermSnapshot {
+        self.snapshot_since(0, 0)
+    }
+
+    /// Lines that have ever scrolled out of the screen, including those already
+    /// dropped from the scrollback ring. Cheap enough to read before deciding
+    /// how much history a snapshot should carry.
+    pub fn scrolled_lines(&self) -> u64 {
+        let state = self.core.state.lock();
+        state.term.lines_evicted() + state.term.history_size() as u64
+    }
+
+    /// Snapshot the grid, additionally copying the scrollback rows that
+    /// appeared since `scrolled_before` (oldest first, at most `budget`).
+    ///
+    /// `scrolled_before = 0` therefore asks for the whole retained ring, and
+    /// the count is resolved under the same lock as the grid copy, so a
+    /// concurrent PTY write cannot slip rows between the two reads.
+    pub fn snapshot_since(&self, scrolled_before: u64, budget: usize) -> TermSnapshot {
+        self.read(scrolled_before, budget, true)
+    }
+
+    /// Read the grid without consuming renderer damage or the take-once image
+    /// queues, so a diagnostic reader cannot starve the live projection.
+    pub fn peek_snapshot(&self) -> TermSnapshot {
+        self.read(0, crate::HISTORY_PEEK_LIMIT, false)
+    }
+
+    fn read(&self, scrolled_before: u64, budget: usize, consume: bool) -> TermSnapshot {
         let mut state = self.core.state.lock();
+        let history = (state.term.lines_evicted() + state.term.history_size() as u64)
+            .saturating_sub(scrolled_before)
+            .min(budget as u64) as usize;
         let cols = state.term.columns();
         let screen_lines = state.term.screen_lines();
         let display_offset = state.term.display_offset();
@@ -618,9 +652,12 @@ impl GridEmulator {
             .term
             .peek_damage_event()
             .unwrap_or(TerminalDamage::Noop);
-        let mut graphics_updates = self.core.graphics_updates.lock_recover().take();
-        if let Some(queues) = state.term.graphics_take_queues() {
-            merge_graphics_updates(&mut graphics_updates, queues);
+        let mut graphics_updates = None;
+        if consume {
+            graphics_updates = self.core.graphics_updates.lock_recover().take();
+            if let Some(queues) = state.term.graphics_take_queues() {
+                merge_graphics_updates(&mut graphics_updates, queues);
+            }
         }
         let atlas_placements = state.term.graphics.atlas_placements.clone();
         let mut kitty_placements = state
@@ -653,7 +690,9 @@ impl GridEmulator {
             .collect();
         let graphics_changed =
             state.term.graphics.kitty_graphics_dirty || graphics_updates.is_some();
-        state.term.graphics.kitty_graphics_dirty = false;
+        if consume {
+            state.term.graphics.kitty_graphics_dirty = false;
+        }
         if graphics_changed && damage == TerminalDamage::Noop {
             damage = TerminalDamage::Full;
         }
@@ -668,7 +707,9 @@ impl GridEmulator {
                 }
             }
         }
-        state.term.reset_damage();
+        if consume {
+            state.term.reset_damage();
+        }
         let visible_rows = state.term.visible_rows();
         if damage == TerminalDamage::Full {
             row_damage.fill(true);
@@ -677,26 +718,40 @@ impl GridEmulator {
                 *damaged |= row.dirty;
             }
         }
-        for row in 0..screen_lines {
-            state.term.grid[Line(row as i32 - display_offset as i32)].dirty = false;
+        if consume {
+            for row in 0..screen_lines {
+                state.term.grid[Line(row as i32 - display_offset as i32)].dirty = false;
+            }
         }
+        let history_size = state.term.history_size();
+        let history_rows = (1..=history.min(history_size))
+            .rev()
+            .map(|back| state.term.grid[Line(-(back as i32))].clone())
+            .collect::<Vec<_>>();
         let styles = state.term.grid.styles().to_vec();
         let mut zero_width = HashMap::new();
+        let mut links = HashMap::new();
         for square in visible_rows
             .iter()
+            .chain(&history_rows)
             .flat_map(|row| row.inner.iter())
             .copied()
         {
-            if let Some(id) = square.extras_id().filter(|_| !square.is_bg_only())
-                && let Some(extras) = state.term.grid.extras_table.get(id)
-                && !extras.zerowidth.is_empty()
-            {
+            let Some(id) = square.extras_id().filter(|_| !square.is_bg_only()) else {
+                continue;
+            };
+            let Some(extras) = state.term.grid.extras_table.get(id) else {
+                continue;
+            };
+            if !extras.zerowidth.is_empty() {
                 zero_width.insert(id, extras.zerowidth.clone());
+            }
+            if let Some(link) = &extras.hyperlink {
+                links.insert(id, (link.uri().to_owned(), link.id().to_owned()));
             }
         }
         let mode = state.term.mode();
         let keyboard_mode = state.term.keyboard_mode();
-        let history_size = state.term.history_size();
         let lines_evicted = state.term.lines_evicted();
         let cursor_blinking = state.term.blinking_cursor;
         drop(state);
@@ -705,6 +760,7 @@ impl GridEmulator {
             cols,
             screen_lines,
             visible_rows,
+            history_rows,
             row_damage,
             damage,
             cursor_state,
@@ -725,9 +781,12 @@ impl GridEmulator {
             selection,
             styles,
             zero_width,
+            links,
         }
     }
 
+    /// The host's own viewport is always pinned to the bottom; see
+    /// [`Self::snapshot_since`].
     pub fn hyperlink_at(&self, row: usize, col: usize) -> Option<crate::HyperlinkMatch> {
         let state = self.core.state.lock();
         (row < state.term.screen_lines() && col < state.term.columns())

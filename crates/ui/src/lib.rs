@@ -60,7 +60,6 @@ mod shortcut;
 pub mod sidebar;
 pub mod sizing;
 pub mod store;
-#[cfg(feature = "terminal")]
 mod terminal_drawer;
 pub mod theme;
 #[cfg(feature = "desktop")]

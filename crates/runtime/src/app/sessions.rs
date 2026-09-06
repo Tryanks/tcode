@@ -41,6 +41,12 @@ impl AppState {
                 Topic::SessionStatus { session_id }
                 | Topic::SessionEvents { session_id }
                 | Topic::GitStatus { session_id } => self.select_session(session_id, cx),
+                // No projection ran while nobody was attached, so the first
+                // subscriber rebuilds the frame. A later one reads that same
+                // retained frame and continues from the shared delta sequence.
+                Topic::Terminal { terminal_id } => {
+                    self.refresh_terminal_projection(*terminal_id);
+                }
                 _ => {}
             }
         }

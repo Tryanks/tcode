@@ -18,7 +18,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::host::{HostCx, HostEvent, HostTask};
-use crate::terminal::{LocalTerminalRegistry, TerminalContext, TerminalSplit, TerminalWorkspace};
+use crate::terminal::{
+    TerminalContext, TerminalProjection, TerminalRegistry, TerminalSplit, TerminalWorkspace,
+};
 use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
@@ -319,10 +321,11 @@ pub struct AppState {
     /// Terminal resources parked by conversation destination. Drawer chrome is
     /// client-owned; this map retains only PTYs, tabs, splits, and contexts.
     terminal_workspaces: HashMap<ConversationDestination, TerminalWorkspace>,
-    /// Construction-time local transport registry for opaque live terminal
-    /// objects. All serializable terminal metadata remains in SessionStatus.
-    terminal_registry: LocalTerminalRegistry,
-    terminal_output: HashMap<u64, crate::terminal::OutputReplay>,
+    /// Host-private index from terminal id to its PTY. Clients receive the
+    /// replicated grid instead; nothing here crosses the pipe.
+    terminal_registry: TerminalRegistry,
+    /// The replicated grid published on `Topic::Terminal`, one per live PTY.
+    terminal_projections: HashMap<u64, TerminalProjection>,
     preview_pending: HashMap<u64, async_channel::Sender<Result<preview_mcp::PreviewReply, String>>>,
     next_preview_request: u64,
     /// Provider-native rewind requested while a session is live or starting.
@@ -413,14 +416,10 @@ fn permission_relaunch_marker(
 
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
-        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default(), false)
+        Self::with_ai_titles(store, false)
     }
 
-    pub(crate) fn new_with_terminal_registry(
-        store: SessionStore,
-        terminal_registry: LocalTerminalRegistry,
-        ai_title_generation_enabled: bool,
-    ) -> Self {
+    pub(crate) fn with_ai_titles(store: SessionStore, ai_title_generation_enabled: bool) -> Self {
         // Load + migrate once and persist so derived project ids stay stable.
         let file = store.read_file();
         if let Err(err) = store.persist_index(&file) {
@@ -478,8 +477,8 @@ impl AppState {
             projects,
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
-            terminal_registry,
-            terminal_output: HashMap::new(),
+            terminal_registry: TerminalRegistry::default(),
+            terminal_projections: HashMap::new(),
             preview_pending: HashMap::new(),
             next_preview_request: 0,
             pending_native_rewinds: HashMap::new(),

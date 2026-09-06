@@ -291,6 +291,15 @@ Unified and split rows share syntax highlights and line-number drag selection.
 Unified rows use two 44px gutters and a 2px change-color rail; each split cell
 uses a 42px gutter without the rail. Both retain an 18px minimum row height.
 
+The terminal is host state, not a client's own emulator. The host owns the
+grid and publishes it — cells, cursor, modes, scrollback and image placements —
+so every attached client renders the same screen, and a client that attaches
+mid-session sees exactly what the host sees. Scrolling and selection are local
+to each viewer: two clients read different parts of the same terminal without
+disturbing each other, and only the keys and mouse reports a client sends reach
+the shell. Keyboard input is encoded from the replicated modes, so bracketed
+paste, application cursor keys and mouse reporting behave the same everywhere.
+
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the
 conversation destination rather than the shared window. Stored threads key by

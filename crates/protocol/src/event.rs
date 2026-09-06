@@ -47,14 +47,15 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
-    TerminalOutput {
+    /// The host's whole terminal grid, sent on subscribe and after a restart.
+    TerminalFrame {
         terminal_id: u64,
-        #[serde(with = "crate::wire::base64_bytes")]
-        bytes: Vec<u8>,
-        /// A replay (or restarted PTY) replaces the client emulator.
-        reset: bool,
-        cols: u16,
-        rows: u16,
+        frame: Box<crate::terminal::TerminalFrame>,
+    },
+    /// One coalesced grid update, continuing from the last frame or delta.
+    TerminalDelta {
+        terminal_id: u64,
+        delta: Box<crate::terminal::TerminalDelta>,
     },
     PreviewRequest {
         request_id: u64,

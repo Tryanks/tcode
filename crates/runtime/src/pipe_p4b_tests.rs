@@ -7,7 +7,7 @@ use tcode_protocol::{
 };
 use tcode_remote::HostMux;
 
-fn linked(mux: &HostMux) -> HostLink {
+pub(super) fn linked(mux: &HostMux) -> HostLink {
     let connection = mux.attach();
     let link = HostLink::new(connection.to_host, connection.from_host);
     let pump = link.clone();
@@ -15,7 +15,7 @@ fn linked(mux: &HostMux) -> HostLink {
     link
 }
 
-fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
+pub(super) fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
     let root = std::env::temp_dir().join(format!("tcode-p4b-{}", uuid::Uuid::new_v4()));
     let project = root.join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -53,145 +53,11 @@ fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
     (host, mux, link, session_id)
 }
 
-fn next(
+pub(super) fn next(
     events: &async_channel::Receiver<EventEnvelope>,
     predicate: impl Fn(&ServerEvent) -> bool,
 ) -> ServerEvent {
     super::tests::next_event(events, |event| predicate(&event.event)).event
-}
-
-#[cfg(unix)]
-#[test]
-fn terminal_mux_replays_bounded_raw_output_then_streams_input_and_resize() {
-    let (host, mux, link, session_id) = fixture();
-    let events = link.events();
-    link.command_blocking(Command::ToggleTerminalPanel {
-        session_id: session_id.clone(),
-    })
-    .unwrap();
-    let ServerEvent::SessionStatusReplaced(status) = next(
-        &events,
-        |event| matches!(event, ServerEvent::SessionStatusReplaced(status) if !status.terminals.is_empty()),
-    ) else {
-        unreachable!()
-    };
-    let terminal_id = status.terminals[0].id;
-    link.subscribe(Subscription {
-        topic: Topic::Terminal { terminal_id },
-        after: None,
-    })
-    .unwrap();
-    // Replace the user's configured login shell (whose startup hooks may print
-    // asynchronously) with plain sh, clear its prompt, then use the live mux
-    // event as a barrier proving all startup output reached the ring.
-    link.command_blocking(Command::TerminalInput {
-        terminal_id,
-        bytes: b"exec /bin/sh\rPS1=; printf '\\160\\064\\142-pty-ready\\n'\r".to_vec(),
-    })
-    .unwrap();
-    let mut startup = Vec::new();
-    while !String::from_utf8_lossy(&startup).contains("p4b-pty-ready") {
-        if let ServerEvent::TerminalOutput { bytes, reset, .. } = next(&events, |event| {
-            matches!(event, ServerEvent::TerminalOutput { .. })
-        }) {
-            assert!(!reset || startup.is_empty());
-            startup.extend(bytes);
-        }
-    }
-    link.unsubscribe(Subscription {
-        topic: Topic::Terminal { terminal_id },
-        after: None,
-    })
-    .unwrap();
-    // Inject through the same mailbox callback as the output bridge, testing
-    // byte-exact eviction without flooding the user's shell with 300 KiB.
-    let replay = vec![b'x'; 300 * 1024];
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.emit_terminal_output(terminal_id, replay, false, cx)
-    }))
-    .unwrap();
-    link.subscribe(Subscription {
-        topic: Topic::Terminal { terminal_id },
-        after: None,
-    })
-    .unwrap();
-    let ServerEvent::TerminalOutput { bytes, reset, .. } = next(&events, |event| {
-        matches!(event, ServerEvent::TerminalOutput { reset: true, .. })
-    }) else {
-        unreachable!()
-    };
-    assert!(reset);
-    assert_eq!(bytes, vec![b'x'; 256 * 1024]);
-    link.command_blocking(Command::ResizeTerminal {
-        terminal_id,
-        cols: 93,
-        rows: 17,
-    })
-    .unwrap();
-    assert_eq!(
-        host.terminals
-            .terminal(terminal_id)
-            .unwrap()
-            .grid()
-            .dimensions(),
-        (93, 17)
-    );
-    link.command_blocking(Command::TerminalInput {
-        terminal_id,
-        bytes: b"printf '\\160\\064\\142-STREAM\\n'; stty size; printf '\\160\\064\\142-live-done\\n'\r".to_vec(),
-    })
-    .unwrap();
-    let mut live = Vec::new();
-    while !String::from_utf8_lossy(&live).contains("p4b-STREAM")
-        || !String::from_utf8_lossy(&live).contains("17 93")
-        || !String::from_utf8_lossy(&live).contains("p4b-live-done")
-    {
-        if let ServerEvent::TerminalOutput { bytes, reset, .. } = next(&events, |event| {
-            matches!(event, ServerEvent::TerminalOutput { .. })
-        }) {
-            assert!(!reset);
-            live.extend(bytes);
-        }
-    }
-    let other = linked(&mux);
-    let other_events = other.events();
-    other
-        .subscribe(Subscription {
-            topic: Topic::Terminal { terminal_id },
-            after: None,
-        })
-        .unwrap();
-    let ServerEvent::TerminalOutput { reset, bytes, .. } = next(&other_events, |event| {
-        matches!(event, ServerEvent::TerminalOutput { .. })
-    }) else {
-        unreachable!()
-    };
-    assert!(reset);
-    assert!(bytes.len() <= 256 * 1024);
-    assert!(String::from_utf8_lossy(&bytes).contains("p4b-STREAM"));
-    while let Ok(event) = events.try_recv() {
-        assert!(
-            !matches!(event.event, ServerEvent::TerminalOutput { reset: true, .. }),
-            "second client's snapshot leaked to first"
-        );
-    }
-    link.command_blocking(Command::CaptureTerminalSelection {
-        session_id,
-        terminal_id,
-        selection: Some(tcode_protocol::TerminalSelection {
-            line_start: 2,
-            line_end: 3,
-            text: "text selected in the remote grid".into(),
-        }),
-    })
-    .unwrap();
-    next(&events, |event| {
-        matches!(event, ServerEvent::SessionStatusReplaced(status)
-            if status.terminal_contexts.iter().any(|context|
-                context.text == "text selected in the remote grid"
-                    && context.line_start == 2 && context.line_end == 3))
-    });
-    link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }
 
 #[test]
@@ -669,130 +535,5 @@ fn content_search_is_host_owned_and_survives_appends_limits_and_blank_queries() 
             .any(|hit| hit.snippet.contains("zqxsentinel appended 0"))
     );
     assert_eq!(search("zqxsentinel", 3).len(), 3);
-    link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
-}
-
-/// Evidence only — no product behavior depends on this.
-///
-/// A late client rebuilds its grid from the terminal replay ring, which is a
-/// bounded window of raw bytes. This asks whether that is enough to reproduce
-/// the host's emulator after modes are set, the window overflows, and the grid
-/// is resized. Ignored because it documents a known divergence rather than a
-/// contract; run it with:
-///
-///   cargo test -p tcode-runtime --locked -- --ignored --nocapture \
-///       late_terminal_attach_reproduces_the_host_grid
-#[cfg(unix)]
-#[test]
-#[ignore = "experiment: records that raw-ring replay loses evicted mode state"]
-fn late_terminal_attach_reproduces_the_host_grid() {
-    fn rows(snapshot: &term::TermSnapshot) -> Vec<String> {
-        (0..snapshot.screen_lines)
-            .map(|row| {
-                (0..snapshot.cols)
-                    .filter_map(|col| snapshot.cell_text(row, col))
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
-    }
-
-    let (host, mux, link, session_id) = fixture();
-    let events = link.events();
-    link.command_blocking(Command::ToggleTerminalPanel {
-        session_id: session_id.clone(),
-    })
-    .unwrap();
-    let ServerEvent::SessionStatusReplaced(status) = next(
-        &events,
-        |event| matches!(event, ServerEvent::SessionStatusReplaced(status) if !status.terminals.is_empty()),
-    ) else {
-        unreachable!()
-    };
-    let terminal_id = status.terminals[0].id;
-    let terminal = host.terminals.terminal(terminal_id).unwrap();
-    let wait_for = |needle: &str| {
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        while !rows(&terminal.snapshot())
-            .iter()
-            .any(|row| row.contains(needle))
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the host terminal never showed {needle}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    };
-    let send = |bytes: &str| {
-        link.command_blocking(Command::TerminalInput {
-            terminal_id,
-            bytes: bytes.as_bytes().to_vec(),
-        })
-        .unwrap();
-    };
-
-    // Octal-escaped sentinels so the shell's echo of the typed line never
-    // matches; only real program output does.
-    send("exec /bin/sh\rPS1=; printf '\\122\\105\\101\\104\\131\\n'\r");
-    wait_for("READY");
-    // Alt screen + bracketed paste + steady-bar cursor, then far more than the
-    // 256 KiB replay ring, then a sentinel proving it all landed.
-    send(concat!(
-        "printf '\\033[?1049h\\033[?2004h\\033[6 q'; ",
-        "awk 'BEGIN{for(i=0;i<4400;i++) print \"0123456789012345678901234567890123456789012345678901234567890123\"}'; ",
-        "printf '\\102\\125\\114\\113\\104\\117\\116\\105\\n'\r",
-    ));
-    wait_for("BULKDONE");
-    link.command_blocking(Command::ResizeTerminal {
-        terminal_id,
-        cols: 100,
-        rows: 30,
-    })
-    .unwrap();
-    send("printf '\\122\\123\\132\\117\\113\\n'\r");
-    wait_for("RSZOK");
-
-    let late = linked(&mux);
-    let late_events = late.events();
-    late.subscribe(Subscription {
-        after: None,
-        topic: Topic::Terminal { terminal_id },
-    })
-    .unwrap();
-    let ServerEvent::TerminalOutput {
-        bytes,
-        cols,
-        rows: grid_rows,
-        ..
-    } = next(&late_events, |event| {
-        matches!(event, ServerEvent::TerminalOutput { reset: true, .. })
-    })
-    else {
-        unreachable!()
-    };
-    // Exactly what ClientTerminal::remote does with a reset replay.
-    let client = term::GridEmulator::with_size(usize::from(cols), usize::from(grid_rows));
-    client.feed(&bytes);
-
-    let host_snapshot = terminal.snapshot();
-    let client_snapshot = client.snapshot();
-    let (host_rows, client_rows) = (rows(&host_snapshot), rows(&client_snapshot));
-    println!("replayed bytes: {} at {cols}x{grid_rows}", bytes.len());
-    println!("host mode:   {:?}", host_snapshot.mode);
-    println!("client mode: {:?}", client_snapshot.mode);
-    for (index, (host_row, client_row)) in host_rows.iter().zip(&client_rows).enumerate() {
-        if host_row != client_row {
-            println!("row {index} host:   {host_row:?}");
-            println!("row {index} client: {client_row:?}");
-        }
-    }
-    assert_eq!(
-        client_snapshot.mode.bits(),
-        host_snapshot.mode.bits(),
-        "late attach lost emulator modes evicted from the replay ring"
-    );
-    assert_eq!(client_rows, host_rows);
     link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
 }

@@ -13,7 +13,6 @@ use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
 use crate::host::{HostCx, HostEvent, HostFn};
-use crate::terminal::LocalTerminalRegistry;
 
 /// Optional process-local services attached before the host starts accepting
 /// client traffic.
@@ -40,7 +39,6 @@ pub struct SpawnedHost {
     pub to_host: async_channel::Sender<String>,
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
-    pub terminals: LocalTerminalRegistry,
     link: Arc<OnceLock<HostLink>>,
     #[cfg(any(test, feature = "test-support"))]
     test_mailbox: async_channel::Sender<HostFn>,
@@ -104,7 +102,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostFn>();
-    let terminals = LocalTerminalRegistry::default();
     // The host owns the broker, including when started without a desktop.
     // Both local and remote WebViews answer the same serialized reverse RPC.
     let (preview_registration, preview_requests) = match services.preview.take() {
@@ -116,7 +113,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
-    let host_terminals = terminals.clone();
     #[cfg(any(test, feature = "test-support"))]
     let test_mailbox = mailbox_tx.clone();
 
@@ -124,11 +120,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
-            let mut state = AppState::new_with_terminal_registry(
-                store,
-                host_terminals,
-                services.ai_title_generation,
-            );
+            let mut state = AppState::with_ai_titles(store, services.ai_title_generation);
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
@@ -166,7 +158,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         to_host: client_tx,
         from_host: event_rx,
         stopped: stopped_rx,
-        terminals,
         link: Arc::new(OnceLock::new()),
         #[cfg(any(test, feature = "test-support"))]
         test_mailbox,
@@ -206,7 +197,7 @@ async fn host_loop(
             },
         }
         state.sync_terminal_handles();
-        state.reap_terminal_output();
+        state.reap_terminal_projections();
         domain_diff.emit_changes(&state, &mut cx);
     }
 }
@@ -286,19 +277,16 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             if let Some(terminal) = app.terminal_handle(terminal_id) {
                 terminal.write_input(bytes);
             }
+            app.schedule_terminal_projection(terminal_id, cx);
         }
         Command::ResizeTerminal {
             terminal_id,
             cols,
             rows,
-        } => {
-            if let Some(terminal) = app.terminal_handle(terminal_id) {
-                terminal.resize(
-                    usize::from(cols.clamp(2, 1000)),
-                    usize::from(rows.clamp(2, 1000)),
-                );
-            }
-        }
+            cell_width,
+            cell_height,
+        } => app.resize_terminal(terminal_id, cols, rows, cell_width, cell_height, cx),
+        Command::ClearTerminal { terminal_id } => app.clear_terminal(terminal_id, cx),
         Command::PreviewReply {
             request_id,
             response,
@@ -817,3 +805,7 @@ mod tests {
 #[cfg(test)]
 #[path = "pipe_p4b_tests.rs"]
 mod p4b_tests;
+
+#[cfg(test)]
+#[path = "terminal_replication_tests.rs"]
+mod terminal_replication_tests;

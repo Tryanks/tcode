@@ -14,6 +14,16 @@ pub use tcode_core::settings::SettingsPatch;
 
 use crate::ExternalThread;
 
+/// Fallback cell metrics matching the host emulator's own defaults, used when
+/// a client resizes without knowing its physical cell size.
+fn default_cell_width() -> u16 {
+    8
+}
+
+fn default_cell_height() -> u16 {
+    17
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSelection {
     pub line_start: usize,
@@ -48,6 +58,16 @@ pub enum Command {
         terminal_id: u64,
         cols: u16,
         rows: u16,
+        /// Physical cell size, which the host needs to answer pixel-size
+        /// queries (CSI 14 t) and to lay out image placements.
+        #[serde(default = "default_cell_width")]
+        cell_width: u16,
+        #[serde(default = "default_cell_height")]
+        cell_height: u16,
+    },
+    /// Clear the host grid and its scrollback, keeping the current prompt line.
+    ClearTerminal {
+        terminal_id: u64,
     },
     PreviewReply {
         request_id: u64,

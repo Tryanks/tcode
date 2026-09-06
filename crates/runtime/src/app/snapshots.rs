@@ -204,23 +204,10 @@ impl AppState {
                 project_id: project_id.clone(),
                 status: self.external_imports.get(project_id).cloned(),
             },
-            Topic::Terminal { terminal_id } => {
-                let terminal = self.terminal_handle(*terminal_id)?;
-                let (cols, rows) = terminal.grid().dimensions();
-                ServerEvent::TerminalOutput {
-                    terminal_id: *terminal_id,
-                    bytes: self
-                        .terminal_output
-                        .get(terminal_id)?
-                        .bytes
-                        .iter()
-                        .copied()
-                        .collect(),
-                    reset: true,
-                    cols: cols as u16,
-                    rows: rows as u16,
-                }
-            }
+            Topic::Terminal { terminal_id } => ServerEvent::TerminalFrame {
+                terminal_id: *terminal_id,
+                frame: Box::new(self.terminal_frame(*terminal_id)?),
+            },
         };
         Some(EventEnvelope {
             request_id: None,

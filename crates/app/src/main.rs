@@ -406,12 +406,8 @@ fn main() {
 
             let workspace_store = cx.new(|cx| {
                 let mut store = WorkspaceStore::new(link.clone(), cx);
-                match (&host, &remote) {
-                    (Some(host), _) => store.attach_local(tcode_ui::store::LocalAffordances {
-                        terminals: host.terminals.clone(),
-                    }),
-                    (None, Some((_, name))) => store.attach_remote(name.clone(), cx),
-                    (None, None) => {}
+                if let (None, Some((_, name))) = (&host, &remote) {
+                    store.attach_remote(name.clone(), cx);
                 }
                 if let Some(address) = &remote_address {
                     store.set_remote_address(address.clone());

@@ -4,14 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["local-host", "remote", "terminal", "desktop"]
-local-host = ["dep:tcode-runtime"]
+default = ["remote", "command-ansi", "desktop"]
 # Hosting/pairing UI. Off for wasm targets, which cannot listen or advertise.
 remote = ["remote-client", "tcode-remote/server", "dep:qrcode", "dep:tcode-services"]
 # Pairing, saved hosts, and the reconnecting native WebSocket client.
 remote-client = ["dep:tcode-remote", "tcode-remote/client"]
-# PTY/grid rendering. The live drawer additionally requires `local-host`.
-terminal = ["dep:term"]
+# Replay stored command output through a local terminal emulator, so its SGR
+# colours and carriage returns render as they did in the shell. Off for Android:
+# bionic has no `shm_open`, which rio-vt's kitty graphics path calls. The live
+# terminal drawer renders the host's replicated grid and is always built.
+command-ansi = ["dep:term"]
 # Native desktop integrations: embedded webview, voice, platform dialogs and
 # computer-use permissions/settings.
 desktop = [
@@ -37,11 +39,10 @@ agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
-tcode-runtime = { path = "../runtime", optional = true }
 qrcode = { version = "0.14", default-features = false, optional = true }
 tcode-services = { path = "../services", optional = true }
 tcode-voice = { path = "../voice", optional = true }
-term = { path = "../term", optional = true }
+term = { path = "../term", default-features = false, optional = true }
 preview-mcp = { path = "../preview-mcp", optional = true }
 computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 gpui = { package = "gpui-pre", version = "0.3.1" }

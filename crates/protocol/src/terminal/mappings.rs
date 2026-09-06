@@ -1,6 +1,9 @@
 //! Classic xterm input encoders, kept independent of the UI framework.
+//!
+//! These are pure functions of the replicated mode bits, so a client encodes
+//! input without linking a terminal emulator.
 
-use rio_vt::{ansi::KeyboardModes, crosswords::Mode};
+use super::{KeyboardModes, TerminalMode as Mode};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {

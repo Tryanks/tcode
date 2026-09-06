@@ -24,13 +24,8 @@ use tcode_protocol::{
     ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
     Subscription, Topic,
 };
-#[cfg(all(feature = "local-host", feature = "terminal"))]
-use tcode_runtime::terminal::LocalTerminalRegistry;
-#[cfg(feature = "terminal")]
-mod terminal;
-#[cfg(feature = "terminal")]
+pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
-#[cfg(feature = "terminal")]
 use terminal::TerminalWorkspace;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
@@ -94,28 +89,20 @@ pub(crate) fn observe_store_topics<V: 'static>(
     })
 }
 
-#[cfg(feature = "local-host")]
-pub struct LocalAffordances {
-    #[cfg(feature = "terminal")]
-    pub terminals: LocalTerminalRegistry,
-}
-
 /// The client-facing projection and command boundary for workspace state.
 ///
 /// Views observe this entity and use its typed accessors instead of retaining
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     host: HostLink,
-    #[cfg(feature = "terminal")]
-    remote_terminals: HashMap<u64, std::sync::Arc<ClientTerminal>>,
+    /// Replicated terminal grids, keyed by the host's terminal id.
+    terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
     #[cfg(feature = "desktop")]
     remote_preview: (
         async_channel::Sender<EventEnvelope>,
         async_channel::Receiver<EventEnvelope>,
     ),
     remote_address: Option<String>,
-    #[cfg(all(feature = "local-host", feature = "terminal"))]
-    terminal_registry: Option<LocalTerminalRegistry>,
     /// Latest host-published import status per project, replicated from
     /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
     /// second events consumer.
@@ -210,13 +197,10 @@ impl WorkspaceStore {
         });
         let store = Self {
             host: host.clone(),
-            #[cfg(feature = "terminal")]
-            remote_terminals: HashMap::new(),
+            terminals: HashMap::new(),
             #[cfg(feature = "desktop")]
             remote_preview: async_channel::unbounded(),
             remote_address: None,
-            #[cfg(all(feature = "local-host", feature = "terminal"))]
-            terminal_registry: None,
             import_statuses: HashMap::new(),
             remote_host: None,
             connection_state: ConnectionState::Connected,
@@ -238,7 +222,7 @@ impl WorkspaceStore {
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
         };
-        #[cfg(feature = "local-host")]
+        #[cfg(feature = "desktop")]
         let mut store = store;
 
         // Construction seeding is itself protocol traffic: subscribe, then
@@ -258,12 +242,11 @@ impl WorkspaceStore {
         });
         let events = host.events();
         // A desktop build constructs its in-process or remote host before the
-        // first window and reads settings immediately afterwards. Preserve
-        // that synchronous seed contract only when local-host support is in
-        // the build. Portable clients return immediately and let the task
+        // first window and reads settings immediately afterwards, so it blocks
+        // for that seed. Portable clients return immediately and let the task
         // below apply snapshots as they arrive, which is essential on a
         // single-threaded wasm executor.
-        #[cfg(feature = "local-host")]
+        #[cfg(feature = "desktop")]
         {
             let mut seeded = HashSet::new();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -326,26 +309,6 @@ impl WorkspaceStore {
         }
 
         store
-    }
-
-    #[cfg(feature = "local-host")]
-    pub fn new_local(host: &tcode_runtime::pipe::SpawnedHost, cx: &mut Context<Self>) -> Self {
-        let mut store = Self::new(host.link(), cx);
-        store.attach_local(LocalAffordances {
-            #[cfg(feature = "terminal")]
-            terminals: host.terminals.clone(),
-        });
-        store
-    }
-
-    #[cfg(feature = "local-host")]
-    pub fn attach_local(&mut self, local: LocalAffordances) {
-        #[cfg(not(feature = "terminal"))]
-        let _ = local;
-        #[cfg(feature = "terminal")]
-        {
-            self.terminal_registry = Some(local.terminals);
-        }
     }
 
     /// Mark this store as a client of a remote host and start tracking the
@@ -459,45 +422,20 @@ impl WorkspaceStore {
             {
                 let _ = self.remote_preview.0.try_send(envelope.clone());
             }
-            #[cfg(feature = "terminal")]
             (
                 Topic::Terminal { terminal_id },
-                ServerEvent::TerminalOutput {
-                    terminal_id: output_id,
-                    bytes,
-                    reset,
-                    cols,
-                    rows,
+                ServerEvent::TerminalFrame {
+                    terminal_id: frame_id,
+                    frame,
                 },
-            ) if terminal_id == output_id => {
-                if let Some(terminal) = self.remote_terminals.get(terminal_id) {
-                    if *reset {
-                        let terminal = std::sync::Arc::new(ClientTerminal::remote(
-                            *terminal_id,
-                            self.host.clone(),
-                            usize::from(*cols),
-                            usize::from(*rows),
-                        ));
-                        if let Some(status) =
-                            self.session_status_replica.as_ref().and_then(|status| {
-                                status
-                                    .terminals
-                                    .iter()
-                                    .find(|entry| entry.id == *terminal_id)
-                            })
-                        {
-                            terminal.set_fallback_title(status.title.clone());
-                            if status.exited {
-                                terminal.set_exited(None);
-                            }
-                        }
-                        terminal.feed(bytes);
-                        self.remote_terminals.insert(*terminal_id, terminal);
-                    } else {
-                        terminal.feed(bytes);
-                    }
-                }
-            }
+            ) if terminal_id == frame_id => self.apply_terminal_frame(*terminal_id, frame),
+            (
+                Topic::Terminal { terminal_id },
+                ServerEvent::TerminalDelta {
+                    terminal_id: delta_id,
+                    delta,
+                },
+            ) if terminal_id == delta_id => self.apply_terminal_delta(*terminal_id, delta),
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
                     .index_replica
@@ -588,7 +526,6 @@ impl WorkspaceStore {
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
-                    #[cfg(feature = "terminal")]
                     self.sync_terminal_topics();
                     self.sync_active_conversation_ui();
                     self.background_session_flags.remove(session_id);
@@ -1842,7 +1779,6 @@ impl WorkspaceStore {
 
     /// Build renderer handles from replicated layout. Local affordances keep
     /// direct PTY/grid access; otherwise the handles wrap client emulators.
-    #[cfg(feature = "terminal")]
     pub fn with_terminal_workspace<R>(
         &self,
         read: impl FnOnce(&TerminalWorkspace) -> R,
@@ -2087,7 +2023,7 @@ mod tests {
         meta.id = "reconnect".into();
         disk.upsert_meta(&meta).unwrap();
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session("reconnect".into()));
         wait_until(cx, &workspace, "selected status", |cx| {
             workspace.read_with(cx, |store, _| store.session_status_replica.is_some())
@@ -2206,7 +2142,7 @@ mod tests {
         }
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "initial session timeline replica", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2323,7 +2259,7 @@ mod tests {
             .upsert_meta(&seed_session)
             .expect("persist seed session");
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         wait_until(cx, &workspace, "initial session index", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2453,7 +2389,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2540,7 +2476,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2593,7 +2529,7 @@ mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(first.id.clone()));
         wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2669,7 +2605,7 @@ mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(first.id.clone()));
         wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2741,7 +2677,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
         wait_until(cx, &workspace, "selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2806,7 +2742,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
         wait_until(cx, &workspace, "selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2871,7 +2807,7 @@ mod tests {
         meta.id = "git-replica".into();
         session_store.upsert_meta(&meta).unwrap();
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, _| store.select_session("git-replica".into()));
         // Subscribing adopts the session and spawns a real git probe of the

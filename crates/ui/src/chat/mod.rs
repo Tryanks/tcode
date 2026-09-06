@@ -42,7 +42,6 @@ use crate::composer::{Composer, ComposerEvent};
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
-#[cfg(feature = "terminal")]
 use crate::terminal_drawer::TerminalDrawer;
 use crate::time::now_secs;
 use crate::window_caption;
@@ -326,9 +325,7 @@ pub struct ChatView {
     workspace_store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     composer: Entity<Composer>,
-    #[cfg(feature = "terminal")]
     terminal_drawer: Entity<TerminalDrawer>,
-    #[cfg(feature = "terminal")]
     terminal_was_open: bool,
     list_state: ListState,
     turn_items: Vec<TurnListItem>,
@@ -402,38 +399,29 @@ impl ChatView {
                 cx.notify();
             }),
             cx.observe_in(&workspace_store, window, |this, store, window, cx| {
-                #[cfg(not(feature = "terminal"))]
-                let _ = (&store, &window);
                 this.sync_markdown_states(cx);
                 // Opening the terminal (button, palette, or any other route
                 // through the store) should hand keyboard focus to it, so the
                 // user can type a command without clicking into the panel.
-                #[cfg(feature = "terminal")]
-                {
-                    let open = store.read(cx).panel_state().terminal_open;
-                    if open && !this.terminal_was_open {
-                        let drawer = this.terminal_drawer.clone();
-                        window.defer(cx, move |window, cx| {
-                            gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
-                        });
-                    }
-                    this.terminal_was_open = open;
+                let open = store.read(cx).panel_state().terminal_open;
+                if open && !this.terminal_was_open {
+                    let drawer = this.terminal_drawer.clone();
+                    window.defer(cx, move |window, cx| {
+                        gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
+                    });
                 }
+                this.terminal_was_open = open;
                 cx.notify();
             }),
         ];
-        #[cfg(feature = "terminal")]
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
-        #[cfg(feature = "terminal")]
         let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
 
         let mut this = Self {
             workspace_store,
             window_state,
             composer,
-            #[cfg(feature = "terminal")]
             terminal_drawer,
-            #[cfg(feature = "terminal")]
             terminal_was_open,
             list_state,
             turn_items: Vec::new(),
@@ -1770,22 +1758,19 @@ impl ChatView {
                         h_flex()
                             .flex_none()
                             .gap_1()
-                            .when(cfg!(feature = "terminal"), |this| {
-                                this.child(
-                                    Button::new("panel-layout")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .icon(IconName::PanelBottom)
-                                        .selected(terminal_open)
-                                        .tooltip(crate::tr!("chat.toggle_terminal"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.workspace_store.update(cx, |store, cx| {
-                                                store.toggle_terminal_panel(cx)
-                                            })
-                                        })),
-                                )
-                            })
+                            .child(
+                                Button::new("panel-layout")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::PanelBottom)
+                                    .selected(terminal_open)
+                                    .tooltip(crate::tr!("chat.toggle_terminal"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace_store
+                                            .update(cx, |store, cx| store.toggle_terminal_panel(cx))
+                                    })),
+                            )
                             .child(
                                 Button::new("plan-panel")
                                     .ghost()
@@ -2430,11 +2415,8 @@ impl Render for ChatView {
 
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
-        #[cfg(feature = "terminal")]
         let panel = self.workspace_store.read(cx).panel_state();
-        #[cfg(feature = "terminal")]
         let terminal_open = panel.terminal_open && !self.window_state.read(cx).compact;
-        #[cfg(feature = "terminal")]
         let terminal_height = panel.terminal_height;
 
         // Group entries by turn and render each turn section into the centered
@@ -2558,7 +2540,6 @@ impl Render for ChatView {
             })
             .child(composer);
 
-        #[cfg(feature = "terminal")]
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
             let drawer_resize = self.terminal_drawer.clone();
@@ -2586,8 +2567,6 @@ impl Render for ChatView {
         } else {
             main.into_any_element()
         };
-        #[cfg(not(feature = "terminal"))]
-        let body: AnyElement = main.into_any_element();
         root.when(!self.window_state.read(cx).compact, |el| el.child(header))
             .child(body)
     }
@@ -3431,7 +3410,7 @@ This begins after the hard break."#;
             (active.meta.id.clone(), active.timeline.clone())
         }))
         .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new_local(&host, cx));
+        let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(host.link(), cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id, timeline);
         });
@@ -3578,7 +3557,7 @@ This begins after the hard break."#;
             (active.meta.id.clone(), active.timeline.clone())
         }))
         .expect("seed markdown host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace_store.update(cx, |store, _| {
             store.set_session_replica_for_test(session_id.clone(), timeline);
         });
