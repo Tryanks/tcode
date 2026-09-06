@@ -402,6 +402,8 @@ impl ChatView {
                 cx.notify();
             }),
             cx.observe_in(&workspace_store, window, |this, store, window, cx| {
+                #[cfg(not(feature = "terminal"))]
+                let _ = (&store, &window);
                 this.sync_markdown_states(cx);
                 // Opening the terminal (button, palette, or any other route
                 // through the store) should hand keyboard focus to it, so the
