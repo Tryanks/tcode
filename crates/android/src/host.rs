@@ -18,7 +18,9 @@ use jni::{
     JNIEnv, JavaVM,
     objects::{GlobalRef, JObject, JString, JValue},
 };
-use tcode_mobile::host::{NativeHost, ScanDone};
+use tcode_client::host::HostFuture;
+use tcode_mobile::host::MobileHost;
+use tcode_remote::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
 const RESULT_CANCELLED: i32 = 1;
@@ -117,7 +119,7 @@ impl JavaBridge {
     }
 }
 
-pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeHost, String> {
+pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<MobileHost, String> {
     let bridge = JavaBridge::new(app)?;
     let data_dir = bridge
         .object
@@ -130,16 +132,19 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeHost, S
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "Android".into());
 
-    let callbacks = Rc::new(RefCell::new(HashMap::<u64, ScanDone>::new()));
+    let callbacks = Rc::new(RefCell::new(HashMap::<
+        u64,
+        async_channel::Sender<Result<String, String>>,
+    >::new()));
     let (sender, mut receiver) = mpsc::unbounded();
     *EVENT_SENDER.lock().expect("Android event sender poisoned") = Some(sender);
     let pending = callbacks.clone();
     cx.spawn(async move |cx| {
         while let Some(event) = receiver.next().await {
             let pending = pending.clone();
-            cx.update(move |cx| {
-                let callback = pending.borrow_mut().remove(&event.request_id);
-                let Some(callback) = callback else {
+            cx.update(move |_cx| {
+                let sender = pending.borrow_mut().remove(&event.request_id);
+                let Some(sender) = sender else {
                     log::warn!(
                         "received result for unknown Android camera request {}",
                         event.request_id
@@ -151,7 +156,7 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeHost, S
                     (RESULT_CANCELLED, value) => Err(value.unwrap_or_else(|| "已取消扫描".into())),
                     (_, value) => Err(value.unwrap_or_else(|| "Android 相机扫描失败".into())),
                 };
-                callback(result, cx);
+                let _ = sender.try_send(result);
             });
         }
     })
@@ -159,7 +164,7 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeHost, S
 
     let multicast = bridge.object.clone();
     let camera = bridge.clone();
-    Ok(NativeHost::new(data_dir, device_name)
+    let host = NativeClientHost::new(data_dir, device_name)
         .with_multicast_lock(move |acquire| {
             if multicast
                 .with_env(|env, activity| {
@@ -176,11 +181,19 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeHost, S
                 log::warn!("Android multicast lock unavailable");
             }
         })
-        .with_qr_scanner(move |done, _cx| {
+        .with_qr_scanner(move || -> HostFuture<'static, Result<String, String>> {
+            let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-            callbacks.borrow_mut().insert(request_id, done);
+            callbacks.borrow_mut().insert(request_id, sender);
             camera.start_camera(request_id);
-        }))
+            Box::pin(async move {
+                receiver
+                    .recv()
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()))
+            })
+        });
+    Ok(MobileHost::new(Rc::new(host)).with_insets(gpui_android::insets))
 }
 
 pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {

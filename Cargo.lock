@@ -8820,12 +8820,15 @@ version = "0.1.0"
 dependencies = [
  "android-activity",
  "android_logger",
+ "async-channel",
  "futures",
  "gpui-android",
  "gpui-pre",
  "jni 0.21.1",
  "log",
+ "tcode-client",
  "tcode-mobile",
+ "tcode-remote",
  "tcode-ui",
 ]
 
@@ -8872,10 +8875,13 @@ dependencies = [
 name = "tcode-ios"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "gpui-ios",
  "gpui-pre",
  "log",
+ "tcode-client",
  "tcode-mobile",
+ "tcode-remote",
  "tcode-ui",
 ]
 
@@ -8885,13 +8891,11 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "chrono",
- "dirs 6.0.0",
  "gpui-android",
  "gpui-base",
  "gpui-ios",
  "gpui-pre",
  "gpui-pre-platform",
- "log",
  "serde_json",
  "tcode-client",
  "tcode-core",
@@ -8918,6 +8922,7 @@ dependencies = [
  "async-channel",
  "async-tungstenite",
  "base64 0.23.1",
+ "dirs 6.0.0",
  "futures-lite",
  "futures-rustls",
  "futures-util",
@@ -9047,6 +9052,7 @@ dependencies = [
  "gpui-pre-web",
  "js-sys",
  "serde_json",
+ "tcode-client",
  "tcode-mobile",
  "tcode-protocol",
  "tcode-ui",

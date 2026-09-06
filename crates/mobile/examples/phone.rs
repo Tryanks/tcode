@@ -12,7 +12,9 @@ fn main() {
             };
             tcode_mobile::run_with_size(
                 cx,
-                Rc::new(tcode_mobile::host::NativeHost::from_env()),
+                Rc::new(tcode_mobile::host::MobileHost::new(Rc::new(
+                    tcode_mobile::host::NativeHost::from_env(),
+                ))),
                 dimensions,
             );
         });

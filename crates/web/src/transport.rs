@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use async_channel::{Receiver, Sender};
 use futures_lite::future::race;
-use tcode_mobile::host::{ConnectionState, Transport};
+use tcode_client::{ConnectionState, host::Transport};
 use wasm_bindgen::{JsCast as _, prelude::*};
 
 use crate::host::window;

@@ -8,7 +8,7 @@ use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use host::{WebHost, window};
 #[cfg(feature = "debug-exports")]
-use tcode_mobile::host::{MobileHost as _, PairRequest, Transport};
+use tcode_client::host::{ClientHost as _, PairRequest, Transport};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -92,7 +92,10 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
                 ])
                 .expect("failed to load browser fonts");
-            tcode_mobile::run_with_host(cx, Rc::new(WebHost));
+            tcode_mobile::run_with_host(
+                cx,
+                Rc::new(tcode_mobile::host::MobileHost::new(Rc::new(WebHost))),
+            );
             if let Some(document) = window().document() {
                 if let Some(loading) = document.get_element_by_id("loading") {
                     loading.remove();
@@ -118,36 +121,22 @@ struct DebugConnection {
 #[wasm_bindgen]
 #[cfg(feature = "debug-exports")]
 pub async fn debug_pair_and_connect(code: String) -> String {
-    let (tx, rx) = async_channel::bounded(1);
-    let started = APPLICATION.with(|slot| {
-        let slot = slot.borrow();
-        let Some(application) = slot.as_ref() else {
-            return false;
-        };
-        application.update(|cx| {
-            let (addr, port) = WebHost.fixed_pairing_endpoint().unwrap();
-            WebHost.pair(
-                PairRequest {
-                    addr,
-                    port,
-                    code,
-                    fingerprint: String::new(),
-                },
-                cx,
-                Box::new(move |result, _cx| {
-                    let _ = tx.try_send(result);
-                }),
-            );
-        });
-        true
-    });
+    let started = APPLICATION.with(|slot| slot.borrow().is_some());
     if !started {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
-    let paired = match rx.recv().await {
-        Ok(Ok(host)) => host,
-        Ok(Err(error)) => return serde_json::json!({"error":error}).to_string(),
-        Err(error) => return serde_json::json!({"error":error.to_string()}).to_string(),
+    let (addr, port) = WebHost.fixed_pairing_endpoint().unwrap();
+    let paired = match WebHost
+        .pair(PairRequest {
+            addr,
+            port,
+            code,
+            fingerprint: String::new(),
+        })
+        .await
+    {
+        Ok(host) => host,
+        Err(error) => return serde_json::json!({"error":error}).to_string(),
     };
     let transport = WebHost.connect(&paired);
     let _ = transport.to_host.try_send(
