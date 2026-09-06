@@ -22,6 +22,14 @@ pub struct OverlayHost {
     notifications: Entity<NotificationList>,
 }
 
+struct DetachedView;
+
+impl Render for DetachedView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
+    }
+}
+
 impl OverlayHost {
     pub fn new(view: impl Into<AnyView>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         #[cfg(all(target_os = "macos", not(test)))]
@@ -108,6 +116,9 @@ impl Render for OverlayHost {
 
 /// Imperative overlay operations used by application views.
 pub trait OverlayExt {
+    /// Release the current view graph while its replacement is constructed.
+    fn detach_view(&mut self, cx: &mut App);
+    fn replace_view(&mut self, view: impl Into<AnyView>, cx: &mut App);
     fn open_dialog<F>(&mut self, cx: &mut App, build: F)
     where
         F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static;
@@ -123,6 +134,28 @@ pub trait OverlayExt {
 }
 
 impl OverlayExt for Window {
+    fn detach_view(&mut self, cx: &mut App) {
+        let view = cx.new(|_| DetachedView).into();
+        OverlayHost::update(self, cx, move |host, window, cx| {
+            host.close_all_dialogs(window, cx);
+            host.notifications
+                .update(cx, |list, cx| list.clear(window, cx));
+            host.view = view;
+            cx.notify();
+        });
+    }
+
+    fn replace_view(&mut self, view: impl Into<AnyView>, cx: &mut App) {
+        let view = view.into();
+        OverlayHost::update(self, cx, move |host, window, cx| {
+            host.close_all_dialogs(window, cx);
+            host.notifications
+                .update(cx, |list, cx| list.clear(window, cx));
+            host.view = view;
+            cx.notify();
+        });
+    }
+
     fn open_dialog<F>(&mut self, cx: &mut App, build: F)
     where
         F: Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static,

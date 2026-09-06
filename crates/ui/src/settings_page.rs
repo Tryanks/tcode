@@ -696,6 +696,7 @@ impl SettingsPage {
                 .on_ok(move |_, window, cx| {
                     store.update(cx, |store, _cx| {
                         store.reset_settings();
+                        store.reset_client_preferences();
                     });
                     // Provider profiles and installed agents survive the reset,
                     // so their cards need no rebuild — only the panels and
@@ -781,10 +782,13 @@ impl SettingsPage {
     }
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {
-        let settings = self.store.read(cx).settings();
+        let store = self.store.read(cx);
+        let settings = store.settings();
+        let language_overridden = store.client_language_override().is_some();
+        let theme_overridden = store.client_theme_override().is_some();
         let appearance = vec![
-            self.language_row(settings.language.as_deref(), cx),
-            self.theme_row(settings.theme_mode, cx),
+            self.language_row(settings.language.as_deref(), language_overridden, cx),
+            self.theme_row(settings.theme_mode, theme_overridden, cx),
         ];
         let delete_confirm_reset = self.reset_action(
             "reset-delete-confirm",
@@ -2308,16 +2312,12 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn theme_row(&self, mode: ThemeMode, cx: &mut Context<Self>) -> AnyElement {
-        let reset = self.reset_action(
-            "reset-theme",
-            mode != ThemeMode::System,
-            cx,
-            |this, window, cx| {
-                this.dispatch_settings(|store| store.set_theme_mode(ThemeMode::System), cx);
-                apply_theme(ThemeMode::System, window, cx);
-            },
-        );
+    fn theme_row(&self, mode: ThemeMode, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
+        let reset = self.reset_action("reset-theme", overridden, cx, |this, window, cx| {
+            this.dispatch_settings(|store| store.set_client_theme(None), cx);
+            let fallback = this.store.read(cx).settings().theme_mode;
+            apply_theme(fallback, window, cx);
+        });
         let label = match mode {
             ThemeMode::System => crate::tr!("settings.theme.system"),
             ThemeMode::Light => crate::tr!("settings.theme.light"),
@@ -2354,7 +2354,7 @@ impl SettingsPage {
             reset,
             |mode, page, window, cx| {
                 page.update(cx, |page, cx| {
-                    page.dispatch_settings(|store| store.set_theme_mode(mode), cx)
+                    page.dispatch_settings(|store| store.set_client_theme(Some(mode)), cx)
                 });
                 apply_theme(mode, window, cx);
             },
@@ -2362,10 +2362,18 @@ impl SettingsPage {
         )
     }
 
-    fn language_row(&self, language: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
+    fn language_row(
+        &self,
+        language: Option<&str>,
+        overridden: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = language.map(str::to_owned);
-        let reset = self.reset_action("reset-language", language.is_some(), cx, |this, _, cx| {
-            this.dispatch_settings(|store| store.set_language(None), cx);
+        let reset = self.reset_action("reset-language", overridden, cx, |this, window, cx| {
+            this.dispatch_settings(|store| store.set_client_language(None), cx);
+            let fallback = this.store.read(cx).settings().language;
+            crate::settings::apply_locale(fallback.as_deref());
+            window.refresh();
         });
         let label = match language {
             Some(LANGUAGE_ENGLISH) => crate::tr!("settings.language.english"),
@@ -2398,13 +2406,14 @@ impl SettingsPage {
                 ),
             ],
             reset,
-            |language, page, _, cx| {
+            |language, page, window, cx| {
                 page.update(cx, |page, cx| {
-                    page.dispatch_settings(
-                        |store| store.set_language(language.map(str::to_owned)),
-                        cx,
-                    )
-                })
+                    let preference = Some(language.unwrap_or("system").to_owned());
+                    page.dispatch_settings(|store| store.set_client_language(preference), cx);
+                    let effective = page.store.read(cx).settings().language;
+                    crate::settings::apply_locale(effective.as_deref());
+                });
+                window.refresh();
             },
             cx,
         )

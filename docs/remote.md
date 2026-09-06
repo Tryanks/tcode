@@ -31,9 +31,11 @@ to display and operate them.
 5. Check **Paired devices** after pairing. Use **Revoke** to withdraw a device's
    access. Keep the app and computer running while clients use the host.
 
-Hosting is unavailable while that desktop window is connected to another host.
-Choose **Back to local** to relaunch in local mode first. Desktop hosting serves
-native clients; it does not embed the browser client.
+The desktop's local kernel, listener and discovery beacon stay running when its
+window connects to another host. **Host this computer** therefore remains
+available while the window is remote, and already attached clients continue
+working. Desktop hosting serves native clients; it does not embed the browser
+client.
 
 ## Headless host
 
@@ -182,9 +184,10 @@ clients can still pair and connect. The browser app uses the compact phone UI.
    You can also paste the host's pairing link into the address or code field.
 3. Choose **Pair**. Compare the displayed fingerprint with the host's fingerprint
    through a trusted channel before choosing **Connect** under **Paired hosts**.
-4. Let the app relaunch. It now uses that host's projects and threads. To switch,
-   select another paired host and choose **Connect**; **Back to local** relaunches
-   without a remote connection.
+4. Choose **Connect**. The same window immediately replaces its workspace with
+   that host's projects and threads. Select another paired host to switch again;
+   **Back to local** immediately restores the local workspace. Switching closes
+   only this window's old client link, not either host.
 
 You can also pair from the desktop executable. Replace the sample address and
 code with the host's current values:

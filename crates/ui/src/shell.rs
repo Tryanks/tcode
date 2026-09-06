@@ -8,7 +8,7 @@ use crate::theme::ActiveTheme as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, Div, ElementId, Entity,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels,
-    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
+    Render, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_base::{ResizableState, h_resizable, resizable_panel};
@@ -126,6 +126,7 @@ pub struct AppShell {
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
+    _attachment_tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -189,13 +190,15 @@ impl AppShell {
         });
         let preview = cx
             .new(|cx| PreviewPanel::new(workspace_store.clone(), window_state.clone(), window, cx));
+        let attachment_tasks = Vec::new();
 
         #[cfg(feature = "desktop")]
-        {
+        let attachment_tasks = {
+            let mut attachment_tasks = attachment_tasks;
             let requests = workspace_store.read(cx).remote_preview_requests();
             let preview = preview.clone();
-            let store = workspace_store.clone();
-            cx.spawn_in(window, async move |_, cx| {
+            let store = workspace_store.downgrade();
+            attachment_tasks.push(cx.spawn_in(window, async move |_, cx| {
                 while let Ok(envelope) = requests.recv().await {
                     let tcode_protocol::ServerEvent::PreviewRequest {
                         request_id,
@@ -222,13 +225,14 @@ impl AppShell {
                             .recv()
                             .await
                             .unwrap_or_else(|_| Err("preview panel dropped request".into()));
-                        store.update(cx, |store, _| store.preview_reply(request_id, response));
+                        let _ =
+                            store.update(cx, |store, _| store.preview_reply(request_id, response));
                     })
                     .detach();
                 }
-            })
-            .detach();
-        }
+            }));
+            attachment_tasks
+        };
 
         Self {
             sidebar: cx
@@ -255,6 +259,7 @@ impl AppShell {
             last_viewport_width: None,
             sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
+            _attachment_tasks: attachment_tasks,
             _subscriptions: vec![subscription, event_subscription, window_subscription],
         }
     }
@@ -273,8 +278,9 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let toast = match event {
-            RuntimeEvent::Effect(effect @ RuntimeEffect::ApplyLocale { .. }) => {
-                apply_runtime_effect(effect);
+            RuntimeEvent::Effect(RuntimeEffect::ApplyLocale { .. }) => {
+                let language = self.store.read(cx).settings().language;
+                apply_runtime_effect(&RuntimeEffect::ApplyLocale { language });
                 cx.notify();
                 return;
             }

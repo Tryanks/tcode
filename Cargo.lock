@@ -8796,6 +8796,7 @@ dependencies = [
 name = "tcode"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "computer-use-mcp",
  "embed-resource",
  "env_logger",

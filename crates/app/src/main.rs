@@ -2,23 +2,21 @@
 // Debug builds keep the console so `RUST_LOG` output stays visible.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use std::{borrow::Cow, time::Duration};
+use std::{borrow::Cow, cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
     App, AppContext as _, BorrowAppContext as _, Entity, KeyBinding, ParentElement as _,
     Styled as _, TitlebarOptions, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
     WindowOptions, point, px, size,
 };
-use tcode_client::HostLink;
+use tcode_client::{HostLink, host::ClientHost as _};
 use tcode_protocol::{Command, CommandResponse};
-use tcode_remote::HostMux;
-use tcode_remote::client::PairedHost;
+use tcode_remote::{HostMux, NativeClientHost};
 use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
-use tcode_ui::remote::{RemoteController, load_hosts, machine_name};
+use tcode_ui::remote::{AttachmentTarget, RemoteController, machine_name};
 use tcode_ui::{
-    AppShell, Quit, TogglePalette, WindowState,
-    store::WorkspaceStore,
+    Quit, TogglePalette, WindowState,
     theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode},
 };
 use tcode_ui::{assets, settings};
@@ -28,6 +26,9 @@ use tcode_ui::widgets::button::{Button, ButtonVariants as _};
 
 #[cfg(not(target_os = "linux"))]
 mod preview_smoke;
+mod session;
+
+use session::DesktopSession;
 
 const TCODE_THEME: &str = include_str!("../../../themes/tcode.json");
 
@@ -74,10 +75,11 @@ fn finish_quit_prompt(window_state: &Entity<WindowState>, epoch: u64, cx: &mut A
 
 fn handle_quit(
     _: &Quit,
-    workspace_store: &Entity<WorkspaceStore>,
+    desktop_session: &Rc<RefCell<DesktopSession>>,
     window_state: &Entity<WindowState>,
     cx: &mut App,
 ) {
+    let workspace_store = desktop_session.borrow().store();
     let count = workspace_store.read(cx).working_sessions_count();
     if count == 0 {
         cx.quit();
@@ -183,80 +185,30 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
 /// Hidden `tcode --pair <addr> <port> <code>`: pair with a host over HTTP,
 /// record it in `hosts.json`, print its id and exit. The desktop pairing UI
 /// does the same thing; this is the headless path used by the remote e2e run.
-fn pair_command(args: &[String], data_dir: &std::path::Path) -> Result<String, String> {
+fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<String, String> {
     let [addr, port, code] = args else {
         return Err("usage: tcode --pair <addr> <port> <code>".into());
     };
     let port: u16 = port
         .parse()
         .map_err(|error| format!("invalid port: {error}"))?;
-    let host = tcode_remote::client::pair(addr, port, code, &machine_name())?;
-    let mut hosts: Vec<PairedHost> = load_hosts(data_dir);
+    let host = smol::block_on(client_host.pair(tcode_client::host::PairRequest {
+        addr: addr.clone(),
+        port,
+        code: code.clone(),
+        fingerprint: String::new(),
+    }))?;
+    let mut hosts = client_host.load_hosts();
     hosts.retain(|existing| existing.host_id != host.host_id);
     let host_id = host.host_id.clone();
     hosts.push(host);
-    tcode_remote::client::save_hosts(data_dir, &hosts).map_err(|error| error.to_string())?;
+    client_host.save_hosts(&hosts);
     Ok(host_id)
 }
 
-/// Everything the window needs regardless of where the host runs.
-struct Wiring {
-    link: HostLink,
-    /// Present in local mode only: the in-process host and its affordances.
-    host: Option<SpawnedHost>,
-    /// Present in local mode only: the fan-out every client attaches through.
-    mux: Option<HostMux>,
-    /// `(host_id, host_name)` in remote mode.
-    remote: Option<(String, String)>,
-    remote_address: Option<String>,
-    data_dir: std::path::PathBuf,
-}
-
-/// Build a link to a host running in another process, forwarding the reconnect
-/// state machine's transitions onto the link so the UI can render its banner.
-fn connect_remote(host: PairedHost, data_dir: std::path::PathBuf) -> Wiring {
-    let identity = (host.host_id.clone(), host.name.clone());
-    let remote_address = host.addrs.first().cloned();
-    let client = tcode_remote::client::connect(host, machine_name());
-    let link = HostLink::new(client.to_host, client.from_host);
-    smol::spawn({
-        let link = link.clone();
-        async move { link.pump().await }
-    })
-    .detach();
-    smol::spawn({
-        let link = link.clone();
-        let states = client.state;
-        async move {
-            while let Ok(state) = states.recv().await {
-                link.set_connection_state(match state {
-                    tcode_remote::client::ConnectionState::Connected => {
-                        tcode_client::ConnectionState::Connected
-                    }
-                    tcode_remote::client::ConnectionState::Reconnecting { attempt } => {
-                        tcode_client::ConnectionState::Reconnecting { attempt }
-                    }
-                    tcode_remote::client::ConnectionState::Offline => {
-                        tcode_client::ConnectionState::Offline
-                    }
-                });
-            }
-        }
-    })
-    .detach();
-    Wiring {
-        link,
-        host: None,
-        mux: None,
-        remote: Some(identity),
-        remote_address,
-        data_dir,
-    }
-}
-
 /// Start the in-process host and put the mux in front of it. This window is
-/// then just the first client attached to that mux, exactly like a remote one.
-fn start_local(store: SessionStore, data_dir: std::path::PathBuf) -> Wiring {
+/// then one ordinary client among every link attached to that mux.
+fn start_local(store: SessionStore) -> (SpawnedHost, HostMux) {
     let mut host_services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -278,20 +230,61 @@ fn start_local(store: SessionStore, data_dir: std::path::PathBuf) -> Wiring {
     }
     let host = spawn_host(store, host_services).expect("failed to start tcode host thread");
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
-    let connection = mux.attach();
-    let link = HostLink::new(connection.to_host, connection.from_host);
-    smol::spawn({
-        let link = link.clone();
-        async move { link.pump().await }
-    })
-    .detach();
-    Wiring {
-        link,
-        host: Some(host),
-        mux: Some(mux),
-        remote: None,
-        remote_address: None,
-        data_dir,
+    (host, mux)
+}
+
+struct LocalKernel {
+    host: SpawnedHost,
+    mux: HostMux,
+    control_link: HostLink,
+    _control_pump: smol::Task<()>,
+}
+
+impl LocalKernel {
+    fn start(store: SessionStore) -> Self {
+        let (host, mux) = start_local(store);
+        let connection = mux.attach();
+        let control_link = HostLink::new(connection.to_host, connection.from_host);
+        let pump_link = control_link.clone();
+        let control_pump = smol::spawn(async move { pump_link.pump().await });
+        Self {
+            host,
+            mux,
+            control_link,
+            _control_pump: control_pump,
+        }
+    }
+
+    fn settings(&self) -> settings::Settings {
+        let topic = tcode_protocol::Topic::Settings;
+        if let Err(error) = self.control_link.subscribe(tcode_protocol::Subscription {
+            topic: topic.clone(),
+            after: None,
+        }) {
+            log::error!("could not request local settings: {}", error.message);
+            return settings::Settings::default();
+        }
+        let events = self.control_link.events();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let result = loop {
+            match events.try_recv() {
+                Ok(tcode_protocol::EventEnvelope {
+                    event:
+                        tcode_protocol::ServerEvent::SettingsSnapshot(settings)
+                        | tcode_protocol::ServerEvent::SettingsReplaced(settings),
+                    ..
+                }) => break settings,
+                Ok(_) => {}
+                Err(async_channel::TryRecvError::Empty) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break settings::Settings::default(),
+            }
+        };
+        let _ = self
+            .control_link
+            .unsubscribe(tcode_protocol::Subscription { topic, after: None });
+        result
     }
 }
 
@@ -327,13 +320,15 @@ fn main() {
     // Hidden debug/dev flag: open the most recently updated session on launch.
     let open_latest = std::env::args().any(|arg| arg == "--open-latest");
     let args: Vec<String> = std::env::args().collect();
-    // `open_default` is used here purely to resolve (and create) the data dir:
-    // remote mode never hands a session store to a host.
+    // The local kernel is process composition, not a property of the window's
+    // current attachment. Open its store unconditionally and keep it alive even
+    // when the window starts on, or later switches to, a remote host.
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
     let data_dir = store.root().clone();
+    let native_client = Rc::new(NativeClientHost::new(data_dir.clone(), machine_name()));
 
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
-        match pair_command(&args[index + 1..], &data_dir) {
+        match pair_command(&args[index + 1..], &native_client) {
             Ok(host_id) => println!("{host_id}"),
             Err(error) => {
                 eprintln!("tcode: {error}");
@@ -343,9 +338,10 @@ fn main() {
         return;
     }
 
-    let wiring = match arg_value(&args, "--connect") {
+    let initial_target = match arg_value(&args, "--connect") {
         Some(host_id) => {
-            let Some(host) = load_hosts(&data_dir)
+            let Some(host) = native_client
+                .load_hosts()
                 .into_iter()
                 .find(|host| host.host_id == host_id)
             else {
@@ -355,18 +351,14 @@ fn main() {
                 );
                 std::process::exit(1);
             };
-            connect_remote(host, data_dir)
+            AttachmentTarget::Remote(host)
         }
-        None => start_local(store, data_dir),
+        None => AttachmentTarget::Local,
     };
-    let Wiring {
-        link,
-        host,
-        mux,
-        remote,
-        remote_address,
-        data_dir,
-    } = wiring;
+    // Kernel ownership is process composition, not a property of whichever
+    // host the window currently views.
+    let kernel = Rc::new(LocalKernel::start(store));
+    let local_settings = kernel.settings();
 
     gpui_platform::application()
         .with_assets(assets::Assets)
@@ -404,31 +396,37 @@ fn main() {
             };
             theme::init_with_json(&theme_json, cx);
 
-            let workspace_store = cx.new(|cx| {
-                let mut store = WorkspaceStore::new(link.clone(), cx);
-                if let (None, Some((_, name))) = (&host, &remote) {
-                    store.attach_remote(name.clone(), cx);
-                }
-                if let Some(address) = &remote_address {
-                    store.set_remote_address(address.clone());
-                }
-                store
+            let window_state = cx.new(|_| WindowState::new(false));
+            let desktop_session = Rc::new(RefCell::new(DesktopSession::new(
+                kernel.mux.clone(),
+                native_client.clone(),
+                window_state.clone(),
+            )));
+            let prepared = desktop_session.borrow().prepare(initial_target.clone(), cx);
+            let initial_settings = prepared.store.read(cx).settings();
+            window_state.update(cx, |state, _| {
+                state.sidebar_collapsed = initial_settings.sidebar_collapsed;
             });
-            // The remote controller owns the listener, beacon and hosts.json for
-            // the whole process; Settings → Remote drives it.
-            cx.set_global(match (&mux, &remote) {
-                (Some(mux), _) => RemoteController::local(mux.clone(), data_dir.clone()),
-                (None, Some((host_id, name))) => {
-                    RemoteController::connected(data_dir.clone(), host_id.clone(), name.clone())
-                }
-                (None, None) => unreachable!("a window is either local or connected"),
-            });
-            let initial_settings = workspace_store.read(cx).settings();
-            if host.is_some() && initial_settings.remote_hosting_enabled {
-                let port = initial_settings
+
+            // Hosting belongs to the process-owned local kernel. The controller
+            // uses the shared ClientHost adapter for pairing and saved hosts;
+            // it carries no current-attachment mode.
+            let switch_session = desktop_session.clone();
+            cx.set_global(RemoteController::new(
+                kernel.mux.clone(),
+                data_dir.clone(),
+                native_client.clone(),
+                kernel.control_link.clone(),
+                local_settings.clone(),
+                move |target, window, cx| {
+                    switch_session.borrow_mut().switch_to(target, window, cx);
+                },
+            ));
+            if local_settings.remote_hosting_enabled {
+                let port = local_settings
                     .remote_port
                     .unwrap_or(tcode_ui::remote::DEFAULT_REMOTE_PORT);
-                let name = initial_settings
+                let name = local_settings
                     .remote_host_name
                     .clone()
                     .unwrap_or_else(machine_name);
@@ -438,12 +436,10 @@ fn main() {
                     }
                 });
             }
-            let sidebar_collapsed = initial_settings.sidebar_collapsed;
-            let window_state = cx.new(|_| WindowState::new(sidebar_collapsed));
             cx.on_action::<Quit>({
-                let workspace_store = workspace_store.clone();
+                let desktop_session = desktop_session.clone();
                 let window_state = window_state.clone();
-                move |action, cx| handle_quit(action, &workspace_store, &window_state, cx)
+                move |action, cx| handle_quit(action, &desktop_session, &window_state, cx)
             });
             // Restart continuity: if this launch follows a permission-grant
             // relaunch, reopen the recorded session and Settings page. Runs
@@ -451,14 +447,18 @@ fn main() {
             // the page mounts already on the recorded section. No-op otherwise.
             // Only meaningful for a host in this process: the marker lives in
             // this machine's data dir, and a remote host's marker is its own.
-            if host.is_some()
+            if matches!(initial_target, AttachmentTarget::Local)
                 && let Ok(CommandResponse::PendingRelaunchSection {
                     section: Some(section),
                     session_id,
-                }) = link.command_blocking(Command::ApplyPendingRelaunch)
+                }) = kernel
+                    .control_link
+                    .command_blocking(Command::ApplyPendingRelaunch)
             {
                 if let Some(id) = session_id {
-                    workspace_store.update(cx, |store, _| store.select_session(id));
+                    prepared
+                        .store
+                        .update(cx, |store, _| store.select_session(id));
                 }
                 window_state.update(cx, |state, cx| {
                     state.pending_settings_section = Some(section);
@@ -481,21 +481,17 @@ fn main() {
                 cx.theme().mode.name(),
                 cx.theme().theme_name()
             );
-            // Quitting a remote client must never shut the host down — other
-            // clients are still attached to it. Only the process that owns the
-            // host flushes it.
+            // Process ownership, not the window's current attachment, grants
+            // authority to stop the local kernel on application quit.
             let quit_subscription = cx.on_app_quit({
-                let link = link.clone();
-                let host_channels = host
-                    .as_ref()
-                    .map(|host| (host.to_host.clone(), host.stopped.clone()));
+                let link = kernel.control_link.clone();
+                let to_host = kernel.host.to_host.clone();
+                let stopped = kernel.host.stopped.clone();
                 move |_cx| {
                     let link = link.clone();
-                    let host_channels = host_channels.clone();
+                    let to_host = to_host.clone();
+                    let stopped = stopped.clone();
                     async move {
-                        let Some((to_host, stopped)) = host_channels else {
-                            return;
-                        };
                         let _ = link.shutdown().await;
                         // `shutdown` only closes this client's mux connection;
                         // the host loop ends when its own inbox closes.
@@ -553,13 +549,11 @@ fn main() {
             cx.spawn(async move |cx| {
                 let smoke_shell = std::rc::Rc::new(std::cell::RefCell::new(None));
                 let smoke_shell_for_window = smoke_shell.clone();
+                let mount_session = desktop_session.clone();
                 let window = cx
                     .open_window(window_options, {
-                        let theme_store = workspace_store.clone();
-                        let workspace_store = workspace_store.clone();
-                        let window_state = window_state.clone();
                         move |window, cx| {
-                            match theme_store.read(cx).settings().theme_mode {
+                            match initial_settings.theme_mode {
                                 settings::ThemeMode::Light => {
                                     theme::change_mode(UiThemeMode::Light, Some(window), cx)
                                 }
@@ -570,8 +564,7 @@ fn main() {
                                     theme::sync_system_appearance(Some(window), cx)
                                 }
                             }
-                            let shell = cx
-                                .new(|cx| AppShell::new(workspace_store, window_state, window, cx));
+                            let shell = mount_session.borrow_mut().mount(prepared, window, cx);
                             *smoke_shell_for_window.borrow_mut() = Some(shell.clone());
                             cx.new(|cx| OverlayHost::new(shell, window, cx))
                         }
@@ -594,19 +587,29 @@ fn main() {
                 }
 
                 if open_latest {
+                    let link = desktop_session.borrow().link();
                     if let Ok(CommandResponse::SessionId(Some(id))) =
                         link.command(Command::OpenLatestSession).await
                     {
+                        let workspace_store = desktop_session.borrow().store();
                         workspace_store.update(cx, |store, _| store.select_session(id));
                     }
                     for _ in 0..100 {
-                        if cx.update(|cx| workspace_store.read(cx).active_session_id().is_some()) {
+                        if cx.update(|cx| {
+                            desktop_session
+                                .borrow()
+                                .store()
+                                .read(cx)
+                                .active_session_id()
+                                .is_some()
+                        }) {
                             break;
                         }
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(10))
                             .await;
                     }
+                    let workspace_store = desktop_session.borrow().store();
                     workspace_store.update(cx, |store, _cx| {
                         store.sync_active_conversation_ui();
                     });

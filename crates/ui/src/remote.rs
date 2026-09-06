@@ -1,15 +1,15 @@
 //! Settings → Remote: host this computer, or connect to another tcode host.
 //!
-//! `RemoteController` is the process-wide handle main.rs installs: in local
-//! mode it owns the [`HostMux`] every client (including this window) attaches
-//! to, plus the listener and discovery beacon while hosting is on. In remote
-//! mode it only remembers which host this process connected to.
+//! `RemoteController` is the process-wide handle main.rs installs. It owns the
+//! local [`HostMux`], listener and discovery beacon independently of whichever
+//! host the desktop window is currently attached to.
 //!
 //! Everything the panel does off the UI thread (pairing, discovery) is blocking
 //! I/O, so it runs on the background executor.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -17,9 +17,12 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use tcode_client::host::ClientHost as _;
-use tcode_remote::client::{PairInvite, PairedHost, pair_pinned, pair_url, parse_pair_url};
-use tcode_remote::discovery::{Beacon, BeaconHandle, browse, start_beacon};
+use tcode_client::HostLink;
+use tcode_client::host::{ClientHost, DiscoveredHost, PairRequest};
+use tcode_client::pairing::{PairInvite, PairedHost, pair_url, parse_pair_url};
+use tcode_core::settings::Settings;
+use tcode_protocol::{Command, SettingsPatch};
+use tcode_remote::discovery::{BeaconHandle, start_beacon};
 use tcode_remote::{DeviceInfo, HostMux, PairingCode, RemoteConfig, RemoteServer, serve};
 
 use crate::icon::{Icon, IconName};
@@ -34,22 +37,23 @@ use crate::widgets::switch::Switch;
 /// Default port advertised by desktop hosting.
 pub const DEFAULT_REMOTE_PORT: u16 = 47_420;
 
-/// How this process is wired to a host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteMode {
-    /// The host runs here; other clients may attach through the mux.
+pub enum AttachmentTarget {
     Local,
-    /// The host runs elsewhere and this process is one of its clients.
-    Connected { host_id: String, name: String },
+    Remote(PairedHost),
 }
 
+type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
+
 pub struct RemoteController {
-    /// `None` in remote mode: there is no local host to serve.
-    mux: Option<HostMux>,
+    mux: HostMux,
     server: Option<RemoteServer>,
     beacon: Option<BeaconHandle>,
     data_dir: PathBuf,
-    mode: RemoteMode,
+    client_host: Rc<dyn ClientHost>,
+    local_settings_link: HostLink,
+    local_settings: Settings,
+    switch_attachment: SwitchAttachment,
     /// The last minted code and when it was minted, for the countdown.
     pairing: Option<(PairingCode, Instant)>,
 }
@@ -57,34 +61,58 @@ pub struct RemoteController {
 impl Global for RemoteController {}
 
 impl RemoteController {
-    pub fn local(mux: HostMux, data_dir: PathBuf) -> Self {
+    pub fn new(
+        mux: HostMux,
+        data_dir: PathBuf,
+        client_host: Rc<dyn ClientHost>,
+        local_settings_link: HostLink,
+        local_settings: Settings,
+        switch_attachment: impl Fn(AttachmentTarget, &mut Window, &mut App) + 'static,
+    ) -> Self {
         Self {
-            mux: Some(mux),
+            mux,
             server: None,
             beacon: None,
             data_dir,
-            mode: RemoteMode::Local,
+            client_host,
+            local_settings_link,
+            local_settings,
+            switch_attachment: Rc::new(switch_attachment),
             pairing: None,
         }
     }
 
-    pub fn connected(data_dir: PathBuf, host_id: String, name: String) -> Self {
-        Self {
-            mux: None,
-            server: None,
-            beacon: None,
-            data_dir,
-            mode: RemoteMode::Connected { host_id, name },
-            pairing: None,
+    pub fn client_host(&self) -> Rc<dyn ClientHost> {
+        self.client_host.clone()
+    }
+
+    pub fn switcher(&self) -> SwitchAttachment {
+        self.switch_attachment.clone()
+    }
+
+    pub fn local_settings(&self) -> &Settings {
+        &self.local_settings
+    }
+
+    pub fn save_hosting_settings(&mut self, enabled: bool, port: u16, name: Option<String>) {
+        self.local_settings.remote_hosting_enabled = enabled;
+        self.local_settings.remote_port = Some(port);
+        self.local_settings.remote_host_name = name.clone();
+        for patch in [
+            SettingsPatch::RemoteHostingEnabled(enabled),
+            SettingsPatch::RemotePort(Some(port)),
+            SettingsPatch::RemoteHostName(name),
+        ] {
+            if let Err(error) = self
+                .local_settings_link
+                .dispatch(Command::PatchSettings { patch })
+            {
+                log::error!(
+                    "could not persist local hosting settings: {}",
+                    error.message
+                );
+            }
         }
-    }
-
-    pub fn mode(&self) -> &RemoteMode {
-        &self.mode
-    }
-
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
     }
 
     pub fn is_hosting(&self) -> bool {
@@ -100,14 +128,11 @@ impl RemoteController {
         if self.server.is_some() {
             return Ok(());
         }
-        let Some(mux) = self.mux.clone() else {
-            return Err("this window is a remote client; it has no host to serve".into());
-        };
         let listen: SocketAddr = format!("0.0.0.0:{port}")
             .parse()
             .map_err(|error| format!("invalid listen address: {error}"))?;
         let server = serve(
-            mux,
+            self.mux.clone(),
             RemoteConfig {
                 listen,
                 host_name,
@@ -170,7 +195,7 @@ impl RemoteController {
     }
 
     pub fn hosts(&self) -> Vec<PairedHost> {
-        load_hosts(&self.data_dir)
+        self.client_host.load_hosts()
     }
 
     pub fn save_host(&self, host: PairedHost) {
@@ -187,33 +212,13 @@ impl RemoteController {
     }
 
     fn write_hosts(&self, hosts: &[PairedHost]) {
-        if let Err(error) = tcode_remote::client::save_hosts(&self.data_dir, hosts) {
-            log::error!("could not save hosts.json: {error}");
-        }
+        self.client_host.save_hosts(hosts);
     }
 }
 
-/// Paired hosts recorded in `hosts.json`; an unreadable file reads as empty.
-pub fn load_hosts(data_dir: &Path) -> Vec<PairedHost> {
-    tcode_remote::NativeClientHost::new(data_dir.to_owned(), machine_name()).load_hosts()
-}
-
-/// This machine's name, used as the advertised host name and the device name
-/// presented while pairing.
+/// This machine's default advertised host name.
 pub fn machine_name() -> String {
     tcode_remote::client_host::default_device_name()
-}
-
-/// Relaunch tcode against `host_id` (or back to local when `None`) and quit.
-fn relaunch(host_id: Option<&str>, cx: &mut App) {
-    let args = match host_id {
-        Some(id) => vec!["--connect".to_owned(), id.to_owned()],
-        None => Vec::new(),
-    };
-    match tcode_services::relaunch::spawn_with_args(&args) {
-        Ok(()) => cx.quit(),
-        Err(error) => log::error!("could not relaunch tcode: {error}"),
-    }
 }
 
 /// A QR code as `(width_in_modules, dark_module_flags)`, row-major.
@@ -276,7 +281,7 @@ fn countdown(seconds: u64) -> String {
 enum Discovery {
     Idle,
     Searching,
-    Found(Vec<Beacon>),
+    Found(Vec<DiscoveredHost>),
 }
 
 pub struct RemotePanel {
@@ -296,7 +301,11 @@ pub struct RemotePanel {
 
 impl RemotePanel {
     pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = store.read(cx).settings();
+        let settings = cx
+            .try_global::<RemoteController>()
+            .map(RemoteController::local_settings)
+            .cloned()
+            .unwrap_or_default();
         let port_input = cx.new(|cx| {
             InputState::new(window, cx).default_value(
                 settings
@@ -387,16 +396,18 @@ impl RemotePanel {
             } else {
                 controller.stop_hosting();
             }
+            if failure.is_none() {
+                controller.save_hosting_settings(
+                    enabled,
+                    port,
+                    (!typed_name.is_empty()).then_some(typed_name.clone()),
+                );
+            }
         });
         if let Some(error) = failure {
             window.push_notification(Notification::error(error), cx);
             return;
         }
-        self.store.update(cx, |store, _cx| {
-            store.set_remote_hosting_enabled(enabled);
-            store.set_remote_port(Some(port));
-            store.set_remote_host_name((!typed_name.is_empty()).then_some(typed_name));
-        });
         self.sync_ticker(cx);
         cx.notify();
     }
@@ -412,9 +423,12 @@ impl RemotePanel {
         } else {
             let port = self.port(cx);
             let typed_name = self.host_name_input.read(cx).value().trim().to_owned();
-            self.store.update(cx, |store, _cx| {
-                store.set_remote_port(Some(port));
-                store.set_remote_host_name((!typed_name.is_empty()).then_some(typed_name));
+            cx.update_global::<RemoteController, _>(|controller, _| {
+                controller.save_hosting_settings(
+                    false,
+                    port,
+                    (!typed_name.is_empty()).then_some(typed_name),
+                );
             });
         }
     }
@@ -422,11 +436,9 @@ impl RemotePanel {
     fn discover(&mut self, cx: &mut Context<Self>) {
         self.discovery = Discovery::Searching;
         cx.notify();
+        let host = cx.global::<RemoteController>().client_host();
         cx.spawn(async move |this, cx| {
-            let found = cx
-                .background_executor()
-                .spawn(async move { browse(Duration::from_secs(2)) })
-                .await;
+            let found = host.browse_hosts().await;
             let _ = this.update(cx, |panel, cx| {
                 panel.discovery = Discovery::Found(found);
                 cx.notify();
@@ -467,11 +479,15 @@ impl RemotePanel {
         }
         self.pairing_busy = true;
         cx.notify();
-        let device = machine_name();
+        let host = cx.global::<RemoteController>().client_host();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { pair_pinned(&addr, port, &code, &device, &fingerprint) })
+            let result = host
+                .pair(PairRequest {
+                    addr,
+                    port,
+                    code,
+                    fingerprint,
+                })
                 .await;
             let _ = this.update_in(cx, |panel, window, cx| {
                 panel.pairing_busy = false;
@@ -554,26 +570,16 @@ impl RemotePanel {
         let hosting = cx
             .try_global::<RemoteController>()
             .is_some_and(RemoteController::is_hosting);
-        let can_host = matches!(
-            cx.try_global::<RemoteController>()
-                .map(RemoteController::mode),
-            Some(RemoteMode::Local)
-        );
         let toggle = self
             .row()
             .child(self.labels(
                 crate::tr!("remote.host.title").into_owned().into(),
-                if can_host {
-                    crate::tr!("remote.host.description").into_owned().into()
-                } else {
-                    SharedString::from(crate::tr!("remote.host.unavailable").into_owned())
-                },
+                crate::tr!("remote.host.description").into_owned().into(),
                 cx,
             ))
             .child(
                 Switch::new("remote-hosting")
                     .checked(hosting)
-                    .disabled(!can_host)
                     .on_click(cx.listener(move |this, checked: &bool, window, cx| {
                         this.set_hosting(*checked, window, cx);
                     })),
@@ -824,17 +830,16 @@ impl RemotePanel {
     }
 
     fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mode = cx
-            .try_global::<RemoteController>()
-            .map(RemoteController::mode)
-            .cloned()
-            .unwrap_or(RemoteMode::Local);
+        let current_id = self.store.read(cx).remote_host_id().map(str::to_owned);
+        let current_name = self.store.read(cx).remote_host_name().map(str::to_owned);
         let mut column = v_flex().w_full().gap_3().child(
             self.section_caption(crate::tr!("remote.connect.section").into_owned().into(), cx),
         );
-        if let RemoteMode::Connected { host_id, .. } = &mode
-            && tcode_remote::client::certificate_changed(host_id)
-        {
+        if current_id.as_deref().is_some_and(|host_id| {
+            cx.global::<RemoteController>()
+                .client_host()
+                .certificate_changed(host_id)
+        }) {
             column = column.child(
                 div()
                     .text_color(cx.theme().danger_foreground)
@@ -842,7 +847,7 @@ impl RemotePanel {
                     .child(crate::tr!("mobile.certificate_changed_help")),
             );
         }
-        if let RemoteMode::Connected { name, .. } = &mode {
+        if let Some(name) = current_name {
             column = column.child(
                 crate::material::group(cx).child(
                     self.row()
@@ -862,19 +867,22 @@ impl RemotePanel {
                                 .primary()
                                 .compact()
                                 .label(crate::tr!("remote.connect.back_to_local"))
-                                .on_click(|_, _, cx| relaunch(None, cx)),
+                                .on_click(|_, window, cx| {
+                                    let switch = cx.global::<RemoteController>().switcher();
+                                    switch(AttachmentTarget::Local, window, cx);
+                                }),
                         ),
                 ),
             );
         }
         column
-            .child(self.render_paired_hosts(&mode, cx))
+            .child(self.render_paired_hosts(current_id.as_deref(), cx))
             .child(self.render_discovery(cx))
             .child(self.render_pair_form(cx))
             .into_any_element()
     }
 
-    fn render_paired_hosts(&self, mode: &RemoteMode, cx: &mut Context<Self>) -> AnyElement {
+    fn render_paired_hosts(&self, current_id: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let hosts = cx
             .try_global::<RemoteController>()
             .map(RemoteController::hosts)
@@ -885,9 +893,8 @@ impl RemotePanel {
                 group.child(self.note(crate::tr!("remote.hosts.empty").into_owned().into(), cx));
         }
         for host in hosts {
-            let current =
-                matches!(mode, RemoteMode::Connected { host_id, .. } if *host_id == host.host_id);
-            let connect_id = host.host_id.clone();
+            let current = current_id == Some(host.host_id.as_str());
+            let connect_host = host.clone();
             let remove_id = host.host_id.clone();
             let address = host
                 .addrs
@@ -924,7 +931,10 @@ impl RemotePanel {
                             } else {
                                 crate::tr!("remote.hosts.connect")
                             })
-                            .on_click(move |_, _, cx| relaunch(Some(&connect_id), cx)),
+                            .on_click(move |_, window, cx| {
+                                let switch = cx.global::<RemoteController>().switcher();
+                                switch(AttachmentTarget::Remote(connect_host.clone()), window, cx);
+                            }),
                     )
                     .child(
                         Button::new(SharedString::from(format!("remove-{}", host.host_id)))

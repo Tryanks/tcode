@@ -430,7 +430,7 @@ impl CommandPalette {
                     ThemeMode::Dark
                 };
                 self.store.update(cx, |store, _cx| {
-                    store.set_theme_mode(next);
+                    store.set_client_theme(Some(next));
                 });
                 apply_theme(next, window, cx);
                 self.close(cx);

@@ -8,7 +8,6 @@ use tcode_core::{
     session::ReviewComment,
     settings::{
         ChildApprovalMode, ImageMode, OrchestrateChildModel, ProfileSettingsPatch, SidebarLayout,
-        ThemeMode,
     },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
@@ -46,12 +45,6 @@ impl WorkspaceStore {
         self.dispatch(Command::PatchSettings { patch });
     }
 
-    pub fn set_language(&mut self, value: Option<String>) {
-        self.patch_settings(SettingsPatch::Language(value));
-    }
-    pub fn set_theme_mode(&mut self, value: ThemeMode) {
-        self.patch_settings(SettingsPatch::ThemeMode(value));
-    }
     pub fn set_word_wrap_diffs(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::WordWrapDiffs(value));
     }

@@ -867,7 +867,6 @@ remote:
     section: "将本机作为执行端"
     title: "将本机作为执行端"
     description: "向网络中已配对的 tcode 客户端提供本机的会话。"
-    unavailable: "当前窗口已连接到其他执行端，无法同时作为执行端。"
   port:
     title: "端口"
     description: "远程监听器在所有网卡上绑定的 TCP 端口。"

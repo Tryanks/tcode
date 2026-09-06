@@ -303,9 +303,20 @@ impl HostLink {
         self.inner.connection_state_rx.clone()
     }
 
+    /// Close this client attachment without asking the host to shut down.
+    ///
+    /// Closing both transport directions wakes [`Self::pump`], fails pending
+    /// requests, and tells reconnecting adapters to stop. The host and any
+    /// other links attached to it keep running.
+    pub fn close(&self) {
+        self.inner.to_host.close();
+        self.inner.from_host.close();
+        self.inner.connection_state_tx.close();
+    }
+
     pub async fn shutdown(&self) -> Result<(), ProtocolError> {
         let result = self.command(Command::ShutdownAllAndFlush).await;
-        self.inner.to_host.close();
+        self.close();
         match result? {
             CommandResponse::Unit => Ok(()),
             other => Err(ProtocolError {
@@ -318,7 +329,7 @@ impl HostLink {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn shutdown_blocking(&self) -> Result<(), ProtocolError> {
         let result = self.command_blocking(Command::ShutdownAllAndFlush);
-        self.inner.to_host.close();
+        self.close();
         match result? {
             CommandResponse::Unit => Ok(()),
             other => Err(ProtocolError {

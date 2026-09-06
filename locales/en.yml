@@ -873,7 +873,6 @@ remote:
     section: "HOST THIS COMPUTER"
     title: "Host this computer"
     description: "Serve this computer's sessions to paired tcode clients on your network."
-    unavailable: "Unavailable while this window is connected to another host."
   port:
     title: "Port"
     description: "TCP port the remote listener binds on every interface."

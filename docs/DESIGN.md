@@ -365,6 +365,13 @@ perspectives, useful initiative within scope, and proportionate verification.
 Both add-model popovers reuse the provider/model picker with fixed tabs and a
 300px scrollable model list.
 
+Desktop theme and language choices belong to the client. An explicit client
+choice overrides the attached host's replicated setting; restoring that row
+reveals the host setting again. Changing hosts replaces the workspace store,
+shell and all descendant views in the same window. The local kernel and remote
+hosting controls remain alive independently, so **Connect** and **Back to local**
+never relaunch the process and never interrupt other attached clients.
+
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 
 Centered top-anchored modal over a dim backdrop: search input; grouped results

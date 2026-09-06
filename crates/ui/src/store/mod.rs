@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
-use tcode_client::{ConnectionState, HostLink};
+use tcode_client::{
+    ConnectionState, HostLink,
+    host::{ClientHost, ClientPreferences},
+};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
@@ -14,6 +18,7 @@ use tcode_core::{
     session::{EntryContent, ReviewComment, StoredEvent, Timeline},
     settings::{
         BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings, SidebarLayout,
+        ThemeMode,
     },
     ui::{ConversationDestination, RightTab},
 };
@@ -89,12 +94,28 @@ pub(crate) fn observe_store_topics<V: 'static>(
     })
 }
 
+/// Identity and network hints fixed for one workspace attachment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceAttachment {
+    Local,
+    Remote {
+        host_id: String,
+        host_name: String,
+        address: Option<String>,
+    },
+}
+
 /// The client-facing projection and command boundary for workspace state.
 ///
 /// Views observe this entity and use its typed accessors instead of retaining
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     host: HostLink,
+    attachment: WorkspaceAttachment,
+    client_host: Option<Rc<dyn ClientHost>>,
+    client_preferences: ClientPreferences,
+    image_namespace: u64,
+    attachment_tasks: Vec<Task<()>>,
     /// Replicated terminal grids, keyed by the host's terminal id.
     terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
     #[cfg(feature = "desktop")]
@@ -107,9 +128,6 @@ pub struct WorkspaceStore {
     /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
     /// second events consumer.
     import_statuses: HashMap<String, Option<ExternalImportStatus>>,
-    /// Name of the remote host this store is a client of. `None` means the host
-    /// runs in this process, so local affordances are available.
-    remote_host: Option<String>,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
@@ -179,6 +197,22 @@ fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
+fn effective_client_settings(host: &Settings, preferences: &ClientPreferences) -> Settings {
+    let mut settings = host.clone();
+    settings.theme_mode = match preferences.appearance.as_deref() {
+        Some("system") => ThemeMode::System,
+        Some("light") => ThemeMode::Light,
+        Some("dark") => ThemeMode::Dark,
+        _ => settings.theme_mode,
+    };
+    settings.language = match preferences.language.as_deref() {
+        Some("system") => None,
+        Some(language) => Some(language.to_owned()),
+        None => settings.language,
+    };
+    settings
+}
+
 impl WorkspaceStore {
     fn destination(status: &SessionStatus) -> ConversationDestination {
         if status.draft {
@@ -189,21 +223,50 @@ impl WorkspaceStore {
     }
 
     pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
+        Self::new_attached(host, WorkspaceAttachment::Local, None, cx)
+    }
+
+    /// Construct the complete projection for exactly one client link.
+    pub fn new_attached(
+        host: HostLink,
+        attachment: WorkspaceAttachment,
+        client_host: Option<Rc<dyn ClientHost>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         static NEXT_IMAGE_NAMESPACE: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
+        let image_namespace =
+            NEXT_IMAGE_NAMESPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         cx.set_global(images::HostImages {
-            link: host.clone(),
-            namespace: NEXT_IMAGE_NAMESPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            link: Some(host.clone()),
+            namespace: image_namespace,
         });
+        let client_preferences = client_host
+            .as_ref()
+            .map(|host| host.load_preferences())
+            .unwrap_or_default();
+        let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
+        let remote_address = match &attachment {
+            WorkspaceAttachment::Local => None,
+            WorkspaceAttachment::Remote { address, .. } => address.clone(),
+        };
         let store = Self {
             host: host.clone(),
+            attachment,
+            client_host,
+            client_preferences,
+            image_namespace,
+            attachment_tasks: Vec::new(),
             terminals: HashMap::new(),
             #[cfg(feature = "desktop")]
             remote_preview: async_channel::unbounded(),
-            remote_address: None,
+            remote_address,
             import_statuses: HashMap::new(),
-            remote_host: None,
-            connection_state: ConnectionState::Connected,
+            connection_state: if remote {
+                host.connection_state()
+            } else {
+                ConnectionState::Connected
+            },
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
             selected_session_id: None,
@@ -222,7 +285,6 @@ impl WorkspaceStore {
             fallback_reviews: HashMap::new(),
             conversation_ui: HashMap::new(),
         };
-        #[cfg(feature = "desktop")]
         let mut store = store;
 
         // Construction seeding is itself protocol traffic: subscribe, then
@@ -285,7 +347,7 @@ impl WorkspaceStore {
         #[cfg(not(test))]
         {
             let event_messages = events;
-            cx.spawn(async move |this, cx| {
+            store.attachment_tasks.push(cx.spawn(async move |this, cx| {
                 while let Ok(envelope) = event_messages.recv().await {
                     if this
                         .update(cx, |store, cx| {
@@ -304,20 +366,40 @@ impl WorkspaceStore {
                         break;
                     }
                 }
-            })
-            .detach();
+            }));
+        }
+
+        if remote {
+            let changes = host.connection_state_changes();
+            store.attachment_tasks.push(cx.spawn(async move |this, cx| {
+                while let Ok(state) = changes.recv().await {
+                    if this
+                        .update(cx, |store, cx| {
+                            store.connection_state = state;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
         }
 
         store
     }
 
-    /// Mark this store as a client of a remote host and start tracking the
-    /// link's connection state so the workspace can show its banner.
+    /// Compatibility path for the mobile coordinator until it adopts the
+    /// attachment identity constructor.
     pub fn attach_remote(&mut self, host_name: String, cx: &mut Context<Self>) {
-        self.remote_host = Some(host_name);
+        self.attachment = WorkspaceAttachment::Remote {
+            host_id: String::new(),
+            host_name,
+            address: None,
+        };
         self.connection_state = self.host.connection_state();
         let changes = self.host.connection_state_changes();
-        cx.spawn(async move |this, cx| {
+        self.attachment_tasks.push(cx.spawn(async move |this, cx| {
             while let Ok(state) = changes.recv().await {
                 if this
                     .update(cx, |store, cx| {
@@ -329,8 +411,7 @@ impl WorkspaceStore {
                     break;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
     /// Whether the host lives in another process. Computer use settings and
@@ -348,7 +429,13 @@ impl WorkspaceStore {
     }
 
     pub fn set_remote_address(&mut self, address: String) {
-        self.remote_address = Some(address);
+        self.remote_address = Some(address.clone());
+        if let WorkspaceAttachment::Remote {
+            address: current, ..
+        } = &mut self.attachment
+        {
+            *current = Some(address);
+        }
     }
 
     #[cfg(feature = "desktop")]
@@ -365,15 +452,47 @@ impl WorkspaceStore {
     }
 
     pub fn is_remote(&self) -> bool {
-        self.remote_host.is_some()
+        matches!(self.attachment, WorkspaceAttachment::Remote { .. })
     }
 
     pub fn remote_host_name(&self) -> Option<&str> {
-        self.remote_host.as_deref()
+        match &self.attachment {
+            WorkspaceAttachment::Local => None,
+            WorkspaceAttachment::Remote { host_name, .. } => Some(host_name),
+        }
+    }
+
+    pub fn remote_host_id(&self) -> Option<&str> {
+        match &self.attachment {
+            WorkspaceAttachment::Local => None,
+            WorkspaceAttachment::Remote { host_id, .. } => Some(host_id),
+        }
     }
 
     pub fn connection_state(&self) -> &ConnectionState {
         &self.connection_state
+    }
+
+    /// End this store's one-link lifetime before its views are replaced.
+    pub fn detach(&mut self, cx: &mut App) {
+        self.attachment_tasks.clear();
+        for subscription in self.host.subscriptions() {
+            let _ = self.host.unsubscribe(subscription);
+        }
+        self.host.close();
+        #[cfg(feature = "desktop")]
+        {
+            self.remote_preview.0.close();
+            self.remote_preview.1.close();
+        }
+        if let Some(images) = cx.try_global::<images::HostImages>()
+            && images.namespace == self.image_namespace
+        {
+            cx.set_global(images::HostImages {
+                link: None,
+                namespace: self.image_namespace,
+            });
+        }
     }
 
     pub fn sync_active_conversation_ui(&mut self) {
@@ -983,7 +1102,63 @@ impl WorkspaceStore {
     }
 
     pub fn settings(&self) -> Settings {
-        self.settings_replica.clone()
+        effective_client_settings(&self.settings_replica, &self.client_preferences)
+    }
+
+    pub fn client_theme_override(&self) -> Option<ThemeMode> {
+        match self.client_preferences.appearance.as_deref() {
+            Some("system") => Some(ThemeMode::System),
+            Some("light") => Some(ThemeMode::Light),
+            Some("dark") => Some(ThemeMode::Dark),
+            _ => None,
+        }
+    }
+
+    pub fn set_client_theme(&mut self, mode: Option<ThemeMode>) {
+        self.client_preferences.appearance = mode.map(|mode| match mode {
+            ThemeMode::System => "system".to_owned(),
+            ThemeMode::Light => "light".to_owned(),
+            ThemeMode::Dark => "dark".to_owned(),
+        });
+        self.save_client_preferences();
+    }
+
+    pub fn client_language_override(&self) -> Option<&str> {
+        self.client_preferences.language.as_deref()
+    }
+
+    pub fn set_client_language(&mut self, language: Option<String>) {
+        self.client_preferences.language = language;
+        self.save_client_preferences();
+    }
+
+    pub fn client_device_name_override(&self) -> Option<&str> {
+        self.client_preferences.device_name.as_deref()
+    }
+
+    pub fn client_device_name(&self) -> String {
+        self.client_preferences
+            .device_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| self.client_host.as_ref().map(|host| host.device_name()))
+            .unwrap_or_else(|| "tcode".into())
+    }
+
+    pub fn set_client_device_name(&mut self, name: Option<String>) {
+        self.client_preferences.device_name = name.filter(|name| !name.trim().is_empty());
+        self.save_client_preferences();
+    }
+
+    pub fn reset_client_preferences(&mut self) {
+        self.client_preferences = ClientPreferences::default();
+        self.save_client_preferences();
+    }
+
+    fn save_client_preferences(&self) {
+        if let Some(host) = &self.client_host {
+            host.save_preferences(&self.client_preferences);
+        }
     }
 
     pub fn live_command_panel(&self) -> bool {
@@ -1951,6 +2126,7 @@ impl Drop for WorkspaceStore {
         for subscription in self.host.subscriptions() {
             let _ = self.host.unsubscribe(subscription);
         }
+        self.host.close();
     }
 }
 
@@ -1965,13 +2141,56 @@ mod tests {
         git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
         session::{ReviewComment, ReviewSide},
+        settings::{Settings, ThemeMode},
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
     use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
 
-    use super::WorkspaceStore;
+    use super::{WorkspaceStore, effective_client_settings};
+
+    #[cfg(feature = "remote-client")]
+    #[test]
+    fn client_preferences_persist_and_override_host_settings_only_when_set() {
+        use tcode_client::host::{ClientHost as _, ClientPreferences};
+
+        let root = std::env::temp_dir().join(format!(
+            "tcode-desktop-preferences-{}",
+            tcode_services::store::now_millis()
+        ));
+        let client = tcode_remote::NativeClientHost::new(root.clone(), "fallback device");
+        let host = Settings {
+            theme_mode: ThemeMode::Dark,
+            language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            effective_client_settings(&host, &client.load_preferences()),
+            host
+        );
+
+        client.save_preferences(&ClientPreferences {
+            appearance: Some("light".into()),
+            language: Some("system".into()),
+            device_name: Some("Desk client".into()),
+        });
+        let reloaded = tcode_remote::NativeClientHost::new(root.clone(), "different fallback");
+        let preferences = reloaded.load_preferences();
+        let effective = effective_client_settings(&host, &preferences);
+        assert_eq!(effective.theme_mode, ThemeMode::Light);
+        assert_eq!(effective.language, None);
+        assert_eq!(reloaded.device_name(), "Desk client");
+
+        reloaded.save_preferences(&ClientPreferences::default());
+        assert_eq!(
+            effective_client_settings(&host, &reloaded.load_preferences()),
+            host,
+            "clearing the client override must reveal the replicated host fallback"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn test_host(store: SessionStore) -> SpawnedHost {
         spawn_host(store, HostServices::default()).expect("spawn test host")
