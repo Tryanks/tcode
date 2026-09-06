@@ -234,20 +234,26 @@ impl fmt::Display for BackendError {
 
 impl std::error::Error for BackendError {}
 
+/// Enumerate desktop roots. The host process is never a root: in-process
+/// accessibility queries run the host's own accessibility callbacks on the
+/// calling (non-main) thread, which aborts the app.
 pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
+    let own_pid = std::process::id();
+    if filters.pid == Some(own_pid) {
+        return Err(BackendError::new(
+            BackendErrorCode::RootNotFound,
+            "the tcode host process cannot observe itself; launch a separate instance to drive it",
+        ));
+    }
     #[cfg(target_os = "macos")]
-    {
-        macos::MacosBackend.list_roots(filters)
-    }
+    let roots = macos::MacosBackend.list_roots(filters);
     #[cfg(target_os = "windows")]
-    {
-        windows::WindowsBackend.list_roots(filters)
-    }
+    let roots = windows::WindowsBackend.list_roots(filters);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = filters;
-        Err(BackendError::unsupported())
-    }
+    let roots: Result<Vec<RootInfo>, BackendError> = Err(BackendError::unsupported());
+    let mut roots = roots?;
+    roots.retain(|root| root.pid != own_pid);
+    Ok(roots)
 }
 
 pub fn observe(root: &RootInfo, request: ObserveRequest) -> Result<RootObservation, BackendError> {

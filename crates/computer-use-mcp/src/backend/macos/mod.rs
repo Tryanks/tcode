@@ -62,7 +62,8 @@ impl MacosBackend {
             let window_id = dictionary_i64(dictionary, unsafe { kCGWindowNumber })
                 .and_then(|id| u32::try_from(id).ok())
                 .unwrap_or_default();
-            if pid == 0 || window_id == 0 {
+            // Skip our own windows before any AX query touches them.
+            if pid == 0 || window_id == 0 || pid == std::process::id() {
                 continue;
             }
             let app_name =
