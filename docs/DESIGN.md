@@ -4,6 +4,24 @@ The visual and interaction contract for tcode. Update it deliberately when a
 product decision changes; historical design drafts are not additional rules.
 Phone and browser adaptations are in [mobile design](mobile-design.md).
 
+## Capability-appropriate UI
+
+Every product view is built by every client. A view is never compiled away
+because of the platform it happens to run on: the difference between clients is
+which *operations* they can perform, not which screens exist.
+
+An operation is gated only when it is genuinely native — a file dialog, an
+embedded webview, macOS permission grants, dictation, the AppKit pasteboard,
+launching an editor — and then by two independent things: whether this build has
+the capability at all, and whether it applies to the current attachment. A
+picker that browses this machine is meaningless while the workspace runs on
+another one, so it is withheld even where the build has it.
+
+Where an operation is unavailable, the view says which machine can perform it
+and offers what it can (open externally, copy, type the value) instead of a
+control that would do nothing. A client never infers the host's state from its
+own operating system, and never reports a success it did not perform.
+
 ## Design tokens
 
 The embedded [theme](../themes/tcode.json) owns colors and font choices;
@@ -75,6 +93,12 @@ queued messages, user-input options, approval details and expanded toast
 details. A bounded flex column with `overflow` on the same node is not an
 acceptable substitute: flexbox can shrink its rows until no scrollable overflow
 remains.
+
+Those heights are desktop design sizes, and the same views now open in phone and
+browser viewports. Each is capped to what the window can actually show, so a
+short window scrolls the list instead of pushing the footer off-screen. Dialogs
+are capped the same way — width and height — because a dialog wider than the
+viewport is also positioned off-centre.
 
 ## Surface anatomy
 
@@ -300,6 +324,16 @@ disturbing each other, and only the keys and mouse reports a client sends reach
 the shell. Keyboard input is encoded from the replicated modes, so bracketed
 paste, application cursor keys and mouse reporting behave the same everywhere.
 
+The Preview tab exists on every client. Its URL field, open-in-system-browser
+and copy-URL work everywhere; the embedded browser, history, JS automation and
+screenshots need a system webview, which only macOS and Windows desktop builds
+have. Without one the tab explains that and offers the portable actions rather
+than dead back/reload/screenshot controls, agent automation requests are
+answered with an explicit "unsupported" instead of timing out, and such a client
+does not subscribe as an owner of the session's preview at all. Localhost port
+discovery scans the client, so it is offered only for a local workspace; a host
+URL typed into the field still works.
+
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the
 conversation destination rather than the shared window. Stored threads key by
@@ -316,7 +350,20 @@ palette, or leaving Chat hides every WebView that no longer owns the panel.
 Settings uses a left navigation column and independently scrolling content.
 Groups share the composer's opaque floating-card treatment. Rows pair a title
 and description with a control; sparse groups use space, dense lists use inset
-hairlines. Restore defaults requires confirmation.
+hairlines. Restore defaults requires confirmation. Compact clients have no room
+for the rail beside the content: the same sections become a full-width list that
+pushes to one section at a time, with a back control in its header.
+
+Every section is present on every client, including over a remote link. Computer
+Use configuration is host settings and stays editable; only its **System
+permissions** group is local — it shows live status and Grant/Recheck when this
+build can read them *and* the workspace is this machine's, and otherwise says to
+manage system permissions on the named host. A client never reports the host's
+permission state from its own OS.
+
+Editable fields are seeded from the host's settings the first time a real
+snapshot exists, not from local defaults, and a field the user has since edited
+is never rewritten by a later snapshot.
 
 Provider profiles expose only applicable options. Pi defaults to no tcode
 permission extension; its Native approvals toggle enables the gate for
@@ -365,12 +412,24 @@ perspectives, useful initiative within scope, and proportionate verification.
 Both add-model popovers reuse the provider/model picker with fixed tabs and a
 300px scrollable model list.
 
-Desktop theme and language choices belong to the client. An explicit client
-choice overrides the attached host's replicated setting; restoring that row
-reveals the host setting again. Changing hosts replaces the workspace store,
-shell and all descendant views in the same window. The local kernel and remote
-hosting controls remain alive independently, so **Connect** and **Back to local**
-never relaunch the process and never interrupt other attached clients.
+Theme, language and device name belong to the client. An explicit client choice
+overrides the attached host's replicated setting; restoring that row reveals the
+host setting again. Changing hosts replaces the workspace store, shell and all
+descendant views in the same window. The local kernel and remote hosting controls
+remain alive independently, so **Connect** and **Back to local** never relaunch
+the process and never interrupt other attached clients.
+
+Settings → Remote has two independent halves. **Connecting** — saved hosts,
+discovery, the pair form and certificate repair — is client work and is present
+on every client. **Hosting this computer** needs a listener and a discovery
+beacon, so it only appears where the client can host. Pairing follows the same
+rules everywhere: a fingerprint pinned by an invite or a discovery result applies
+only to the endpoint it came from and is dropped if either field is edited; an
+answer from a superseded attempt is discarded rather than applied; and a client
+that can only reach the origin that served it (a browser) fixes the address and
+port, hides discovery, and hides the camera scan unless it has one. A host whose
+certificate no longer matches the pinned one cannot be connected to — the row
+offers to pair again instead.
 
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 
@@ -387,7 +446,27 @@ group, including compact ones — there is no local session store to reopen. The
 client owns presentation only: a 150ms debounce and discarding an answer that a
 newer keystroke has already superseded.
 
+### Exporting a thread
+
+The host renders the artifact — it owns the event log and flushes pending writes
+first — and writes nothing. The client owns delivery, because "where does this
+file go" is a question about the machine the user is at, which over a remote link
+is not the host. The export dialog names the file and its size, and offers only
+what this client can actually do: **Save** through the platform save panel,
+**Download** where the platform has one (a browser Blob), and **Copy** to the
+clipboard everywhere. A dismissed save panel is a decision, not a failure, and
+reports nothing. An export too large for one response frame is refused with an
+explicit size error rather than truncated.
+
 ### Importing external history
+
+The project root in **Add project** belongs to the host: whether a path is
+absolute and whether it exists are facts about the host's filesystem, so the host
+decides and the dialog shows the host's own reason for refusing one. The native
+directory picker browses *this* machine, so it appears only for a local
+workspace; a remote one types a host path, with the recents list and the import
+run also coming from the host. Failures — a refused path, an unreadable recents
+scan, a refused import — are shown, never swallowed.
 
 Choosing a directory in **Add project** starts an import and opens a modal,
 non-dismissible progress dialog with a bar, the "n of N" line naming the tool
