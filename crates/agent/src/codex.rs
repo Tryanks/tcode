@@ -358,7 +358,7 @@ fn codex_service_tier(selections: &[OptionSelection]) -> Option<String> {
 enum PendingRequest {
     TurnStart,
     Interrupt,
-    Steer(String),
+    Steer { request_id: String, text: String },
 }
 
 struct PendingElicitation {
@@ -419,6 +419,11 @@ struct Actor {
     seen_subagent_activities: HashSet<String>,
     usage_by_turn: HashMap<String, TokenUsage>,
     active_turn: Option<String>,
+    /// Steers the server acknowledged but has not yet consumed, as
+    /// `(request_id, text)`. `turn/steer` only enqueues the input; the turn
+    /// loop drains it before its next model request and echoes it back as a
+    /// `userMessage` item, which is the real acceptance signal.
+    pending_steers: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -485,6 +490,7 @@ async fn run_actor(
         seen_subagent_activities: HashSet::new(),
         usage_by_turn: HashMap::new(),
         active_turn: None,
+        pending_steers: Vec::new(),
     };
 
     let started = AgentEvent::SessionStarted {
@@ -697,7 +703,7 @@ impl SessionActor for Actor {
                         "expectedTurnId": turn_id,
                         "input": user_input(&text, &attachments),
                     }),
-                    PendingRequest::Steer(request_id),
+                    PendingRequest::Steer { request_id, text },
                 )
             }
             SessionCommand::Rewind {
@@ -1253,15 +1259,32 @@ impl Actor {
                             self.active_turn.get_or_insert_with(|| turn_id.to_owned());
                         }
                     }
-                    Some(PendingRequest::Steer(request_id)) => {
-                        self.events
-                            .emit(AgentEvent::SteerAccepted { request_id })
-                            .await;
+                    Some(PendingRequest::Steer { request_id, text }) => {
+                        self.pending_steers.push((request_id, text));
                     }
                     _ => {}
                 }
             }
         }
+    }
+
+    /// Codex echoes user input as a `userMessage` item only once the turn loop
+    /// has drained it into the model context. Match the echo's text against
+    /// the acknowledged steers (oldest first) rather than assuming FIFO, since
+    /// the turn's own prompt echo can land after a fast steer was sent.
+    async fn accept_echoed_steer(&mut self, item: &Value) {
+        let echoed = user_message_text(item);
+        let Some(position) = self
+            .pending_steers
+            .iter()
+            .position(|(_, text)| *text == echoed)
+        else {
+            return;
+        };
+        let (request_id, _) = self.pending_steers.remove(position);
+        self.events
+            .emit(AgentEvent::SteerAccepted { request_id })
+            .await;
     }
 
     /// A `turn/start` the runtime already accepted was rejected by the server
@@ -1519,6 +1542,12 @@ impl Actor {
                     .and_then(|item| item.get("type"))
                     .and_then(Value::as_str)
                 {
+                    Some("userMessage") => {
+                        if let Some(item) = item_value {
+                            self.accept_echoed_steer(item).await;
+                        }
+                        return;
+                    }
                     Some("plan") => {
                         if method == "item/completed"
                             && let Some(item) = item_value
@@ -1873,11 +1902,23 @@ fn user_input(text: &str, attachments: &[Attachment]) -> Value {
     Value::Array(input)
 }
 
+/// The text parts of a `userMessage` item's `content: UserInput[]`, joined in
+/// order; mirrors what [`user_input`] sent so a steer echo compares equal.
+fn user_message_text(item: &Value) -> String {
+    item.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect()
+}
+
 fn pending_name(request: Option<&PendingRequest>) -> &'static str {
     match request {
         Some(PendingRequest::TurnStart) => "turn/start",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
-        Some(PendingRequest::Steer(_)) => "turn/steer",
+        Some(PendingRequest::Steer { .. }) => "turn/steer",
         None => "unknown",
     }
 }
@@ -2533,6 +2574,7 @@ mod tests {
                 subagents: HashMap::new(),
                 subagent_parent_by_thread: HashMap::new(),
                 seen_subagent_activities: HashSet::new(),
+                pending_steers: Vec::new(),
                 usage_by_turn: HashMap::new(),
                 active_turn: None,
             },
@@ -2748,7 +2790,7 @@ mod tests {
     }
 
     #[test]
-    fn steer_acceptance_waits_for_successful_correlated_rpc_response() {
+    fn steer_acceptance_waits_for_the_consumed_user_message_echo() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
             actor.active_turn = Some("turn-1".into());
@@ -2760,10 +2802,6 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert!(
-                events.try_recv().is_err(),
-                "request write is not acceptance"
-            );
             let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
                 panic!("expected echoed request")
             };
@@ -2772,10 +2810,35 @@ mod tests {
             actor
                 .handle_line(&json!({"id": id, "result": {"turnId": "turn-1"}}).to_string())
                 .await;
+            assert!(
+                events.try_recv().is_err(),
+                "the turn/steer reply only means the input was enqueued"
+            );
+
+            // The turn's own prompt echo arriving late must not be mistaken
+            // for the steer.
+            actor
+                .handle_line(&json!({"method":"item/started","params":{"threadId":"thread-1","item":{
+                    "type":"userMessage","id":"u0","content":[{"type":"text","text":"original prompt"}]
+                }}}).to_string())
+                .await;
+            assert!(events.try_recv().is_err());
+
+            for method in ["item/started", "item/completed"] {
+                actor
+                    .handle_line(&json!({"method":method,"params":{"threadId":"thread-1","item":{
+                        "type":"userMessage","id":"u1","content":[{"type":"text","text":"redirect"}]
+                    }}}).to_string())
+                    .await;
+            }
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::SteerAccepted { ref request_id } if request_id == "steer-ok"
             ));
+            assert!(
+                events.try_recv().is_err(),
+                "one echo lifecycle accepts once"
+            );
 
             actor
                 .handle_command(SessionCommand::Steer {
@@ -2800,9 +2863,14 @@ mod tests {
                 events.recv().await.unwrap(),
                 AgentEvent::Error { .. }
             ));
+            actor
+                .handle_line(&json!({"method":"item/completed","params":{"threadId":"thread-1","item":{
+                    "type":"userMessage","id":"u2","content":[{"type":"text","text":"do not accept"}]
+                }}}).to_string())
+                .await;
             assert!(
                 events.try_recv().is_err(),
-                "RPC errors must not accept a steer"
+                "RPC errors must not accept a steer, even if matching text is echoed"
             );
 
             let _ = actor.child.kill();
