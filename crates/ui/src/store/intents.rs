@@ -7,8 +7,8 @@ use tcode_core::{
     git::GitAction,
     session::ReviewComment,
     settings::{
-        ChildApprovalMode, ImageMode, OrchestrateChildModel, OrchestratorIdentity,
-        ProfileSettingsPatch, SidebarLayout, ThemeMode,
+        ChildApprovalMode, ImageMode, OrchestrateChildModel, ProfileSettingsPatch, SidebarLayout,
+        ThemeMode,
     },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
@@ -92,11 +92,8 @@ impl WorkspaceStore {
     pub fn set_auto_archive_notice_shown(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::AutoArchiveNoticeShown(value));
     }
-    pub fn set_orchestrate_generic_identity(&mut self, value: String) {
-        self.patch_settings(SettingsPatch::OrchestrateGenericIdentity(value));
-    }
-    pub fn set_orchestrate_model_identities(&mut self, value: Vec<OrchestratorIdentity>) {
-        self.patch_settings(SettingsPatch::OrchestrateModelIdentities(value));
+    pub fn set_orchestrate_decision_models(&mut self, value: Vec<OrchestrateChildModel>) {
+        self.patch_settings(SettingsPatch::OrchestrateDecisionModels(value));
     }
     pub fn set_orchestrate_child_models(&mut self, value: Vec<OrchestrateChildModel>) {
         self.patch_settings(SettingsPatch::OrchestrateChildModels(value));

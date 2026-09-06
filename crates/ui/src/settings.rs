@@ -36,8 +36,7 @@ pub fn apply_locale(override_locale: Option<&str>) {
 
 pub use tcode_core::settings::{
     BrowserSettings, ChildApprovalMode, EnvVar, ImageMode, OrchestrateChildModel,
-    OrchestrateSettings, OrchestratorIdentity, ProjectSort, ProviderSettings, Settings, ThemeMode,
-    provider_label,
+    OrchestrateSettings, ProjectSort, ProviderSettings, Settings, ThemeMode, provider_label,
 };
 /// The six accent presets offered by the provider card (T3 §2).
 pub const ACCENT_PRESETS: [&str; 6] = [

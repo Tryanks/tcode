@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
-use crate::{Broker, OrchestrateOp};
+use crate::{Broker, OrchestrateOp, ThreadPurpose};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct DispatchParams {
@@ -18,6 +18,9 @@ struct DispatchParams {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Reasoning effort for this call. Choose any available effort listed for this model in the current Orchestrate configuration (for example low, medium, high, xhigh, max, ultra, ultracode, or ultrathink when supported). Use the model description and task difficulty; the model is not pinned to a preset effort. Omit to use medium when available, otherwise the provider default. Unsupported values are rejected."
+    )]
     effort: Option<String>,
     #[serde(default)]
     profile: Option<String>,
@@ -48,6 +51,40 @@ struct DispatchParams {
     )]
     fast: Option<bool>,
 }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum CollaborationEffort {
+    Medium,
+    High,
+}
+impl CollaborationEffort {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct CollaborateParams {
+    provider: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Peer reasoning effort: medium for focused consultation, high for difficult synthesis or tradeoffs. Defaults to medium when available, otherwise high. Other efforts are not allowed for collaboration."
+    )]
+    effort: Option<CollaborationEffort>,
+    #[serde(default)]
+    profile: Option<String>,
+    title: String,
+    #[schemars(
+        description = "Self-contained discussion: context, open question, current alternatives, constraints, and the independent perspective requested. Concrete implementation belongs to execution models."
+    )]
+    brief: String,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct StatusParams {
     #[serde(default)]
@@ -97,7 +134,7 @@ impl OrchestrateTools {
     }
 
     #[tool(
-        description = "Dispatch a brief to a new child tcode thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
+        description = "Dispatch concrete execution work to an enabled execution-model profile in a new child tcode thread. Use collaborate for peer decision discussions. Dispatch a brief to the thread and return its thread id. profile is the provider-profile id from the fleet table, required when the entry names one. access is one of read_only (review/investigation: read-only actions run without prompts; anything that mutates pauses for user approval), workspace_write (edits auto-approved inside the workspace), or full (default; no approval prompts). worktree optionally isolates the child in tcode/<thread-id> and overrides the Orchestrate setting; the response identifies the path and branch or explains fallback. Completed children are auto-archived after their result is delivered unless archive_on_complete: false; failed children stay visible for retries. fast overrides the profile's fast-mode setting for this child; use it only on the user's explicit instruction."
     )]
     async fn dispatch(
         &self,
@@ -105,6 +142,7 @@ impl OrchestrateTools {
     ) -> Result<CallToolResult, ErrorData> {
         Ok(self
             .run(OrchestrateOp::Dispatch {
+                purpose: ThreadPurpose::Execution,
                 parent_id: self.parent_id.clone(),
                 provider: p.provider,
                 model: p.model,
@@ -118,6 +156,33 @@ impl OrchestrateTools {
                 archive_on_complete: p.archive_on_complete,
                 result_max_chars: p.result_max_chars,
                 fast: p.fast,
+            })
+            .await)
+    }
+
+    #[tool(
+        description = "Open a peer discussion with an enabled collaboration model from Settings → Orchestrate (bundled: Astra and Fable 5.1). Use for independent approaches, architecture, assumptions, and review of decisions. This is a read-only consultation, not an implementation assignment; dispatch concrete work to execution models. Prefer a complementary provider when it adds a useful perspective. Returns thread_id; use send for further discussion. The peer's report arrives through the normal completion callback."
+    )]
+    async fn collaborate(
+        &self,
+        Parameters(p): Parameters<CollaborateParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        Ok(self
+            .run(OrchestrateOp::Dispatch {
+                purpose: ThreadPurpose::Collaboration,
+                parent_id: self.parent_id.clone(),
+                provider: p.provider,
+                model: p.model,
+                effort: p.effort.map(|effort| effort.as_str().to_string()),
+                profile: p.profile,
+                access: Some("read_only".into()),
+                title: p.title,
+                brief: p.brief,
+                cwd: None,
+                worktree: Some(false),
+                archive_on_complete: None,
+                result_max_chars: Some(0),
+                fast: None,
             })
             .await)
     }
@@ -244,7 +309,7 @@ impl ChildReportTools {
     }
 
     #[tool(
-        description = "Send your complete final report (RESULT) to the orchestrator that dispatched this thread. This is the orchestrator's only view of your work — it cannot see your transcript — so make the report self-contained: what you did, files changed, every command you ran with its outcome, and your findings or conclusions in full. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). Only if this call fails, write the same complete report as your final message instead — it is sent back as the fallback, truncated when long."
+        description = "Send your complete final report (RESULT) to the thread that initiated this work or discussion. This is the orchestrator's only view of your work — it cannot see your transcript — so make the report self-contained: your reasoning, recommendations, disagreements, and open questions for a discussion; files changed and commands actually run with outcomes for execution; evidence for your conclusions in either case. Call it once when your work is complete, before ending your turn; calling again replaces the previous report (last call wins). Only if this call fails, write the same complete report as your final message instead — it is sent back as the fallback, truncated when long."
     )]
     async fn report_result(
         &self,
@@ -299,7 +364,7 @@ impl ServerHandler for OrchestrateTools {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Dispatch and coordinate work in isolated child tcode threads.")
+            .with_instructions("Prefer tcode Orchestrate for cross-provider peer collaboration and execution dispatch. Use collaborate for decision discussions, dispatch for implementation, and send to continue either thread.")
     }
 }
 
@@ -353,6 +418,50 @@ mod tests {
         resolver.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn collaboration_tool_routes_peer_purpose_with_read_only_defaults() {
+        let (tx, rx) = async_channel::unbounded();
+        let broker = broker(tx, std::time::Duration::from_secs(2));
+        let resolver = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            assert!(matches!(request.op, OrchestrateOp::Dispatch {
+                purpose: ThreadPurpose::Collaboration,
+                parent_id, provider, access: Some(access), worktree: Some(false), result_max_chars: Some(0), ..
+            } if parent_id == "parent" && provider == "codex" && access == "read_only"));
+            request
+                .reply
+                .send(Ok(serde_json::json!({"thread_id": "peer"})))
+                .await
+                .unwrap();
+        });
+        let result = OrchestrateTools::new(broker, "parent".into())
+            .collaborate(Parameters(CollaborateParams {
+                provider: "codex".into(),
+                model: None,
+                effort: None,
+                profile: None,
+                title: "Design discussion".into(),
+                brief: "Compare the alternatives".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        resolver.await.unwrap();
+    }
+
+    #[test]
+    fn collaboration_schema_and_parameters_only_allow_medium_and_high() {
+        let schema = serde_json::to_value(schemars::schema_for!(CollaborationEffort)).unwrap();
+        assert_eq!(schema["enum"], serde_json::json!(["medium", "high"]));
+        for effort in ["medium", "high"] {
+            let params: CollaborateParams = serde_json::from_value(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).unwrap();
+            assert_eq!(params.effort.unwrap().as_str(), effort);
+        }
+        for effort in ["low", "xhigh", "max", "ultra"] {
+            assert!(serde_json::from_value::<CollaborateParams>(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).is_err());
+        }
+    }
+
     #[test]
     fn all_tools_are_registered() {
         let (tx, _rx) = async_channel::unbounded();
@@ -368,7 +477,14 @@ mod tests {
         assert_eq!(
             names,
             [
-                "approve", "archive", "cancel", "dispatch", "result", "send", "status"
+                "approve",
+                "archive",
+                "cancel",
+                "collaborate",
+                "dispatch",
+                "result",
+                "send",
+                "status"
             ]
         );
     }
