@@ -630,3 +630,91 @@ fn clipping_an_overlay_shrinks_its_source_rect_proportionally() {
     assert_eq!(clipped.source_rect, [0.25, 0., 0.75, 1.]);
     assert_eq!(overlay.clipped(200., 0., 300., 40.), None);
 }
+
+/// Rendering an export and registering a project both moved a decision to the
+/// host, so their literal shapes are what an older or non-Rust client sees.
+#[test]
+fn thread_export_and_project_creation_use_their_documented_wire_shapes() {
+    let request = ClientMessage {
+        id: 7,
+        payload: ClientPayload::Query(Query::RenderThreadExport {
+            session_id: "session-1".into(),
+            format: ThreadExportFormat::Markdown,
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({
+            "id": 7,
+            "payload": {
+                "type": "query",
+                "content": {
+                    "type": "render_thread_export",
+                    "content": {"session_id": "session-1", "format": "markdown"},
+                },
+            },
+        })
+    );
+    assert_eq!(
+        decode_client_line(&encode_line(&request).unwrap()).unwrap(),
+        request
+    );
+
+    // Bytes travel base64, so the artifact survives a transport that is text.
+    let answer = HostMessage::QueryResult {
+        id: 7,
+        result: Ok(QueryResponse::ThreadExport {
+            bytes: b"# Title\n".to_vec(),
+            suggested_name: "Title.md".into(),
+            mime: "text/markdown".into(),
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&answer).unwrap(),
+        json!({
+            "type": "query_result",
+            "content": {
+                "id": 7,
+                "result": {"Ok": {
+                    "type": "thread_export",
+                    "content": {
+                        "bytes": "IyBUaXRsZQo=",
+                        "suggested_name": "Title.md",
+                        "mime": "text/markdown",
+                    },
+                }},
+            },
+        })
+    );
+    assert_eq!(
+        decode_host_line(&encode_line(&answer).unwrap()).unwrap(),
+        answer
+    );
+
+    // A root the host will not accept comes back as a typed protocol error, so
+    // the client can show the host's reason instead of guessing one.
+    let rejected = HostMessage::Ack {
+        id: 8,
+        result: Err(ProtocolError {
+            code: "invalid_project_root".into(),
+            message: r"C:\Users\dev\src is not an absolute path on this host".into(),
+        }),
+    };
+    assert_eq!(
+        serde_json::to_value(&rejected).unwrap(),
+        json!({
+            "type": "ack",
+            "content": {
+                "id": 8,
+                "result": {"Err": {
+                    "code": "invalid_project_root",
+                    "message": r"C:\Users\dev\src is not an absolute path on this host",
+                }},
+            },
+        })
+    );
+    assert_eq!(
+        decode_host_line(&encode_line(&rejected).unwrap()).unwrap(),
+        rejected
+    );
+}
