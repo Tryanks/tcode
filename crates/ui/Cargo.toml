@@ -5,34 +5,51 @@ edition = "2024"
 
 [features]
 default = ["remote", "command-ansi", "desktop"]
-# Hosting/pairing UI. Off for wasm targets, which cannot listen or advertise.
-remote = ["remote-client", "tcode-remote/server", "dep:qrcode", "dep:tcode-services"]
-# Pairing, saved hosts, and the reconnecting native WebSocket client.
-remote-client = ["dep:tcode-remote", "tcode-remote/client"]
+# Hosting this machine: listener, discovery beacon, minted pairing codes and
+# device revocation. Off for wasm targets, which cannot listen or advertise.
+# Client pairing (saved hosts, the pair form, certificate repair) is *not* here:
+# it is shared UI over `tcode_client` and compiles everywhere.
+remote-hosting = ["dep:tcode-remote", "tcode-remote/server", "tcode-remote/client", "dep:qrcode"]
+# Transitional alias for the pre-split feature name.
+remote = ["remote-hosting"]
 # Replay stored command output through a local terminal emulator, so its SGR
 # colours and carriage returns render as they did in the shell. Off for Android:
 # bionic has no `shm_open`, which rio-vt's kitty graphics path calls. The live
 # terminal drawer renders the host's replicated grid and is always built.
 command-ansi = ["dep:term"]
-# Native desktop integrations: embedded webview, voice, platform dialogs and
-# computer-use permissions/settings.
+# Aggregate of the narrow native capabilities the desktop binary ships. It gates
+# no product view: every surface below compiles without any of these.
 desktop = [
-    "dep:async-lock",
-    "dep:tcode-services",
-    "dep:tcode-voice",
-    "dep:preview-mcp",
-    "dep:computer-use-mcp",
+    "native-dialogs",
+    "native-preview",
+    "voice",
+    "local-permissions",
+    "pasteboard-image",
+]
+# GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
+# Guards only the Browse and Save-to-disk actions.
+native-dialogs = []
+# Embedded webview preview backend. Only macOS and Windows have one; the panel,
+# its URL field, open-externally and copy-URL are always compiled.
+native-preview = [
     "dep:gpui-wry",
     "dep:wry",
     "dep:raw-window-handle",
-    "dep:block2",
-    "dep:objc2",
-    "dep:objc2-app-kit",
+    "dep:preview-mcp",
+    "dep:async-lock",
     "dep:objc2-core-foundation",
-    "dep:objc2-foundation",
     "dep:objc2-image-io",
     "dep:objc2-web-kit",
+    "dep:block2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
 ]
+# macOS 26 dictation in the composer.
+voice = ["dep:tcode-voice"]
+# macOS TCC permission status, grant and relaunch for a *local* attachment.
+local-permissions = ["dep:computer-use-mcp"]
+# Reading an image off the macOS AppKit pasteboard.
+pasteboard-image = ["dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
 agent = { path = "../agent", default-features = false }
@@ -40,11 +57,7 @@ tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false, optional = true }
-tcode-services = { path = "../services", optional = true }
-tcode-voice = { path = "../voice", optional = true }
 term = { path = "../term", default-features = false, optional = true }
-preview-mcp = { path = "../preview-mcp", optional = true }
-computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 gpui = { package = "gpui-pre", version = "0.3.1" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" } # 0.6.0 on crates.io pulls an unused gpui-pre-platform that breaks iOS/Android; switch back once 0.6.1 ships
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }
@@ -52,7 +65,6 @@ gpui-component-macros = "0.6.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 base64 = "0.23"
 async-channel = "2"
-async-lock = { version = "3", optional = true }
 chrono = "0.4"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
@@ -73,19 +85,39 @@ web-time = "1"
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tcode-remote = { path = "../remote", default-features = false, optional = true }
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+# The preview backend exists only where a system webview can be embedded as a
+# child of the GPUI window, so its whole dependency set is target-scoped.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 gpui-wry = { version = "0.6.0", optional = true }
 wry = { version = "0.53.3", package = "lb-wry", optional = true }
 raw-window-handle = { version = "0.6", features = ["std"], optional = true }
+preview-mcp = { path = "../preview-mcp", optional = true }
+# Only the Windows WebContext needs it, but Cargo has no per-feature target
+# narrower than this.
+async-lock = { version = "3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tcode-voice = { path = "../voice", optional = true }
+computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 block2 = { version = "0.6.2", optional = true }
-objc2 = { version = "0.6.4", optional = true }
-objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"], optional = true }
-objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"], optional = true }
-objc2-foundation = { version = "0.3.2", features = ["NSError", "NSNotification", "NSOperation", "NSString", "block2"], optional = true }
-objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"], optional = true }
-objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKWebView"], optional = true }
+objc2-app-kit = { version = "0.3.2", features = ["NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"], optional = true }
+objc2-foundation = { version = "0.3.2", features = ["NSError", "NSString", "block2"], optional = true }
+
+# The macOS WKWebView snapshot backend.
+[target.'cfg(target_os = "macos")'.dependencies.objc2-core-foundation]
+version = "0.3.2"
+features = ["CFData", "CFString"]
+optional = true
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-image-io]
+version = "0.3.2"
+features = ["CGImageDestination"]
+optional = true
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-web-kit]
+version = "0.3.2"
+features = ["WKSnapshotConfiguration", "WKWebView"]
+optional = true
 
 [dev-dependencies]
 criterion = "0.8"
@@ -96,6 +128,12 @@ tcode-runtime = { path = "../runtime", features = ["test-support"] }
 # dump-create is only needed by examples/sanitize_syntaxes.rs and the syntax-set
 # regression test; the shipped binary keeps the lean dependency feature set.
 syntect = { version = "5.3.0", default-features = false, features = ["parsing", "regex-fancy", "dump-load", "dump-create"] }
+
+# Test fixtures build real session stores and a real native client host; neither
+# is reachable from the shipped library.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+tcode-remote = { path = "../remote" }
+tcode-services = { path = "../services" }
 
 [[bench]]
 name = "markdown_perf"

@@ -395,9 +395,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.remove_review_comment(&session_id, index, cx)
         }
         Command::CycleProjectSort => app.cycle_project_sort(cx),
-        Command::CreateProject { root } => {
-            response = CommandResponse::ProjectId(app.create_project(root, cx));
-        }
+        Command::CreateProject { root } => match app.create_project(root, cx) {
+            Ok(project_id) => response = CommandResponse::ProjectId(Some(project_id)),
+            Err(error) => return CommandOutcome::Immediate(Err(error)),
+        },
         Command::StartExternalImport {
             project_id,
             threads,
@@ -405,11 +406,6 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             Ok(started) => response = CommandResponse::ExternalImportStarted(started),
             Err(error) => return CommandOutcome::Immediate(Err(error)),
         },
-        Command::ExportThread {
-            session_id,
-            destination,
-            format,
-        } => app.export_thread(&session_id, destination, format, cx),
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
@@ -525,8 +521,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
 }
 
 fn dispatch_query(
-    app: &AppState,
-    cx: &HostCx,
+    app: &mut AppState,
+    cx: &mut HostCx,
     query: Query,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
@@ -601,9 +597,8 @@ fn dispatch_query(
                     .map_err(io_protocol_error)
             })
         }
-        Query::IsDirectory { path } => {
-            let task = cx.unblock(move || path.is_dir());
-            cx.spawn_background(async move { Ok(QueryResponse::IsDirectory(task.await)) })
+        Query::RenderThreadExport { session_id, format } => {
+            app.render_thread_export(&session_id, format, cx)
         }
         Query::SearchSessionContent { query, limit } => {
             let task = app.search_session_content(query, limit, cx);
@@ -644,6 +639,110 @@ mod tests {
             }
         }
         panic!("timed out waiting for host event");
+    }
+
+    /// Export rendering is host work and delivery is the client's, so the query
+    /// must hand back the complete artifact and leave nothing behind on the
+    /// host — including for a client whose filesystem the host cannot reach.
+    #[test]
+    fn rendering_a_thread_export_returns_the_whole_artifact_and_writes_nothing() {
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-export-query-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            data_root.join("workspace"),
+            Some("opus".into()),
+        );
+        meta.id = "export-session".into();
+        meta.title = "Export: fixture/thread".into();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &agent::AgentEvent::Warning {
+                    message: "recorded".into(),
+                },
+            )
+            .expect("append event");
+        store.upsert_meta(&meta).expect("write meta");
+        let event_log = store.read_event_log(&meta.id).expect("read event log");
+
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let before = tree_snapshot(&data_root);
+        let link = host.link();
+
+        let QueryResponse::ThreadExport {
+            bytes,
+            suggested_name,
+            mime,
+        } = smol::block_on(link.query(Query::RenderThreadExport {
+            session_id: meta.id.clone(),
+            format: tcode_protocol::ThreadExportFormat::Jsonl,
+        }))
+        .expect("render export over the pipe")
+        else {
+            panic!("unexpected export response");
+        };
+
+        // The JSONL artifact is a metadata header line followed by the session's
+        // own append-only log, byte for byte.
+        let split = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .expect("header line");
+        let header: serde_json::Value =
+            serde_json::from_slice(&bytes[..split]).expect("header is JSON");
+        assert_eq!(header["type"], "tcode_thread");
+        assert_eq!(header["version"], 1);
+        assert_eq!(header["meta"]["id"], "export-session");
+        assert_eq!(header["attachments"], "references_only");
+        assert_eq!(header["redaction"], "none");
+        assert_eq!(&bytes[split + 1..], event_log.as_slice());
+
+        // The name is safe on any client OS; the host's title had a separator in it.
+        assert_eq!(suggested_name, "Export- fixture-thread.jsonl");
+        assert_eq!(mime, "application/x-ndjson");
+
+        assert_eq!(
+            tree_snapshot(&data_root),
+            before,
+            "rendering an export must not write anything on the host"
+        );
+
+        let missing = smol::block_on(link.query(Query::RenderThreadExport {
+            session_id: "nope".into(),
+            format: tcode_protocol::ThreadExportFormat::Markdown,
+        }))
+        .expect_err("unknown session must be refused");
+        assert_eq!(missing.code, "unknown_session");
+
+        link.shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        std::fs::remove_dir_all(data_root).expect("remove test data");
+    }
+
+    /// Every path under `root`, sorted, with its length — enough to catch a
+    /// stray write without depending on file order.
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, u64)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                match entry.metadata() {
+                    Ok(metadata) if metadata.is_dir() => walk(&path, out),
+                    Ok(metadata) => out.push((path, metadata.len())),
+                    Err(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
     }
 
     #[test]
@@ -777,13 +876,14 @@ mod tests {
             CommandResponse::ExternalImportStarted(false)
         );
 
-        assert_eq!(
-            smol::block_on(link.query(Query::IsDirectory {
-                path: project_root.clone(),
-            }))
-            .expect("query directory over pipe"),
-            QueryResponse::IsDirectory(true)
-        );
+        // A path the client believes in but the host cannot resolve is refused
+        // by the host, not by whatever OS the client happens to run.
+        let rejected = link
+            .command_blocking(Command::CreateProject {
+                root: project_root.join("does-not-exist"),
+            })
+            .expect_err("missing project root must be refused");
+        assert_eq!(rejected.code, "invalid_project_root");
         assert_eq!(
             smol::block_on(link.query(Query::ListActiveWorkspace {
                 session_id: "missing".into()

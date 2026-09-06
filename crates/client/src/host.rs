@@ -133,6 +133,27 @@ pub trait ClientHost: 'static {
     fn certificate_changed(&self, _host_id: &str) -> bool {
         false
     }
+
+    /// Whether [`ClientHost::deliver_artifact`] can actually hand a produced
+    /// file to the user here (a browser download, a share sheet). Views ask
+    /// before offering the action, so a client without one shows Copy instead of
+    /// a button that silently does nothing.
+    fn supports_artifact_delivery(&self) -> bool {
+        false
+    }
+
+    /// Hand finished bytes to the platform's own delivery path. `Err` is a real
+    /// failure worth reporting; callers must check
+    /// [`ClientHost::supports_artifact_delivery`] first.
+    fn deliver_artifact(&self, _name: &str, _mime: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("this client cannot save files".into())
+    }
+
+    /// Open a path in the user's external editor. `None` means this client has
+    /// no editor integration; the path is always one this client can reach.
+    fn open_in_editor(&self, _path: &std::path::Path) -> Option<Result<(), String>> {
+        None
+    }
 }
 
 #[cfg(test)]

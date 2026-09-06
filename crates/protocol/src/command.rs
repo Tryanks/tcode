@@ -198,6 +198,10 @@ pub enum Command {
         index: usize,
     },
     CycleProjectSort,
+    /// Register a project rooted at `root`. The host validates the path against
+    /// its own filesystem — a client never decides whether a host path is
+    /// absolute or exists — and answers `invalid_project_root` when it is not an
+    /// absolute, existing directory there.
     CreateProject {
         root: PathBuf,
     },
@@ -209,11 +213,6 @@ pub enum Command {
     StartExternalImport {
         project_id: String,
         threads: Vec<ExternalThread>,
-    },
-    ExportThread {
-        session_id: String,
-        destination: PathBuf,
-        format: ThreadExportFormat,
     },
     ToggleProjectCollapsed {
         project_id: String,

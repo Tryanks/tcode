@@ -411,7 +411,6 @@ pub enum RuntimeError {
     ProviderClosed { reason: Option<String> },
     PersistSessionIndex { error: String },
     ProviderMessage(String),
-    ExportThread { error: String },
 }
 
 #[non_exhaustive]
@@ -440,9 +439,6 @@ pub enum RuntimeNotice {
     },
     SwitchedBranch {
         branch: String,
-    },
-    ThreadExported {
-        file: String,
     },
     WorktreeSeeded {
         copied_files: usize,
@@ -474,7 +470,6 @@ impl RuntimeNotice {
             | Self::NativeRewindCompleted { .. }
             | Self::PlanSaved { .. }
             | Self::SwitchedBranch { .. }
-            | Self::ThreadExported { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward
             | Self::WorktreeMergedCommit => NoticeSeverity::Success,

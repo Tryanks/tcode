@@ -94,9 +94,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::PersistSessionIndex { error } => {
                     crate::tr!("errors.persist_session_index", error = error).into_owned()
                 }
-                RuntimeError::ExportThread { error } => {
-                    crate::tr!("errors.export_thread", error = error).into_owned()
-                }
                 _ => format!("Unknown runtime error: {error:?}"),
             };
             (RuntimeEventSeverity::Error, message)
@@ -140,9 +137,6 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 }
                 RuntimeNotice::SwitchedBranch { branch } => {
                     crate::tr!("notice.switched_branch", branch = branch).into_owned()
-                }
-                RuntimeNotice::ThreadExported { file } => {
-                    crate::tr!("notice.thread_exported", file = file).into_owned()
                 }
                 RuntimeNotice::WorktreeSeeded {
                     copied_files,

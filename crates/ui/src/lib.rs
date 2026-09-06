@@ -1,12 +1,5 @@
-#[cfg(feature = "desktop")]
 mod acp_panel;
-#[cfg(feature = "desktop")]
 mod add_project_dialog;
-#[cfg(not(feature = "desktop"))]
-#[path = "add_project_dialog_portable.rs"]
-mod add_project_dialog;
-#[cfg(feature = "desktop")]
-mod app_activation;
 pub mod assets;
 mod attachments;
 pub mod chat;
@@ -22,38 +15,31 @@ pub(crate) mod git;
 mod highlight;
 pub mod i18n;
 pub mod icon;
+/// macOS TCC permission status and grant flow. Compiled only where the platform
+/// actually has one; every other build shows the host/unsupported note instead.
+#[cfg(all(feature = "local-permissions", target_os = "macos"))]
+mod local_permissions;
 pub mod markdown;
 // Shared material helpers are also used by the phone shell.
 pub mod material;
-#[cfg(feature = "desktop")]
 mod orchestrate_settings;
 pub mod overlay;
+/// The shared pairing form: endpoint-bound fingerprints, stale-result
+/// generations and fixed-origin behavior, reused by every client shell.
+pub mod pairing;
 pub mod palette;
 mod pasteboard;
 mod plan_panel;
-#[cfg(feature = "desktop")]
-mod preview_panel;
-#[cfg(not(feature = "desktop"))]
-#[path = "preview_panel_portable.rs"]
 mod preview_panel;
 pub(crate) mod provider_card;
-#[cfg(feature = "desktop")]
 mod provider_dialog;
-#[cfg(feature = "desktop")]
 mod provider_model_picker;
-#[cfg(feature = "desktop")]
 pub(crate) mod provider_models;
-#[cfg(feature = "desktop")]
 pub(crate) mod provider_status;
-#[cfg(feature = "remote")]
 pub mod remote;
 pub(crate) mod runtime_event;
 mod scroll;
 pub mod settings;
-#[cfg(feature = "desktop")]
-mod settings_page;
-#[cfg(not(feature = "desktop"))]
-#[path = "settings_page_portable.rs"]
 mod settings_page;
 mod shell;
 mod shortcut;
@@ -62,10 +48,6 @@ pub mod sizing;
 pub mod store;
 mod terminal_drawer;
 pub mod theme;
-#[cfg(feature = "desktop")]
-mod thread_export;
-#[cfg(not(feature = "desktop"))]
-#[path = "thread_export_portable.rs"]
 mod thread_export;
 pub mod time;
 pub(crate) mod toast;
@@ -82,3 +64,17 @@ pub use i18n::{
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, TogglePalette};
 pub use window_state::{OpenThread, WindowState};
+
+/// Where this client may keep its own files (the WebView2 profile is the only
+/// current user). Bootstrap owns the location; the UI never resolves it, so a
+/// remote attachment cannot be tricked into reading the host's data directory.
+static CLIENT_DATA_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_client_data_dir(dir: std::path::PathBuf) {
+    let _ = CLIENT_DATA_DIR.set(dir);
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn client_data_dir() -> Option<&'static std::path::Path> {
+    CLIENT_DATA_DIR.get().map(std::path::PathBuf::as_path)
+}

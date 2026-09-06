@@ -22,7 +22,8 @@ use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Entity, Window};
 use gpui_wry::WebView;
-use preview_mcp::{PreviewReply, js};
+use preview_mcp::js;
+use tcode_protocol::PreviewResponse;
 
 use super::{ReplyTx, unavailable_message};
 
@@ -366,7 +367,7 @@ impl BrowserLifecycle {
             let reply = reply.clone();
             move |raw: String| {
                 let value = js::parse_result(&raw);
-                let _ = reply.try_send(Ok(PreviewReply::Json(value)));
+                let _ = reply.try_send(Ok(PreviewResponse::Json(value)));
             }
         });
         if result.is_err() {
@@ -563,9 +564,12 @@ mod platform {
 
     impl Adapter {
         pub(super) fn new() -> Result<Self, String> {
-            let store = tcode_services::store::SessionStore::open_default()
-                .map_err(|error| format!("failed to resolve tcode data directory: {error}"))?;
-            let user_data_dir = store.root().join("WebView2");
+            // WebView2's profile belongs to *this client*, not to whichever host
+            // it is attached to, so the location comes from bootstrap rather
+            // than from opening the session store the host owns.
+            let user_data_dir = crate::client_data_dir()
+                .ok_or_else(|| "client data directory was not set at startup".to_string())?
+                .join("WebView2");
             std::fs::create_dir_all(&user_data_dir).map_err(|error| {
                 format!(
                     "failed to create WebView2 user-data directory {}: {error}",

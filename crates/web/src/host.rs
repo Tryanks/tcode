@@ -80,6 +80,35 @@ impl ClientHost for WebHost {
     fn connect(&self, host: &PairedHost) -> Transport {
         crate::transport::connect(host.token.clone(), self.device_name())
     }
+
+    fn supports_artifact_delivery(&self) -> bool {
+        true
+    }
+
+    fn deliver_artifact(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
+        download(name, mime, bytes)
+            .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
+    }
+}
+
+/// A browser has no filesystem: the only way to give the user a file is a Blob
+/// behind a synthetic download link, revoked as soon as the click is dispatched.
+fn download(name: &str, mime: &str, bytes: &[u8]) -> Result<(), JsValue> {
+    let parts = js_sys::Array::new();
+    parts.push(&js_sys::Uint8Array::from(bytes).into());
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type(mime);
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options)?;
+    let url = web_sys::Url::create_object_url_with_blob(&blob)?;
+    let document = window()
+        .document()
+        .ok_or_else(|| JsValue::from_str("no document"))?;
+    let anchor: web_sys::HtmlAnchorElement = document.create_element("a")?.dyn_into()?;
+    anchor.set_href(&url);
+    anchor.set_download(name);
+    anchor.click();
+    web_sys::Url::revoke_object_url(&url)?;
+    Ok(())
 }
 
 async fn pair(code: &str, device_name: &str) -> Result<PairedHost, String> {

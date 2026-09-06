@@ -22,8 +22,8 @@ pub use event::{
     Topic,
 };
 pub use query::{
-    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,
-    RecentDir, SessionSearchHit, SourceTool,
+    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, MAX_THREAD_EXPORT_BYTES, PathEntry,
+    Query, QueryResponse, RecentDir, SessionSearchHit, SourceTool,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{

@@ -308,22 +308,16 @@ impl Element for MarkdownView {
     }
 }
 
-#[cfg(feature = "desktop")]
+/// Launching an editor is the client's own process work, so it is injected
+/// through the client host rather than linked here. A client without one (a
+/// phone, a browser) reports that plainly.
 fn open_in_zed(path: &Path, window: &mut Window, cx: &mut App) {
-    if tcode_services::desktop::open_in_zed(path).is_err() {
+    if !matches!(crate::remote::open_in_editor(path, cx), Some(Ok(()))) {
         window.push_notification(
             Notification::error(crate::tr!("errors.zed_cli_missing")),
             cx,
         );
     }
-}
-
-#[cfg(not(feature = "desktop"))]
-fn open_in_zed(_path: &Path, window: &mut Window, cx: &mut App) {
-    window.push_notification(
-        Notification::error(crate::tr!("errors.zed_cli_missing")),
-        cx,
-    );
 }
 
 #[cfg(test)]

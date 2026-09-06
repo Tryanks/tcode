@@ -14,7 +14,7 @@ use tcode_protocol::{Command, CommandResponse};
 use tcode_remote::{HostMux, NativeClientHost};
 use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
-use tcode_ui::remote::{AttachmentTarget, RemoteController, machine_name};
+use tcode_ui::remote::{AttachmentTarget, ClientAttachment, RemoteController, machine_name};
 use tcode_ui::{
     Quit, TogglePalette, WindowState,
     theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode},
@@ -325,7 +325,16 @@ fn main() {
     // when the window starts on, or later switches to, a remote host.
     let store = SessionStore::open_default().expect("failed to open tcode data directory");
     let data_dir = store.root().clone();
-    let native_client = Rc::new(NativeClientHost::new(data_dir.clone(), machine_name()));
+    // The UI never resolves a data directory of its own: whatever client-owned
+    // files it needs (the WebView2 profile) live under this one.
+    tcode_ui::set_client_data_dir(data_dir.clone());
+    // Launching an editor is process work this crate already owns the helpers
+    // for, so it is injected rather than linked into the UI.
+    let native_client = Rc::new(
+        NativeClientHost::new(data_dir.clone(), machine_name()).with_editor_opener(|path| {
+            tcode_services::desktop::open_in_zed(path).map_err(|error| error.to_string())
+        }),
+    );
 
     if let Some(index) = args.iter().position(|arg| arg == "--pair") {
         match pair_command(&args[index + 1..], &native_client) {
@@ -408,19 +417,22 @@ fn main() {
                 state.sidebar_collapsed = initial_settings.sidebar_collapsed;
             });
 
-            // Hosting belongs to the process-owned local kernel. The controller
-            // uses the shared ClientHost adapter for pairing and saved hosts;
-            // it carries no current-attachment mode.
+            // Who this client is, and how it re-points at another host. Shared
+            // by every client surface, including ones that can never host.
             let switch_session = desktop_session.clone();
-            cx.set_global(RemoteController::new(
-                kernel.mux.clone(),
-                data_dir.clone(),
+            cx.set_global(ClientAttachment::new(
                 native_client.clone(),
-                kernel.control_link.clone(),
-                local_settings.clone(),
                 move |target, window, cx| {
                     switch_session.borrow_mut().switch_to(target, window, cx);
                 },
+            ));
+            // Hosting belongs to the process-owned local kernel; it carries no
+            // current-attachment mode.
+            cx.set_global(RemoteController::new(
+                kernel.mux.clone(),
+                data_dir.clone(),
+                kernel.control_link.clone(),
+                local_settings.clone(),
             ));
             if local_settings.remote_hosting_enabled {
                 let port = local_settings

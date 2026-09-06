@@ -1784,22 +1784,22 @@ impl ChatView {
                                             .update(cx, |store, cx| store.toggle_plan_panel(cx));
                                     })),
                             )
-                            .when(cfg!(feature = "desktop"), |this| {
-                                this.child(
-                                    Button::new("preview-panel")
-                                        .ghost()
-                                        .small()
-                                        .compact()
-                                        .icon(IconName::Globe)
-                                        .selected(preview_showing)
-                                        .tooltip(crate::tr!("chat.toggle_preview"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.workspace_store.update(cx, |store, cx| {
-                                                store.toggle_preview_panel(cx)
-                                            });
-                                        })),
-                                )
-                            })
+                            // The Preview tab is a product view now: it always
+                            // offers open-externally and copy-URL, and says so
+                            // where there is no embedded browser to drive.
+                            .child(
+                                Button::new("preview-panel")
+                                    .ghost()
+                                    .small()
+                                    .compact()
+                                    .icon(IconName::Globe)
+                                    .selected(preview_showing)
+                                    .tooltip(crate::tr!("chat.toggle_preview"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace_store
+                                            .update(cx, |store, cx| store.toggle_preview_panel(cx));
+                                    })),
+                            )
                             .child(
                                 Button::new("diff-panel")
                                     .ghost()
@@ -2617,22 +2617,16 @@ fn render_commit_footer(
         .into_any_element()
 }
 
-#[cfg(feature = "desktop")]
+/// Launching an editor is the client's own process work, so it is injected
+/// through the client host rather than linked here. A client without one (a
+/// phone, a browser) reports that plainly.
 fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
-    if tcode_services::desktop::open_in_zed(cwd).is_err() {
+    if !matches!(crate::remote::open_in_editor(cwd, cx), Some(Ok(()))) {
         window.push_notification(
             Notification::error(crate::tr!("errors.zed_cli_missing")),
             cx,
         );
     }
-}
-
-#[cfg(not(feature = "desktop"))]
-fn open_in_zed(_cwd: &Path, window: &mut Window, cx: &mut App) {
-    window.push_notification(
-        Notification::error(crate::tr!("errors.zed_cli_missing")),
-        cx,
-    );
 }
 
 #[cfg(test)]

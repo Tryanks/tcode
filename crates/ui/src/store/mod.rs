@@ -118,7 +118,9 @@ pub struct WorkspaceStore {
     attachment_tasks: Vec<Task<()>>,
     /// Replicated terminal grids, keyed by the host's terminal id.
     terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
-    #[cfg(feature = "desktop")]
+    /// Preview requests routed to this client. Every client owns the channel:
+    /// one without a backend still has to answer `unsupported` rather than
+    /// leave the agent's call hanging.
     remote_preview: (
         async_channel::Sender<EventEnvelope>,
         async_channel::Receiver<EventEnvelope>,
@@ -131,6 +133,10 @@ pub struct WorkspaceStore {
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
+    /// Whether `settings_replica` is the host's settings or still the local
+    /// defaults it was constructed with. Views that copy a setting into an
+    /// editable input must not treat the defaults as the host's answer.
+    settings_hydrated: bool,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
     session_statuses: HashMap<String, SessionStatus>,
@@ -171,6 +177,16 @@ pub struct FallbackReview {
     pub assessment: String,
     /// Empty when the reviewer did not judge the flag a false positive.
     pub draft: String,
+}
+
+/// A rendered thread export as it arrives from the host: complete bytes, a file
+/// name that is legal on any client OS, and the type to hand a download or
+/// share sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadExportArtifact {
+    pub bytes: Vec<u8>,
+    pub suggested_name: String,
+    pub mime: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,15 +238,25 @@ impl WorkspaceStore {
         }
     }
 
+    /// An attached, blocking-seeded local store. Callers that must not block —
+    /// a phone or browser on a single-threaded executor — go through
+    /// [`WorkspaceStore::new_attached`] directly.
     pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
-        Self::new_attached(host, WorkspaceAttachment::Local, None, cx)
+        Self::new_attached(host, WorkspaceAttachment::Local, None, true, cx)
     }
 
     /// Construct the complete projection for exactly one client link.
+    ///
+    /// `seed_blocking` makes construction wait for the first Index/Settings/
+    /// Providers snapshots. Only the desktop composition root asks for it: it
+    /// applies the locale and theme from `settings()` the instant the store
+    /// exists. Every other client renders immediately and re-renders when the
+    /// snapshots land, which is the only option on a single-threaded executor.
     pub fn new_attached(
         host: HostLink,
         attachment: WorkspaceAttachment,
         client_host: Option<Rc<dyn ClientHost>>,
+        seed_blocking: bool,
         cx: &mut Context<Self>,
     ) -> Self {
         static NEXT_IMAGE_NAMESPACE: std::sync::atomic::AtomicU64 =
@@ -258,7 +284,6 @@ impl WorkspaceStore {
             image_namespace,
             attachment_tasks: Vec::new(),
             terminals: HashMap::new(),
-            #[cfg(feature = "desktop")]
             remote_preview: async_channel::unbounded(),
             remote_address,
             import_statuses: HashMap::new(),
@@ -269,6 +294,7 @@ impl WorkspaceStore {
             },
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
+            settings_hydrated: false,
             selected_session_id: None,
             session_records: HashMap::new(),
             session_statuses: HashMap::new(),
@@ -303,13 +329,8 @@ impl WorkspaceStore {
             after: None,
         });
         let events = host.events();
-        // A desktop build constructs its in-process or remote host before the
-        // first window and reads settings immediately afterwards, so it blocks
-        // for that seed. Portable clients return immediately and let the task
-        // below apply snapshots as they arrive, which is essential on a
-        // single-threaded wasm executor.
-        #[cfg(feature = "desktop")]
-        {
+        #[cfg(not(target_family = "wasm"))]
+        if seed_blocking {
             let mut seeded = HashSet::new();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
@@ -343,6 +364,8 @@ impl WorkspaceStore {
                 );
             }
         }
+        #[cfg(target_family = "wasm")]
+        let _ = seed_blocking;
 
         #[cfg(not(test))]
         {
@@ -414,9 +437,6 @@ impl WorkspaceStore {
         }));
     }
 
-    /// Whether the host lives in another process. Computer use settings and
-    /// native host-directory pickers remain local-only.
-    #[cfg(feature = "desktop")]
     pub(crate) fn preview_reply(
         &mut self,
         request_id: u64,
@@ -438,12 +458,12 @@ impl WorkspaceStore {
         }
     }
 
-    #[cfg(feature = "desktop")]
     pub(crate) fn remote_preview_requests(&self) -> async_channel::Receiver<EventEnvelope> {
         self.remote_preview.1.clone()
     }
 
-    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
+    /// Rewrite a host-local preview URL so it reaches the host from here. Pure
+    /// string work over the attachment address; no client filesystem or network.
     pub(crate) fn rewrite_preview_url(&self, url: &str) -> String {
         self.remote_address.as_deref().map_or_else(
             || url.to_string(),
@@ -480,11 +500,8 @@ impl WorkspaceStore {
             let _ = self.host.unsubscribe(subscription);
         }
         self.host.close();
-        #[cfg(feature = "desktop")]
-        {
-            self.remote_preview.0.close();
-            self.remote_preview.1.close();
-        }
+        self.remote_preview.0.close();
+        self.remote_preview.1.close();
         if let Some(images) = cx.try_global::<images::HostImages>()
             && images.namespace == self.image_namespace
         {
@@ -529,7 +546,6 @@ impl WorkspaceStore {
             return;
         }
         match (&envelope.topic, &envelope.event) {
-            #[cfg(feature = "desktop")]
             (
                 Topic::Preview { session_id },
                 ServerEvent::PreviewRequest {
@@ -625,6 +641,7 @@ impl WorkspaceStore {
             (Topic::Settings, ServerEvent::SettingsReplaced(settings))
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
                 self.settings_replica = settings.clone();
+                self.settings_hydrated = true;
             }
             (Topic::Providers, ServerEvent::ProvidersReplaced(status)) => {
                 self.providers_replica = status.clone();
@@ -830,7 +847,7 @@ impl WorkspaceStore {
     }
 
     #[cfg(test)]
-    fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
         let events = self.host.events();
         while let Ok(envelope) = events.try_recv() {
             if let ServerEvent::Runtime(event) = &envelope.event {
@@ -1103,6 +1120,32 @@ impl WorkspaceStore {
 
     pub fn settings(&self) -> Settings {
         effective_client_settings(&self.settings_replica, &self.client_preferences)
+    }
+
+    /// Whether [`WorkspaceStore::settings`] reflects the host yet.
+    pub fn settings_hydrated(&self) -> bool {
+        self.settings_hydrated
+    }
+
+    /// Whether this client can hand a produced file to the platform (a browser
+    /// download, a share sheet).
+    pub fn supports_artifact_delivery(&self) -> bool {
+        self.client_host
+            .as_ref()
+            .is_some_and(|host| host.supports_artifact_delivery())
+    }
+
+    pub fn deliver_artifact(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
+        match &self.client_host {
+            Some(host) => host.deliver_artifact(name, mime, bytes),
+            None => Err("this client cannot save files".into()),
+        }
+    }
+
+    /// Open a *client-local* path in the user's editor. `None` when this client
+    /// has no editor integration at all.
+    pub fn open_in_editor(&self, path: &std::path::Path) -> Option<Result<(), String>> {
+        self.client_host.as_ref()?.open_in_editor(path)
     }
 
     pub fn client_theme_override(&self) -> Option<ThemeMode> {
@@ -1380,8 +1423,6 @@ impl WorkspaceStore {
         })
     }
 
-    /// Only the native preview panel prunes by liveness; Linux compiles it out.
-    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
         let mut keys = self
             .index_replica
@@ -1569,19 +1610,16 @@ impl WorkspaceStore {
             .map(|project| project.root.clone())
     }
 
-    pub fn scan_external_history(&self, cx: &mut App) -> Task<Vec<RecentDir>> {
+    /// Scan the *host's* external-agent histories. A failure is returned rather
+    /// than logged away: an empty list and a broken host look identical to the
+    /// user otherwise.
+    pub fn scan_external_history(&self, cx: &mut App) -> Task<Result<Vec<RecentDir>, String>> {
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ScanExternalHistory).await {
-                Ok(QueryResponse::ExternalHistory(recent)) => recent,
-                Ok(other) => {
-                    log::error!("unexpected external-history response: {other:?}");
-                    Vec::new()
-                }
-                Err(error) => {
-                    log::error!("external-history query failed: {}", error.message);
-                    Vec::new()
-                }
+                Ok(QueryResponse::ExternalHistory(recent)) => Ok(recent),
+                Ok(other) => Err(format!("unexpected external-history response: {other:?}")),
+                Err(error) => Err(error.message),
             },
         )
     }
@@ -1815,6 +1853,36 @@ impl WorkspaceStore {
         })
     }
 
+    /// Ask the host to render a stored thread into transferable bytes. Nothing
+    /// is written anywhere: the host owns rendering and its store-flush barrier,
+    /// this client owns where the artifact goes.
+    pub fn render_thread_export(
+        &self,
+        session_id: String,
+        format: tcode_protocol::ThreadExportFormat,
+        cx: &mut App,
+    ) -> Task<Result<ThreadExportArtifact, String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::RenderThreadExport { session_id, format })
+                .await
+            {
+                Ok(QueryResponse::ThreadExport {
+                    bytes,
+                    suggested_name,
+                    mime,
+                }) => Ok(ThreadExportArtifact {
+                    bytes,
+                    suggested_name,
+                    mime,
+                }),
+                Ok(other) => Err(format!("unexpected thread-export response: {other:?}")),
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+
     pub fn read_file_bytes(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
         let host = self.host.clone();
         cx.spawn(
@@ -1824,23 +1892,6 @@ impl WorkspaceStore {
                     "unexpected file-bytes response: {other:?}"
                 ))),
                 Err(error) => Err(protocol_io_error(error.message)),
-            },
-        )
-    }
-
-    pub fn is_directory(&self, path: PathBuf, cx: &mut App) -> Task<bool> {
-        let host = self.host.clone();
-        cx.spawn(
-            async move |_| match host.query(Query::IsDirectory { path }).await {
-                Ok(QueryResponse::IsDirectory(is_directory)) => is_directory,
-                Ok(other) => {
-                    log::error!("unexpected is-directory response: {other:?}");
-                    false
-                }
-                Err(error) => {
-                    log::error!("is-directory query failed: {}", error.message);
-                    false
-                }
             },
         )
     }
@@ -2150,7 +2201,6 @@ mod tests {
 
     use super::{WorkspaceStore, effective_client_settings};
 
-    #[cfg(feature = "remote-client")]
     #[test]
     fn client_preferences_persist_and_override_host_settings_only_when_set() {
         use tcode_client::host::{ClientHost as _, ClientPreferences};
@@ -2504,12 +2554,11 @@ mod tests {
             assert!(store.archived_groups().is_empty());
         });
 
-        command(
-            &host,
-            Command::CreateProject {
-                root: root.join("created"),
-            },
-        );
+        // The host validates a project root against its own filesystem, so this
+        // directory has to exist before it will accept it.
+        let created_root = root.join("created");
+        std::fs::create_dir_all(&created_root).unwrap();
+        command(&host, Command::CreateProject { root: created_root });
         command(
             &host,
             Command::ArchiveSession {

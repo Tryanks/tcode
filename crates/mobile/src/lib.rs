@@ -154,7 +154,7 @@ impl MobileRoot {
         tcode_ui::apply_locale(preferences.language.as_deref());
         let device_name =
             cx.new(|cx| InputState::new(window, cx).default_value(host.device_name()));
-        let pair = pairing::PairForm::new(&host, window, cx);
+        let pair = pairing::PairForm::new(host.fixed_pairing_endpoint(), window, cx);
         let subscriptions = vec![
             cx.subscribe(&device_name, |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -281,7 +281,16 @@ impl MobileRoot {
         let pump = link.clone();
         let pump = cx.spawn(async move |_, _| pump.pump().await);
         let store = cx.new(|cx| {
-            let mut store = WorkspaceStore::new(link.clone(), cx);
+            // Never block for the first snapshots here: the phone and the
+            // browser run this on a single-threaded executor, where waiting for
+            // the host would stall the very task that delivers them.
+            let mut store = WorkspaceStore::new_attached(
+                link.clone(),
+                tcode_ui::store::WorkspaceAttachment::Local,
+                None,
+                false,
+                cx,
+            );
             store.attach_remote(host.name.clone(), cx);
             store
         });

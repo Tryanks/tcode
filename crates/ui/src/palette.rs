@@ -78,7 +78,6 @@ enum Action {
     },
     ExportThread {
         session_id: String,
-        title: String,
         cwd: std::path::PathBuf,
         format: ThreadExportFormat,
     },
@@ -321,7 +320,6 @@ impl CommandPalette {
                     IconName::Inbox,
                     Action::ExportThread {
                         session_id: meta.id.clone(),
-                        title: meta.title.clone(),
                         cwd: meta.cwd.clone(),
                         format,
                     },
@@ -463,7 +461,6 @@ impl CommandPalette {
             }
             Action::ExportThread {
                 session_id,
-                title,
                 cwd,
                 format,
             } => {
@@ -471,7 +468,6 @@ impl CommandPalette {
                 crate::thread_export::prompt_thread_export(
                     self.store.clone(),
                     session_id,
-                    title,
                     cwd,
                     format,
                     window,

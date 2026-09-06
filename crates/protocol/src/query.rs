@@ -33,8 +33,12 @@ pub enum Query {
     RemoveUserFile {
         path: PathBuf,
     },
-    IsDirectory {
-        path: PathBuf,
+    /// Render a stored thread into a transferable artifact. Rendering belongs to
+    /// the host (it owns the event log); where the bytes land belongs to the
+    /// client, so nothing is written here.
+    RenderThreadExport {
+        session_id: String,
+        format: crate::ThreadExportFormat,
     },
     /// Full-text search over the host's own stored session logs. The host owns
     /// the index, the cache and the session order; clients supply no paths.
@@ -43,6 +47,12 @@ pub enum Query {
         limit: u32,
     },
 }
+
+/// Largest export the host will put on one response frame. The transport writes
+/// a single WebSocket text frame per NDJSON line and peers read with
+/// tungstenite's 16 MiB frame cap, so the base64 payload (4/3 of the raw bytes)
+/// plus its envelope must stay well inside that.
+pub const MAX_THREAD_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Typed response paired with a [`Query`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +65,14 @@ pub enum QueryResponse {
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
-    IsDirectory(bool),
+    /// A rendered thread export. `suggested_name` is already safe for a file
+    /// name on any client OS; the client picks the destination.
+    ThreadExport {
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+        suggested_name: String,
+        mime: String,
+    },
     SessionContentHits(Vec<SessionSearchHit>),
 }
 

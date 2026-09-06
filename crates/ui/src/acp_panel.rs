@@ -427,7 +427,7 @@ impl AcpPanel {
             .into_any_element()
     }
 
-    fn render_marketplace(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_marketplace(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let market: Vec<AcpMarketplaceItem> = self
             .store
@@ -479,7 +479,10 @@ impl AcpPanel {
             .child(
                 div()
                     .w_full()
-                    .h(px(360.))
+                    .h(crate::sizing::fit_viewport(
+                        360.,
+                        window.viewport_size().height,
+                    ))
                     .overflow_y_scrollbar()
                     .rounded(material::radius_card())
                     .bg(cx.theme().muted)
@@ -816,13 +819,13 @@ impl AcpPanel {
 }
 
 impl Render for AcpPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().w_full().child(match self.view {
             PanelView::Home => v_flex()
                 .w_full()
                 .gap_3()
                 .child(self.render_provider_entries(cx))
-                .child(self.render_marketplace(cx))
+                .child(self.render_marketplace(window, cx))
                 .into_any_element(),
             PanelView::ThirdParty => self.render_third_party(cx),
             PanelView::CustomAcp => self.render_custom(cx),

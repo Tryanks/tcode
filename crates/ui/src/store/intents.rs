@@ -225,7 +225,6 @@ impl WorkspaceStore {
                 tcode_protocol::Topic::SessionStatus {
                     session_id: session_id.clone(),
                 },
-                #[cfg(feature = "desktop")]
                 tcode_protocol::Topic::Preview {
                     session_id: session_id.clone(),
                 },
@@ -267,12 +266,20 @@ impl WorkspaceStore {
             tcode_protocol::Topic::GitStatus {
                 session_id: session_id.clone(),
             },
-            #[cfg(feature = "desktop")]
             tcode_protocol::Topic::Preview {
                 session_id: session_id.clone(),
             },
             tcode_protocol::Topic::SessionEvents { session_id },
         ] {
+            // A client with no preview backend must not become a competing
+            // owner of the session's preview: it would win requests it can only
+            // refuse. It still answers `unsupported` for anything that reaches
+            // it through an already-open subscription.
+            if matches!(topic, tcode_protocol::Topic::Preview { .. })
+                && !crate::preview_panel::PREVIEW_BACKEND
+            {
+                continue;
+            }
             let _ = self.host.subscribe(tcode_protocol::Subscription {
                 after: if matches!(topic, tcode_protocol::Topic::SessionEvents { .. }) {
                     after
@@ -428,18 +435,6 @@ impl WorkspaceStore {
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
         self.command(Command::CreateProject { root }, cx)
-    }
-    pub fn export_thread(
-        &mut self,
-        session_id: String,
-        destination: PathBuf,
-        format: tcode_protocol::ThreadExportFormat,
-    ) {
-        self.dispatch(Command::ExportThread {
-            session_id,
-            destination,
-            format,
-        });
     }
     pub fn toggle_project_collapsed(&mut self, project_id: String) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });

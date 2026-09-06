@@ -875,13 +875,16 @@ impl ProviderDialog {
 }
 
 impl Render for ProviderDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The dialog's content_builder path has no built-in scroll, so cap and
-        // scroll the form body ourselves.
+        // scroll the form body ourselves — against the window, not a constant.
         div()
             .id("provider-dialog-body")
             .w_full()
-            .max_h(px(520.))
+            .max_h(crate::sizing::fit_viewport(
+                520.,
+                window.viewport_size().height,
+            ))
             .overflow_y_scroll()
             .child(
                 v_flex()

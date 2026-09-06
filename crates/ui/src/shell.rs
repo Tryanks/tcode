@@ -19,7 +19,10 @@ use crate::chat::ChatView;
 use crate::diff::DiffPanel;
 use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
-#[cfg(all(feature = "desktop", not(target_os = "linux")))]
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows")
+))]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::runtime_event::{
     RuntimeEventSeverity, RuntimeToastDisposition, apply_runtime_effect, present_runtime_event,
@@ -44,6 +47,15 @@ impl Render for WindowDragState {
     }
 }
 
+/// Whether this client's window can be dragged by its content at all. A phone
+/// or browser surface has no movable window, so the handlers below are not just
+/// useless there — they would arm on presses that belong to the content.
+pub(crate) const WINDOW_DRAGGABLE: bool = cfg!(not(any(
+    target_os = "ios",
+    target_os = "android",
+    target_family = "wasm"
+)));
+
 /// Make `el` a window-drag handle (the window has no separate titlebar, so the
 /// column top rows are the drag surface). Mirrors gpui-component's `TitleBar`
 /// mechanics: a press arms a move, the first drag calls `start_window_move`.
@@ -54,6 +66,9 @@ pub(crate) fn window_drag_area(
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
+    if !WINDOW_DRAGGABLE {
+        return el;
+    }
     let state = window.use_keyed_state(id, cx, |_, _| WindowDragState { should_move: false });
     el.on_mouse_down_out(window.listener_for(&state, |state, _, _, _| {
         state.should_move = false;
@@ -190,11 +205,10 @@ impl AppShell {
         });
         let preview = cx
             .new(|cx| PreviewPanel::new(workspace_store.clone(), window_state.clone(), window, cx));
-        let attachment_tasks = Vec::new();
-
-        #[cfg(feature = "desktop")]
+        // Every client pumps preview requests: one without a backend still has
+        // to answer `unsupported` for anything that reaches it.
         let attachment_tasks = {
-            let mut attachment_tasks = attachment_tasks;
+            let mut attachment_tasks: Vec<Task<()>> = Vec::new();
             let requests = workspace_store.read(cx).remote_preview_requests();
             let preview = preview.clone();
             let store = workspace_store.downgrade();
@@ -264,7 +278,10 @@ impl AppShell {
         }
     }
 
-    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows")
+    ))]
     #[allow(private_interfaces)]
     #[doc(hidden)]
     pub fn preview_lifecycle(&self, cx: &App) -> Entity<BrowserLifecycle> {

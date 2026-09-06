@@ -12,7 +12,7 @@ name = "tcode_mobile"
 # WebSocket client and hosts.json under the platform data dir. The browser
 # build turns this off and supplies its own `MobileHost`.
 default = ["native"]
-native = ["dep:tcode-remote", "tcode-ui/remote-client"]
+native = ["dep:tcode-remote"]
 
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }

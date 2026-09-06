@@ -114,17 +114,37 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
-    /// Create a project rooted at `root` (native picker feeds this).
-    /// Returns the new project's id, or an existing one if `root` matches.
-    pub fn create_project(&mut self, root: PathBuf, cx: &mut HostCx) -> Option<String> {
+    /// Create a project rooted at `root`, or return the existing id when one
+    /// already covers it.
+    ///
+    /// The root is validated here, against this host's filesystem and path
+    /// rules: a client cannot decide whether `C:\src` or `/srv/src` is absolute,
+    /// and only the host can see whether the directory exists.
+    pub fn create_project(
+        &mut self,
+        root: PathBuf,
+        cx: &mut HostCx,
+    ) -> Result<String, ProtocolError> {
         if let Some(existing) = self.projects.iter().find(|p| p.root == root) {
-            return Some(existing.id.clone());
+            return Ok(existing.id.clone());
+        }
+        if !root.is_absolute() {
+            return Err(ProtocolError {
+                code: "invalid_project_root".into(),
+                message: format!("{} is not an absolute path on this host", root.display()),
+            });
+        }
+        if !root.is_dir() {
+            return Err(ProtocolError {
+                code: "invalid_project_root".into(),
+                message: format!("{} is not a directory on this host", root.display()),
+            });
         }
         let project = Project::from_root(root);
         let id = project.id.clone();
         self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
         self.projects.push(project);
-        Some(id)
+        Ok(id)
     }
 
     /// Scan supported external-agent histories without exposing the import
@@ -357,61 +377,56 @@ impl AppState {
         }
     }
 
-    /// Flush pending appends, then serialize and write a thread on the host's
-    /// blocking-I/O executor. The source session is only read.
-    pub fn export_thread(
+    /// Flush pending appends, then render a thread into transferable bytes on
+    /// the host's blocking-I/O executor. Nothing is written: the requesting
+    /// client owns the destination, which may not be on this machine at all.
+    pub fn render_thread_export(
         &mut self,
         session_id: &str,
-        destination: PathBuf,
         format: ThreadExportFormat,
         cx: &mut HostCx,
-    ) {
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
         let Some(meta) = self.find_meta(session_id) else {
-            self.report_error(
-                RuntimeError::ExportThread {
-                    error: format!("unknown session {session_id}"),
-                },
-                cx,
-            );
-            return;
+            let session_id = session_id.to_owned();
+            return cx.spawn_background(async move {
+                Err(ProtocolError {
+                    code: "unknown_session".into(),
+                    message: format!("unknown session {session_id}"),
+                })
+            });
         };
         let barrier = self.store_write_barrier(cx);
         let store = self.store.clone();
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = match barrier.recv().await {
-                Ok(()) => {
-                    host_cx
-                        .unblock(move || export::export_thread(&store, &meta, &destination, format))
-                        .await
-                }
-                Err(error) => Err(std::io::Error::other(format!(
-                    "session-store flush failed: {error}"
-                ))),
-            };
-            host_cx.enqueue(move |state, cx| state.finish_thread_export(result, cx));
-        });
-    }
-
-    fn finish_thread_export(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
-        match result {
-            Ok(path) => {
-                let file = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Notice(RuntimeNotice::ThreadExported { file }),
-                );
+        cx.spawn_background(async move {
+            barrier.recv().await.map_err(|error| ProtocolError {
+                code: "store_barrier_closed".into(),
+                message: format!("session-store flush failed: {error}"),
+            })?;
+            let suggested_name = export::export_file_name(&meta.title, format);
+            let bytes = host_cx
+                .unblock(move || export::render_thread(&store, &meta, format))
+                .await
+                .map_err(|error| ProtocolError {
+                    code: "export_failed".into(),
+                    message: error.to_string(),
+                })?;
+            if bytes.len() > tcode_protocol::MAX_THREAD_EXPORT_BYTES {
+                return Err(ProtocolError {
+                    code: "export_too_large".into(),
+                    message: format!(
+                        "the rendered export is {} bytes, over the {} byte transfer limit",
+                        bytes.len(),
+                        tcode_protocol::MAX_THREAD_EXPORT_BYTES
+                    ),
+                });
             }
-            Err(error) => self.report_error(
-                RuntimeError::ExportThread {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
-        }
+            Ok(QueryResponse::ThreadExport {
+                bytes,
+                suggested_name,
+                mime: export::export_mime(format).to_owned(),
+            })
+        })
     }
 
     /// Merge a clean dedicated-worktree branch into its clean original checkout

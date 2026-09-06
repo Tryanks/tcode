@@ -358,7 +358,14 @@ impl Styled for Dialog {
 impl RenderOnce for Dialog {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let viewport = window.viewport_size();
-        let x = viewport.width / 2. - self.width / 2.;
+        // Every dialog carries a desktop design width, and the same views now
+        // open in phone-sized and browser viewports. Clamp here rather than at
+        // each call site: a wider-than-viewport dialog is also positioned
+        // off-screen, because `x` is derived from the same width. The height cap
+        // below keeps the footer actions reachable; `DialogContent` is already
+        // `flex_1 min_h_0`, so a scrolling body shrinks into it.
+        let width = crate::sizing::fit_viewport(f32::from(self.width), viewport.width);
+        let x = viewport.width / 2. - width / 2.;
         let y = viewport.height / 10. + px(self.layer as f32 * 16.);
         let padding = Edges::all(px(16.));
         let content = self
@@ -376,8 +383,9 @@ impl RenderOnce for Dialog {
             .absolute()
             .left(x)
             .top(y)
-            .w(self.width)
+            .w(width)
             .when_some(self.max_width, |el, width| el.max_w(width))
+            .max_h(viewport.height - y - px(16.))
             .min_h_24()
             .flex()
             .flex_col()

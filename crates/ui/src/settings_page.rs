@@ -18,17 +18,12 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, v_flex};
 
-use computer_use_mcp::permissions::{
-    self, PermissionGrantAction, PermissionGrantFlow, PermissionKind, PermissionStatus,
-    open_settings_pane, relaunch_app, request,
-};
-
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
 use crate::provider_card::ProviderCard;
 use crate::provider_model_picker::ProviderModelPicker;
 use crate::settings::{ImageMode, LANGUAGE_ENGLISH, LANGUAGE_SIMPLIFIED_CHINESE, ThemeMode};
-use crate::shell::Quit;
+use crate::sizing::fit_viewport;
 use crate::store::WorkspaceStore;
 use crate::theme::{self, ActiveTheme as _, ThemeMode as UiThemeMode};
 use crate::time::{humanize_ago, now_secs};
@@ -59,9 +54,100 @@ enum Section {
     Browser,
     ComputerUse,
     Orchestrate,
-    #[cfg(feature = "remote")]
     Remote,
     Archived,
+}
+
+/// Navigation order, shared by the desktop rail and the compact section list.
+const SECTIONS: [Section; 8] = [
+    Section::General,
+    Section::Providers,
+    Section::Usage,
+    Section::Browser,
+    Section::ComputerUse,
+    Section::Orchestrate,
+    Section::Remote,
+    Section::Archived,
+];
+
+impl Section {
+    fn id(self) -> &'static str {
+        match self {
+            Self::General => "settings-nav-general",
+            Self::Providers => "settings-nav-providers",
+            Self::Usage => "settings-nav-usage",
+            Self::Browser => "settings-nav-browser",
+            Self::ComputerUse => "settings-nav-computer-use",
+            Self::Orchestrate => "settings-nav-orchestrate",
+            Self::Remote => "settings-nav-remote",
+            Self::Archived => "settings-nav-archived",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::General => IconName::Settings,
+            Self::Providers => IconName::Bot,
+            Self::Usage => IconName::ChartPie,
+            Self::Browser => IconName::Globe,
+            Self::ComputerUse => IconName::LayoutDashboard,
+            Self::Orchestrate => IconName::Map,
+            Self::Remote => IconName::HardDrive,
+            Self::Archived => IconName::Inbox,
+        }
+    }
+
+    fn label(self) -> SharedString {
+        match self {
+            Self::General => crate::tr!("settings.general"),
+            Self::Providers => crate::tr!("settings.providers"),
+            Self::Usage => crate::tr!("settings.usage"),
+            Self::Browser => crate::tr!("settings.browser"),
+            Self::ComputerUse => crate::tr!("settings.computer_use"),
+            Self::Orchestrate => crate::tr!("settings.orchestrate"),
+            Self::Remote => crate::tr!("settings.remote"),
+            Self::Archived => crate::tr!("settings.archived"),
+        }
+        .into_owned()
+        .into()
+    }
+}
+
+/// An input seeded from replicated settings.
+///
+/// `pushed` is the last value this page wrote into the field, so an echoed
+/// change event can be told apart from a real edit; `dirty` then freezes the
+/// field against later snapshots so a host update cannot overwrite what the
+/// user is in the middle of typing.
+struct SettingsInput {
+    state: Entity<InputState>,
+    pushed: String,
+    dirty: bool,
+}
+
+impl SettingsInput {
+    fn new(state: Entity<InputState>) -> Self {
+        Self {
+            state,
+            pushed: String::new(),
+            dirty: false,
+        }
+    }
+
+    /// `true` when the change came from the user and should be committed.
+    fn is_user_edit(&mut self, value: &str) -> bool {
+        if value == self.pushed {
+            return false;
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn push(&mut self, value: String, window: &mut Window, cx: &mut App) {
+        self.pushed = value.clone();
+        self.state
+            .update(cx, |input, cx| input.set_value(value, window, cx));
+    }
 }
 
 #[derive(Clone)]
@@ -92,8 +178,7 @@ pub struct SettingsPage {
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
-    /// Hosting/pairing controls. Present only with the `remote` feature.
-    #[cfg(feature = "remote")]
+    /// Saved hosts, pairing and (where the client can host) hosting controls.
     remote_panel: Entity<crate::remote::RemotePanel>,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
@@ -106,22 +191,19 @@ pub struct SettingsPage {
     /// section; cleared as soon as the page shows anything else.
     usage_refresh_sent: bool,
     /// Editable "Home URL" for the Browser page; committed on change.
-    home_url_input: Entity<InputState>,
-    auto_archive_idle_input: Entity<InputState>,
-    auto_archive_keep_input: Entity<InputState>,
-    /// Last-known TCC permission snapshot, refreshed when Computer Use becomes
-    /// visible and on every explicit Recheck / Grant.
-    perm_status: PermissionStatus,
-    /// Whether a Screen Recording grant looks pending-restart (a fresh grant
-    /// only takes effect after tcode relaunches). Drives the restart banner.
-    sr_restart_hint: bool,
-    /// A temporary continuity marker exists for an in-flight Screen Recording
-    /// request. It is cleared when the app becomes active without a grant.
-    screen_recording_marker_pending: bool,
-    /// Separates the initial native TCC request from the explicit fallback that
-    /// opens System Settings when macOS will no longer show its prompt.
-    permission_grant_flow: PermissionGrantFlow,
-    _app_activation_observer: crate::app_activation::AppActivationObserver,
+    home_url_input: SettingsInput,
+    auto_archive_idle_input: SettingsInput,
+    auto_archive_keep_input: SettingsInput,
+    /// Whether the editable fields have been seeded from the host's settings.
+    /// A portable client renders before its first snapshot arrives, and the
+    /// local defaults it starts with must never be shown as the host's answer.
+    hydrated: bool,
+    /// Compact layout only: whether a section detail is open over the list.
+    compact_detail: bool,
+    /// The native permission group. `Some` only where this build can read TCC
+    /// *and* the workspace is this machine's.
+    #[cfg(all(feature = "local-permissions", target_os = "macos"))]
+    local_permissions: Option<Entity<crate::local_permissions::LocalPermissions>>,
     /// One focus handle per toggle row, keyed by row id. The row owns keyboard
     /// activation, so its capture-phase Space handler must be able to tell
     /// "the row is focused" from "the inline reset button inside it is".
@@ -142,7 +224,6 @@ impl SettingsPage {
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
-                #[cfg(feature = "remote")]
                 "remote" => Section::Remote,
                 "archived" => Section::Archived,
                 _ => Section::General,
@@ -208,8 +289,12 @@ impl SettingsPage {
                 let window_state = this.window_state.clone();
                 if let Some(section) = Self::take_requested_section(&window_state, cx) {
                     this.section = section;
+                    this.compact_detail = true;
                 }
                 cx.notify();
+            }),
+            cx.observe_in(&store, window, |this, _, window, cx| {
+                this.hydrate_inputs(window, cx);
             }),
             cx.subscribe(&title_model_picker, |this, _, event, cx| {
                 let selected = event.0.clone();
@@ -241,94 +326,113 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        #[cfg(feature = "remote")]
         let remote_panel = cx.new(|cx| crate::remote::RemotePanel::new(store.clone(), window, cx));
-        let settings = store.read(cx).settings();
-        let home_url_value = settings.browser.home_url.clone().unwrap_or_default();
+        // Editable fields start empty and are seeded by `hydrate_inputs` once
+        // the host's settings actually arrive, so a portable client never shows
+        // its local defaults as if they were the host's configuration.
         let home_url_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(crate::tr!("browser.home_url.placeholder"))
-                .default_value(home_url_value)
+            InputState::new(window, cx).placeholder(crate::tr!("browser.home_url.placeholder"))
         });
-        let auto_archive_idle_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.auto_archive_max_idle_days.max(1).to_string())
+        let auto_archive_idle_input = cx.new(|cx| InputState::new(window, cx));
+        let auto_archive_keep_input = cx.new(|cx| InputState::new(window, cx));
+        #[cfg(all(feature = "local-permissions", target_os = "macos"))]
+        let local_permissions = (!store.read(cx).is_remote()).then(|| {
+            let store = store.clone();
+            cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
-        let auto_archive_keep_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value(settings.auto_archive_keep_count.max(1).to_string())
-        });
-        // Refresh the TCC snapshot once as the page mounts. When the page is
-        // opened by a post-grant relaunch this is the "automatic recheck" that
-        // surfaces the new status immediately.
-        let perm_status = permissions::check();
-        let (app_activation_observer, app_activation_events) = crate::app_activation::observe();
         let mut page = Self {
             store,
             window_state,
             provider_cards: Vec::new(),
             acp_panel,
             orchestrate_panel,
-            #[cfg(feature = "remote")]
             remote_panel,
             title_model_picker,
             fallback_review_model_picker,
             acp_cards: Vec::new(),
             section,
             usage_refresh_sent: false,
-            home_url_input: home_url_input.clone(),
-            auto_archive_idle_input: auto_archive_idle_input.clone(),
-            auto_archive_keep_input: auto_archive_keep_input.clone(),
-            perm_status,
-            sr_restart_hint: false,
-            screen_recording_marker_pending: false,
-            permission_grant_flow: PermissionGrantFlow::default(),
-            _app_activation_observer: app_activation_observer,
+            home_url_input: SettingsInput::new(home_url_input.clone()),
+            auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
+            auto_archive_keep_input: SettingsInput::new(auto_archive_keep_input.clone()),
+            hydrated: false,
+            compact_detail: false,
+            #[cfg(all(feature = "local-permissions", target_os = "macos"))]
+            local_permissions,
             toggle_focus: HashMap::new(),
             _subscriptions: subscriptions,
         };
         page._subscriptions
-            .push(cx.subscribe(&home_url_input, |this, _, event, cx| {
+            .push(cx.subscribe(&home_url_input, |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.commit_home_url(cx);
+                    let value = input.read(cx).value().to_string();
+                    if this.home_url_input.is_user_edit(&value) {
+                        this.commit_home_url(cx);
+                    }
                 }
             }));
-        page._subscriptions.push(
-            cx.subscribe(&auto_archive_idle_input, |this, _, event, cx| {
+        page._subscriptions.push(cx.subscribe(
+            &auto_archive_idle_input,
+            |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.commit_auto_archive_idle_days(cx);
+                    let value = input.read(cx).value().to_string();
+                    if this.auto_archive_idle_input.is_user_edit(&value) {
+                        this.commit_auto_archive_idle_days(cx);
+                    }
                 }
-            }),
-        );
-        page._subscriptions.push(
-            cx.subscribe(&auto_archive_keep_input, |this, _, event, cx| {
+            },
+        ));
+        page._subscriptions.push(cx.subscribe(
+            &auto_archive_keep_input,
+            |this, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
-                    this.commit_auto_archive_keep_count(cx);
+                    let value = input.read(cx).value().to_string();
+                    if this.auto_archive_keep_input.is_user_edit(&value) {
+                        this.commit_auto_archive_keep_count(cx);
+                    }
                 }
-            }),
-        );
+            },
+        ));
         page.build_provider_cards(cx);
         page.sync_acp_cards(window, cx);
-        cx.spawn(async move |this, cx| {
-            while app_activation_events.recv().await.is_ok() {
-                if this
-                    .update(cx, |this, cx| {
-                        if this.section == Section::ComputerUse {
-                            this.recheck_permissions(true, cx);
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+        page.hydrate_inputs(window, cx);
         page
     }
 
+    /// Seed the editable fields from the host's settings, exactly once, the
+    /// first time a real snapshot exists.
+    ///
+    /// A desktop client already has one at construction; a portable client gets
+    /// it milliseconds later. Untouched fields adopt it; a field the user has
+    /// already edited keeps that edit, and no later snapshot rewrites either.
+    fn hydrate_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hydrated || !self.store.read(cx).settings_hydrated() {
+            return;
+        }
+        self.hydrated = true;
+        let settings = self.store.read(cx).settings();
+        if !self.home_url_input.dirty {
+            let value = settings.browser.home_url.clone().unwrap_or_default();
+            self.home_url_input.push(value, window, cx);
+        }
+        if !self.auto_archive_idle_input.dirty {
+            let value = settings.auto_archive_max_idle_days.max(1).to_string();
+            self.auto_archive_idle_input.push(value, window, cx);
+        }
+        if !self.auto_archive_keep_input.dirty {
+            let value = settings.auto_archive_keep_count.max(1).to_string();
+            self.auto_archive_keep_input.push(value, window, cx);
+        }
+    }
+
     fn commit_home_url(&self, cx: &mut Context<Self>) {
-        let value = self.home_url_input.read(cx).value().trim().to_string();
+        let value = self
+            .home_url_input
+            .state
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
         let home_url = (!value.is_empty()).then_some(value);
         self.dispatch_settings(move |store| store.set_browser_home_url(home_url), cx);
     }
@@ -336,6 +440,7 @@ impl SettingsPage {
     fn commit_auto_archive_idle_days(&self, cx: &mut Context<Self>) {
         let Some(days) = self
             .auto_archive_idle_input
+            .state
             .read(cx)
             .value()
             .trim()
@@ -353,6 +458,7 @@ impl SettingsPage {
     fn commit_auto_archive_keep_count(&self, cx: &mut Context<Self>) {
         let Some(keep) = self
             .auto_archive_keep_input
+            .state
             .read(cx)
             .value()
             .trim()
@@ -406,8 +512,11 @@ impl SettingsPage {
         self.acp_panel
             .update(cx, |panel, cx| panel.prepare_to_open(cx));
         let panel = self.acp_panel.clone();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             let panel = panel.clone();
+            // The catalog is a viewport of its own, so cap it against the window
+            // rather than a desktop-sized constant.
+            let body = fit_viewport(456., window.viewport_size().height - px(200.));
             dialog
                 .w(px(620.))
                 // Opaque T3 panel: the library default paints the translucent
@@ -415,7 +524,7 @@ impl SettingsPage {
                 .bg(cx.theme().popover)
                 .shadow_xl()
                 .title(crate::tr!("providers.acp.add_agent").into_owned())
-                .content(move |content, _, _| content.h(px(456.)).child(panel.clone()))
+                .content(move |content, _, _| content.h(body).child(panel.clone()))
         });
     }
 
@@ -423,76 +532,94 @@ impl SettingsPage {
         self.store.update(cx, |store, _cx| intent(store));
     }
 
+    fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.section = section;
+        self.compact_detail = true;
+        cx.notify();
+    }
+
+    fn nav_item(&self, section: Section, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.section == section;
+        let label = section.label();
+        let fg = if active {
+            cx.theme().sidebar_foreground
+        } else {
+            cx.theme().muted_foreground
+        };
+        crate::material::accessible_clickable(
+            gpui_base::h_flex(),
+            section.id(),
+            Role::Tab,
+            label.clone(),
+            cx,
+        )
+        .aria_selected(active)
+        // Keep the hitbox, stable element id, and hover style on the
+        // same element. Splitting them across an outer clickable and
+        // an anonymous inner row leaves GPUI tracking two overlapping
+        // interaction regions, which makes hover paint stale or skip
+        // as the pointer crosses adjacent tabs.
+        .h(px(30.))
+        .items_center()
+        .gap_2()
+        .px_2()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .when(active, |s| s.bg(cx.theme().list_active))
+        .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
+        .child(Icon::new(section.icon()).size_4().text_color(fg))
+        .child(
+            div()
+                .text_size(px(13.))
+                .when(active, |d| d.font_medium())
+                .text_color(fg)
+                .child(label),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
+        .into_any_element()
+    }
+
+    fn back_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        crate::material::accessible_clickable(
+            gpui_base::h_flex(),
+            "settings-back",
+            Role::Button,
+            crate::tr!("settings.back"),
+            cx,
+        )
+        .h(px(40.))
+        .items_center()
+        .gap_2()
+        .px_3()
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().sidebar_accent))
+        .text_size(px(13.))
+        .text_color(cx.theme().sidebar_foreground)
+        .child(
+            Icon::new(IconName::ArrowLeft)
+                .size_4()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(crate::tr!("settings.back"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.window_state
+                .update(cx, |state, cx| state.close_settings(cx));
+        }))
+        .into_any_element()
+    }
+
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let nav_item = |this: &Self,
-                        id: &'static str,
-                        icon: IconName,
-                        label: SharedString,
-                        section: Section,
-                        cx: &mut Context<Self>|
-         -> AnyElement {
-            let active = this.section == section;
-            let fg = if active {
-                cx.theme().sidebar_foreground
-            } else {
-                cx.theme().muted_foreground
-            };
-            crate::material::accessible_clickable(
-                gpui_base::h_flex(),
-                id,
-                Role::Tab,
-                label.clone(),
-                cx,
-            )
-            .aria_selected(active)
-            // Keep the hitbox, stable element id, and hover style on the
-            // same element. Splitting them across an outer clickable and
-            // an anonymous inner row leaves GPUI tracking two overlapping
-            // interaction regions, which makes hover paint stale or skip
-            // as the pointer crosses adjacent tabs.
-            .h(px(30.))
-            .items_center()
-            .gap_2()
+        let mut tabs = v_flex()
+            .id("settings-nav-tabs")
+            .role(Role::TabList)
+            .aria_label(crate::tr!("settings.title"))
+            .flex_1()
+            .min_h_0()
             .px_2()
-            .rounded(px(6.))
-            .cursor_pointer()
-            .when(active, |s| s.bg(cx.theme().list_active))
-            .when(!active, |s| s.hover(|s| s.bg(cx.theme().sidebar_accent)))
-            .child(Icon::new(icon).size_4().text_color(fg))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .when(active, |d| d.font_medium())
-                    .text_color(fg)
-                    .child(label.clone()),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.section = section;
-                // Refresh the TCC snapshot each time Computer Use becomes
-                // visible (cheap native calls, event-driven).
-                if section == Section::ComputerUse {
-                    this.perm_status = permissions::check();
-                }
-                cx.notify();
-            }))
-            .into_any_element()
-        };
-
-        #[cfg(feature = "remote")]
-        let remote_nav_item = |this: &Self, cx: &mut Context<Self>| {
-            nav_item(
-                this,
-                "settings-nav-remote",
-                IconName::HardDrive,
-                crate::tr!("settings.remote").into_owned().into(),
-                Section::Remote,
-                cx,
-            )
-        };
-        #[cfg(not(feature = "remote"))]
-        let remote_nav_item = |_: &Self, _: &mut Context<Self>| div().into_any_element();
-
-        let remote = self.store.read(cx).is_remote();
+            .gap(px(2.));
+        for section in SECTIONS {
+            tabs = tabs.child(self.nav_item(section, cx));
+        }
         v_flex()
             .flex_none()
             .w(px(NAV_WIDTH))
@@ -513,106 +640,103 @@ impl SettingsPage {
                 )
                 .child(crate::material::brand_wordmark(cx)),
             )
+            .child(tabs)
+            .child(div().flex_none().child(self.back_row(cx)))
+            .into_any_element()
+    }
+
+    /// Compact clients have no room for a 255px rail beside the content, so the
+    /// same sections become a full-width list that pushes to a detail view.
+    fn render_section_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let rows: Vec<AnyElement> = SECTIONS
+            .iter()
+            .map(|section| {
+                let section = *section;
+                let label = section.label();
+                crate::material::accessible_clickable(
+                    gpui_base::h_flex(),
+                    section.id(),
+                    Role::Button,
+                    label.clone(),
+                    cx,
+                )
+                .w_full()
+                .min_h(px(48.))
+                .px_3()
+                .gap_3()
+                .items_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(cx.theme().list_hover))
+                .child(
+                    Icon::new(section.icon())
+                        .size_4()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(div().flex_1().text_size(px(15.)).child(label))
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
+                .into_any_element()
+            })
+            .collect();
+        div()
+            .id("settings-section-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
             .child(
                 v_flex()
-                    .id("settings-nav-tabs")
-                    .role(Role::TabList)
-                    .aria_label(crate::tr!("settings.title"))
-                    .flex_1()
-                    .min_h_0()
-                    .px_2()
-                    .gap(px(2.))
-                    .child(nav_item(
-                        self,
-                        "settings-nav-general",
-                        IconName::Settings,
-                        crate::tr!("settings.general").into_owned().into(),
-                        Section::General,
-                        cx,
-                    ))
-                    .child(nav_item(
-                        self,
-                        "settings-nav-providers",
-                        IconName::Bot,
-                        crate::tr!("settings.providers").into_owned().into(),
-                        Section::Providers,
-                        cx,
-                    ))
-                    .child(nav_item(
-                        self,
-                        "settings-nav-usage",
-                        IconName::ChartPie,
-                        crate::tr!("settings.usage").into_owned().into(),
-                        Section::Usage,
-                        cx,
-                    ))
-                    .child(nav_item(
-                        self,
-                        "settings-nav-browser",
-                        IconName::Globe,
-                        crate::tr!("settings.browser").into_owned().into(),
-                        Section::Browser,
-                        cx,
-                    ))
-                    // Computer use controls this machine, so remote clients cannot
-                    // grant its local permissions.
-                    .when(!remote, |tabs| {
-                        tabs.child(nav_item(
-                            self,
-                            "settings-nav-computer-use",
-                            IconName::LayoutDashboard,
-                            crate::tr!("settings.computer_use").into_owned().into(),
-                            Section::ComputerUse,
-                            cx,
-                        ))
-                    })
-                    .child(nav_item(
-                        self,
-                        "settings-nav-orchestrate",
-                        IconName::Map,
-                        crate::tr!("settings.orchestrate").into_owned().into(),
-                        Section::Orchestrate,
-                        cx,
-                    ))
-                    .child(remote_nav_item(self, cx))
-                    .child(nav_item(
-                        self,
-                        "settings-nav-archived",
-                        IconName::Inbox,
-                        crate::tr!("settings.archived").into_owned().into(),
-                        Section::Archived,
-                        cx,
-                    )),
+                    .w_full()
+                    .p_3()
+                    .gap_3()
+                    .child(crate::material::grouped(rows, cx))
+                    .child(crate::material::group(cx).child(self.back_row(cx))),
             )
+            .into_any_element()
+    }
+
+    /// The compact list header: just the page title, since the list itself is
+    /// the navigation.
+    fn render_compact_header_root(&self, _cx: &mut Context<Self>) -> AnyElement {
+        gpui_base::h_flex()
+            .flex_none()
+            .h(px(52.))
+            .w_full()
+            .px_4()
+            .items_center()
             .child(
-                div().flex_none().child(
-                    crate::material::accessible_clickable(
-                        gpui_base::h_flex(),
-                        "settings-back",
-                        Role::Button,
-                        crate::tr!("settings.back"),
-                        cx,
-                    )
-                    .h(px(40.))
-                    .items_center()
-                    .gap_2()
-                    .px_3()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().sidebar_accent))
-                    .text_size(px(13.))
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child(
-                        Icon::new(IconName::ArrowLeft)
-                            .size_4()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(crate::tr!("settings.back"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.window_state
-                            .update(cx, |state, cx| state.close_settings(cx));
-                    })),
-                ),
+                div()
+                    .text_size(px(17.))
+                    .font_medium()
+                    .child(crate::tr!("settings.title")),
             )
+            .into_any_element()
+    }
+
+    /// The compact detail header: one back control plus the section's name.
+    fn render_compact_header(&self, title: SharedString, cx: &mut Context<Self>) -> AnyElement {
+        gpui_base::h_flex()
+            .flex_none()
+            .h(px(52.))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("settings-compact-back")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ArrowLeft)
+                    .aria_label(crate::tr!("settings.sections"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.compact_detail = false;
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1().text_size(px(15.)).font_medium().child(title))
             .into_any_element()
     }
 
@@ -714,18 +838,17 @@ impl SettingsPage {
                             .home_url
                             .clone()
                             .unwrap_or_default();
-                        page.home_url_input
-                            .update(cx, |input, cx| input.set_value(home_url, window, cx));
-                        page.auto_archive_idle_input.update(cx, |input, cx| {
-                            input.set_value(
-                                DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
-                                window,
-                                cx,
-                            )
-                        });
-                        page.auto_archive_keep_input.update(cx, |input, cx| {
-                            input.set_value(DEFAULT_AUTO_ARCHIVE_KEEP_COUNT.to_string(), window, cx)
-                        });
+                        page.home_url_input.push(home_url, window, cx);
+                        page.auto_archive_idle_input.push(
+                            DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
+                            window,
+                            cx,
+                        );
+                        page.auto_archive_keep_input.push(
+                            DEFAULT_AUTO_ARCHIVE_KEEP_COUNT.to_string(),
+                            window,
+                            cx,
+                        );
                     });
                     apply_theme(ThemeMode::System, window, cx);
                     true
@@ -734,11 +857,6 @@ impl SettingsPage {
     }
 
     fn render_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Its nav entry is hidden over a remote link, so a section remembered
-        // from a relaunch marker must not strand the page on it either.
-        if self.section == Section::ComputerUse && self.store.read(cx).is_remote() {
-            self.section = Section::General;
-        }
         // Usage is fetched on demand: kick one refresh off on the transition
         // into the section (any entry path — nav click, route key, restore),
         // not on every frame it renders.
@@ -758,7 +876,6 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
-            #[cfg(feature = "remote")]
             Section::Remote => v_flex().child(self.remote_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
@@ -1440,9 +1557,11 @@ impl SettingsPage {
                     },
                     cx,
                 );
-                this.auto_archive_idle_input.update(cx, |input, cx| {
-                    input.set_value(DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(), window, cx)
-                });
+                this.auto_archive_idle_input.push(
+                    DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
+                    window,
+                    cx,
+                );
             },
         );
         let keep_count_reset = self.reset_action(
@@ -1454,9 +1573,11 @@ impl SettingsPage {
                     |store| store.set_auto_archive_keep_count(DEFAULT_AUTO_ARCHIVE_KEEP_COUNT),
                     cx,
                 );
-                this.auto_archive_keep_input.update(cx, |input, cx| {
-                    input.set_value(DEFAULT_AUTO_ARCHIVE_KEEP_COUNT.to_string(), window, cx)
-                });
+                this.auto_archive_keep_input.push(
+                    DEFAULT_AUTO_ARCHIVE_KEEP_COUNT.to_string(),
+                    window,
+                    cx,
+                );
             },
         );
         let rows = vec![
@@ -1481,7 +1602,7 @@ impl SettingsPage {
                     cx,
                 ))
                 .child(
-                    Input::new(&self.auto_archive_idle_input)
+                    Input::new(&self.auto_archive_idle_input.state)
                         .w(px(72.))
                         .rounded(crate::material::radius_input()),
                 )
@@ -1494,7 +1615,7 @@ impl SettingsPage {
                     cx,
                 ))
                 .child(
-                    Input::new(&self.auto_archive_keep_input)
+                    Input::new(&self.auto_archive_keep_input.state)
                         .w(px(72.))
                         .rounded(crate::material::radius_input()),
                 )
@@ -1707,13 +1828,7 @@ impl SettingsPage {
                     .child(self.section_label(crate::tr!("computer_use.section"), cx))
                     .child(self.grouped_plain(rows, cx)),
             )
-            .child(self.permissions_group(
-                &[
-                    PermissionKind::Accessibility,
-                    PermissionKind::ScreenRecording,
-                ],
-                cx,
-            ))
+            .child(self.permissions_group(cx))
     }
 
     fn render_browser(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -1768,8 +1883,7 @@ impl SettingsPage {
             cx,
             |this, window, cx| {
                 this.dispatch_settings(|store| store.set_browser_home_url(None), cx);
-                this.home_url_input
-                    .update(cx, |input, cx| input.set_value("", window, cx));
+                this.home_url_input.push(String::new(), window, cx);
             },
         );
         self.row_frame(cx)
@@ -1781,7 +1895,7 @@ impl SettingsPage {
             ))
             .child(
                 div().w(px(240.)).child(
-                    Input::new(&self.home_url_input)
+                    Input::new(&self.home_url_input.state)
                         .small()
                         .rounded(crate::material::radius_input()),
                 ),
@@ -1852,200 +1966,47 @@ impl SettingsPage {
         )
     }
 
-    /// The Computer Use "System permissions" group. Non-macOS platforms have
-    /// no TCC, so it shows a quiet note instead.
-    fn permissions_group(&self, kinds: &[PermissionKind], cx: &mut Context<Self>) -> AnyElement {
-        let col =
+    /// The Computer Use "System permissions" group.
+    ///
+    /// Permissions belong to the machine that runs the agent, so only a local
+    /// attachment on a platform with TCC shows live status and grant controls.
+    /// A remote client is told where to manage them; it never infers the host's
+    /// permission state from its own operating system.
+    fn permissions_group(&self, cx: &mut Context<Self>) -> AnyElement {
+        let column =
             v_flex().child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
-        if !cfg!(target_os = "macos") {
-            return col
-                .child(
-                    crate::material::group(cx).child(
-                        div()
-                            .w_full()
-                            .px_3()
-                            .py_3()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("permissions.unsupported")),
-                    ),
-                )
-                .into_any_element();
+        if let Some(rows) = self.local_permission_rows() {
+            return column.child(rows).into_any_element();
         }
-        let rows: Vec<AnyElement> = kinds
-            .iter()
-            .map(|kind| self.permission_row(*kind, cx))
-            .collect();
-        let mut stack = v_flex()
-            .w_full()
-            .gap_2()
-            .child(self.grouped_plain(rows, cx));
-        // A fresh Screen Recording grant only takes effect after a restart; offer
-        // an explicit relaunch when we've detected one is pending.
-        if self.sr_restart_hint && kinds.contains(&PermissionKind::ScreenRecording) {
-            stack = stack.child(self.restart_banner(cx));
-        }
-        col.child(stack).into_any_element()
-    }
-
-    fn permission_row(&self, kind: PermissionKind, cx: &mut Context<Self>) -> AnyElement {
-        let granted = self.perm_status.granted(kind);
-        let grant_action = self.permission_grant_flow.action(kind);
-        let grant_label = match grant_action {
-            PermissionGrantAction::Request => crate::tr!("permissions.grant"),
-            PermissionGrantAction::OpenSettings => crate::tr!("permissions.open_settings"),
+        let message = match self.store.read(cx).remote_host_name() {
+            Some(host) => crate::tr!("permissions.manage_on_host", host = host).into_owned(),
+            None => crate::tr!("permissions.unsupported").into_owned(),
         };
-        let (name_key, why_key, grant_id, recheck_id) = match kind {
-            PermissionKind::Accessibility => (
-                "permissions.accessibility.name",
-                "permissions.accessibility.why",
-                "perm-grant-accessibility",
-                "perm-recheck-accessibility",
-            ),
-            PermissionKind::ScreenRecording => (
-                "permissions.screen_recording.name",
-                "permissions.screen_recording.why",
-                "perm-grant-screen-recording",
-                "perm-recheck-screen-recording",
-            ),
-        };
-        let mut controls = gpui_base::h_flex()
-            .flex_none()
-            .gap_2()
-            .items_center()
-            .child(self.status_chip(granted, cx));
-        if !granted {
-            controls = controls
-                .child(
-                    Button::new(grant_id)
-                        .outline()
-                        .small()
-                        .label(grant_label)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.grant_permission(kind, cx);
-                        })),
-                )
-                .child(
-                    Button::new(recheck_id)
-                        .ghost()
-                        .small()
-                        .label(crate::tr!("permissions.recheck"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.recheck_permissions(true, cx);
-                        })),
-                );
-        }
-        // No reset affordance: the grant lives in the OS, not in settings.json.
-        self.row_frame(cx)
-            .child(self.row_labels(crate::tr!(name_key), crate::tr!(why_key), None, cx))
-            .child(controls)
-            .into_any_element()
-    }
-
-    fn status_chip(&self, granted: bool, cx: &Context<Self>) -> AnyElement {
-        let (bg, fg, label) = if granted {
-            (
-                cx.theme().success.opacity(0.12),
-                cx.theme().success_foreground,
-                crate::tr!("permissions.granted"),
-            )
-        } else {
-            (
-                cx.theme().warning.opacity(0.12),
-                cx.theme().warning_foreground,
-                crate::tr!("permissions.missing"),
-            )
-        };
-        crate::material::semantic_chip(label, bg, fg).into_any_element()
-    }
-
-    fn restart_banner(&self, cx: &mut Context<Self>) -> AnyElement {
-        gpui_base::h_flex()
-            .w_full()
-            .items_center()
-            .gap_3()
-            .rounded(crate::material::radius_card())
-            .bg(cx.theme().warning.opacity(0.12))
-            .px_3()
-            .py_2p5()
+        column
             .child(
-                Icon::new(IconName::Info)
-                    .small()
-                    .text_color(cx.theme().warning_foreground),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.))
-                    .child(crate::tr!("permissions.restart_banner")),
-            )
-            .child(
-                Button::new("perm-relaunch")
-                    .outline()
-                    .small()
-                    .label(crate::tr!("permissions.relaunch"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.relaunch(window, cx);
-                    })),
+                crate::material::group(cx).child(
+                    div()
+                        .w_full()
+                        .px_3()
+                        .py_3()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(message),
+                ),
             )
             .into_any_element()
     }
 
-    /// Fire the native prompt first. If the permission remains missing, the
-    /// next explicit click opens System Settings as a fallback; doing both at
-    /// once races macOS's own consent dialog and duplicates its Open Settings
-    /// action.
-    fn grant_permission(&mut self, kind: PermissionKind, cx: &mut Context<Self>) {
-        match self.permission_grant_flow.advance(kind) {
-            PermissionGrantAction::Request => {
-                if kind == PermissionKind::ScreenRecording {
-                    self.store.update(cx, |store, _cx| {
-                        store.write_relaunch_marker("computer_use".into());
-                    });
-                    self.screen_recording_marker_pending = true;
-                }
-                let _ = request(kind);
-                // Both native request APIs may return before the user has
-                // completed the system UI, so this immediate snapshot must not
-                // clear the temporary Screen Recording marker.
-                self.recheck_permissions(false, cx);
-            }
-            PermissionGrantAction::OpenSettings => {
-                open_settings_pane(kind);
-                cx.notify();
-            }
-        }
+    #[cfg(all(feature = "local-permissions", target_os = "macos"))]
+    fn local_permission_rows(&self) -> Option<AnyElement> {
+        self.local_permissions
+            .clone()
+            .map(gpui::IntoElement::into_any_element)
     }
 
-    fn recheck_permissions(&mut self, clear_ungranted_marker: bool, cx: &mut Context<Self>) {
-        let fresh = permissions::check();
-        if clear_ungranted_marker && self.screen_recording_marker_pending && !fresh.screen_recording
-        {
-            self.store.update(cx, |store, _cx| {
-                store.clear_relaunch_marker();
-            });
-            self.screen_recording_marker_pending = false;
-        }
-        // A Screen Recording grant that flips on still needs a restart to take
-        // effect for the running process, so surface the relaunch affordance.
-        if fresh.screen_recording && !self.perm_status.screen_recording {
-            self.sr_restart_hint = true;
-        }
-        self.perm_status = fresh;
-        cx.notify();
-    }
-
-    fn relaunch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.store.update(cx, |store, _cx| {
-            store.write_relaunch_marker("computer_use".into());
-        });
-        if let Err(err) = relaunch_app() {
-            log::warn!("failed to relaunch tcode: {err}");
-            return;
-        }
-        // Quit through the app's existing quit action; the fresh instance
-        // consumes the marker on launch.
-        window.dispatch_action(Box::new(Quit), cx);
+    #[cfg(not(all(feature = "local-permissions", target_os = "macos")))]
+    fn local_permission_rows(&self) -> Option<AnyElement> {
+        None
     }
 
     fn section_label(&self, label: impl Into<SharedString>, cx: &mut Context<Self>) -> AnyElement {
@@ -2422,6 +2383,26 @@ impl SettingsPage {
 
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Compact: the 255px rail has nowhere to go beside the content, so the
+        // sections become a list that pushes to one section at a time.
+        if self.window_state.read(cx).compact {
+            let column = v_flex()
+                .size_full()
+                .text_color(cx.theme().foreground)
+                .bg(crate::material::content_surface(cx));
+            return if self.compact_detail {
+                let title = self.section.label();
+                column
+                    .child(self.render_compact_header(title, cx))
+                    .child(self.render_content(window, cx))
+                    .into_any_element()
+            } else {
+                column
+                    .child(self.render_compact_header_root(cx))
+                    .child(self.render_section_list(cx))
+                    .into_any_element()
+            };
+        }
         // No opaque full-page fill: the nav must sit on the same translucent
         // glass canvas the chat sidebar does (its `sidebar` token shows the
         // T0 blur through its own translucency), so navigating chat↔settings
@@ -2440,5 +2421,110 @@ impl Render for SettingsPage {
                     .child(self.render_header(window, cx))
                     .child(self.render_content(window, cx)),
             )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, VisualTestContext};
+    use tcode_protocol::SettingsPatch;
+    use tcode_runtime::pipe::{HostServices, spawn_host};
+    use tcode_services::store::SessionStore;
+
+    use super::*;
+    use crate::store::WorkspaceAttachment;
+
+    /// A client that renders before its host answers must not present its own
+    /// defaults as the host's configuration, must adopt the host's values the
+    /// moment they arrive, and must never overwrite what the user has since
+    /// typed — no matter how many snapshots follow.
+    #[gpui::test]
+    fn editable_settings_wait_for_the_host_and_then_keep_the_user_edit(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-settings-hydration-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .expect("spawn settings test host");
+        smol::block_on(host.update_state_for_test(|state, _| {
+            state.settings.browser.home_url = Some("https://host.example".into());
+            state.settings.auto_archive_keep_count = 7;
+        }))
+        .expect("seed host settings");
+
+        // No blocking seed: this is the portable client's timeline, where the
+        // first snapshot lands after the page already exists.
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (page, cx) = cx.add_window_view(|window, cx| {
+            SettingsPage::new(store.clone(), window_state.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        page.read_with(cx, |page, cx| {
+            assert!(!page.hydrated, "nothing has arrived from the host yet");
+            assert_eq!(
+                page.home_url_input.state.read(cx).value(),
+                "",
+                "an unhydrated field must stay empty rather than show a local default"
+            );
+        });
+
+        let drain = |cx: &mut VisualTestContext| {
+            for _ in 0..50 {
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                cx.run_until_parked();
+            }
+        };
+        drain(cx);
+
+        page.read_with(cx, |page, cx| {
+            assert!(page.hydrated);
+            assert_eq!(
+                page.home_url_input.state.read(cx).value(),
+                "https://host.example"
+            );
+            assert_eq!(page.auto_archive_keep_input.state.read(cx).value(), "7");
+        });
+
+        // The user edits the field: `replace_all` takes the same path typing
+        // does, emitting the change the page listens for.
+        cx.update(|window, cx| {
+            page.update(cx, |page, cx| {
+                page.home_url_input.state.update(cx, |input, cx| {
+                    input.replace_all("https://edited", window, cx)
+                });
+            });
+        });
+        cx.run_until_parked();
+        page.read_with(cx, |page, _| {
+            assert!(page.home_url_input.dirty, "a typed value is a user edit");
+        });
+
+        // Two more snapshots arrive: the echo of that edit, then an unrelated
+        // change made elsewhere. Neither may rewrite the field.
+        drain(cx);
+        smol::block_on(host.link().command(tcode_protocol::Command::PatchSettings {
+            patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
+        }))
+        .expect("patch settings");
+        drain(cx);
+
+        page.read_with(cx, |page, cx| {
+            assert_eq!(
+                page.home_url_input.state.read(cx).value(),
+                "https://edited",
+                "a later snapshot must not clobber the field the user is editing"
+            );
+        });
+
+        host.shutdown_blocking().expect("stop host");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

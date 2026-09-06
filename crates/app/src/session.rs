@@ -129,7 +129,7 @@ impl DesktopSession {
         let link = runtime.link.clone();
         let client_host = self.client_host.clone();
         let store =
-            cx.new(|cx| WorkspaceStore::new_attached(link, identity, Some(client_host), cx));
+            cx.new(|cx| WorkspaceStore::new_attached(link, identity, Some(client_host), true, cx));
         PreparedAttachment {
             target,
             runtime,

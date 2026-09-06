@@ -795,7 +795,6 @@ impl SessionsSidebar {
         crate::thread_export::prompt_thread_export(
             self.store.clone(),
             meta.id,
-            meta.title,
             meta.cwd,
             format,
             window,

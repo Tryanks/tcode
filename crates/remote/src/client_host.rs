@@ -14,6 +14,7 @@ use tcode_client::pairing::PairedHost;
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
 type HostBrowser = dyn Fn() -> HostFuture<'static, Vec<DiscoveredHost>>;
 type MulticastLock = dyn Fn(bool) + Send + Sync;
+type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 
 /// Native clients share hosts.json, mobile.json, pairing, and transport policy.
 pub struct NativeClientHost {
@@ -22,6 +23,7 @@ pub struct NativeClientHost {
     qr_scanner: Option<Box<QrScanner>>,
     browser: Option<Box<HostBrowser>>,
     multicast_lock: Option<Arc<MulticastLock>>,
+    editor: Option<Box<EditorOpener>>,
 }
 
 impl NativeClientHost {
@@ -32,6 +34,7 @@ impl NativeClientHost {
             qr_scanner: None,
             browser: None,
             multicast_lock: None,
+            editor: None,
         }
     }
 
@@ -69,6 +72,17 @@ impl NativeClientHost {
         browser: impl Fn() -> HostFuture<'static, Vec<DiscoveredHost>> + 'static,
     ) -> Self {
         self.browser = Some(Box::new(browser));
+        self
+    }
+
+    /// Supply the external-editor launcher. It is injected because launching a
+    /// process belongs to the composition root that already owns the process
+    /// helpers, not to this transport crate.
+    pub fn with_editor_opener(
+        mut self,
+        open: impl Fn(&Path) -> Result<(), String> + 'static,
+    ) -> Self {
+        self.editor = Some(Box::new(open));
         self
     }
 
@@ -173,6 +187,10 @@ impl ClientHost for NativeClientHost {
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()))
         })
+    }
+
+    fn open_in_editor(&self, path: &Path) -> Option<Result<(), String>> {
+        self.editor.as_ref().map(|open| open(path))
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
