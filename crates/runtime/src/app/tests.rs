@@ -1077,49 +1077,244 @@ fn provider_update_command_hides_install_source() {
 
 #[test]
 fn orchestrate_guidance_and_current_configuration_are_composed() {
-    let settings = OrchestrateSettings {
-        generic_identity: "Generic lead".into(),
-        ..Default::default()
-    };
-    let first = compose_orchestrate_text(
-        ProviderKind::ClaudeCode,
-        Some("claude-fable-5"),
-        true,
-        &settings,
-        "Ship it",
+    let mut settings = OrchestrateSettings::default();
+    let first = compose_orchestrate_text(&settings, "Ship it", None, &HashMap::new());
+    assert!(first.starts_with(ORCHESTRATE_GUIDANCE.trim()));
+    assert!(first.contains("### Collaboration models — `collaborate`"));
+    assert!(first.contains("#### `codex` / `gpt-6-astra` — available `effort`: `medium`, `high`"));
+    assert!(
+        first.contains("#### `claude` / `claude-fable-5-1` — available `effort`: `medium`, `high`")
     );
-    assert!(first.starts_with(FABLE_ORCHESTRATE_GUIDANCE.trim()));
-    assert!(first.contains("wise owl"));
-    assert!(first.contains("#### `codex` / `gpt-5.6-sol` — effort `medium`"));
-    assert!(first.contains("cost efficiency 9, intelligence 8, taste 6"));
-    assert!(first.contains("#### `claude` / `claude-opus-4-8` — effort `high`"));
+    assert!(first.contains("### Execution models — `dispatch`"));
+    assert!(first.contains(
+        "#### `codex` / `gpt-5.6-sol` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
+    ));
     assert!(first.ends_with("\n\nShip it"));
-    let follow_up = compose_orchestrate_text(
-        ProviderKind::ClaudeCode,
-        Some("claude-opus-4-8"),
-        false,
-        &settings,
-        "Follow up",
-    );
-    assert!(!follow_up.contains(FABLE_ORCHESTRATE_GUIDANCE));
-    assert!(follow_up.starts_with("## Current orchestrator configuration"));
-    assert!(follow_up.contains("Generic lead"));
+    settings.decision_models[0].enabled = false;
+    settings.child_models.clear();
+    let follow_up = compose_orchestrate_text(&settings, "Follow up", None, &HashMap::new());
+    assert!(follow_up.starts_with(ORCHESTRATE_GUIDANCE.trim()));
+    assert!(follow_up.contains("## Current orchestrator configuration"));
+    assert!(!follow_up.contains("#### `codex` / `gpt-6-astra`"));
+    assert!(follow_up.contains("`dispatch` is unavailable"));
     assert!(follow_up.ends_with("\n\nFollow up"));
+}
 
-    let codex = compose_orchestrate_text(ProviderKind::Codex, None, true, &settings, "Implement");
-    assert!(codex.starts_with(CODEX_ORCHESTRATE_GUIDANCE.trim()));
-    assert!(codex.ends_with("\n\nImplement"));
-    assert!(codex.contains("Generic lead"));
-
-    let acp = compose_orchestrate_text(
-        ProviderKind::Acp,
-        Some("gemini-3-pro"),
-        true,
+#[test]
+fn lead_sees_only_other_peers_and_each_peer_receives_its_own_guidance() {
+    let settings = OrchestrateSettings::default();
+    for (index, name, other_name) in [(0, "Astra", "Fable 5.1"), (1, "Fable 5.1", "Astra")] {
+        let peer = &settings.decision_models[index];
+        let composed = compose_orchestrate_text(
+            &settings,
+            "Discuss the design",
+            Some((peer.provider, Some(peer.model.as_str()))),
+            &HashMap::new(),
+        );
+        assert!(!composed.contains(&format!("You are {name},")));
+        assert!(composed.contains(&format!("You are {other_name},")));
+        let brief = compose_collaboration_brief(
+            &settings,
+            peer.provider,
+            &peer.model,
+            "An independent view",
+        );
+        assert!(brief.contains(&format!("You are {name},")));
+        assert!(!brief.contains(&format!("You are {other_name},")));
+        assert!(brief.ends_with("An independent view"));
+    }
+    let unknown = compose_orchestrate_text(
         &settings,
-        "Coordinate",
+        "Discuss",
+        Some((ProviderKind::Codex, None)),
+        &HashMap::new(),
     );
-    assert!(acp.starts_with(GENERIC_ORCHESTRATE_GUIDANCE.trim()));
-    assert!(acp.contains("Generic lead"));
+    assert!(!unknown.contains("You are Astra,"));
+    assert!(unknown.contains("You are Fable 5.1,"));
+}
+
+#[test]
+fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
+    let settings = OrchestrateSettings::default();
+    let catalogs = HashMap::from([(
+        ProviderKind::Codex,
+        vec![ModelSpec {
+            id: "gpt-5.6-sol".into(),
+            display_name: "Sol".into(),
+            is_default: false,
+            options: vec![OptionDescriptor::Select {
+                id: "reasoningEffort".into(),
+                label: "Effort".into(),
+                default_value: Some("high".into()),
+                options: ["medium", "high", "deep"]
+                    .into_iter()
+                    .map(|value| agent::SelectOption {
+                        value: value.into(),
+                        label: value.into(),
+                        description: None,
+                    })
+                    .collect(),
+            }],
+        }],
+    )]);
+    assert_eq!(
+        resolve_orchestrate_dispatch(&settings, "codex", None, Some("deep"), None, &catalogs)
+            .unwrap()
+            .2
+            .as_deref(),
+        Some("deep")
+    );
+    assert!(
+        resolve_orchestrate_dispatch(&settings, "codex", None, Some("max"), None, &catalogs)
+            .unwrap_err()
+            .contains("unsupported effort max")
+    );
+    let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
+    assert!(configuration.contains("`gpt-5.6-sol` — available `effort`: `medium`, `high`, `deep`"));
+}
+
+#[test]
+fn collaboration_and_execution_resolve_separate_profile_lists() {
+    let mut settings = OrchestrateSettings::default();
+    assert_eq!(
+        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
+            .unwrap()
+            .1,
+        "gpt-6-astra"
+    );
+    assert_eq!(
+        resolve_orchestrate_collaboration(&settings, "claude", None, None, None, &HashMap::new())
+            .unwrap()
+            .1,
+        "claude-fable-5-1"
+    );
+    assert!(
+        resolve_orchestrate_collaboration(
+            &settings,
+            "codex",
+            Some("gpt-5.6-sol"),
+            None,
+            None,
+            &HashMap::new()
+        )
+        .is_err()
+    );
+    assert!(
+        resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-6-astra"),
+            None,
+            None,
+            &HashMap::new()
+        )
+        .is_err()
+    );
+    assert!(
+        resolve_orchestrate_dispatch(
+            &settings,
+            "claude",
+            Some("claude-fable-5-1"),
+            None,
+            None,
+            &HashMap::new()
+        )
+        .is_err()
+    );
+    settings.decision_models[0].enabled = false;
+    assert!(
+        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
+            .is_err()
+    );
+    settings.decision_models[0].enabled = true;
+    settings.decision_models[0].profile_id = Some("custom".into());
+    assert!(
+        resolve_orchestrate_collaboration(
+            &settings,
+            "codex",
+            None,
+            Some("max"),
+            Some("custom"),
+            &HashMap::new()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        resolve_orchestrate_collaboration(
+            &settings,
+            "codex",
+            None,
+            Some("high"),
+            Some("custom"),
+            &HashMap::new()
+        )
+        .unwrap()
+        .4
+        .as_deref(),
+        Some("custom")
+    );
+}
+
+#[test]
+fn collaboration_starts_a_read_only_peer_discussion() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-peer-collaboration-test");
+    let state = cx.new_entity(|_| TestClientState::new((*test_store).clone()));
+    state.host_update(cx, |state, cx| {
+        let parent = SessionMeta::new(
+            ProviderKind::ClaudeCode,
+            PathBuf::from("/workspace"),
+            Some("claude-fable-5-1".into()),
+        );
+        let parent_id = parent.id.clone();
+        state.sessions.push(parent);
+        state.settings.orchestrate.child_worktrees = true;
+        let (reply, response) = smol::channel::bounded(1);
+        state.handle_orchestrate_op(
+            orchestrate_mcp::OrchestrateOp::Dispatch {
+                purpose: orchestrate_mcp::ThreadPurpose::Collaboration,
+                parent_id: parent_id.clone(),
+                provider: "codex".into(),
+                model: None,
+                effort: None,
+                profile: None,
+                access: Some("full".into()),
+                title: "Compare architectures".into(),
+                brief: "Challenge these alternatives".into(),
+                cwd: None,
+                worktree: Some(true),
+                archive_on_complete: None,
+                result_max_chars: Some(0),
+                fast: None,
+            },
+            reply,
+            cx,
+        );
+        let result = response.try_recv().unwrap().unwrap();
+        let id = result["thread_id"].as_str().unwrap();
+        let child = state.resident(id).unwrap();
+        assert_eq!(child.meta.model.as_deref(), Some("gpt-6-astra"));
+        assert_eq!(
+            child.meta.parent_session_id.as_deref(),
+            Some(parent_id.as_str())
+        );
+        assert_eq!(child.meta.approval_mode, ApprovalMode::ReadOnly);
+        assert!(child.meta.worktree.is_none());
+        assert!(!child.meta.orchestrate_enabled);
+        assert!(
+            child.queue[0]
+                .text
+                .starts_with(COLLABORATION_GUIDANCE.trim())
+        );
+        assert!(child.queue[0].text.contains("Challenge these alternatives"));
+        assert!(
+            child.queue[0]
+                .text
+                .contains("You are Astra, a peer collaborator")
+        );
+        assert!(!child.queue[0].text.contains("You are Fable"));
+        assert!(child.queue[0].text.ends_with(CHILD_REPORT_FOOTER));
+    });
 }
 
 #[test]
@@ -1193,7 +1388,7 @@ fn send_turn_assembles_draft_context_and_attachment_paths() {
 }
 
 #[test]
-fn orchestrate_turn_records_the_context_split_on_the_user_message() {
+fn orchestrate_turn_records_context_and_runs_with_collaboration_disabled() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-split-test");
     let store = (*test_store).clone();
@@ -1208,7 +1403,35 @@ fn orchestrate_turn_records_the_context_split_on_the_user_message() {
         // record_user_message where the split is stored.
         let mut active = live_session(ProviderKind::Codex, commands);
         active.meta.id = "orchestrator".into();
+        active.meta.model = Some("gpt-6-astra".into());
         active.meta.orchestrate_enabled = true;
+        // Disabling every peer (including Astra itself) must only block
+        // consultation. Astra remains the lead and can dispatch execution.
+        for peer in &mut state.settings.orchestrate.decision_models {
+            peer.enabled = false;
+        }
+        assert!(
+            resolve_orchestrate_collaboration(
+                &state.settings.orchestrate,
+                "codex",
+                None,
+                None,
+                None,
+                &state.providers.model_catalogs
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_orchestrate_dispatch(
+                &state.settings.orchestrate,
+                "codex",
+                None,
+                None,
+                None,
+                &state.providers.model_catalogs
+            )
+            .is_ok()
+        );
         // Match the live launch state so the send is an ordinary turn rather
         // than a restart (which would flush through a different path).
         active.live_model = active.meta.model.clone();
@@ -1224,11 +1447,18 @@ fn orchestrate_turn_records_the_context_split_on_the_user_message() {
 
         // What the provider actually receives is the whole composed text.
         expected_full = compose_orchestrate_text(
-            ProviderKind::Codex,
-            None,
-            false,
             &state.settings.orchestrate,
             "执行某某任务",
+            Some((
+                ProviderKind::Codex,
+                state
+                    .resident("orchestrator")
+                    .unwrap()
+                    .meta
+                    .model
+                    .as_deref(),
+            )),
+            &state.providers.model_catalogs,
         );
         expected_context = expected_full.len() - "执行某某任务".len();
     });
@@ -1340,11 +1570,9 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
 #[test]
 fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let mut settings = OrchestrateSettings::default();
-    let mut custom_profile = settings.child_models[0].clone();
-    custom_profile.profile_id = Some("kimi".into());
-    settings.child_models.push(custom_profile);
     assert_eq!(
-        resolve_orchestrate_dispatch(&settings, "codex", None, None, None).unwrap(),
+        resolve_orchestrate_dispatch(&settings, "codex", None, None, None, &HashMap::new())
+            .unwrap(),
         (
             ProviderKind::Codex,
             "gpt-5.6-sol".into(),
@@ -1353,6 +1581,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             None
         )
     );
+    settings.child_models[0].profile_id = Some("kimi".into());
     assert_eq!(
         resolve_orchestrate_dispatch(
             &settings,
@@ -1360,6 +1589,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             Some("gpt-5.6-sol"),
             Some("medium"),
             Some("KIMI"),
+            &HashMap::new()
         )
         .unwrap(),
         (
@@ -1376,6 +1606,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         Some("gpt-5.6-sol"),
         Some("medium"),
         Some("missing"),
+        &HashMap::new(),
     )
     .unwrap_err();
     assert!(unknown_profile.contains("profile missing"));
@@ -1384,37 +1615,62 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "claude_code",
-            Some("claude-opus-4-8"),
+            Some("claude-opus-5"),
             Some(" HIGH "),
             None,
+            &HashMap::new()
         )
         .unwrap(),
         (
             ProviderKind::ClaudeCode,
-            "claude-opus-4-8".into(),
+            "claude-opus-5".into(),
             Some("high".into()),
             false,
             None
         )
     );
-    let wrong_effort =
-        resolve_orchestrate_dispatch(&settings, "codex", Some("gpt-5.6-sol"), Some("xhigh"), None)
-            .unwrap_err();
-    assert!(
-        wrong_effort
-            .contains("no enabled child profile matches gpt-5.6-sol (effort xhigh) under codex")
-    );
-    assert!(wrong_effort.contains("gpt-5.6-sol (effort medium)"));
-    assert!(wrong_effort.contains("gpt-5.6-sol (effort max)"));
-    let denied =
-        resolve_orchestrate_dispatch(&settings, "claude", Some("claude-haiku-4-5"), None, None)
-            .unwrap_err();
-    assert!(denied.contains("no enabled child profile matches"));
+    for effort in ["medium", "high", "xhigh", "max"] {
+        assert_eq!(
+            resolve_orchestrate_dispatch(
+                &settings,
+                "codex",
+                Some("gpt-5.6-sol"),
+                Some(effort),
+                None,
+                &HashMap::new()
+            )
+            .unwrap()
+            .2
+            .as_deref(),
+            Some(effort)
+        );
+    }
+    let wrong_effort = resolve_orchestrate_dispatch(
+        &settings,
+        "codex",
+        Some("gpt-5.6-sol"),
+        Some("imaginary"),
+        None,
+        &HashMap::new(),
+    )
+    .unwrap_err();
+    assert!(wrong_effort.contains("unsupported effort imaginary"));
+    assert!(wrong_effort.contains("medium, high, xhigh, max"));
+    let denied = resolve_orchestrate_dispatch(
+        &settings,
+        "claude",
+        Some("claude-haiku-4-5"),
+        None,
+        None,
+        &HashMap::new(),
+    )
+    .unwrap_err();
+    assert!(denied.contains("no enabled profile matches"));
 
     let mut empty = settings;
     empty.child_models.clear();
     assert!(
-        resolve_orchestrate_dispatch(&empty, "codex", None, None, None)
+        resolve_orchestrate_dispatch(&empty, "codex", None, None, None, &HashMap::new())
             .unwrap_err()
             .contains("enabled profiles: none")
     );
@@ -1629,18 +1885,18 @@ fn draft_model_selection_switches_to_the_rows_explicit_provider() {
         assert_eq!(draft.meta.provider, ProviderKind::Codex);
         assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.6-sol"));
 
-        // `claude-fable-5` cannot be reliably classified by a hard-coded
+        // `claude-fable-5-1` cannot be reliably classified by a hard-coded
         // model-name heuristic. The provider comes from its picker row.
         state.set_active_model(
             ProviderKind::ClaudeCode,
-            Some("claude-fable-5".into()),
+            Some("claude-fable-5-1".into()),
             None,
             cx,
         );
 
         let draft = state.selected_session().unwrap();
         assert_eq!(draft.meta.provider, ProviderKind::ClaudeCode);
-        assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5"));
+        assert_eq!(draft.meta.model.as_deref(), Some("claude-fable-5-1"));
         assert!(draft.meta.acp_agent_id.is_none());
         assert!(draft.meta.option_selections.is_empty());
         assert!(state.store.load_index().is_empty());
@@ -1669,7 +1925,7 @@ fn model_switch_restores_last_effort_used_with_that_model() {
         let mut fable = SessionMeta::new(
             ProviderKind::ClaudeCode,
             PathBuf::from("/tmp/fable"),
-            Some("claude-fable-5".into()),
+            Some("claude-fable-5-1".into()),
         );
         fable.project_id = Some("project-target".into());
         fable.updated_at = 20;
@@ -4249,7 +4505,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
     state.host_update(cx, |state, cx| {
         state.settings.abort_on_model_fallback = true;
         let mut active = live_session(ProviderKind::ClaudeCode, commands);
-        active.meta.model = Some("claude-fable-5".into());
+        active.meta.model = Some("claude-fable-5-1".into());
         active.turn_in_flight = true;
         active.timeline.apply_at(
             None,
@@ -4264,7 +4520,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
         state.on_event(
             &session_id,
             AgentEvent::ModelFallbackDetected {
-                expected: "claude-fable-5".into(),
+                expected: "claude-fable-5-1".into(),
                 actual: "claude-opus-4-8".into(),
                 category: None,
                 checkpoint_id: None,
@@ -4290,7 +4546,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
                 fallback_model: Some(fallback_model),
                 ..
             },
-        }) if model == "claude-fable-5" && fallback_model == "claude-opus-4-8"
+        }) if model == "claude-fable-5-1" && fallback_model == "claude-opus-4-8"
     )));
 }
 
@@ -6107,7 +6363,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
     let parent = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/project"), None);
     let parent_id = parent.id.clone();
 
-    // Profile default: medium is plain, max is fast.
+    // Fast mode belongs to the model, independent of reasoning effort.
     state.host_update(cx, |state, _| {
         state.sessions.push(parent);
         let max = state
@@ -6115,7 +6371,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
             .orchestrate
             .child_models
             .iter_mut()
-            .find(|child| child.effort.as_deref() == Some("max"))
+            .find(|child| child.model == "gpt-5.6-sol")
             .unwrap();
         max.fast = true;
     });
@@ -6124,6 +6380,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
         let (reply, response) = smol::channel::bounded(1);
         state.handle_orchestrate_op(
             orchestrate_mcp::OrchestrateOp::Dispatch {
+                purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id: parent_id.clone(),
                 provider: "codex".into(),
                 model: Some("gpt-5.6-sol".into()),
@@ -6154,7 +6411,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
     };
 
     state.host_update(cx, |state, cx| {
-        assert!(!dispatch(state, cx, "medium", None), "profile default: off");
+        assert!(dispatch(state, cx, "medium", None), "model default: on");
         assert!(dispatch(state, cx, "medium", Some(true)), "override on");
         assert!(dispatch(state, cx, "max", None), "profile default: on");
         assert!(!dispatch(state, cx, "max", Some(false)), "override off");
@@ -6178,6 +6435,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
         state.sessions.push(parent);
         state.handle_orchestrate_op(
             orchestrate_mcp::OrchestrateOp::Dispatch {
+                purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
                 model: Some("gpt-5.6-sol".into()),
@@ -6237,6 +6495,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
         state.sessions.push(parent);
         state.handle_orchestrate_op(
             orchestrate_mcp::OrchestrateOp::Dispatch {
+                purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
                 model: Some("gpt-5.6-sol".into()),

@@ -1,8 +1,9 @@
 use super::*;
+use tcode_core::settings::{OrchestrateChildModel, orchestrate_efforts};
 
 /// Appended to every dispatched brief so the report contract reaches the child
 /// regardless of what the orchestrator wrote.
-pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_result tool is the only channel through which your work reaches the orchestrator that dispatched you; it cannot see your transcript. When your work is complete, send your complete final report through it, then end your turn. Make the report self-contained: what you did, files changed, every command you ran with its outcome, and your findings or conclusions in full. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
+pub(super) const CHILD_REPORT_FOOTER: &str = "\n\n---\nThe tcode_report report_result tool is the only channel through which your work reaches the orchestrator that dispatched you; it cannot see your transcript. When your work is complete, send your complete final report through it, then end your turn. Make the report self-contained: for a discussion, give your reasoning, recommendations, disagreements, and open questions; for execution, include files changed and commands actually run with their outcomes. Include the evidence behind your conclusions. Only if the tool call fails, write that same complete report as your final message instead — it is sent back as the fallback, truncated when long.";
 
 #[derive(Default)]
 pub(super) struct McpWiring {
@@ -180,22 +181,30 @@ impl AppState {
         let Some(active) = self.resident(target_id) else {
             return;
         };
-        let provider = active.meta.provider;
-        let model = active.meta.model.clone();
         let enabling = !active.meta.orchestrate_enabled;
         let session_id = active.meta.id.clone();
-        // The composed text is [guidance?] + [configuration] + [user text] joined
+        // The composed text is [workflow] + [configuration] + [user text] joined
         // by "\n\n", with the user's words last. `context_len` is the byte length
         // of everything before them (prefix + its trailing "\n\n") — the split the
         // timeline records so it can show the prefix as a disclosure and the
         // bubble only the user's words. The provider still receives all of `text`.
         let user_len = text.len();
+        let caller_model = active
+            .meta
+            .model
+            .as_deref()
+            .or(active.live_model.as_deref())
+            .or_else(|| {
+                self.models_for(active.meta.provider)
+                    .iter()
+                    .find(|model| model.is_default)
+                    .map(|model| model.id.as_str())
+            });
         let text = compose_orchestrate_text(
-            provider,
-            model.as_deref(),
-            enabling,
             &self.settings.orchestrate,
             &text,
+            Some((active.meta.provider, caller_model)),
+            &self.providers.model_catalogs,
         );
         let context_len = text.len().saturating_sub(user_len);
 
@@ -415,6 +424,7 @@ impl AppState {
                 thread_id,
             } => self.handle_orchestrate_result(parent_id, thread_id, reply, cx),
             orchestrate_mcp::OrchestrateOp::Dispatch {
+                purpose,
                 parent_id,
                 provider,
                 model,
@@ -429,20 +439,31 @@ impl AppState {
                 result_max_chars,
                 fast: fast_override,
             } => {
+                let collaboration = purpose == orchestrate_mcp::ThreadPurpose::Collaboration;
+                let resolve = if collaboration {
+                    resolve_orchestrate_collaboration
+                } else {
+                    resolve_orchestrate_dispatch
+                };
                 let resolved = (|| {
-                    let (provider, model, effort, fast, profile_id) = resolve_orchestrate_dispatch(
+                    let (provider, model, effort, fast, profile_id) = resolve(
                         &self.settings.orchestrate,
                         &provider,
                         model.as_deref(),
                         effort.as_deref(),
                         profile.as_deref(),
+                        &self.providers.model_catalogs,
                     )?;
                     if let Some(id) = profile_id.as_deref()
                         && self.settings.resolved_profile(id).is_none()
                     {
                         return Err(format!("unknown profile: {id}"));
                     }
-                    let approval_mode = resolve_dispatch_access(access.as_deref())?;
+                    let approval_mode = if collaboration {
+                        ApprovalMode::ReadOnly
+                    } else {
+                        resolve_dispatch_access(access.as_deref())?
+                    };
                     // The profile's fast setting is the default; a dispatch may
                     // override it either way on the user's explicit instruction.
                     let fast = fast_override.unwrap_or(fast);
@@ -455,9 +476,20 @@ impl AppState {
                         return;
                     }
                 };
+                let brief = if collaboration {
+                    compose_collaboration_brief(
+                        &self.settings.orchestrate,
+                        provider,
+                        &model,
+                        &brief,
+                    )
+                } else {
+                    brief
+                };
                 let archive_on_complete =
                     archive_on_complete.unwrap_or(self.settings.orchestrate.archive_on_complete);
-                let isolate = worktree.unwrap_or(self.settings.orchestrate.child_worktrees);
+                let isolate =
+                    !collaboration && worktree.unwrap_or(self.settings.orchestrate.child_worktrees);
                 if cwd.is_none() && !isolate {
                     let result = self
                         .create_child_session(
@@ -1181,34 +1213,22 @@ impl AppState {
     }
 }
 
-// Named fable.md: on case-insensitive filesystems a claude.md here collides
-// with the CLAUDE.md project-memory convention and gets auto-ingested by
-// Claude Code sessions working on this repo.
-pub(super) const FABLE_ORCHESTRATE_GUIDANCE: &str =
-    include_str!("../../../../assets/orchestrate/fable.md");
-pub(super) const CODEX_ORCHESTRATE_GUIDANCE: &str =
-    include_str!("../../../../assets/orchestrate/codex.md");
-pub(super) const GENERIC_ORCHESTRATE_GUIDANCE: &str =
-    include_str!("../../../../assets/orchestrate/generic.md");
+pub(super) const ORCHESTRATE_GUIDANCE: &str =
+    include_str!("../../../../assets/orchestrate/workflow.md");
+pub(super) const COLLABORATION_GUIDANCE: &str =
+    include_str!("../../../../assets/orchestrate/collaboration.md");
 
 pub(super) fn compose_orchestrate_text(
-    provider: ProviderKind,
-    model: Option<&str>,
-    enabling: bool,
     settings: &OrchestrateSettings,
     user_text: &str,
+    caller: Option<(ProviderKind, Option<&str>)>,
+    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
 ) -> String {
-    let base_guidance = match provider {
-        ProviderKind::ClaudeCode => FABLE_ORCHESTRATE_GUIDANCE,
-        ProviderKind::Codex => CODEX_ORCHESTRATE_GUIDANCE,
-        ProviderKind::Pi | ProviderKind::OpenCode => GENERIC_ORCHESTRATE_GUIDANCE,
-        ProviderKind::Acp => GENERIC_ORCHESTRATE_GUIDANCE,
-    };
-    let configuration = render_orchestrate_configuration(settings, provider, model);
+    let configuration = render_orchestrate_configuration(settings, caller, catalogs);
     let mut sections = Vec::with_capacity(3);
-    if enabling {
-        sections.push(base_guidance.trim());
-    }
+    // Refresh the workflow on explicit /orchestrate messages, including sessions
+    // enabled before the old model-identity instructions were removed.
+    sections.push(ORCHESTRATE_GUIDANCE.trim());
     sections.push(configuration.trim());
     if !user_text.is_empty() {
         sections.push(user_text);
@@ -1216,47 +1236,97 @@ pub(super) fn compose_orchestrate_text(
     sections.join("\n\n")
 }
 
-pub(super) fn render_orchestrate_configuration(
+pub(super) fn compose_collaboration_brief(
     settings: &OrchestrateSettings,
     provider: ProviderKind,
-    model: Option<&str>,
+    model: &str,
+    brief: &str,
 ) -> String {
-    let identity = settings.identity_for(provider, model).trim();
-    let mut text = String::from("## Current orchestrator configuration\n\n### Your role\n\n");
-    if identity.is_empty() {
-        text.push_str("No additional model-specific identity is configured.");
-    } else {
-        text.push_str(identity);
-    }
-    text.push_str(
-        "\n\n### Allowed child models\n\nProfiles pin the effort they dispatch at. A dispatch must name `model` and `effort` exactly as listed; both may be omitted, in which case tcode picks the first enabled profile for the provider. When an entry names a `profile`, pass it exactly as listed. A profile marked `fast mode` dispatches with the provider's fast mode; pass `fast: true|false` on a dispatch (or on a `send`, for a child that already exists) to override that only when the user explicitly asks. The definitions below are user-configured routing guidance.\n",
+    let recognition = settings
+        .decision_models
+        .iter()
+        .find(|entry| entry.provider == provider && entry.model == model)
+        .map(|entry| entry.description.trim())
+        .unwrap_or_default();
+    format!(
+        "{}\n\n## Your collaboration guidance\n\n{recognition}\n\n## Discussion\n\n{brief}",
+        COLLABORATION_GUIDANCE.trim()
+    )
+}
+
+pub(super) fn render_orchestrate_configuration(
+    settings: &OrchestrateSettings,
+    caller: Option<(ProviderKind, Option<&str>)>,
+    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
+) -> String {
+    let mut text = String::from(
+        "## Current orchestrator configuration\n\nUse tcode_orchestrate for collaboration and execution. Compare enabled profiles across all providers by their task fit, strengths, limitations, and cost; provider family is not a routing preference.\n",
     );
-    if !settings.child_models.iter().any(|child| child.enabled) {
-        text.push_str("No child models are enabled. Work without dispatching until the user enables one in Settings → Orchestrate.");
-        return text;
-    }
-    for child in settings.child_models.iter().filter(|child| child.enabled) {
-        let provider = provider_name(child.provider);
-        let effort = child.effort.as_deref().unwrap_or("provider default");
-        let fast = if child.fast { " — fast mode" } else { "" };
-        if let Some(profile_id) = child.profile_id.as_deref() {
+    for (heading, tool, profiles) in [
+        (
+            "Collaboration models",
+            "collaborate",
+            &settings.decision_models,
+        ),
+        ("Execution models", "dispatch", &settings.child_models),
+    ] {
+        text.push_str(&format!("\n### {heading} — `{tool}`\n\n"));
+        text.push_str("Choose the model across providers, then set the tool's effort parameter from that model's available values according to its description and task difficulty. Effort is a per-call choice; omitted effort uses medium when available, otherwise the provider default. Match model and endpoint profile exactly. Fast mode follows the configuration unless the user explicitly requests an override. Descriptions under peer headings belong to those peers, not to the main thread. The main thread's own peer entry is omitted.\n");
+        let collaboration = tool == "collaborate";
+        let available: Vec<_> = profiles
+            .iter()
+            .filter(|entry| {
+                entry.enabled
+                    && !(collaboration
+                        && caller.is_some_and(|(provider, model)| {
+                            // Before discovery identifies the lead, withhold that
+                            // provider's peer identities rather than guessing its model.
+                            provider == entry.provider
+                                && model.is_none_or(|model| model == entry.model)
+                        }))
+            })
+            .map(|entry| {
+                (
+                    entry,
+                    orchestrate_efforts(
+                        entry.provider,
+                        &entry.model,
+                        catalogs
+                            .get(&entry.provider)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                        collaboration,
+                    ),
+                )
+            })
+            .filter(|(_, choices)| !collaboration || !choices.is_empty())
+            .collect();
+        if available.is_empty() {
             text.push_str(&format!(
-                "\n#### `{}` / `{}` — effort `{}`{} — profile `{}`\n\n{}\n",
-                escape_markdown_inline(provider),
-                escape_markdown_inline(&child.model),
-                escape_markdown_inline(effort),
-                fast,
-                escape_markdown_inline(profile_id),
-                child.description.trim(),
+                "No eligible configured models; `{tool}` is unavailable with the current configuration.\n"
             ));
-        } else {
+        }
+        for (entry, choices) in available {
+            let profile = entry
+                .profile_id
+                .as_ref()
+                .map(|id| format!(" — profile `{}`", escape_markdown_inline(id)))
+                .unwrap_or_default();
+            let fast = if entry.fast { " — fast mode" } else { "" };
+            let efforts = if choices.is_empty() {
+                "omit (provider default)".to_string()
+            } else {
+                choices
+                    .iter()
+                    .map(|effort| format!("`{}`", escape_markdown_inline(effort)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             text.push_str(&format!(
-                "\n#### `{}` / `{}` — effort `{}`{}\n\n{}\n",
-                escape_markdown_inline(provider),
-                escape_markdown_inline(&child.model),
-                escape_markdown_inline(effort),
-                fast,
-                child.description.trim(),
+                "\n#### `{}` / `{}` — available `effort`: {efforts}{fast}{profile}\n\n{}\n",
+                provider_name(entry.provider),
+                escape_markdown_inline(&entry.model),
+                entry.description.trim()
             ));
         }
     }
@@ -1280,6 +1350,46 @@ pub(super) fn resolve_orchestrate_dispatch(
     model: Option<&str>,
     effort: Option<&str>,
     profile: Option<&str>,
+    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
+) -> Result<ResolvedDispatch, String> {
+    resolve_orchestrate_profiles(
+        &settings.child_models,
+        provider,
+        model,
+        effort,
+        profile,
+        catalogs,
+        false,
+    )
+}
+
+pub(super) fn resolve_orchestrate_collaboration(
+    settings: &OrchestrateSettings,
+    provider: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    profile: Option<&str>,
+    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
+) -> Result<ResolvedDispatch, String> {
+    resolve_orchestrate_profiles(
+        &settings.decision_models,
+        provider,
+        model,
+        effort,
+        profile,
+        catalogs,
+        true,
+    )
+}
+
+fn resolve_orchestrate_profiles(
+    profiles: &[OrchestrateChildModel],
+    provider: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    profile: Option<&str>,
+    catalogs: &HashMap<ProviderKind, Vec<agent::ModelSpec>>,
+    collaboration: bool,
 ) -> Result<ResolvedDispatch, String> {
     let provider = match provider.trim().to_ascii_lowercase().as_str() {
         "claude" | "claude_code" | "claude-code" => ProviderKind::ClaudeCode,
@@ -1297,8 +1407,14 @@ pub(super) fn resolve_orchestrate_dispatch(
     let requested_model = model.map(str::trim).filter(|model| !model.is_empty());
     let requested_effort = effort.map(str::trim).filter(|effort| !effort.is_empty());
     let requested_profile = profile.map(str::trim).filter(|profile| !profile.is_empty());
-    let candidates: Vec<_> = settings
-        .enabled_child_profiles(provider, requested_model, requested_effort)
+    let candidates: Vec<_> = profiles
+        .iter()
+        .filter(|entry| {
+            entry.enabled
+                && entry.provider == provider
+                && requested_model.is_none_or(|model| entry.model == model)
+                && !entry.model.trim().is_empty()
+        })
         .filter(|entry| {
             requested_profile.is_none_or(|requested| {
                 entry
@@ -1318,16 +1434,10 @@ pub(super) fn resolve_orchestrate_dispatch(
             .or_else(|| candidates.first().copied())
     }
     .ok_or_else(|| {
-        let enabled = settings
-            .child_models
-            .iter()
+        let enabled = profiles.iter()
             .filter(|entry| entry.enabled && entry.provider == provider)
             .map(|entry| {
-                let mut option = format!(
-                    "{} (effort {})",
-                    entry.model,
-                    entry.effort.as_deref().unwrap_or("provider default")
-                );
+                let mut option = entry.model.clone();
                 if let Some(profile_id) = entry.profile_id.as_deref() {
                     option.push_str(&format!(", profile {profile_id}"));
                 }
@@ -1343,15 +1453,54 @@ pub(super) fn resolve_orchestrate_dispatch(
             .map(|profile| format!(" under profile {profile}"))
             .unwrap_or_default();
         format!(
-            "no enabled child profile matches {requested}{effort}{profile} under {}; enabled profiles: {}",
+            "no enabled profile matches {requested}{effort}{profile} under {}; enabled profiles: {}",
             provider_name(provider),
             if enabled.is_empty() { "none" } else { &enabled }
         )
     })?;
+    let available = orchestrate_efforts(
+        provider,
+        &child.model,
+        catalogs
+            .get(&provider)
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        collaboration,
+    );
+    let selected_effort = match requested_effort {
+        Some(requested) => Some(
+            available
+                .iter()
+                .find(|effort| effort.eq_ignore_ascii_case(requested))
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "unsupported effort {requested} for {}; available effort values: {}",
+                        child.model,
+                        if available.is_empty() {
+                            "none; omit effort".into()
+                        } else {
+                            available.join(", ")
+                        }
+                    )
+                })?,
+        ),
+        None => available
+            .iter()
+            .find(|effort| effort.as_str() == "medium")
+            .or_else(|| collaboration.then(|| available.first()).flatten())
+            .cloned(),
+    };
+    if collaboration && selected_effort.is_none() {
+        return Err(format!(
+            "{} has no available medium/high collaboration effort",
+            child.model
+        ));
+    }
     Ok((
         provider,
         child.model.clone(),
-        child.effort.clone(),
+        selected_effort,
         child.fast,
         child.profile_id.clone(),
     ))

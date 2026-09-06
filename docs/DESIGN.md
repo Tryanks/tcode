@@ -333,21 +333,45 @@ access while Read only remains enforced by pi's native tool filter. Because pi
 has no MCP client, its unattached-tools warning is emitted only for explicitly
 enabled orchestration or computer-use registrations.
 
-Orchestrate begins with an explicit built-in `/orchestrate` explanation. Every
-main model is eligible: the page exposes one multiline generic identity plus
-optional per-model multiline identity overrides, and models without an override
-inherit the generic text. Each editor has a compact "Restore default" action.
-Allowed child models are retained as provider/model profiles with one multiline
-routing-definition editor, an independent dispatch switch, restore and delete
-actions. Each row exposes the catalog's reasoning choices and shows a Fast
-switch only when the model catalog declares Claude fast mode or a Codex Fast
-service tier (or when a stored Fast value must remain available to turn off).
-Built-in ratings and recommended effort live inside the default text, not
-separate controls. Add-model popovers keep provider tabs fixed above a
-300px scrollable model list so large catalogs never grow past the viewport.
-That provider/model picker is one shared component also used by the General
-page's thread-title setting, so catalog resolution and provider switching stay
-identical across both settings surfaces.
+Orchestrate uses one provider-neutral workflow, refreshed on each explicit
+`/orchestrate` message. It describes framing, cross-provider peer discussion,
+execution routing, and independent acceptance. Main-model self-concept editors
+and identity overrides are removed. Existing identity fields are ignored on load.
+
+Settings show two model lists: **Collaboration models**, bundled
+with GPT-6 Astra and Claude Fable 5.1, and **Execution models**, bundled with
+GPT-5.6 Sol and Claude Opus 5. Other models may still initiate `/orchestrate`.
+`collaborate` opens a read-only peer discussion, continued through `send`;
+`dispatch` assigns concrete work to execution models. Model selection considers
+the whole cross-provider fleet, preferring tcode Orchestrate to native subagents.
+Each collaboration model can be switched on or off independently. Its switch
+controls whether it can be invited through `collaborate`, never whether it may
+serve as the main decision model. Turning every peer off still permits the main
+thread to use `/orchestrate` and dispatch execution work. Status chips and switch
+tooltips explicitly name collaboration to make this distinction visible.
+
+Each provider/model ID occurs once across both lists, regardless of endpoint.
+Add pickers exclude configured models and settings patches enforce uniqueness.
+Each row has an editable description, enable switch, restore/delete actions,
+a read-only list of available reasoning efforts, and a Fast switch when supported
+(or when a stored value needs to remain visible). Effort is selected per tool call
+from the live provider catalog, with bundled startup fallbacks. There is no saved
+fixed-effort field. Collaboration is limited to medium/high; omitted effort uses
+medium when available. Sol's description recommends medium for routine execution,
+high/xhigh as difficulty grows, and max for the hardest well-defined problems.
+
+The main workflow has no self-concept. Peer descriptions contain their collaboration
+self-concepts: the main thread sees only other peers, and a consulted peer receives
+its own description with the discussion brief. These texts emphasize complementary
+perspectives, useful initiative within scope, and proportionate verification.
+See [model guidance sources](orchestrate-model-guidance.md).
+
+Migration combines old effort-tier descriptions into one model record and retains
+the first record's endpoint, enable, and Fast choices. Bundled Sonnet entries are
+removed, Opus 4.8 becomes Opus 5, and Fable 5 becomes Fable 5.1. Custom descriptions
+are retained with their old effort context; explicitly empty lists stay empty.
+Both add-model popovers reuse the provider/model picker with fixed tabs and a
+300px scrollable model list.
 
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 Centered top-anchored modal over a dim backdrop: search input; grouped results

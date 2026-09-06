@@ -4,9 +4,16 @@ use std::time::Duration;
 
 mod tools;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadPurpose {
+    Execution,
+    Collaboration,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrchestrateOp {
     Dispatch {
+        purpose: ThreadPurpose,
         parent_id: String,
         provider: String,
         model: Option<String>,

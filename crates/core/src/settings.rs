@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use agent::ProviderKind;
+use agent::{ModelSpec, OptionDescriptor, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 use crate::acp::InstalledAcpAgent;
@@ -227,22 +227,8 @@ pub struct ResolvedProfile {
     pub settings: ProviderSettings,
 }
 
-/// A model-specific identity override for an orchestrator. Models without an
-/// entry here remain fully eligible for `/orchestrate`; they inherit
-/// [`OrchestrateSettings::generic_identity`] instead.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrchestratorIdentity {
-    pub provider: ProviderKind,
-    pub model: String,
-    pub identity: String,
-}
-
-/// One (model, effort) profile the orchestrator may dispatch work to. The same
-/// model may appear several times at different efforts (e.g. `gpt-5.6-sol` at
-/// medium as the bulk tier and at max as the exception tier), each with its own
-/// routing definition. Profiles stay in this list while paused so their
-/// editable routing definition is preserved; `enabled` is the actual allow-list
-/// decision.
+/// One configured model, unique by provider and model ID across both fleets.
+/// Reasoning effort is selected per tool call from the provider's capabilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrchestrateChildModel {
     pub provider: ProviderKind,
@@ -251,19 +237,11 @@ pub struct OrchestrateChildModel {
     /// `None` = the kind's built-in profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
-    /// Disabled profiles retain all routing preferences but cannot receive a
-    /// dispatch and are omitted from the lead model's available-fleet table.
+    /// Controls availability as a collaboration peer or executor in this list.
+    /// Disabled entries retain their configuration and are omitted from the fleet.
+    /// This never controls whether the model can run as the main decision model.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// The reasoning effort this profile dispatches at; `None` = provider
-    /// default. Part of the allow-list key: a dispatch naming an effort must
-    /// match an enabled profile with that effort.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "default_effort"
-    )]
-    pub effort: Option<String>,
     /// Dispatch with the provider's fast mode (Claude `fastMode`, Codex `fast`
     /// service tier). Ignored by providers without one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -272,32 +250,65 @@ pub struct OrchestrateChildModel {
     pub description: String,
 }
 
-impl OrchestrateChildModel {
-    /// Whether a dispatch-supplied effort selects this profile. `None` selects
-    /// any profile for the model; a named effort must match exactly
-    /// (case-insensitive).
-    pub fn matches_effort(&self, effort: Option<&str>) -> bool {
-        match effort {
-            None => true,
-            Some(effort) => self
-                .effort
-                .as_deref()
-                .is_some_and(|own| own.eq_ignore_ascii_case(effort.trim())),
-        }
+const LEGACY_GPT_MEDIUM_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 9, intelligence 8, taste 6. An economical execution profile for bulk or mechanical implementation against a written brief, closed-form debugging with a repro, migrations, data analysis, reviews, sweeps, computer use and eyes-on-screen verification, and token-heavy log or codebase crawls. Extremely steerable and disciplined: respects scope fences, does not weaken tests, reports accurately. Measured equal to its higher efforts on spec-driven work — escalate only after this profile demonstrably misses on a specific piece and the gap looks like depth, not a bad brief.";
+const LEGACY_GPT_MAX_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 6, intelligence 9, taste 7. Exception tier — near the top judgment model's raw problem-solving at a fraction of the token cost, with a rottweiler temperament: grabs the problem by the throat and doesn't let go. Route it hard, well-defined problems that reward tenacity or depth: gnarly bugs with a repro, long autonomous grinds, brute-force search of a solution space, open-ended polish passes. Two measured caveats: wall-clock latency is 5–6x the medium profile, so keep it off any pipeline's critical path; and on closed-form bug fixes it produces the same fix as medium at 1.5–3x the cost. Taste 7 clears the bar for internal tools and dashboards; keep brand- or copy-critical surfaces on a taste-8+ model.";
+const LEGACY_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 5, intelligence 5, taste 7. Cheap glue — wrappers, chores, and context gathering that does not require top-tier judgment.";
+const LEGACY_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 4, intelligence 7, taste 8. First choice for user-facing work: UI, copy, API design, and anything where taste matters more than grinding depth. Also a strong independent reviewer of plans and implementations.";
+const LEGACY_ASTRA_DECISION_DEFINITION: &str = "Decision collaboration: develop independent approaches, challenge assumptions, and review architecture and acceptance evidence. Consult alongside Fable for another provider's perspective; route implementation and evidence gathering to execution models.";
+const LEGACY_FABLE_DECISION_DEFINITION: &str = "Decision collaboration: examine framing, architecture, user-facing design, and ambiguous tradeoffs. Consult alongside Astra for another provider's perspective; route implementation and evidence gathering to execution models.";
+
+const DEFAULT_SOL_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
+const DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
+const DEFAULT_ASTRA_DEFINITION: &str = include_str!("../../../assets/orchestrate/astra.md");
+const DEFAULT_FABLE_DEFINITION: &str = include_str!("../../../assets/orchestrate/fable-5-1.md");
+
+/// Live catalogs are authoritative. Bundled fallbacks cover startup before discovery.
+/// Collaboration is deliberately capped at medium/high, independent of execution.
+pub fn orchestrate_efforts(
+    provider: ProviderKind,
+    model: &str,
+    catalog: &[ModelSpec],
+    collaboration: bool,
+) -> Vec<String> {
+    let mut efforts = if let Some(spec) = catalog.iter().find(|spec| spec.id == model) {
+        spec.options
+            .iter()
+            .find_map(|option| match option {
+                OptionDescriptor::Select { id, options, .. } if id == "reasoningEffort" => Some(
+                    options
+                        .iter()
+                        .map(|choice| choice.value.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    } else {
+        let fallback: &[&str] = match (provider, model) {
+            (ProviderKind::Codex, "gpt-5.6-sol" | "gpt-6-astra") => {
+                &["low", "medium", "high", "xhigh", "max", "ultra"]
+            }
+            (ProviderKind::ClaudeCode, "claude-opus-5" | "claude-fable-5-1") => &[
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "ultracode",
+                "ultrathink",
+            ],
+            _ => &[],
+        };
+        fallback
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect()
+    };
+    if collaboration {
+        efforts.retain(|effort| matches!(effort.as_str(), "medium" | "high"));
     }
+    efforts
 }
-
-const DEFAULT_ORCHESTRATOR_IDENTITY: &str = "You are the primary decision model and technical lead for this session. Your leverage is judgment: understand the problem, frame it well, decompose it, define done, route work to the cheapest adequate child model, and verify the result independently. Keep architecture, ambiguous tradeoffs, and final acceptance for yourself; delegate execution when a child can complete it from a precise brief.";
-
-const DEFAULT_FABLE_IDENTITY: &str = "You are Fable 5, the scarcest judgment resource in this fleet: a wise owl—thoughtful, discerning, and exceptionally strong at framing, architecture, taste, and clear communication. Spend that judgment on understanding, delegation, review, and final acceptance rather than routine typing. Use high effort by default; deeper tiers usually consume more of the fleet's bottleneck without improving your decisions.";
-
-const DEFAULT_SOL_IDENTITY: &str = "You are gpt-5.6-sol, the fleet's relentless closer: a rottweiler with an articulate report—tenacious, disciplined, and exceptional on hard, well-defined problems. As the lead, run at max effort: decision quality, not tokens, is the bottleneck in this seat. Point that tenacity at understanding, decomposition, acceptance criteria, and verification rather than typing; and since taste is not your strongest suit, route taste-critical surfaces (UI, copy, API design) to a high-taste child or flag them to the user instead of powering through.";
-
-const DEFAULT_GPT_MEDIUM_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 9, intelligence 8, taste 6. The default profile for everything dispatched: bulk or mechanical implementation against a written brief, closed-form debugging with a repro, migrations, data analysis, reviews, sweeps, computer use and eyes-on-screen verification, and token-heavy log or codebase crawls. Extremely steerable and disciplined: respects scope fences, does not weaken tests, reports accurately. Measured equal to its higher efforts on spec-driven work — escalate only after this profile demonstrably misses on a specific piece and the gap looks like depth, not a bad brief.";
-const DEFAULT_GPT_MAX_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 6, intelligence 9, taste 7. Exception tier — near the top judgment model's raw problem-solving at a fraction of the token cost, with a rottweiler temperament: grabs the problem by the throat and doesn't let go. Route it hard, well-defined problems that reward tenacity or depth: gnarly bugs with a repro, long autonomous grinds, brute-force search of a solution space, open-ended polish passes. Two measured caveats: wall-clock latency is 5–6x the medium profile, so keep it off any pipeline's critical path; and on closed-form bug fixes it produces the same fix as medium at 1.5–3x the cost. Taste 7 clears the bar for internal tools and dashboards; keep brand- or copy-critical surfaces on a taste-8+ model.";
-const DEFAULT_SONNET_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 5, intelligence 5, taste 7. Cheap glue — wrappers, chores, and context gathering that does not require top-tier judgment.";
-const DEFAULT_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 4, intelligence 7, taste 8. First choice for user-facing work: UI, copy, API design, and anything where taste matters more than grinding depth. Also a strong independent reviewer of plans and implementations.";
-const DEFAULT_FABLE_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): cost efficiency 2, intelligence 9, taste 9. Highest-judgment escalation for framing, architecture, ambiguous tradeoffs, taste-critical surfaces, and final review. The scarcest resource in the fleet: dispatch to it only when nothing cheaper is adequate.";
 
 /// Who answers permission requests raised by dispatched child threads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -314,16 +325,13 @@ pub enum ChildApprovalMode {
 
 /// Settings for tcode's built-in orchestration layer.
 ///
-/// There is deliberately no main-model allow list. Every model may orchestrate;
-/// only its identity text changes through the generic fallback and optional
-/// per-model overrides. Child models, by contrast, are an explicit allow list.
+/// Decision profiles support peer consultation; execution profiles receive tasks.
+/// Any session may invoke the workflow. Bundled decision profiles are Astra and Fable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "OrchestrateSettingsData")]
 pub struct OrchestrateSettings {
-    #[serde(default = "default_orchestrator_identity")]
-    pub generic_identity: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_identities: Vec<OrchestratorIdentity>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Collaboration invite list, not an allow list for the main decision model.
+    pub decision_models: Vec<OrchestrateChildModel>,
     pub child_models: Vec<OrchestrateChildModel>,
     #[serde(default)]
     pub child_approval: ChildApprovalMode,
@@ -338,72 +346,24 @@ pub struct OrchestrateSettings {
     pub archive_on_complete: bool,
 }
 
-fn default_orchestrator_identity() -> String {
-    DEFAULT_ORCHESTRATOR_IDENTITY.to_string()
-}
-
 impl Default for OrchestrateSettings {
     fn default() -> Self {
         Self {
-            generic_identity: default_orchestrator_identity(),
-            model_identities: vec![
-                OrchestratorIdentity {
-                    provider: ProviderKind::ClaudeCode,
-                    model: "claude-fable-5".into(),
-                    identity: DEFAULT_FABLE_IDENTITY.into(),
-                },
-                OrchestratorIdentity {
-                    provider: ProviderKind::Codex,
-                    model: "gpt-5.6-sol".into(),
-                    identity: DEFAULT_SOL_IDENTITY.into(),
-                },
+            decision_models: vec![
+                builtin_model(ProviderKind::Codex, "gpt-6-astra", DEFAULT_ASTRA_DEFINITION),
+                builtin_model(
+                    ProviderKind::ClaudeCode,
+                    "claude-fable-5-1",
+                    DEFAULT_FABLE_DEFINITION,
+                ),
             ],
             child_models: vec![
-                OrchestrateChildModel {
-                    provider: ProviderKind::Codex,
-                    model: "gpt-5.6-sol".into(),
-                    profile_id: None,
-                    enabled: true,
-                    effort: Some("medium".into()),
-                    fast: false,
-                    description: DEFAULT_GPT_MEDIUM_CHILD_DEFINITION.into(),
-                },
-                OrchestrateChildModel {
-                    provider: ProviderKind::Codex,
-                    model: "gpt-5.6-sol".into(),
-                    profile_id: None,
-                    enabled: true,
-                    effort: Some("max".into()),
-                    fast: false,
-                    description: DEFAULT_GPT_MAX_CHILD_DEFINITION.into(),
-                },
-                OrchestrateChildModel {
-                    provider: ProviderKind::ClaudeCode,
-                    model: "claude-sonnet-5".into(),
-                    profile_id: None,
-                    enabled: true,
-                    effort: Some("high".into()),
-                    fast: false,
-                    description: DEFAULT_SONNET_CHILD_DEFINITION.into(),
-                },
-                OrchestrateChildModel {
-                    provider: ProviderKind::ClaudeCode,
-                    model: "claude-opus-4-8".into(),
-                    profile_id: None,
-                    enabled: true,
-                    effort: Some("high".into()),
-                    fast: false,
-                    description: DEFAULT_OPUS_CHILD_DEFINITION.into(),
-                },
-                OrchestrateChildModel {
-                    provider: ProviderKind::ClaudeCode,
-                    model: "claude-fable-5".into(),
-                    profile_id: None,
-                    enabled: true,
-                    effort: Some("high".into()),
-                    fast: false,
-                    description: DEFAULT_FABLE_CHILD_DEFINITION.into(),
-                },
+                builtin_model(ProviderKind::Codex, "gpt-5.6-sol", DEFAULT_SOL_DEFINITION),
+                builtin_model(
+                    ProviderKind::ClaudeCode,
+                    "claude-opus-5",
+                    DEFAULT_OPUS_DEFINITION,
+                ),
             ],
             child_approval: ChildApprovalMode::default(),
             child_worktrees: false,
@@ -412,72 +372,191 @@ impl Default for OrchestrateSettings {
     }
 }
 
+fn builtin_model(provider: ProviderKind, model: &str, description: &str) -> OrchestrateChildModel {
+    OrchestrateChildModel {
+        provider,
+        model: model.into(),
+        profile_id: None,
+        enabled: true,
+        fast: false,
+        description: description.into(),
+    }
+}
+
+#[derive(Deserialize)]
+struct LegacyOrchestrateModel {
+    #[serde(flatten)]
+    entry: OrchestrateChildModel,
+    #[serde(default, alias = "default_effort")]
+    effort: Option<String>,
+}
+
+impl LegacyOrchestrateModel {
+    fn migrate(mut self) -> Option<OrchestrateChildModel> {
+        let entry = &mut self.entry;
+        let legacy = self.effort.is_some();
+        if legacy {
+            if entry.provider == ProviderKind::ClaudeCode {
+                match entry.model.as_str() {
+                    "claude-sonnet-5" if entry.description == LEGACY_SONNET_CHILD_DEFINITION => {
+                        return None;
+                    }
+                    "claude-opus-4-8" => entry.model = "claude-opus-5".into(),
+                    "claude-fable-5" => entry.model = "claude-fable-5-1".into(),
+                    _ => {}
+                }
+            }
+            let bundled = [
+                LEGACY_GPT_MEDIUM_CHILD_DEFINITION,
+                LEGACY_GPT_MAX_CHILD_DEFINITION,
+                LEGACY_OPUS_CHILD_DEFINITION,
+                LEGACY_ASTRA_DECISION_DEFINITION,
+                LEGACY_FABLE_DECISION_DEFINITION,
+                "Ratings (1–10, higher is better): cost efficiency 2, intelligence 9, taste 9. Highest-judgment escalation for framing, architecture, ambiguous tradeoffs, taste-critical surfaces, and final review. The scarcest resource in the fleet: dispatch to it only when nothing cheaper is adequate.",
+            ];
+            if bundled.contains(&entry.description.as_str())
+                || entry.description
+                    == LEGACY_GPT_MEDIUM_CHILD_DEFINITION.replace(
+                        "An economical execution profile for",
+                        "The default profile for everything dispatched:",
+                    )
+            {
+                if let Some(description) =
+                    OrchestrateSettings::builtin_child_definition(entry.provider, &entry.model)
+                {
+                    entry.description = description.into();
+                }
+            } else if !entry.description.trim().is_empty() {
+                // Old custom tier guidance remains meaningful after merging rows.
+                entry.description = format!(
+                    "Guidance previously used at {} effort: {}",
+                    self.effort.as_deref().unwrap(),
+                    entry.description
+                );
+            }
+        }
+        Some(self.entry)
+    }
+}
+
+/// Ignore retired lead identities and consume old fixed efforts only for migration.
+#[derive(Deserialize)]
+#[serde(default)]
+struct OrchestrateSettingsData {
+    decision_models: Option<Vec<LegacyOrchestrateModel>>,
+    child_models: Vec<LegacyOrchestrateModel>,
+    child_approval: ChildApprovalMode,
+    child_worktrees: bool,
+    archive_on_complete: bool,
+}
+
+impl Default for OrchestrateSettingsData {
+    fn default() -> Self {
+        Self {
+            decision_models: None,
+            child_models: Vec::new(),
+            child_approval: ChildApprovalMode::default(),
+            child_worktrees: false,
+            archive_on_complete: true,
+        }
+    }
+}
+
+impl From<OrchestrateSettingsData> for OrchestrateSettings {
+    fn from(data: OrchestrateSettingsData) -> Self {
+        let mut children: Vec<_> = data
+            .child_models
+            .into_iter()
+            .filter_map(LegacyOrchestrateModel::migrate)
+            .collect();
+        let decisions =
+            data.decision_models
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .filter_map(LegacyOrchestrateModel::migrate)
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    let mut decisions = Self::default().decision_models;
+                    let mut migrated = Vec::new();
+                    children.retain(|child| {
+                        if decisions.iter().any(|entry| {
+                            entry.provider == child.provider && entry.model == child.model
+                        }) {
+                            migrated.push(child.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    for builtin in &mut decisions {
+                        if let Some(index) = migrated.iter().position(|entry| {
+                            entry.provider == builtin.provider && entry.model == builtin.model
+                        }) {
+                            *builtin = migrated.remove(index);
+                        }
+                    }
+                    decisions.extend(migrated);
+                    decisions
+                });
+        let mut settings = Self {
+            decision_models: decisions,
+            child_models: children,
+            child_approval: data.child_approval,
+            child_worktrees: data.child_worktrees,
+            archive_on_complete: data.archive_on_complete,
+        };
+        settings.deduplicate_models(true);
+        settings
+    }
+}
+
 impl OrchestrateSettings {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
 
-    /// Resolve a model's dedicated identity, falling back to the generic one.
-    /// `None` (the provider's default model) also uses the generic identity.
-    pub fn identity_for(&self, provider: ProviderKind, model: Option<&str>) -> &str {
-        model
-            .and_then(|model| {
-                self.model_identities
-                    .iter()
-                    .find(|entry| entry.provider == provider && entry.model == model)
-            })
-            .map(|entry| entry.identity.as_str())
-            .unwrap_or(&self.generic_identity)
-    }
-
-    pub fn builtin_generic_identity() -> &'static str {
-        DEFAULT_ORCHESTRATOR_IDENTITY
-    }
-
-    /// Factory text for a dedicated identity editor. Models without a bundled
-    /// specialization reset to the factory generic identity.
-    pub fn builtin_identity_for(provider: ProviderKind, model: &str) -> &'static str {
+    pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
         match (provider, model) {
-            (ProviderKind::ClaudeCode, "claude-fable-5") => DEFAULT_FABLE_IDENTITY,
-            (ProviderKind::Codex, "gpt-5.6-sol") => DEFAULT_SOL_IDENTITY,
-            _ => DEFAULT_ORCHESTRATOR_IDENTITY,
-        }
-    }
-
-    /// Factory definition for a bundled child-model preset. Custom models have
-    /// no product-authored definition and therefore reset to an empty editor.
-    pub fn builtin_child_definition(
-        provider: ProviderKind,
-        model: &str,
-        effort: Option<&str>,
-    ) -> Option<&'static str> {
-        match (provider, model) {
-            (ProviderKind::Codex, "gpt-5.6-sol")
-                if effort.is_some_and(|effort| effort.eq_ignore_ascii_case("max")) =>
-            {
-                Some(DEFAULT_GPT_MAX_CHILD_DEFINITION)
-            }
-            (ProviderKind::Codex, "gpt-5.6-sol") => Some(DEFAULT_GPT_MEDIUM_CHILD_DEFINITION),
-            (ProviderKind::ClaudeCode, "claude-sonnet-5") => Some(DEFAULT_SONNET_CHILD_DEFINITION),
-            (ProviderKind::ClaudeCode, "claude-opus-4-8") => Some(DEFAULT_OPUS_CHILD_DEFINITION),
-            (ProviderKind::ClaudeCode, "claude-fable-5") => Some(DEFAULT_FABLE_CHILD_DEFINITION),
+            (ProviderKind::Codex, "gpt-5.6-sol") => Some(DEFAULT_SOL_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-opus-5") => Some(DEFAULT_OPUS_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-fable-5-1") => Some(DEFAULT_FABLE_DEFINITION),
+            (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_ASTRA_DEFINITION),
             _ => None,
         }
     }
 
-    pub fn enabled_child_profiles(
-        &self,
-        provider: ProviderKind,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> impl Iterator<Item = &OrchestrateChildModel> {
-        self.child_models.iter().filter(move |entry| {
-            entry.enabled
-                && entry.provider == provider
-                && model.is_none_or(|model| entry.model == model)
-                && !entry.model.trim().is_empty()
-                && entry.matches_effort(effort)
-        })
+    /// A model has one endpoint and one role. Migration combines distinct notes;
+    /// new patches keep the first row without allowing duplicates to mutate it.
+    pub fn deduplicate_models(&mut self, merge_notes: bool) {
+        let mut unique: Vec<OrchestrateChildModel> = Vec::new();
+        for models in [&mut self.decision_models, &mut self.child_models] {
+            let start = unique.len();
+            for mut entry in std::mem::take(models) {
+                entry.model = entry.model.trim().to_string();
+                if let Some(existing) = unique.iter_mut().find(|existing| {
+                    existing.provider == entry.provider && existing.model == entry.model
+                }) {
+                    if merge_notes
+                        && !entry.description.is_empty()
+                        && !existing.description.contains(&entry.description)
+                    {
+                        if !existing.description.is_empty() {
+                            existing.description.push_str("\n\n");
+                        }
+                        existing.description.push_str(&entry.description);
+                    }
+                } else {
+                    unique.push(entry);
+                }
+            }
+            *models = unique[start..].to_vec();
+        }
+        // Cross-role merged notes belong to the first (decision) record.
+        let decision_count = self.decision_models.len();
+        self.decision_models
+            .clone_from_slice(&unique[..decision_count]);
     }
 }
 
@@ -636,8 +715,7 @@ pub enum SettingsPatch {
     AutoArchiveMaxIdleDays(u32),
     AutoArchiveKeepCount(usize),
     AutoArchiveNoticeShown(bool),
-    OrchestrateGenericIdentity(String),
-    OrchestrateModelIdentities(Vec<OrchestratorIdentity>),
+    OrchestrateDecisionModels(Vec<OrchestrateChildModel>),
     OrchestrateChildModels(Vec<OrchestrateChildModel>),
     OrchestrateChildApproval(ChildApprovalMode),
     OrchestrateChildWorktrees(bool),
@@ -908,14 +986,23 @@ impl Settings {
             SettingsPatch::AutoArchiveNoticeShown(value) => {
                 self.auto_archive_notice_shown = value;
             }
-            SettingsPatch::OrchestrateGenericIdentity(value) => {
-                self.orchestrate.generic_identity = value;
+            SettingsPatch::OrchestrateDecisionModels(mut value) => {
+                value.retain(|entry| {
+                    !self.orchestrate.child_models.iter().any(|existing| {
+                        existing.provider == entry.provider && existing.model == entry.model.trim()
+                    })
+                });
+                self.orchestrate.decision_models = value;
+                self.orchestrate.deduplicate_models(false);
             }
-            SettingsPatch::OrchestrateModelIdentities(value) => {
-                self.orchestrate.model_identities = value;
-            }
-            SettingsPatch::OrchestrateChildModels(value) => {
+            SettingsPatch::OrchestrateChildModels(mut value) => {
+                value.retain(|entry| {
+                    !self.orchestrate.decision_models.iter().any(|existing| {
+                        existing.provider == entry.provider && existing.model == entry.model.trim()
+                    })
+                });
                 self.orchestrate.child_models = value;
+                self.orchestrate.deduplicate_models(false);
             }
             SettingsPatch::OrchestrateChildApproval(value) => {
                 self.orchestrate.child_approval = value;
@@ -1267,53 +1354,55 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_identity_uses_model_override_then_generic_fallback() {
-        let settings = OrchestrateSettings::default();
-        assert!(
-            settings
-                .identity_for(ProviderKind::ClaudeCode, Some("claude-fable-5"))
-                .contains("wise owl")
-        );
-        assert!(
-            settings
-                .identity_for(ProviderKind::Codex, Some("gpt-5.6-sol"))
-                .contains("rottweiler"),
-            "gpt-5.6-sol is the other model bundled with a dedicated lead identity"
-        );
+    fn orchestrate_defaults_and_legacy_migration() {
+        let defaults = OrchestrateSettings::default();
         assert_eq!(
-            settings.identity_for(ProviderKind::ClaudeCode, Some("claude-opus-4-8")),
-            settings.generic_identity
-        );
-        assert_eq!(
-            settings.identity_for(ProviderKind::Codex, Some("claude-fable-5")),
-            settings.generic_identity,
-            "the provider is part of a model's identity key"
-        );
-        assert_eq!(
-            settings.identity_for(ProviderKind::Acp, None),
-            settings.generic_identity,
-            "provider-default and ACP models remain eligible through the fallback"
-        );
-    }
-
-    #[test]
-    fn orchestrate_defaults_round_trip_and_legacy_files_get_defaults() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert_eq!(legacy.orchestrate, OrchestrateSettings::default());
-        assert_eq!(legacy.orchestrate.child_models.len(), 5);
-        assert!(
-            legacy
-                .orchestrate
-                .child_models
+            defaults
+                .decision_models
                 .iter()
-                .all(|entry| entry.enabled)
+                .map(|entry| entry.model.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-6-astra", "claude-fable-5-1"]
         );
-        let mut settings = Settings::default();
-        settings.orchestrate.generic_identity = "Custom lead identity".into();
-        settings.orchestrate.model_identities.clear();
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.orchestrate, settings.orchestrate);
+        assert_eq!(defaults.child_models.len(), 2);
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert_eq!(legacy.orchestrate, defaults);
+        let mut old = serde_json::to_value(&defaults).unwrap();
+        old.as_object_mut().unwrap().remove("decision_models");
+        old["generic_identity"] = "old self-concept".into();
+        old["model_identities"] = serde_json::json!([{"provider":"codex","model":"gpt-5.6-sol","identity":"old identity"}]);
+        let mut fable = defaults.decision_models[1].clone();
+        fable.enabled = false;
+
+        fable.description = "Custom consultation guidance".into();
+        old["child_models"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(&fable).unwrap());
+        let migrated: OrchestrateSettings = serde_json::from_value(old).unwrap();
+        assert_eq!(migrated.child_models, defaults.child_models);
+        assert_eq!(migrated.decision_models[1], fable);
+        let json = serde_json::to_string(&migrated).unwrap();
+        assert!(!json.contains("identity"));
+        assert_eq!(
+            serde_json::from_str::<OrchestrateSettings>(&json).unwrap(),
+            migrated
+        );
+        let empty: OrchestrateSettings =
+            serde_json::from_str(r#"{"decision_models":[],"child_models":[]}"#).unwrap();
+        let legacy_empty: OrchestrateSettings =
+            serde_json::from_str(r#"{"generic_identity":"old instructions"}"#).unwrap();
+        assert!(
+            legacy_empty.child_models.is_empty(),
+            "omitted legacy execution list stays empty"
+        );
+        assert!(empty.decision_models.is_empty());
+        assert!(empty.child_models.is_empty());
+        assert_eq!(
+            serde_json::from_str::<OrchestrateSettings>(&serde_json::to_string(&empty).unwrap())
+                .unwrap(),
+            empty
+        );
     }
 
     #[test]
@@ -1427,34 +1516,95 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_child_legacy_default_effort_alias_parses() {
-        let settings: OrchestrateSettings = serde_json::from_str(
-            r#"{"child_models":[{"provider":"codex","model":"m","default_effort":"high"}]}"#,
-        )
-        .unwrap();
-        assert_eq!(settings.child_models[0].effort.as_deref(), Some("high"));
+    fn orchestrate_merges_legacy_tiers_and_upgrades_bundled_models() {
+        let settings: OrchestrateSettings = serde_json::from_value(serde_json::json!({
+            "child_models": [
+                {"provider":"codex", "model":"gpt-5.6-sol", "default_effort":"medium", "description":"Routine work", "enabled":false, "profile_id":"custom", "fast":true},
+                {"provider":"codex", "model":"gpt-5.6-sol", "effort":"max", "description":"Difficult bugs"},
+                {"provider":"claude_code", "model":"claude-sonnet-5", "effort":"high", "description":LEGACY_SONNET_CHILD_DEFINITION},
+                {"provider":"claude_code", "model":"claude-opus-4-8", "effort":"high", "description":LEGACY_OPUS_CHILD_DEFINITION},
+                {"provider":"claude_code", "model":"claude-fable-5", "effort":"high", "description":LEGACY_FABLE_DECISION_DEFINITION}
+            ]
+        })).unwrap();
+        assert_eq!(settings.child_models.len(), 2);
+        let sol = &settings.child_models[0];
+        assert!(sol.description.contains("medium effort: Routine work"));
+        assert!(sol.description.contains("max effort: Difficult bugs"));
+        assert!(!sol.enabled);
+        assert!(sol.fast);
+        assert_eq!(sol.profile_id.as_deref(), Some("custom"));
+        assert_eq!(settings.child_models[1].model, "claude-opus-5");
+        assert_eq!(
+            settings.child_models[1].description,
+            DEFAULT_OPUS_DEFINITION
+        );
+        assert_eq!(settings.decision_models[1].model, "claude-fable-5-1");
+        assert_eq!(
+            settings.decision_models[1].description,
+            DEFAULT_FABLE_DEFINITION
+        );
+        let serialized = serde_json::to_string(&settings).unwrap();
+        assert!(!serialized.contains("\"effort\""));
+        assert_eq!(
+            serde_json::from_str::<OrchestrateSettings>(&serialized).unwrap(),
+            settings
+        );
     }
 
     #[test]
-    fn orchestrate_child_effort_matching_is_exact_case_insensitive() {
-        let profile = OrchestrateChildModel {
-            provider: ProviderKind::Codex,
-            model: "m".into(),
-            profile_id: None,
-            enabled: true,
-            effort: Some("High".into()),
-            fast: false,
-            description: String::new(),
-        };
-        assert!(profile.matches_effort(Some("high")));
-        assert!(!profile.matches_effort(Some("medium")));
-        assert!(profile.matches_effort(None));
+    fn orchestrate_capabilities_use_catalog_and_cap_collaboration() {
+        let catalog = vec![ModelSpec {
+            id: "custom".into(),
+            display_name: "Custom".into(),
+            is_default: false,
+            options: vec![OptionDescriptor::Select {
+                id: "reasoningEffort".into(),
+                label: "Effort".into(),
+                default_value: None,
+                options: ["medium", "high", "deep"]
+                    .into_iter()
+                    .map(|value| agent::SelectOption {
+                        value: value.into(),
+                        label: value.into(),
+                        description: None,
+                    })
+                    .collect(),
+            }],
+        }];
+        assert_eq!(
+            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog, false),
+            ["medium", "high", "deep"]
+        );
+        assert_eq!(
+            orchestrate_efforts(ProviderKind::Codex, "custom", &catalog, true),
+            ["medium", "high"]
+        );
+        assert!(orchestrate_efforts(ProviderKind::Codex, "unknown", &catalog, false).is_empty());
+        for entry in OrchestrateSettings::default().decision_models {
+            assert_eq!(
+                orchestrate_efforts(entry.provider, &entry.model, &[], true),
+                ["medium", "high"]
+            );
+        }
+    }
 
-        let provider_default = OrchestrateChildModel {
-            effort: None,
-            ..profile
-        };
-        assert!(!provider_default.matches_effort(Some("high")));
+    #[test]
+    fn orchestrate_settings_patches_reject_duplicate_models_across_roles_and_endpoints() {
+        let mut settings = Settings::default();
+        let sol = settings.orchestrate.child_models[0].clone();
+        let mut duplicate = sol.clone();
+        duplicate.profile_id = Some("another-endpoint".into());
+        duplicate.description = "must not overwrite".into();
+        let mut children = settings.orchestrate.child_models.clone();
+        children.push(duplicate.clone());
+        settings.apply(SettingsPatch::OrchestrateChildModels(children));
+        assert_eq!(settings.orchestrate.child_models.len(), 2);
+        assert_eq!(settings.orchestrate.child_models[0], sol);
+        let mut decisions = settings.orchestrate.decision_models.clone();
+        decisions.push(duplicate);
+        settings.apply(SettingsPatch::OrchestrateDecisionModels(decisions));
+        assert_eq!(settings.orchestrate.decision_models.len(), 2);
+        assert_eq!(settings.orchestrate.child_models[0], sol);
     }
 
     #[test]

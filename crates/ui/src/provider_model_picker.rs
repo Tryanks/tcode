@@ -19,7 +19,7 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use agent::{OptionDescriptor, ProviderKind};
+use agent::ProviderKind;
 use tcode_core::settings::Settings;
 
 use crate::provider_card::provider_glyph;
@@ -31,7 +31,6 @@ pub(crate) struct ModelOption {
     pub provider: ProviderKind,
     pub id: String,
     pub name: String,
-    pub effort: Option<String>,
     pub profile_id: Option<String>,
 }
 
@@ -104,13 +103,6 @@ impl ProviderModelPicker {
         }
     }
 
-    pub fn set_excluded(&mut self, excluded: Vec<(ProviderKind, String)>, cx: &mut Context<Self>) {
-        if self.excluded != excluded {
-            self.excluded = excluded;
-            cx.notify();
-        }
-    }
-
     pub fn set_selected(
         &mut self,
         provider: ProviderKind,
@@ -126,24 +118,25 @@ impl ProviderModelPicker {
         }
     }
 
+    pub fn set_excluded(&mut self, excluded: Vec<(ProviderKind, String)>, cx: &mut Context<Self>) {
+        if self.excluded != excluded {
+            self.excluded = excluded;
+            cx.notify();
+        }
+    }
+
     fn options(&self, cx: &App) -> Vec<ModelOption> {
         let mut options = Vec::new();
         // Only enabled profiles are offered for new selections; a disabled
         // profile stays configurable in Settings but never reaches the picker.
         for profile in self.store.read(cx).enabled_profiles() {
-            let catalog = self.store.read(cx).provider_model_catalog(profile.kind);
             let profile_id =
                 (!Settings::is_builtin_profile_id(&profile.id)).then_some(profile.id.clone());
             for model in self.store.read(cx).picker_models_for_profile(&profile.id) {
-                let effort = catalog
-                    .iter()
-                    .find(|spec| spec.id == model.id)
-                    .and_then(default_reasoning_effort);
                 options.push(ModelOption {
                     provider: profile.kind,
                     id: model.id,
                     name: model.name,
-                    effort,
                     profile_id: profile_id.clone(),
                 });
             }
@@ -420,13 +413,4 @@ fn selection_profile_id(provider: ProviderKind, profile_id: Option<&str>) -> Str
 /// The profile tab an option files under (see [`selection_profile_id`]).
 fn option_profile_id(option: &ModelOption) -> String {
     selection_profile_id(option.provider, option.profile_id.as_deref())
-}
-
-fn default_reasoning_effort(spec: &agent::ModelSpec) -> Option<String> {
-    spec.options.iter().find_map(|option| match option {
-        OptionDescriptor::Select {
-            id, default_value, ..
-        } if id == "reasoningEffort" => default_value.clone(),
-        _ => None,
-    })
 }

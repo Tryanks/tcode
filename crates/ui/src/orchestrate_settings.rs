@@ -1,5 +1,4 @@
-//! Settings → Orchestrate: lead-model identities and the child-model routing
-//! allow list. Every main model is eligible; only child dispatch is gated.
+//! Settings → Orchestrate: decision peers and execution-model routing profiles.
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -16,21 +15,15 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use agent::{OptionDescriptor, ProviderKind, SelectOption};
+use agent::{OptionDescriptor, ProviderKind};
+use tcode_core::settings::orchestrate_efforts;
 
 use crate::provider_card::provider_glyph;
 use crate::provider_model_picker::{ModelOption, ProviderModelPicker};
 use crate::settings::{
-    ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, OrchestratorIdentity,
-    provider_label,
+    ChildApprovalMode, OrchestrateChildModel, OrchestrateSettings, provider_label,
 };
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
-
-struct IdentityRowState {
-    provider: ProviderKind,
-    model: String,
-    identity: Entity<TextareaState>,
-}
 
 struct ChildRowState {
     provider: ProviderKind,
@@ -41,10 +34,8 @@ struct ChildRowState {
 
 pub struct OrchestrateSettingsPanel {
     store: Entity<WorkspaceStore>,
-    generic_identity: Entity<TextareaState>,
-    identity_rows: Vec<IdentityRowState>,
     child_rows: Vec<ChildRowState>,
-    identity_model_picker: Entity<ProviderModelPicker>,
+    decision_model_picker: Entity<ProviderModelPicker>,
     child_model_picker: Entity<ProviderModelPicker>,
     _subscriptions: Vec<Subscription>,
     input_subscriptions: Vec<Subscription>,
@@ -52,24 +43,12 @@ pub struct OrchestrateSettingsPanel {
 
 impl OrchestrateSettingsPanel {
     pub fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let generic_value = store
-            .read(cx)
-            .settings()
-            .orchestrate
-            .generic_identity
-            .clone();
-        let generic_identity = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .auto_grow(4, 14)
-                .placeholder(crate::tr!("orchestrate.generic_identity.placeholder"))
-                .default_value(generic_value)
-        });
-        let identity_model_picker = cx.new(|cx| {
+        let decision_model_picker = cx.new(|cx| {
             ProviderModelPicker::add(
                 store.clone(),
-                "orchestrate-add-identity-popover",
-                "orchestrate-add-identity",
-                crate::tr!("orchestrate.model_identity.add"),
+                "orchestrate-add-decision-popover",
+                "orchestrate-add-decision",
+                crate::tr!("orchestrate.decisions.add"),
                 cx,
             )
         });
@@ -98,80 +77,94 @@ impl OrchestrateSettingsPanel {
                     _ => {}
                 },
             ),
-            cx.subscribe_in(&identity_model_picker, window, |this, _, event, _, cx| {
-                this.add_identity(&event.0, cx);
+            cx.subscribe_in(&decision_model_picker, window, |this, _, event, _, cx| {
+                this.add_child(&event.0, true, cx);
             }),
             cx.subscribe_in(&child_model_picker, window, |this, _, event, _, cx| {
-                this.add_child(&event.0, cx);
+                this.add_child(&event.0, false, cx);
             }),
         ];
         let mut panel = Self {
             store,
-            generic_identity,
-            identity_rows: Vec::new(),
             child_rows: Vec::new(),
-            identity_model_picker,
+            decision_model_picker,
             child_model_picker,
             _subscriptions: subscriptions,
             input_subscriptions: Vec::new(),
         };
-        let generic = panel.generic_identity.clone();
-        panel
-            .input_subscriptions
-            .push(cx.subscribe(&generic, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.commit_generic_identity(cx);
-                }
-            }));
         panel.rebuild_rows(window, cx);
         panel
     }
 
-    fn update_model_identities(
+    fn update_models(
         &self,
-        mutate: impl FnOnce(&mut Vec<OrchestratorIdentity>),
-        cx: &mut Context<Self>,
-    ) {
-        let mut identities = self.store.read(cx).settings().orchestrate.model_identities;
-        mutate(&mut identities);
-        self.store.update(cx, |store, _cx| {
-            store.set_orchestrate_model_identities(identities)
-        });
-    }
-
-    fn update_child_models(
-        &self,
+        decision: bool,
         mutate: impl FnOnce(&mut Vec<OrchestrateChildModel>),
         cx: &mut Context<Self>,
     ) {
-        let mut models = self.store.read(cx).settings().orchestrate.child_models;
+        let settings = self.store.read(cx).settings().orchestrate;
+        let mut models = if decision {
+            settings.decision_models
+        } else {
+            settings.child_models
+        };
         mutate(&mut models);
-        self.store
-            .update(cx, |store, _cx| store.set_orchestrate_child_models(models));
+        self.store.update(cx, |store, _cx| {
+            if decision {
+                store.set_orchestrate_decision_models(models)
+            } else {
+                store.set_orchestrate_child_models(models)
+            }
+        });
     }
 
-    fn commit_generic_identity(&self, cx: &mut Context<Self>) {
-        let identity = self.generic_identity.read(cx).value().to_string();
-        self.store.update(cx, |store, _cx| {
-            store.set_orchestrate_generic_identity(identity)
-        });
+    fn profile_location(&self, index: usize, cx: &App) -> (bool, usize) {
+        let decisions = self
+            .store
+            .read(cx)
+            .settings()
+            .orchestrate
+            .decision_models
+            .len();
+        if index < decisions {
+            (true, index)
+        } else {
+            (false, index - decisions)
+        }
+    }
+
+    fn update_profile(
+        &self,
+        index: usize,
+        mutate: impl FnOnce(&mut OrchestrateChildModel),
+        cx: &mut Context<Self>,
+    ) {
+        let (decision, index) = self.profile_location(index, cx);
+        self.update_models(
+            decision,
+            move |models| {
+                if let Some(entry) = models.get_mut(index) {
+                    mutate(entry);
+                }
+            },
+            cx,
+        );
     }
 
     /// Settings patches are echoed back asynchronously, so rows are rebuilt from
     /// the replica only when the set of rows changed — never while typing.
     fn rows_match_settings(&self, cx: &App) -> bool {
         let orchestrate = self.store.read(cx).settings().orchestrate;
-        self.identity_rows.len() == orchestrate.model_identities.len()
-            && self
-                .identity_rows
-                .iter()
-                .zip(&orchestrate.model_identities)
-                .all(|(row, entry)| row.provider == entry.provider && row.model == entry.model)
-            && self.child_rows.len() == orchestrate.child_models.len()
+        self.child_rows.len() == orchestrate.decision_models.len() + orchestrate.child_models.len()
             && self
                 .child_rows
                 .iter()
-                .zip(&orchestrate.child_models)
+                .zip(
+                    orchestrate
+                        .decision_models
+                        .iter()
+                        .chain(&orchestrate.child_models),
+                )
                 .all(|(row, entry)| {
                     row.provider == entry.provider
                         && row.model == entry.model
@@ -180,35 +173,26 @@ impl OrchestrateSettingsPanel {
     }
 
     fn rebuild_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Preserve the generic input subscription at index zero.
-        self.input_subscriptions.truncate(1);
-        self.identity_rows.clear();
+        self.input_subscriptions.clear();
         self.child_rows.clear();
         let orchestrate = self.store.read(cx).settings().orchestrate;
+        let excluded: Vec<_> = orchestrate
+            .decision_models
+            .iter()
+            .chain(&orchestrate.child_models)
+            .map(|entry| (entry.provider, entry.model.clone()))
+            .collect();
+        self.decision_model_picker
+            .update(cx, |picker, cx| picker.set_excluded(excluded.clone(), cx));
+        self.child_model_picker
+            .update(cx, |picker, cx| picker.set_excluded(excluded, cx));
 
-        for entry in orchestrate.model_identities {
-            let identity = cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .auto_grow(3, 10)
-                    .placeholder(crate::tr!("orchestrate.model_identity.placeholder"))
-                    .default_value(entry.identity)
-            });
-            let provider = entry.provider;
-            let model = entry.model.clone();
-            self.input_subscriptions
-                .push(cx.subscribe(&identity, move |this, _, event, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        this.commit_model_identity(provider, &model, cx);
-                    }
-                }));
-            self.identity_rows.push(IdentityRowState {
-                provider: entry.provider,
-                model: entry.model,
-                identity,
-            });
-        }
-
-        for (index, entry) in orchestrate.child_models.into_iter().enumerate() {
+        for (index, entry) in orchestrate
+            .decision_models
+            .into_iter()
+            .chain(orchestrate.child_models)
+            .enumerate()
+        {
             let description = cx.new(|cx| {
                 TextareaState::new(window, cx)
                     .auto_grow(3, 9)
@@ -228,40 +212,6 @@ impl OrchestrateSettingsPanel {
                 description,
             });
         }
-        self.sync_picker_exclusions(cx);
-    }
-
-    fn sync_picker_exclusions(&self, cx: &mut Context<Self>) {
-        let identities = self
-            .identity_rows
-            .iter()
-            .map(|row| (row.provider, row.model.clone()))
-            .collect();
-        self.identity_model_picker
-            .update(cx, |picker, cx| picker.set_excluded(identities, cx));
-    }
-
-    fn commit_model_identity(&self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {
-        let Some(row) = self
-            .identity_rows
-            .iter()
-            .find(|row| row.provider == provider && row.model == model)
-        else {
-            return;
-        };
-        let value = row.identity.read(cx).value().to_string();
-        let model = model.to_string();
-        self.update_model_identities(
-            move |identities| {
-                if let Some(entry) = identities
-                    .iter_mut()
-                    .find(|entry| entry.provider == provider && entry.model == model)
-                {
-                    entry.identity = value;
-                }
-            },
-            cx,
-        );
     }
 
     fn commit_child_definition(&self, index: usize, cx: &mut Context<Self>) {
@@ -271,12 +221,10 @@ impl OrchestrateSettingsPanel {
         let description = row.description.read(cx).value().to_string();
         let provider = row.provider;
         let model = row.model.clone();
-        self.update_child_models(
-            move |models| {
-                if let Some(entry) = models.get_mut(index)
-                    && entry.provider == provider
-                    && entry.model == model
-                {
+        self.update_profile(
+            index,
+            move |entry| {
+                if entry.provider == provider && entry.model == model {
                     entry.description = description;
                 }
             },
@@ -284,26 +232,8 @@ impl OrchestrateSettingsPanel {
         );
     }
 
-    fn set_child_effort(&self, index: usize, effort: Option<String>, cx: &mut Context<Self>) {
-        self.update_child_models(
-            move |models| {
-                if let Some(entry) = models.get_mut(index) {
-                    entry.effort = effort;
-                }
-            },
-            cx,
-        );
-    }
-
     fn set_child_fast(&self, index: usize, fast: bool, cx: &mut Context<Self>) {
-        self.update_child_models(
-            move |models| {
-                if let Some(entry) = models.get_mut(index) {
-                    entry.fast = fast;
-                }
-            },
-            cx,
-        );
+        self.update_profile(index, move |entry| entry.fast = fast, cx);
     }
 
     /// Whether the provider catalog declares a fast mode for a model: Claude's
@@ -312,91 +242,33 @@ impl OrchestrateSettingsPanel {
         model_fast_supported(&self.store.read(cx).provider_model_catalog(provider), model)
     }
 
-    /// The valid `reasoningEffort` choices the provider catalog declares for a
-    /// model; empty when the model has no reasoning selector.
-    fn child_effort_options(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        cx: &App,
-    ) -> Vec<SelectOption> {
-        self.store
-            .read(cx)
-            .provider_model_catalog(provider)
-            .into_iter()
-            .find(|spec| spec.id == model)
-            .into_iter()
-            .flat_map(|spec| spec.options)
-            .find_map(|option| match option {
-                OptionDescriptor::Select { id, options, .. } if id == "reasoningEffort" => {
-                    Some(options)
-                }
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    fn add_identity(&mut self, option: &ModelOption, cx: &mut Context<Self>) {
-        let provider = option.provider;
-        let model = option.id.clone();
-        let identity = self
-            .store
-            .read(cx)
-            .settings()
-            .orchestrate
-            .generic_identity
-            .clone();
-        self.update_model_identities(
-            move |identities| {
-                if !identities
-                    .iter()
-                    .any(|entry| entry.provider == provider && entry.model == model)
-                {
-                    identities.push(OrchestratorIdentity {
-                        provider,
-                        model,
-                        identity,
-                    });
-                }
-            },
-            cx,
-        );
-    }
-
-    fn remove_identity(&mut self, provider: ProviderKind, model: &str, cx: &mut Context<Self>) {
-        let model = model.to_string();
-        self.update_model_identities(
-            move |identities| {
-                identities.retain(|entry| !(entry.provider == provider && entry.model == model));
-            },
-            cx,
-        );
-    }
-
-    fn add_child(&mut self, option: &ModelOption, cx: &mut Context<Self>) {
+    fn add_child(&mut self, option: &ModelOption, decision: bool, cx: &mut Context<Self>) {
+        let settings = self.store.read(cx).settings().orchestrate;
+        if settings
+            .decision_models
+            .iter()
+            .chain(&settings.child_models)
+            .any(|entry| entry.provider == option.provider && entry.model == option.id)
+        {
+            return;
+        }
         let profile = OrchestrateChildModel {
             provider: option.provider,
             model: option.id.clone(),
             profile_id: option.profile_id.clone(),
             enabled: true,
-            effort: option.effort.clone(),
             fast: false,
-            description: OrchestrateSettings::builtin_child_definition(
-                option.provider,
-                &option.id,
-                option.effort.as_deref(),
-            )
-            .unwrap_or_default()
-            .to_string(),
+            description: OrchestrateSettings::builtin_child_definition(option.provider, &option.id)
+                .unwrap_or_default()
+                .to_string(),
         };
-        self.update_child_models(
+        self.update_models(
+            decision,
             move |models| {
-                if !models.iter().any(|entry| {
-                    entry.provider == profile.provider
-                        && entry.model == profile.model
-                        && entry.effort == profile.effort
-                        && entry.profile_id == profile.profile_id
-                }) {
+                if !models
+                    .iter()
+                    .any(|entry| entry.provider == profile.provider && entry.model == profile.model)
+                {
                     models.push(profile);
                 }
             },
@@ -405,7 +277,9 @@ impl OrchestrateSettingsPanel {
     }
 
     fn remove_child(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.update_child_models(
+        let (decision, index) = self.profile_location(index, cx);
+        self.update_models(
+            decision,
             move |models| {
                 if index < models.len() {
                     models.remove(index);
@@ -416,84 +290,35 @@ impl OrchestrateSettingsPanel {
     }
 
     fn set_child_enabled(&self, index: usize, enabled: bool, cx: &mut Context<Self>) {
-        self.update_child_models(
-            move |models| {
-                if let Some(entry) = models.get_mut(index) {
-                    entry.enabled = enabled;
-                }
-            },
-            cx,
-        );
+        self.update_profile(index, move |entry| entry.enabled = enabled, cx);
     }
 
-    fn reset_generic_identity(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let value = OrchestrateSettings::builtin_generic_identity().to_string();
-        let persisted = value.clone();
-        self.store.update(cx, |store, _cx| {
-            store.set_orchestrate_generic_identity(persisted)
-        });
-        self.generic_identity
-            .update(cx, |input, cx| input.set_value(value, window, cx));
-    }
-
-    fn reset_model_identity(
-        &self,
-        provider: ProviderKind,
-        model: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let value = OrchestrateSettings::builtin_identity_for(provider, model).to_string();
-        let persisted = value.clone();
-        let model_key = model.to_string();
-        self.update_model_identities(
-            move |identities| {
-                if let Some(entry) = identities
-                    .iter_mut()
-                    .find(|entry| entry.provider == provider && entry.model == model_key)
-                {
-                    entry.identity = persisted;
-                }
-            },
-            cx,
-        );
-        if let Some(row) = self
-            .identity_rows
-            .iter()
-            .find(|row| row.provider == provider && row.model == model)
-        {
-            row.identity
-                .update(cx, |input, cx| input.set_value(value, window, cx));
-        }
-    }
-
-    /// Restore both halves of a child row's routing preset — effort and
-    /// definition — from the bundled fleet entry it maps to. `enabled` is
-    /// list-level state and deliberately untouched.
+    /// Restore the bundled model description without changing routing state.
     fn reset_child_definition(&self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let settings = self.store.read(cx).settings();
-        let Some(target) = builtin_child_target(&settings.orchestrate.child_models, index) else {
+        let models: Vec<_> = settings
+            .orchestrate
+            .decision_models
+            .into_iter()
+            .chain(settings.orchestrate.child_models)
+            .collect();
+        let Some(target) = builtin_child_target(&models, index) else {
             return;
         };
         let provider = target.provider;
         let model = target.model.clone();
-        let effort = target.effort;
         let description = target.description;
         let persisted_description = description.clone();
-        self.update_child_models(
-            move |models| {
-                if let Some(entry) = models.get_mut(index)
-                    && entry.provider == provider
-                    && entry.model == model
-                {
-                    entry.effort = effort;
+        self.update_profile(
+            index,
+            move |entry| {
+                if entry.provider == provider && entry.model == model {
                     entry.description = persisted_description;
                 }
             },
             cx,
         );
-        // The effort dropdown reads straight from settings; only the
-        // description textarea holds its own copy.
+        // The description textarea holds its own copy.
         if let Some(row) = self.child_rows.get(index) {
             row.description
                 .update(cx, |input, cx| input.set_value(description, window, cx));
@@ -543,7 +368,7 @@ impl OrchestrateSettingsPanel {
         profile_id: Option<&str>,
         cx: &App,
     ) -> String {
-        self.identity_model_picker
+        self.decision_model_picker
             .read(cx)
             .display_name(provider, model, profile_id, cx)
     }
@@ -871,186 +696,81 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    fn render_identities(&self, cx: &mut Context<Self>) -> AnyElement {
-        let identities = self.store.read(cx).settings().orchestrate.model_identities;
-        let generic_reset = (self.store.read(cx).settings().orchestrate.generic_identity
-            != OrchestrateSettings::builtin_generic_identity())
-        .then(|| {
-            self.reset_button(
-                "reset-generic-orchestrator-identity",
-                cx,
-                |this, window, cx| this.reset_generic_identity(window, cx),
-            )
-        });
-        let section = v_flex()
-            .w_full()
-            .gap_3()
-            .child(self.section_heading(
-                crate::tr!("orchestrate.identity.title"),
-                crate::tr!("orchestrate.identity.description"),
-                None,
-                cx,
-            ))
-            // Generic identity: a single-row group holding the header, help and
-            // its text area — no slab fill.
-            .child(
-                crate::material::group(cx).child(
-                    v_flex()
-                        .w_full()
-                        .gap_1p5()
-                        .px_3()
-                        .py_3()
-                        .child(self.row_title(
-                            crate::tr!("orchestrate.generic_identity.title").into_owned(),
-                            generic_reset,
-                        ))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("orchestrate.generic_identity.description")),
-                        )
-                        .child(
-                            Textarea::new(&self.generic_identity)
-                                .rounded(crate::material::radius_input()),
-                        ),
-                ),
-            )
-            .child(self.section_heading(
-                crate::tr!("orchestrate.model_identity.title"),
-                crate::tr!("orchestrate.model_identity.description"),
-                Some(self.identity_model_picker.clone().into_any_element()),
-                cx,
-            ));
-
-        if self.identity_rows.is_empty() {
-            return section
-                .child(
-                    crate::material::group(cx).child(
-                        div()
-                            .w_full()
-                            .px_3()
-                            .py_3()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::tr!("orchestrate.model_identity.empty")),
-                    ),
-                )
-                .into_any_element();
-        }
-
-        // Per-model identities: one grouped list, rows split by inset hairlines.
-        let mut rows: Vec<AnyElement> = Vec::new();
-        for (index, row) in self.identity_rows.iter().enumerate() {
-            let name = self.model_name(row.provider, &row.model, None, cx);
-            let provider = row.provider;
-            let model = row.model.clone();
-            let reset_model = row.model.clone();
-            // Models without a bundled specialization fall back to the factory
-            // generic text — that *is* their default.
-            let overridden = identities.get(index).is_some_and(|entry| {
-                entry.identity != OrchestrateSettings::builtin_identity_for(provider, &entry.model)
-            });
-            let reset = overridden.then(|| {
-                self.reset_button(
-                    ("reset-orchestrator-identity", index),
-                    cx,
-                    move |this, window, cx| {
-                        this.reset_model_identity(provider, &reset_model, window, cx);
-                    },
-                )
-            });
-            rows.push(
-                v_flex()
-                    .w_full()
-                    .gap_2()
-                    .px_3()
-                    .py_3()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_2()
-                            .items_center()
-                            .child(provider_glyph(provider).small())
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(self.row_title(name, reset))
-                                    .child(
-                                        div()
-                                            .font_family("monospace")
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!(
-                                                "{} · {}",
-                                                provider_label(provider),
-                                                row.model
-                                            )),
-                                    ),
-                            )
-                            .child(
-                                Button::new(("remove-orchestrator-identity", index))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Delete)
-                                    .tooltip(crate::tr!("orchestrate.model_identity.use_generic"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_identity(provider, &model, cx);
-                                    })),
-                            ),
-                    )
-                    .child(Textarea::new(&row.identity).rounded(crate::material::radius_input()))
-                    .into_any_element(),
-            );
-        }
-        section
-            .child(crate::material::grouped(rows, cx))
-            .into_any_element()
-    }
-
-    fn render_children(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_children(&self, decision: bool, cx: &mut Context<Self>) -> AnyElement {
         let settings = self.store.read(cx).settings().orchestrate;
-        let mut section = v_flex().w_full().gap_3().child(self.section_heading(
-            crate::tr!("orchestrate.children.title"),
-            crate::tr!("orchestrate.children.description"),
-            Some(self.child_model_picker.clone().into_any_element()),
-            cx,
-        ));
-        if self.child_rows.is_empty() {
+        let offset = if decision {
+            0
+        } else {
+            settings.decision_models.len()
+        };
+        let count = if decision {
+            settings.decision_models.len()
+        } else {
+            settings.child_models.len()
+        };
+        let models: Vec<_> = settings
+            .decision_models
+            .into_iter()
+            .chain(settings.child_models)
+            .collect();
+        let profiles = &models[offset..offset + count];
+        let mut section = v_flex().w_full().gap_3().child(
+            self.section_heading(
+                if decision {
+                    crate::tr!("orchestrate.decisions.title")
+                } else {
+                    crate::tr!("orchestrate.children.title")
+                },
+                if decision {
+                    crate::tr!("orchestrate.decisions.description")
+                } else {
+                    crate::tr!("orchestrate.children.description")
+                },
+                Some(
+                    if decision {
+                        self.decision_model_picker.clone()
+                    } else {
+                        self.child_model_picker.clone()
+                    }
+                    .into_any_element(),
+                ),
+                cx,
+            ),
+        );
+        if profiles.is_empty() {
             return section
                 .child(self.status_note(
                     cx.theme().danger,
-                    crate::tr!("orchestrate.children.empty"),
+                    if decision {
+                        crate::tr!("orchestrate.decisions.empty")
+                    } else {
+                        crate::tr!("orchestrate.children.empty")
+                    },
                     cx,
                 ))
                 .into_any_element();
         }
 
-        if !settings.child_models.iter().any(|profile| profile.enabled) {
+        if !profiles.iter().any(|profile| profile.enabled) {
             section = section.child(self.status_note(
                 cx.theme().warning,
-                crate::tr!("orchestrate.children.none_enabled"),
+                if decision {
+                    crate::tr!("orchestrate.decisions.none_enabled")
+                } else {
+                    crate::tr!("orchestrate.children.none_enabled")
+                },
                 cx,
             ));
         }
 
         // Child profiles: one grouped list, rows split by inset hairlines.
         let mut rows: Vec<AnyElement> = Vec::new();
-        for (index, row) in self.child_rows.iter().enumerate() {
-            let Some(profile) = settings.child_models.get(index) else {
+        for (index, row) in self.child_rows.iter().enumerate().skip(offset).take(count) {
+            let Some(profile) = models.get(index) else {
                 continue;
             };
             let provider = row.provider;
             let name = self.model_name(provider, &row.model, row.profile_id.as_deref(), cx);
-            let mut effort = profile
-                .effort
-                .clone()
-                .unwrap_or_else(|| crate::tr!("orchestrate.children.effort_default").into_owned());
-            if profile.fast {
-                effort.push_str(" · ");
-                effort.push_str(&crate::tr!("orchestrate.children.fast_label"));
-            }
             let subtitle = if let Some(id) = row.profile_id.as_deref() {
                 let profile_settings = self.store.read(cx).provider_profile_settings(id);
                 let profile_name = profile_settings
@@ -1060,19 +780,16 @@ impl OrchestrateSettingsPanel {
                     .filter(|name| !name.is_empty())
                     .unwrap_or(id);
                 format!(
-                    "{} · {} · {} · {}",
+                    "{} · {} · {}",
                     provider_label(provider),
                     row.model,
-                    effort,
                     profile_name
                 )
             } else {
-                format!("{} · {} · {}", provider_label(provider), row.model, effort)
+                format!("{} · {}", provider_label(provider), row.model)
             };
-            let reset = builtin_child_target(&settings.child_models, index)
-                .filter(|target| {
-                    target.effort != profile.effort || target.description != profile.description
-                })
+            let reset = builtin_child_target(&models, index)
+                .filter(|target| target.description != profile.description)
                 .map(|_| {
                     self.reset_button(
                         ("reset-orchestrate-child", index),
@@ -1114,7 +831,11 @@ impl OrchestrateSettingsPanel {
                                 } else {
                                     (cx.theme().muted, cx.theme().muted_foreground)
                                 };
-                                let label = if profile.enabled {
+                                let label = if decision && profile.enabled {
+                                    crate::tr!("orchestrate.decisions.enabled")
+                                } else if decision {
+                                    crate::tr!("orchestrate.decisions.disabled")
+                                } else if profile.enabled {
                                     crate::tr!("orchestrate.children.enabled")
                                 } else {
                                     crate::tr!("orchestrate.children.disabled")
@@ -1124,7 +845,11 @@ impl OrchestrateSettingsPanel {
                             .child(
                                 Switch::new(("orchestrate-child-enabled", index))
                                     .checked(profile.enabled)
-                                    .tooltip(if profile.enabled {
+                                    .tooltip(if decision && profile.enabled {
+                                        crate::tr!("orchestrate.decisions.disable")
+                                    } else if decision {
+                                        crate::tr!("orchestrate.decisions.enable")
+                                    } else if profile.enabled {
                                         crate::tr!("orchestrate.children.disable")
                                     } else {
                                         crate::tr!("orchestrate.children.enable")
@@ -1145,111 +870,21 @@ impl OrchestrateSettingsPanel {
                             ),
                     )
                     .child({
-                        let current = profile.effort.clone();
-                        let mut choices = self.child_effort_options(provider, &row.model, cx);
-                        // Keep a stored value the catalog no longer lists (legacy
-                        // free-text entries) visible so it can be seen and fixed.
-                        if let Some(value) = current.clone()
-                            && !choices
-                                .iter()
-                                .any(|choice| choice.value.eq_ignore_ascii_case(&value))
-                        {
-                            choices.push(SelectOption {
-                                label: value.clone(),
-                                value,
-                                description: None,
-                            });
-                        }
-                        let selected_label: gpui::SharedString = match current.as_deref() {
-                            Some(value) => choices
-                                .iter()
-                                .find(|choice| choice.value.eq_ignore_ascii_case(value))
-                                .map(|choice| choice.label.clone())
-                                .unwrap_or_else(|| value.to_string())
-                                .into(),
-                            None => crate::tr!("orchestrate.children.effort_default")
-                                .into_owned()
-                                .into(),
-                        };
-                        let trigger = Button::new(("orchestrate-child-effort-dropdown", index))
-                            .ghost()
-                            .outline()
-                            .compact()
-                            .child(
-                                h_flex()
-                                    .w(px(140.))
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .text_size(px(13.))
-                                    .child(selected_label)
-                                    .child(
-                                        Icon::new(IconName::ChevronDown)
-                                            .xsmall()
-                                            .text_color(cx.theme().muted_foreground),
-                                    ),
-                            );
-                        let panel = cx.entity();
-                        let dropdown = crate::material::overlay_popover((
-                            "orchestrate-child-effort-popover",
-                            index,
-                        ))
-                        .trigger(trigger)
-                        .content(move |_, _, cx| {
-                            let option = |value: Option<String>,
-                                          label: gpui::SharedString,
-                                          item: usize,
-                                          cx: &mut Context<gpui_base::PopoverState>|
-                             -> AnyElement {
-                                let panel = panel.clone();
-                                let popover = cx.entity();
-                                let selected = match (value.as_deref(), current.as_deref()) {
-                                    (None, None) => true,
-                                    (Some(own), Some(current)) => own.eq_ignore_ascii_case(current),
-                                    _ => false,
-                                };
-                                h_flex()
-                                    .id(("orchestrate-child-effort-option", item))
-                                    .w_full()
-                                    .px_2()
-                                    .py_1()
-                                    .gap_2()
-                                    .items_center()
-                                    .rounded(crate::material::radius_button())
-                                    .text_size(px(13.))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(cx.theme().accent))
-                                    .child(div().flex_1().child(label))
-                                    .when(selected, |row| {
-                                        row.child(Icon::new(IconName::Check).xsmall())
-                                    })
-                                    .on_click(move |_, window, cx| {
-                                        let value = value.clone();
-                                        panel.update(cx, |panel, cx| {
-                                            panel.set_child_effort(index, value, cx);
-                                        });
-                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                    })
-                                    .into_any_element()
-                            };
-                            let mut list = v_flex().p_1().min_w(px(140.)).gap_0p5().child(option(
-                                None,
-                                crate::tr!("orchestrate.children.effort_default")
-                                    .into_owned()
-                                    .into(),
-                                0,
-                                cx,
-                            ));
-                            for (item, choice) in choices.iter().enumerate() {
-                                list = list.child(option(
-                                    Some(choice.value.clone()),
-                                    choice.label.clone().into(),
-                                    item + 1,
-                                    cx,
-                                ));
+                        let choices = orchestrate_efforts(
+                            provider,
+                            &row.model,
+                            &self.store.read(cx).provider_model_catalog(provider),
+                            decision,
+                        );
+                        let efforts = if choices.is_empty() {
+                            if decision {
+                                crate::tr!("orchestrate.decisions.effort_unavailable").into_owned()
+                            } else {
+                                crate::tr!("orchestrate.children.effort_default").into_owned()
                             }
-                            list
-                        });
+                        } else {
+                            choices.join(" · ")
+                        };
                         let fast_supported = self.child_fast_supported(provider, &row.model, cx);
                         h_flex()
                             .gap_4()
@@ -1264,7 +899,13 @@ impl OrchestrateSettingsPanel {
                                             .text_color(cx.theme().muted_foreground)
                                             .child(crate::tr!("orchestrate.children.effort_label")),
                                     )
-                                    .child(dropdown),
+                                    .child(div().text_size(px(12.)).child(efforts))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(crate::tr!("orchestrate.children.effort_hint")),
+                                    ),
                             )
                             // Keep a stored `fast` visible even when the catalog no
                             // longer declares support, so it can be switched off.
@@ -1327,56 +968,18 @@ fn model_fast_supported(catalog: &[agent::ModelSpec], model: &str) -> bool {
         })
 }
 
-/// Whether two efforts name the same tier. Stored efforts are free text, so a
-/// hand-typed "Medium" must still match the bundled "medium".
-fn same_effort(left: &Option<String>, right: &Option<String>) -> bool {
-    match (left, right) {
-        (None, None) => true,
-        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
-        _ => false,
-    }
-}
-
-/// The bundled fleet entry a child row resets to, if it has one. Rows the user
-/// pointed at a custom provider profile were never bundled, and neither were
-/// models missing from [`OrchestrateSettings::default`].
+/// The bundled description for this model, independent of effort or endpoint.
 fn builtin_child_target(
     rows: &[OrchestrateChildModel],
     index: usize,
 ) -> Option<OrchestrateChildModel> {
     let row = rows.get(index)?;
-    if row.profile_id.is_some() {
-        return None;
-    }
-    let builtins: Vec<OrchestrateChildModel> = OrchestrateSettings::default()
-        .child_models
+    let defaults = OrchestrateSettings::default();
+    defaults
+        .decision_models
         .into_iter()
-        .filter(|entry| entry.provider == row.provider && entry.model == row.model)
-        .collect();
-    if let Some(entry) = builtins
-        .iter()
-        .find(|entry| same_effort(&entry.effort, &row.effort))
-    {
-        return Some(entry.clone());
-    }
-    if builtins.len() == 1 {
-        return builtins.into_iter().next();
-    }
-    // A model bundled at several efforts whose row matches none of them (say
-    // gpt-5.6-sol retuned to "high"): claim the first tier no sibling row
-    // already occupies, so two rows never restore onto the same entry.
-    builtins
-        .iter()
-        .find(|entry| {
-            !rows.iter().enumerate().any(|(other, candidate)| {
-                other != index
-                    && candidate.provider == row.provider
-                    && candidate.model == row.model
-                    && same_effort(&entry.effort, &candidate.effort)
-            })
-        })
-        .or_else(|| builtins.first())
-        .cloned()
+        .chain(defaults.child_models)
+        .find(|entry| entry.provider == row.provider && entry.model == row.model)
 }
 
 impl Render for OrchestrateSettingsPanel {
@@ -1396,14 +999,15 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_child_approval(cx))
             .child(self.render_child_worktrees(cx))
             .child(self.render_auto_archive(cx))
-            .child(self.render_identities(cx))
-            .child(self.render_children(cx))
+            .child(self.render_children(true, cx))
+            .child(self.render_children(false, cx))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent::SelectOption;
 
     #[test]
     fn codex_fast_support_accepts_the_model_list_priority_tier() {
