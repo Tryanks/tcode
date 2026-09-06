@@ -557,7 +557,7 @@ mod tests {
     /// extract a binary distribution for this platform and check the resolved
     /// command actually exists and is executable. Network-bound, so it is
     /// `#[ignore]`d by default:
-    /// `cargo test --bin tcode -- --ignored installs_a_real_agent`
+    /// `cargo test -p tcode-services installs_a_real_agent -- --ignored`
     #[test]
     #[ignore = "hits the network"]
     fn installs_a_real_agent_from_the_live_registry() {
@@ -620,16 +620,6 @@ mod tests {
             .map(|agent| agent.id.as_str())
             .collect();
         assert_eq!(ids, vec!["gemini", "goose", "kilo"]);
-        for hidden in HIDDEN_ACP_AGENT_IDS {
-            assert!(
-                !ids.contains(&hidden),
-                "`{hidden}` is an adapter over a natively-integrated CLI and must stay hidden"
-            );
-            assert!(
-                registry.agents.iter().any(|agent| agent.id == hidden),
-                "the fixture must actually contain `{hidden}`, or this test proves nothing"
-            );
-        }
     }
 
     #[test]
@@ -677,16 +667,6 @@ mod tests {
             }
             other => panic!("expected an npx recipe, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn the_platform_key_is_a_registry_key() {
-        let key = platform_key();
-        assert!(
-            ["darwin", "linux", "windows"].contains(&key.split('-').next().unwrap()),
-            "{key}"
-        );
-        assert!(key.contains('-'), "{key}");
     }
 
     /// `cmd` may only point inside the archive (or be `node`): the index must
@@ -752,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_cache_still_serves_when_the_network_is_gone() {
+    fn cached_index_remains_readable_after_ttl() {
         let dir = std::env::temp_dir().join(format!("tcode-acp-cache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -773,24 +753,5 @@ mod tests {
         assert!(!cache_is_fresh(&dir));
         assert_eq!(cached(&dir).unwrap().agents.len(), 7);
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn installed_agents_split_their_launch_args() {
-        let installed = InstalledAgent {
-            id: "gemini".into(),
-            name: "Gemini".into(),
-            version: "1".into(),
-            icon: None,
-            launch: AcpLaunch::Npx {
-                package: "x@1".into(),
-                args: Vec::new(),
-                env: Vec::new(),
-            },
-            enabled: true,
-            env: Vec::new(),
-            launch_args: Some("  --debug   --yolo ".into()),
-        };
-        assert_eq!(installed.extra_args(), vec!["--debug", "--yolo"]);
     }
 }

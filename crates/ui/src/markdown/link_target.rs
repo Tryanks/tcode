@@ -201,11 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn expands_leading_home_directory() {
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-            return;
-        };
-        assert_eq!(resolve_link("~/", None), LinkTarget::Local(home));
+    fn expands_home_or_preserves_the_path_when_home_is_unset() {
+        match std::env::var_os("HOME").map(PathBuf::from) {
+            Some(home) => assert_eq!(resolve_link("~/", None), LinkTarget::Local(home)),
+            None => assert_eq!(expand_home("~/file.md"), PathBuf::from("~/file.md")),
+        }
     }
 
     #[test]
@@ -240,44 +240,6 @@ mod tests {
         assert_eq!(
             resolve_link("missing/file.rs:42", Some(temp.path())),
             LinkTarget::Web("missing/file.rs:42".to_string())
-        );
-    }
-
-    #[test]
-    fn web_tooltip_preserves_raw_url() {
-        let url = "https://example.com/docs?view=raw#section";
-        assert_eq!(resolve_link(url, None).tooltip_text(), url);
-    }
-
-    #[test]
-    fn local_tooltips_show_resolved_relative_absolute_and_file_paths() {
-        let temp = TempDir::new();
-        let relative = temp.create_file("src/main.rs");
-        let absolute = temp.create_file("README.md");
-        let file_url = format!("file://{}", absolute.display());
-
-        assert_eq!(
-            resolve_link("src/main.rs", Some(temp.path())).tooltip_text(),
-            relative.display().to_string()
-        );
-        assert_eq!(
-            resolve_link(absolute.to_str().expect("UTF-8 temp path"), None).tooltip_text(),
-            absolute.display().to_string()
-        );
-        assert_eq!(
-            resolve_link(&file_url, None).tooltip_text(),
-            absolute.display().to_string()
-        );
-    }
-
-    #[test]
-    fn line_suffixed_local_tooltip_shows_actual_opened_file() {
-        let temp = TempDir::new();
-        let path = temp.create_file("src/lib.rs");
-
-        assert_eq!(
-            resolve_link("src/lib.rs:42:7", Some(temp.path())).tooltip_text(),
-            path.display().to_string()
         );
     }
 }

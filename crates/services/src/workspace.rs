@@ -129,20 +129,15 @@ mod tests {
         // Folders src, src/ui come first (dirs before files), then files.
         assert!(entries.iter().any(|e| e.rel_path == "src" && e.is_dir));
         assert!(entries.iter().any(|e| e.rel_path == "src/ui" && e.is_dir));
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.rel_path == "src/ui/composer.rs" && !e.is_dir)
-        );
+        let composer = entries
+            .iter()
+            .find(|e| e.rel_path == "src/ui/composer.rs")
+            .unwrap();
+        assert!(!composer.is_dir);
+        assert_eq!(composer.basename, "composer.rs");
+        assert_eq!(composer.parent, "src/ui");
         let readme = entries.iter().find(|e| e.rel_path == "README.md").unwrap();
         assert_eq!(readme.basename, "README.md");
         assert_eq!(readme.parent, "");
-    }
-
-    #[test]
-    fn parent_and_basename_split() {
-        let e = PathEntry::from_rel("a/b/c.rs".to_string(), false);
-        assert_eq!(e.basename, "c.rs");
-        assert_eq!(e.parent, "a/b");
     }
 }

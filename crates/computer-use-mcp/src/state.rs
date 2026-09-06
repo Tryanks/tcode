@@ -29,7 +29,6 @@ pub struct Observation {
     pub root: RootInfo,
     pub root_epoch: u64,
     pub tree: UiNode,
-    pub screenshot_png: Option<Vec<u8>>,
     pub harness_annotation: String,
 }
 
@@ -127,8 +126,6 @@ pub struct OutputPage {
 
 #[derive(Debug)]
 pub struct StateStore {
-    observation_capacity: usize,
-    output_capacity: usize,
     next_state: u64,
     next_output: u64,
     observations: HashMap<String, Arc<Observation>>,
@@ -142,8 +139,6 @@ pub struct StateStore {
 impl Default for StateStore {
     fn default() -> Self {
         Self {
-            observation_capacity: OBSERVATION_CAPACITY,
-            output_capacity: OUTPUT_CAPACITY,
             next_state: 1,
             next_output: 1,
             observations: HashMap::new(),
@@ -157,12 +152,7 @@ impl Default for StateStore {
 }
 
 impl StateStore {
-    pub fn insert_observation(
-        &mut self,
-        root: RootInfo,
-        mut tree: UiNode,
-        screenshot_png: Option<Vec<u8>>,
-    ) -> Arc<Observation> {
+    pub fn insert_observation(&mut self, root: RootInfo, mut tree: UiNode) -> Arc<Observation> {
         let identity = root.identity();
         let previous = self
             .observation_lru
@@ -188,13 +178,12 @@ impl StateStore {
             root,
             root_epoch: *epoch,
             tree,
-            screenshot_png,
             harness_annotation,
         });
         self.observations
             .insert(state_id.clone(), Arc::clone(&observation));
         touch(&mut self.observation_lru, &state_id);
-        while self.observations.len() > self.observation_capacity {
+        while self.observations.len() > OBSERVATION_CAPACITY {
             if let Some(evicted) = self.observation_lru.pop_front()
                 && let Some(observation) = self.observations.remove(&evicted)
             {
@@ -295,7 +284,7 @@ impl StateStore {
             },
         );
         touch(&mut self.output_lru, &output_ref);
-        while self.outputs.len() > self.output_capacity {
+        while self.outputs.len() > OUTPUT_CAPACITY {
             if let Some(evicted) = self.output_lru.pop_front() {
                 self.outputs.remove(&evicted);
             }
@@ -362,11 +351,6 @@ impl StateStore {
         } else {
             page(ref_id, Some(state_id.to_string()), &text, offset)
         }
-    }
-
-    #[cfg(test)]
-    fn contains(&self, state_id: &str) -> bool {
-        self.observations.contains_key(state_id)
     }
 }
 
@@ -674,16 +658,16 @@ mod tests {
     #[test]
     fn lru_evicts_least_recently_used_observation() {
         let mut store = StateStore::default();
-        let first = store.insert_observation(root(1), tree("one"), None);
+        let first = store.insert_observation(root(1), tree("one"));
         for window_id in 2..=OBSERVATION_CAPACITY as u32 {
-            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")), None);
+            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")));
         }
         store.get(&first.state_id).unwrap();
         let newest =
-            store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"), None);
-        assert!(store.contains(&first.state_id));
-        assert!(!store.contains("S2"));
-        assert!(store.contains(&newest.state_id));
+            store.insert_observation(root(OBSERVATION_CAPACITY as u32 + 1), tree("newest"));
+        assert!(store.get(&first.state_id).is_ok());
+        assert!(store.get("S2").is_err());
+        assert!(store.get(&newest.state_id).is_ok());
         assert!(matches!(store.get("S2"), Err(StateError::Evicted(_))));
     }
 
@@ -691,7 +675,7 @@ mod tests {
     fn evicting_the_last_observation_for_a_root_drops_its_harness_history() {
         let mut store = StateStore::default();
         for window_id in 1..=OBSERVATION_CAPACITY as u32 + 1 {
-            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")), None);
+            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")));
         }
         assert!(!store.harness_histories.contains_key(&root(1).identity()));
         assert_eq!(store.harness_histories.len(), OBSERVATION_CAPACITY);
@@ -700,8 +684,8 @@ mod tests {
     #[test]
     fn newer_root_epoch_rejects_actions_from_old_state() {
         let mut store = StateStore::default();
-        let first = store.insert_observation(root(1), tree("one"), None);
-        let second = store.insert_observation(root(1), tree("one changed"), None);
+        let first = store.insert_observation(root(1), tree("one"));
+        let second = store.insert_observation(root(1), tree("one changed"));
         assert!(matches!(
             store.validate_for_action(&first.state_id),
             Err(StateError::Stale { .. })
@@ -769,7 +753,7 @@ mod tests {
     fn recent_actions_keep_only_the_latest_bounded_window_in_order() {
         let mut store = StateStore::default();
         let root = root(1);
-        store.insert_observation(root.clone(), tree("one"), None);
+        store.insert_observation(root.clone(), tree("one"));
         let total = RECENT_ACTION_CAPACITY + 3;
         store.record_actions(&root, (0..total).map(|index| format!("press @e{index}")));
 
@@ -840,9 +824,9 @@ mod tests {
         let mut store = StateStore::default();
         let first_root = root(1);
         let other_root = root(2);
-        let first = store.insert_observation(first_root.clone(), tree("one"), None);
-        let second = store.insert_observation(first_root.clone(), tree("two"), None);
-        let other = store.insert_observation(other_root, tree("other"), None);
+        let first = store.insert_observation(first_root.clone(), tree("one"));
+        let second = store.insert_observation(first_root.clone(), tree("two"));
+        let other = store.insert_observation(other_root, tree("other"));
 
         assert!(first.harness_annotation.contains("observation_sequence: 1"));
         assert!(

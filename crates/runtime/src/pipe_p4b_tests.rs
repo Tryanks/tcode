@@ -49,7 +49,10 @@ fn fixture() -> (SpawnedHost, HostMux, HostLink, String) {
     (host, mux, link, session_id)
 }
 
-fn next(events: &HostEventReceiver, predicate: impl Fn(&ServerEvent) -> bool) -> ServerEvent {
+fn next(
+    events: &async_channel::Receiver<EventEnvelope>,
+    predicate: impl Fn(&ServerEvent) -> bool,
+) -> ServerEvent {
     super::tests::next_event(events, |event| predicate(&event.event)).event
 }
 

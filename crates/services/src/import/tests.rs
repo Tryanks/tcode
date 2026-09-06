@@ -54,7 +54,7 @@ fn claude_converter_maps_items_and_excludes_noise() {
     let file = temp.path().join("claude.jsonl");
     let base =
         json!({"timestamp":"2026-01-02T03:04:05.006Z","cwd":"/synthetic","sessionId":"claude-1"});
-    let mut lines = vec![
+    let lines = vec![
         json!({"type":"user","message":{"role":"user","content":"Hello Claude"},"timestamp":base["timestamp"],"cwd":base["cwd"],"sessionId":base["sessionId"]}),
         json!({"type":"assistant","message":{"role":"assistant","content":[
             {"type":"text","text":"Hello human"},
@@ -69,7 +69,6 @@ fn claude_converter_maps_items_and_excludes_noise() {
         json!({"type":"user","message":{"role":"user","content":"<command-message>noise</command-message>"},"timestamp":"2026-01-02T03:04:10.006Z","cwd":"/synthetic"}),
     ];
     write_lines(&file, &lines);
-    lines.clear();
 
     let converted = claude::convert(&file, "claude:claude-1").unwrap().unwrap();
     let contents = item_contents(&converted);
@@ -285,7 +284,6 @@ fn import_is_idempotent_and_replays_into_timeline() {
         "session-1"
     );
     let timeline = Timeline::fold_events(store.read_events(&meta.id));
-    assert!(!timeline.entries.is_empty());
     assert!(timeline.entries.iter().any(
         |entry| matches!(&entry.content, EntryContent::Item(ItemContent::UserMessage { text, .. }) if text == "Imported question")
     ));

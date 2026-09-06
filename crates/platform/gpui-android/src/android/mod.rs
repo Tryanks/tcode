@@ -1,5 +1,3 @@
-#![allow(clippy::missing_const_for_thread_local)]
-
 mod dispatcher;
 mod display;
 mod host;
@@ -10,6 +8,14 @@ use android_activity::AndroidApp;
 use std::{cell::RefCell, rc::Rc};
 
 pub(crate) use platform::AndroidPlatform;
+
+#[doc(hidden)]
+pub use host::{
+    commit_text as jni_commit_text, delete_backward as jni_delete_backward,
+    finish_composing_text as jni_finish_composing_text, key_event as jni_key_event,
+    on_back as jni_on_back, on_insets as jni_on_insets,
+    set_composing_text as jni_set_composing_text,
+};
 
 thread_local! {
     static PLATFORM: RefCell<Option<Rc<AndroidPlatform>>> = const { RefCell::new(None) };
@@ -49,16 +55,6 @@ pub fn set_back_callback(callback: impl FnMut() + 'static) {
     });
 }
 
-/// Current system-bar and display-cutout insets in logical pixels.
-pub fn safe_area() -> gpui::Edges<gpui::Pixels> {
-    PLATFORM.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(|platform| platform.safe_area())
-            .unwrap_or_default()
-    })
-}
-
 /// Current system-bar, display-cutout, and software-keyboard insets.
 pub fn insets() -> gpui::WindowInsets {
     PLATFORM.with(|slot| {
@@ -67,39 +63,4 @@ pub fn insets() -> gpui::WindowInsets {
             .map(|platform| platform.insets())
             .unwrap_or_default()
     })
-}
-
-#[doc(hidden)]
-pub fn jni_commit_text(text: String) {
-    host::commit_text(text);
-}
-
-#[doc(hidden)]
-pub fn jni_set_composing_text(text: String) {
-    host::set_composing_text(text);
-}
-
-#[doc(hidden)]
-pub fn jni_finish_composing_text() {
-    host::finish_composing_text();
-}
-
-#[doc(hidden)]
-pub fn jni_delete_backward() {
-    host::delete_backward();
-}
-
-#[doc(hidden)]
-pub fn jni_key_event(key_code: i32, down: bool, unicode_code_point: i32, meta_state: i32) {
-    host::key_event(key_code, down, unicode_code_point, meta_state);
-}
-
-#[doc(hidden)]
-pub fn jni_on_insets(left: i32, top: i32, right: i32, bottom: i32, ime_bottom: i32) {
-    host::on_insets(left, top, right, bottom, ime_bottom);
-}
-
-#[doc(hidden)]
-pub fn jni_on_back() {
-    host::on_back();
 }

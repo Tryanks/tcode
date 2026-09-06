@@ -752,54 +752,40 @@ mod tests {
         assert!(!diff.use_full_view);
     }
 
-    fn framed_tree(children: Vec<UiNode>) -> UiNode {
-        UiNode {
+    #[test]
+    fn screenshot_fallback_requires_a_large_text_sparse_root() {
+        let mut tree = UiNode {
             frame: Frame {
                 x: 20.0,
                 y: 30.0,
                 w: 800.0,
                 h: 600.0,
             },
-            children,
-            ..node("window", "Root window title", Vec::new())
-        }
-    }
-
-    #[test]
-    fn large_tree_with_fewer_than_three_text_descendants_is_sparse() {
-        let tree = framed_tree(vec![
-            node("button", "Menu", Vec::new()),
-            node("static_text", "Score", Vec::new()),
-        ]);
-
+            ..node(
+                "window",
+                "Root window title",
+                vec![
+                    node("button", "Menu", Vec::new()),
+                    node("static_text", "Score", Vec::new()),
+                ],
+            )
+        };
         assert!(is_text_sparse(&tree));
-    }
-
-    #[test]
-    fn large_tree_with_three_text_descendants_is_adequate() {
-        let tree = framed_tree(vec![
-            node("button", "Menu", Vec::new()),
-            node("static_text", "Score", Vec::new()),
-            node("static_text", "Ready", Vec::new()),
-        ]);
-
+        tree.children.push(node("static_text", "Ready", Vec::new()));
         assert!(!is_text_sparse(&tree));
-    }
-
-    #[test]
-    fn small_tree_is_not_sparse_even_without_text_descendants() {
-        let mut tree = framed_tree(Vec::new());
+        tree.children.clear();
         tree.frame.w = 100.0;
         tree.frame.h = 100.0;
-
         assert!(!is_text_sparse(&tree));
     }
 
     #[test]
     fn safe_prefix_ends_on_utf8_and_line_boundaries() {
         let text = "a\nβ\ncharlie";
-        let (prefix, offset) = safe_prefix(text, 5, 2);
-        assert_eq!(prefix, "a\nβ\n");
-        assert_eq!(offset, prefix.len());
+        for (bytes, lines, expected) in [(3, 10, "a\n"), (20, 2, "a\nβ\n")] {
+            let (prefix, offset) = safe_prefix(text, bytes, lines);
+            assert_eq!(prefix, expected);
+            assert_eq!(offset, expected.len());
+        }
     }
 }

@@ -1,5 +1,8 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -7,8 +10,15 @@ use rmcp::model::{
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
+use serde_json::json;
+
+use crate::backend::{
+    ActionOutcome, ActionRequest, ActionResult, CapturePolicy, Delivery, ObserveRequest,
+    RootFilters, RootInfo, RootObservation,
+};
+use crate::outline::{self, UiNode};
 
 pub use crate::backend::{ActionKind as UiActionKind, MouseButton, RootKind};
 
@@ -90,25 +100,6 @@ pub struct UiCondition {
 pub enum ConditionUntil {
     Present,
     Absent,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct FindRootsParams {
-    /// Text to match against application and window titles.
-    #[serde(default)]
-    text: Option<String>,
-    /// Application name to match.
-    #[serde(default)]
-    app: Option<String>,
-    /// Application bundle identifier to match.
-    #[serde(default)]
-    bundle_id: Option<String>,
-    /// Process identifier to match.
-    #[serde(default)]
-    pid: Option<u32>,
-    /// Desktop root kind to match.
-    #[serde(default)]
-    kind: Option<RootKind>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -203,202 +194,12 @@ impl ComputerUseTools {
     #[tool(
         description = "Find and rank desktop window roots, returning state-scoped @rN references."
     )]
-    async fn find_roots(
-        &self,
-        Parameters(params): Parameters<FindRootsParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::find_roots(params).await)
-    }
-
-    #[tool(
-        description = "Observe a desktop root and return a folded outline, state_id, and screenshot when requested by the observation mode."
-    )]
-    async fn observe_ui(
-        &self,
-        Parameters(params): Parameters<ObserveUiParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::observe_ui(params).await)
-    }
-
-    #[tool(
-        description = "Search and rank elements in a cached UI state by text and accessibility role."
-    )]
-    async fn search_ui(
-        &self,
-        Parameters(params): Parameters<SearchUiParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::search_ui(params).await)
-    }
-
-    #[tool(description = "Expand local outline context around a state-scoped element reference.")]
-    async fn expand_ui(
-        &self,
-        Parameters(params): Parameters<ExpandUiParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::expand_ui(params).await)
-    }
-
-    #[tool(
-        description = "Inspect an element's full accessibility attributes, frame, and supported actions."
-    )]
-    async fn inspect_ui(
-        &self,
-        Parameters(params): Parameters<InspectUiParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::inspect_ui(params).await)
-    }
-
-    #[tool(
-        description = "Execute a transaction of desktop input actions against a cached UI state, optionally verifying a postcondition."
-    )]
-    async fn act_ui(
-        &self,
-        Parameters(params): Parameters<ActUiParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::act_ui(params).await)
-    }
-
-    #[tool(description = "Read a bounded page of long text owned by a state-scoped reference.")]
-    async fn read_text(
-        &self,
-        Parameters(params): Parameters<ReadTextParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::read_text(params).await)
-    }
-
-    #[tool(
-        description = "Wait for a text, role, value, or referenced UI element to become present or absent."
-    )]
-    async fn wait_for(
-        &self,
-        Parameters(params): Parameters<WaitForParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(dispatch::wait_for(params).await)
-    }
-}
-
-#[tool_handler(router = self.tool_router)]
-impl ServerHandler for ComputerUseTools {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_protocol_version(ProtocolVersion::LATEST)
-            .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                "Observe and control desktop applications through state-scoped accessibility references."
-            )
-    }
-}
-
-pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
-
-pub fn service() -> Service {
-    StreamableHttpService::new(
-        || Ok(ComputerUseTools::new()),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
-    )
-}
-
-mod dispatch {
-    use super::*;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::{Duration, Instant};
-
-    use base64::Engine as _;
-    use serde_json::json;
-
-    use crate::backend::{
-        ActionOutcome, ActionRequest, ActionResult, CapturePolicy, Delivery, ObserveRequest,
-        RootFilters, RootInfo, RootObservation,
-    };
-    use crate::outline::{self, UiNode};
-
-    const DEFAULT_TIMEOUT_MS: u64 = 3_000;
-    const MAX_TIMEOUT_MS: u64 = 30_000;
-    const POLL_INTERVAL_MS: u64 = 100;
-
-    #[derive(Default)]
-    struct RootRegistry {
-        next_ref: u64,
-        by_identity: HashMap<String, String>,
-        by_ref: HashMap<String, RootInfo>,
-    }
-
-    impl RootRegistry {
-        fn refresh(&mut self, roots: Vec<RootInfo>) -> Vec<RootInfo> {
-            if self.next_ref == 0 {
-                self.next_ref = 1;
-            }
-            roots
-                .into_iter()
-                .map(|mut root| {
-                    let identity = root.identity();
-                    let ref_id = self
-                        .by_identity
-                        .entry(identity)
-                        .or_insert_with(|| {
-                            let ref_id = format!("@r{}", self.next_ref);
-                            self.next_ref += 1;
-                            ref_id
-                        })
-                        .clone();
-                    root.ref_id.clone_from(&ref_id);
-                    self.by_ref.insert(ref_id, root.clone());
-                    root
-                })
-                .collect()
-        }
-
-        fn get(&self, ref_id: &str) -> Option<RootInfo> {
-            self.by_ref.get(ref_id).cloned()
-        }
-    }
-
-    static ROOTS: OnceLock<Mutex<RootRegistry>> = OnceLock::new();
-
-    #[derive(Default)]
-    struct ObservationLanes {
-        by_pid: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
-    }
-
-    impl ObservationLanes {
-        fn lane(&self, pid: u32) -> Arc<tokio::sync::Mutex<()>> {
-            Arc::clone(
-                self.by_pid
-                    .lock()
-                    .unwrap()
-                    .entry(pid)
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
-        }
-    }
-
-    static OBSERVATION_LANES: OnceLock<ObservationLanes> = OnceLock::new();
-
-    fn roots() -> &'static Mutex<RootRegistry> {
-        ROOTS.get_or_init(|| Mutex::new(RootRegistry::default()))
-    }
-
-    fn observation_lane(pid: u32) -> Arc<tokio::sync::Mutex<()>> {
-        OBSERVATION_LANES
-            .get_or_init(ObservationLanes::default)
-            .lane(pid)
-    }
-
-    pub(super) async fn find_roots(params: FindRootsParams) -> CallToolResult {
+    async fn find_roots(&self, Parameters(params): Parameters<RootFilters>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
         }
-        let filters = RootFilters {
-            text: params.text,
-            app: params.app,
-            bundle_id: params.bundle_id,
-            pid: params.pid,
-            kind: params.kind,
-        };
-        let discovered = match crate::backend::list_roots(&filters) {
+        let discovered = match crate::backend::list_roots(&params) {
             Ok(roots) => roots,
             Err(error) => return backend_error(error),
         };
@@ -423,7 +224,10 @@ mod dispatch {
         bounded_success(None, lines.join("\n"), Vec::new())
     }
 
-    pub(super) async fn observe_ui(params: ObserveUiParams) -> CallToolResult {
+    #[tool(
+        description = "Observe a desktop root and return a folded outline, state_id, and screenshot when requested by the observation mode."
+    )]
+    async fn observe_ui(&self, Parameters(params): Parameters<ObserveUiParams>) -> CallToolResult {
         let permissions = permissions();
         let config = crate::config::get();
         let needs_accessibility = !matches!(params.mode, Some(ObserveMode::Visual));
@@ -457,7 +261,10 @@ mod dispatch {
         save_observation(observed, capture_warning(config.image_mode, &permissions))
     }
 
-    pub(super) async fn search_ui(params: SearchUiParams) -> CallToolResult {
+    #[tool(
+        description = "Search and rank elements in a cached UI state by text and accessibility role."
+    )]
+    async fn search_ui(&self, Parameters(params): Parameters<SearchUiParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -487,7 +294,8 @@ mod dispatch {
         bounded_success(Some(&observation.state_id), lines.join("\n"), Vec::new())
     }
 
-    pub(super) async fn expand_ui(params: ExpandUiParams) -> CallToolResult {
+    #[tool(description = "Expand local outline context around a state-scoped element reference.")]
+    async fn expand_ui(&self, Parameters(params): Parameters<ExpandUiParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -508,7 +316,10 @@ mod dispatch {
         )
     }
 
-    pub(super) async fn inspect_ui(params: InspectUiParams) -> CallToolResult {
+    #[tool(
+        description = "Inspect an element's full accessibility attributes, frame, and supported actions."
+    )]
+    async fn inspect_ui(&self, Parameters(params): Parameters<InspectUiParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -537,7 +348,10 @@ mod dispatch {
         bounded_success(Some(&observation.state_id), text, Vec::new())
     }
 
-    pub(super) async fn act_ui(params: ActUiParams) -> CallToolResult {
+    #[tool(
+        description = "Execute a transaction of desktop input actions against a cached UI state, optionally verifying a postcondition."
+    )]
+    async fn act_ui(&self, Parameters(params): Parameters<ActUiParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -606,7 +420,7 @@ mod dispatch {
             .expect
             .as_ref()
             .is_some_and(|condition| condition_satisfied(&previous.tree, condition));
-        let (mut successor, expectation_status, root_changed) = match poll_successor(
+        let (successor, expectation_status, root_changed) = match poll_successor(
             &previous,
             params.expect.as_ref(),
             expectation_preexisting,
@@ -616,12 +430,10 @@ mod dispatch {
             Ok(result) => result,
             Err(error) => return backend_error(error),
         };
-        outline::assign_refs_from_previous(&previous.tree, &mut successor.tree);
-        let successor = crate::state::global().lock().unwrap().insert_observation(
-            successor.root,
-            successor.tree,
-            successor.screenshot,
-        );
+        let successor = crate::state::global()
+            .lock()
+            .unwrap()
+            .insert_observation(successor.root, successor.tree);
         let diff = outline::diff_trees(&previous.tree, &successor.tree);
         let expectation_failed = expectation_status == "failed";
         let any_unknown = step_results
@@ -660,7 +472,8 @@ mod dispatch {
         bounded_success(Some(&successor.state_id), text, Vec::new())
     }
 
-    pub(super) async fn read_text(params: ReadTextParams) -> CallToolResult {
+    #[tool(description = "Read a bounded page of long text owned by a state-scoped reference.")]
+    async fn read_text(&self, Parameters(params): Parameters<ReadTextParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -717,7 +530,10 @@ mod dispatch {
         )
     }
 
-    pub(super) async fn wait_for(params: WaitForParams) -> CallToolResult {
+    #[tool(
+        description = "Wait for a text, role, value, or referenced UI element to become present or absent."
+    )]
+    async fn wait_for(&self, Parameters(params): Parameters<WaitForParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -745,7 +561,7 @@ mod dispatch {
         );
         let deadline = Instant::now() + timeout;
         let mut polls = 0_u64;
-        let (mut observed, root_changed, matched) = loop {
+        let (observed, root_changed, matched) = loop {
             polls += 1;
             let (mut observed, root_changed) = match observe_with_root_fallback(
                 &previous.root,
@@ -766,12 +582,10 @@ mod dispatch {
             }
             tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
         };
-        outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
-        let successor = crate::state::global().lock().unwrap().insert_observation(
-            observed.root,
-            observed.tree,
-            observed.screenshot,
-        );
+        let successor = crate::state::global()
+            .lock()
+            .unwrap()
+            .insert_observation(observed.root, observed.tree);
         let status = if matched { "matched" } else { "timeout" };
         let report = json!({
             "state_id": successor.state_id,
@@ -786,491 +600,547 @@ mod dispatch {
         text.push_str(&outline::render_folded(&successor.tree));
         bounded_success(Some(&successor.state_id), text, Vec::new())
     }
+}
 
-    #[cfg(target_os = "macos")]
-    type PermissionSnapshot = crate::permissions::PermissionStatus;
-
-    #[cfg(not(target_os = "macos"))]
-    #[derive(Clone, Copy)]
-    struct PermissionSnapshot;
-
-    #[cfg(target_os = "macos")]
-    fn permissions() -> PermissionSnapshot {
-        crate::permissions::check()
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for ComputerUseTools {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions(
+                "Observe and control desktop applications through state-scoped accessibility references."
+            )
     }
+}
 
-    #[cfg(not(target_os = "macos"))]
-    fn permissions() -> PermissionSnapshot {
-        PermissionSnapshot
-    }
+pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
 
-    #[cfg(target_os = "macos")]
-    fn permission_gate(
-        permissions: PermissionSnapshot,
-        needs_accessibility: bool,
-        needs_screen_recording: bool,
-    ) -> Option<CallToolResult> {
-        if needs_accessibility && !permissions.accessibility {
-            return Some(tool_error(
-                "Accessibility permission is missing; grant it in tcode Settings → Computer Use.",
-            ));
-        }
-        if needs_screen_recording && !permissions.screen_recording {
-            return Some(tool_error(
-                "Screen Recording permission is missing; grant it in tcode Settings → Computer Use.",
-            ));
-        }
-        None
-    }
+pub fn service() -> Service {
+    StreamableHttpService::new(
+        || Ok(ComputerUseTools::new()),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    )
+}
 
-    #[cfg(target_os = "windows")]
-    fn permission_gate(
-        _permissions: PermissionSnapshot,
-        _needs_accessibility: bool,
-        _needs_screen_recording: bool,
-    ) -> Option<CallToolResult> {
-        None
-    }
+const DEFAULT_TIMEOUT_MS: u64 = 3_000;
+const MAX_TIMEOUT_MS: u64 = 30_000;
+const POLL_INTERVAL_MS: u64 = 100;
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn permission_gate(
-        _permissions: PermissionSnapshot,
-        _needs_accessibility: bool,
-        _needs_screen_recording: bool,
-    ) -> Option<CallToolResult> {
-        Some(backend_error(crate::backend::BackendError::unsupported()))
-    }
+#[derive(Default)]
+struct RootRegistry {
+    next_ref: u64,
+    by_identity: HashMap<String, String>,
+    by_ref: HashMap<String, RootInfo>,
+}
 
-    fn resolve_root(requested: Option<&str>) -> Result<RootInfo, Box<CallToolResult>> {
-        if let Some(requested) = requested
-            && let Some(root) = roots().lock().unwrap().get(requested)
-        {
-            return Ok(root);
+impl RootRegistry {
+    fn refresh(&mut self, roots: Vec<RootInfo>) -> Vec<RootInfo> {
+        if self.next_ref == 0 {
+            self.next_ref = 1;
         }
-        let discovered = crate::backend::list_roots(&RootFilters::default())
-            .map_err(|error| Box::new(backend_error(error)))?;
-        let discovered = roots().lock().unwrap().refresh(discovered);
-        match requested {
-            Some(requested) => discovered
-                .into_iter()
-                .find(|root| root.ref_id == requested)
-                .ok_or_else(|| {
-                    Box::new(tool_error(&format!(
-                        "root ref {requested} is no longer available; call find_roots again"
-                    )))
-                }),
-            None => discovered
-                .into_iter()
-                .next()
-                .ok_or_else(|| Box::new(tool_error("no on-screen desktop roots were found"))),
-        }
-    }
-
-    fn capture_policy(
-        configured: crate::config::ImageMode,
-        requested: Option<ObserveMode>,
-        permissions: &PermissionSnapshot,
-    ) -> CapturePolicy {
-        #[cfg(not(target_os = "macos"))]
-        let _ = permissions;
-        if configured == crate::config::ImageMode::Never {
-            return CapturePolicy::Never;
-        }
-        if matches!(requested, Some(ObserveMode::Visual | ObserveMode::Fused))
-            || configured == crate::config::ImageMode::Always
-        {
-            return CapturePolicy::Always;
-        }
-        #[cfg(target_os = "macos")]
-        if !permissions.screen_recording {
-            return CapturePolicy::Never;
-        }
-        CapturePolicy::IfSparse
-    }
-
-    fn capture_warning(
-        configured: crate::config::ImageMode,
-        permissions: &PermissionSnapshot,
-    ) -> Option<&'static str> {
-        #[cfg(target_os = "macos")]
-        if configured == crate::config::ImageMode::Auto && !permissions.screen_recording {
-            return Some(
-                "screenshot omitted in auto mode because Screen Recording permission is missing",
-            );
-        }
-        let _ = (configured, permissions);
-        None
-    }
-
-    fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToolResult {
-        let RootObservation {
-            root,
-            tree,
-            text_sparse,
-            screenshot,
-            screenshot_mime,
-        } = observed;
-        let screenshot_for_response = screenshot.clone();
-        let observation = crate::state::global()
-            .lock()
-            .unwrap()
-            .insert_observation(root, tree, screenshot);
-        let mut text = format!(
-            "state_id: {}\nroot: {} app=\"{}\" title=\"{}\"\nelements: {} interactive: {}",
-            observation.state_id,
-            observation.root.ref_id,
-            escaped(&observation.root.app_name),
-            escaped(&observation.root.title),
-            count_nodes(&observation.tree),
-            outline::interactive_count(&observation.tree)
-        );
-        if text_sparse {
-            text.push_str("\ntext_sparse: true");
-        }
-        if let Some(warning) = warning {
-            text.push_str("\nwarning: ");
-            text.push_str(warning);
-        }
-        text.push('\n');
-        text.push_str(&outline::render_folded(&observation.tree));
-        text.push_str("\n\n");
-        text.push_str(&observation.harness_annotation);
-        let extra = screenshot_for_response
-            .map(|screenshot| {
-                ContentBlock::image(
-                    base64::engine::general_purpose::STANDARD.encode(screenshot),
-                    screenshot_mime,
-                )
-            })
+        roots
             .into_iter()
-            .collect();
-        bounded_success(Some(&observation.state_id), text, extra)
+            .map(|mut root| {
+                let identity = root.identity();
+                let ref_id = self
+                    .by_identity
+                    .entry(identity)
+                    .or_insert_with(|| {
+                        let ref_id = format!("@r{}", self.next_ref);
+                        self.next_ref += 1;
+                        ref_id
+                    })
+                    .clone();
+                root.ref_id.clone_from(&ref_id);
+                self.by_ref.insert(ref_id, root.clone());
+                root
+            })
+            .collect()
     }
 
-    fn prepare_action(tree: &UiNode, action: &UiAction) -> Result<ActionRequest, String> {
-        let target = action.r#ref.as_deref().map(|ref_id| {
-            let node = tree.find(ref_id).ok_or_else(|| {
-                crate::state::StateError::UnknownElement(ref_id.to_string()).to_string()
-            })?;
-            let path = outline::path_to_ref(tree, ref_id).ok_or_else(|| {
-                crate::state::StateError::UnknownElement(ref_id.to_string()).to_string()
-            })?;
-            Ok::<_, String>((node, path))
-        });
-        let target = target.transpose()?;
-        Ok(ActionRequest {
-            kind: action.action,
-            target_path: target.as_ref().map(|(_, path)| path.clone()),
-            target_frame: target.as_ref().map(|(node, _)| node.frame),
-            target_role: target.as_ref().map(|(node, _)| node.role.clone()),
-            target_title: target.as_ref().map(|(node, _)| node.title.clone()),
-            target_actions: target
-                .as_ref()
-                .map(|(node, _)| node.actions.clone())
-                .unwrap_or_default(),
-            x: action.x,
-            y: action.y,
-            text: action.text.clone(),
-            keys: action.keys.clone(),
-            scroll_x: action.scroll_x,
-            scroll_y: action.scroll_y,
-            path: action.path.clone(),
-            button: action.button.unwrap_or(MouseButton::Left),
-            click_count: action.click_count.unwrap_or(1),
-        })
+    fn get(&self, ref_id: &str) -> Option<RootInfo> {
+        self.by_ref.get(ref_id).cloned()
     }
+}
 
-    async fn poll_successor(
-        previous: &crate::state::Observation,
-        condition: Option<&UiCondition>,
-        preexisting: bool,
-    ) -> Result<(RootObservation, &'static str, bool), crate::backend::BackendError> {
-        let timeout = Duration::from_millis(
-            condition
-                .and_then(|condition| condition.timeout_ms)
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .min(MAX_TIMEOUT_MS),
+static ROOTS: OnceLock<Mutex<RootRegistry>> = OnceLock::new();
+
+#[derive(Default)]
+struct ObservationLanes {
+    by_pid: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ObservationLanes {
+    fn lane(&self, pid: u32) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.by_pid
+                .lock()
+                .unwrap()
+                .entry(pid)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+}
+
+static OBSERVATION_LANES: OnceLock<ObservationLanes> = OnceLock::new();
+
+fn roots() -> &'static Mutex<RootRegistry> {
+    ROOTS.get_or_init(|| Mutex::new(RootRegistry::default()))
+}
+
+fn observation_lane(pid: u32) -> Arc<tokio::sync::Mutex<()>> {
+    OBSERVATION_LANES
+        .get_or_init(ObservationLanes::default)
+        .lane(pid)
+}
+
+#[cfg(target_os = "macos")]
+type PermissionSnapshot = crate::permissions::PermissionStatus;
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone, Copy)]
+struct PermissionSnapshot;
+
+#[cfg(target_os = "macos")]
+fn permissions() -> PermissionSnapshot {
+    crate::permissions::check()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn permissions() -> PermissionSnapshot {
+    PermissionSnapshot
+}
+
+#[cfg(target_os = "macos")]
+fn permission_gate(
+    permissions: PermissionSnapshot,
+    needs_accessibility: bool,
+    needs_screen_recording: bool,
+) -> Option<CallToolResult> {
+    if needs_accessibility && !permissions.accessibility {
+        return Some(tool_error(
+            "Accessibility permission is missing; grant it in tcode Settings → Computer Use.",
+        ));
+    }
+    if needs_screen_recording && !permissions.screen_recording {
+        return Some(tool_error(
+            "Screen Recording permission is missing; grant it in tcode Settings → Computer Use.",
+        ));
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn permission_gate(
+    _permissions: PermissionSnapshot,
+    _needs_accessibility: bool,
+    _needs_screen_recording: bool,
+) -> Option<CallToolResult> {
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn permission_gate(
+    _permissions: PermissionSnapshot,
+    _needs_accessibility: bool,
+    _needs_screen_recording: bool,
+) -> Option<CallToolResult> {
+    Some(backend_error(crate::backend::BackendError::unsupported()))
+}
+
+fn resolve_root(requested: Option<&str>) -> Result<RootInfo, Box<CallToolResult>> {
+    if let Some(requested) = requested
+        && let Some(root) = roots().lock().unwrap().get(requested)
+    {
+        return Ok(root);
+    }
+    let discovered = crate::backend::list_roots(&RootFilters::default())
+        .map_err(|error| Box::new(backend_error(error)))?;
+    let discovered = roots().lock().unwrap().refresh(discovered);
+    match requested {
+        Some(requested) => discovered
+            .into_iter()
+            .find(|root| root.ref_id == requested)
+            .ok_or_else(|| {
+                Box::new(tool_error(&format!(
+                    "root ref {requested} is no longer available; call find_roots again"
+                )))
+            }),
+        None => discovered
+            .into_iter()
+            .next()
+            .ok_or_else(|| Box::new(tool_error("no on-screen desktop roots were found"))),
+    }
+}
+
+fn capture_policy(
+    configured: crate::config::ImageMode,
+    requested: Option<ObserveMode>,
+    permissions: &PermissionSnapshot,
+) -> CapturePolicy {
+    #[cfg(not(target_os = "macos"))]
+    let _ = permissions;
+    if configured == crate::config::ImageMode::Never {
+        return CapturePolicy::Never;
+    }
+    if matches!(requested, Some(ObserveMode::Visual | ObserveMode::Fused))
+        || configured == crate::config::ImageMode::Always
+    {
+        return CapturePolicy::Always;
+    }
+    #[cfg(target_os = "macos")]
+    if !permissions.screen_recording {
+        return CapturePolicy::Never;
+    }
+    CapturePolicy::IfSparse
+}
+
+fn capture_warning(
+    configured: crate::config::ImageMode,
+    permissions: &PermissionSnapshot,
+) -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    if configured == crate::config::ImageMode::Auto && !permissions.screen_recording {
+        return Some(
+            "screenshot omitted in auto mode because Screen Recording permission is missing",
         );
-        let deadline = Instant::now() + timeout;
-        loop {
-            let (mut observed, root_changed) = observe_with_root_fallback(
-                &previous.root,
-                ObserveRequest {
-                    semantic: true,
-                    capture: CapturePolicy::Never,
-                },
-            )?;
-            outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
-            let status = match condition {
-                None => Some("not_requested"),
-                Some(_) if preexisting => Some("preexisting"),
-                Some(condition) if condition_satisfied(&observed.tree, condition) => {
-                    Some("verified")
-                }
-                Some(_) if Instant::now() >= deadline => Some("failed"),
-                Some(_) => None,
-            };
-            if let Some(status) = status {
-                return Ok((observed, status, root_changed));
-            }
-            tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
-        }
     }
+    let _ = (configured, permissions);
+    None
+}
 
-    fn observe_with_root_fallback(
-        root: &RootInfo,
-        request: ObserveRequest,
-    ) -> Result<(RootObservation, bool), crate::backend::BackendError> {
-        match crate::backend::observe(root, request) {
-            Ok(observed) => Ok((observed, false)),
-            Err(original_error) => {
-                let discovered = crate::backend::list_roots(&RootFilters::default())?;
-                let discovered = roots().lock().unwrap().refresh(discovered);
-                let Some(successor_root) = discovered.into_iter().next() else {
-                    return Err(original_error);
-                };
-                crate::backend::observe(&successor_root, request)
-                    .map(|observed| (observed, successor_root.identity() != root.identity()))
-            }
-        }
+fn save_observation(observed: RootObservation, warning: Option<&str>) -> CallToolResult {
+    let RootObservation {
+        root,
+        tree,
+        text_sparse,
+        screenshot,
+        screenshot_mime,
+    } = observed;
+    let observation = crate::state::global()
+        .lock()
+        .unwrap()
+        .insert_observation(root, tree);
+    let mut text = format!(
+        "state_id: {}\nroot: {} app=\"{}\" title=\"{}\"\nelements: {} interactive: {}",
+        observation.state_id,
+        observation.root.ref_id,
+        escaped(&observation.root.app_name),
+        escaped(&observation.root.title),
+        observation.tree.node_count(),
+        outline::interactive_count(&observation.tree)
+    );
+    if text_sparse {
+        text.push_str("\ntext_sparse: true");
     }
+    if let Some(warning) = warning {
+        text.push_str("\nwarning: ");
+        text.push_str(warning);
+    }
+    text.push('\n');
+    text.push_str(&outline::render_folded(&observation.tree));
+    text.push_str("\n\n");
+    text.push_str(&observation.harness_annotation);
+    let extra = screenshot
+        .map(|screenshot| {
+            ContentBlock::image(
+                base64::engine::general_purpose::STANDARD.encode(screenshot),
+                screenshot_mime,
+            )
+        })
+        .into_iter()
+        .collect();
+    bounded_success(Some(&observation.state_id), text, extra)
+}
 
-    fn condition_satisfied(tree: &UiNode, condition: &UiCondition) -> bool {
-        let scope = match condition.scope_ref.as_deref() {
-            Some(ref_id) => tree.find(ref_id),
-            None => Some(tree),
+fn prepare_action(tree: &UiNode, action: &UiAction) -> Result<ActionRequest, String> {
+    let target = action.r#ref.as_deref().map(|ref_id| {
+        let node = tree.find(ref_id).ok_or_else(|| {
+            crate::state::StateError::UnknownElement(ref_id.to_string()).to_string()
+        })?;
+        let path = outline::path_to_ref(tree, ref_id).ok_or_else(|| {
+            crate::state::StateError::UnknownElement(ref_id.to_string()).to_string()
+        })?;
+        Ok::<_, String>((node, path))
+    });
+    let target = target.transpose()?;
+    Ok(ActionRequest {
+        kind: action.action,
+        target_path: target.as_ref().map(|(_, path)| path.clone()),
+        target_frame: target.as_ref().map(|(node, _)| node.frame),
+        target_role: target.as_ref().map(|(node, _)| node.role.clone()),
+        target_title: target.as_ref().map(|(node, _)| node.title.clone()),
+        target_actions: target
+            .as_ref()
+            .map(|(node, _)| node.actions.clone())
+            .unwrap_or_default(),
+        x: action.x,
+        y: action.y,
+        text: action.text.clone(),
+        keys: action.keys.clone(),
+        scroll_x: action.scroll_x,
+        scroll_y: action.scroll_y,
+        path: action.path.clone(),
+        button: action.button.unwrap_or(MouseButton::Left),
+        click_count: action.click_count.unwrap_or(1),
+    })
+}
+
+async fn poll_successor(
+    previous: &crate::state::Observation,
+    condition: Option<&UiCondition>,
+    preexisting: bool,
+) -> Result<(RootObservation, &'static str, bool), crate::backend::BackendError> {
+    let timeout = Duration::from_millis(
+        condition
+            .and_then(|condition| condition.timeout_ms)
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS),
+    );
+    let deadline = Instant::now() + timeout;
+    loop {
+        let (mut observed, root_changed) = observe_with_root_fallback(
+            &previous.root,
+            ObserveRequest {
+                semantic: true,
+                capture: CapturePolicy::Never,
+            },
+        )?;
+        outline::assign_refs_from_previous(&previous.tree, &mut observed.tree);
+        let status = match condition {
+            None => Some("not_requested"),
+            Some(_) if preexisting => Some("preexisting"),
+            Some(condition) if condition_satisfied(&observed.tree, condition) => Some("verified"),
+            Some(_) if Instant::now() >= deadline => Some("failed"),
+            Some(_) => None,
         };
-        let Some(scope) = scope else {
-            return matches!(condition.until, Some(ConditionUntil::Absent));
-        };
-        let present = if let Some(ref_id) = condition.r#ref.as_deref() {
-            scope
-                .find(ref_id)
-                .is_some_and(|node| node_matches(node, condition))
-        } else {
-            any_node_matches(scope, condition)
-        };
-        match condition.until.unwrap_or(ConditionUntil::Present) {
-            ConditionUntil::Present => present,
-            ConditionUntil::Absent => !present,
+        if let Some(status) = status {
+            return Ok((observed, status, root_changed));
         }
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
+}
 
-    fn any_node_matches(node: &UiNode, condition: &UiCondition) -> bool {
-        node_matches(node, condition)
-            || node
-                .children
-                .iter()
-                .any(|child| any_node_matches(child, condition))
-    }
-
-    fn node_matches(node: &UiNode, condition: &UiCondition) -> bool {
-        let text_matches = condition.text.as_deref().is_none_or(|text| {
-            contains_case_insensitive(&node.title, text)
-                || contains_case_insensitive(&node.value, text)
-                || contains_case_insensitive(&node.description, text)
-        });
-        let role_matches = condition.role.as_deref().is_none_or(|role| {
-            outline::canonical_role(&node.role) == outline::canonical_role(role)
-        });
-        let value_matches = condition
-            .value
-            .as_deref()
-            .is_none_or(|value| contains_case_insensitive(&node.value, value));
-        text_matches && role_matches && value_matches
-    }
-
-    fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-        haystack.to_lowercase().contains(&needle.to_lowercase())
-    }
-
-    fn until_name(until: Option<ConditionUntil>) -> &'static str {
-        match until.unwrap_or(ConditionUntil::Present) {
-            ConditionUntil::Present => "present",
-            ConditionUntil::Absent => "absent",
-        }
-    }
-
-    fn action_name(action: UiActionKind) -> &'static str {
-        match action {
-            UiActionKind::Press => "press",
-            UiActionKind::Click => "click",
-            UiActionKind::SetText => "set_text",
-            UiActionKind::TypeText => "type_text",
-            UiActionKind::Keypress => "keypress",
-            UiActionKind::Scroll => "scroll",
-            UiActionKind::Drag => "drag",
-            UiActionKind::MoveMouse => "move_mouse",
-        }
-    }
-
-    fn count_nodes(node: &UiNode) -> usize {
-        1 + node.children.iter().map(count_nodes).sum::<usize>()
-    }
-
-    fn escaped(value: &str) -> String {
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace(['\n', '\r'], " ")
-    }
-
-    fn bounded_success(
-        owner_state: Option<&str>,
-        text: String,
-        mut extra: Vec<ContentBlock>,
-    ) -> CallToolResult {
-        let text = crate::state::global()
-            .lock()
-            .unwrap()
-            .bound_model_text(owner_state, text);
-        let mut content = vec![ContentBlock::text(text)];
-        content.append(&mut extra);
-        CallToolResult::success(content)
-    }
-
-    fn backend_error(error: crate::backend::BackendError) -> CallToolResult {
-        let text = serde_json::to_string(&error).unwrap_or_else(|_| error.to_string());
-        CallToolResult::error(vec![ContentBlock::text(text)])
-    }
-
-    fn tool_error(message: &str) -> CallToolResult {
-        CallToolResult::error(vec![ContentBlock::text(message)])
-    }
-
-    #[cfg(test)]
-    mod scheduling_tests {
-        use super::*;
-
-        #[test]
-        fn per_pid_lanes_allow_other_pids_and_serialize_the_same_pid() {
-            let lanes = ObservationLanes::default();
-            let first_pid = lanes.lane(1001);
-            let same_pid = lanes.lane(1001);
-            let other_pid = lanes.lane(2002);
-            assert!(Arc::ptr_eq(&first_pid, &same_pid));
-            assert!(!Arc::ptr_eq(&first_pid, &other_pid));
-
-            let first_guard = first_pid.try_lock().unwrap();
-            let other_guard = other_pid.try_lock().unwrap();
-            assert!(same_pid.try_lock().is_err());
-
-            drop(first_guard);
-            let same_pid_guard = same_pid.try_lock().unwrap();
-            drop((same_pid_guard, other_guard));
-        }
-    }
-
-    #[cfg(all(test, target_os = "macos"))]
-    mod tests {
-        use super::*;
-        use crate::outline::Frame;
-
-        fn sparse_observation(screenshot: Option<Vec<u8>>) -> RootObservation {
-            RootObservation {
-                root: RootInfo {
-                    ref_id: "@r1".into(),
-                    app_name: "Canvas App".into(),
-                    title: "Canvas".into(),
-                    frame: Frame {
-                        x: 0.0,
-                        y: 0.0,
-                        w: 800.0,
-                        h: 600.0,
-                    },
-                    ..RootInfo::default()
-                },
-                tree: UiNode {
-                    role: "window".into(),
-                    title: "Canvas".into(),
-                    frame: Frame {
-                        x: 0.0,
-                        y: 0.0,
-                        w: 800.0,
-                        h: 600.0,
-                    },
-                    ..UiNode::default()
-                },
-                text_sparse: true,
-                screenshot,
-                screenshot_mime: "image/jpeg",
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        #[test]
-        fn auto_with_permission_returns_sparse_flag_and_image() {
-            let permissions = crate::permissions::PermissionStatus {
-                accessibility: true,
-                screen_recording: true,
+fn observe_with_root_fallback(
+    root: &RootInfo,
+    request: ObserveRequest,
+) -> Result<(RootObservation, bool), crate::backend::BackendError> {
+    match crate::backend::observe(root, request) {
+        Ok(observed) => Ok((observed, false)),
+        Err(original_error) => {
+            let discovered = crate::backend::list_roots(&RootFilters::default())?;
+            let discovered = roots().lock().unwrap().refresh(discovered);
+            let Some(successor_root) = discovered.into_iter().next() else {
+                return Err(original_error);
             };
-            let policy = capture_policy(
-                crate::config::ImageMode::Auto,
-                Some(ObserveMode::Semantic),
-                &permissions,
-            );
-            assert_eq!(policy, CapturePolicy::IfSparse);
-            assert!(policy.should_capture(true));
-
-            let result = save_observation(sparse_observation(Some(vec![0xff, 0xd8, 0xff])), None);
-            assert!(matches!(
-                result.content.as_slice(),
-                [ContentBlock::Text(text), ContentBlock::Image(image)]
-                    if text.text.contains("text_sparse: true")
-                        && image.mime_type == "image/jpeg"
-            ));
-        }
-
-        #[cfg(target_os = "macos")]
-        #[test]
-        fn never_returns_sparse_flag_without_image() {
-            let permissions = crate::permissions::PermissionStatus {
-                accessibility: true,
-                screen_recording: true,
-            };
-            let policy = capture_policy(
-                crate::config::ImageMode::Never,
-                Some(ObserveMode::Visual),
-                &permissions,
-            );
-            assert_eq!(policy, CapturePolicy::Never);
-            assert!(!policy.should_capture(true));
-
-            let result = save_observation(sparse_observation(None), None);
-            assert!(matches!(
-                result.content.as_slice(),
-                [ContentBlock::Text(text)] if text.text.contains("text_sparse: true")
-            ));
+            crate::backend::observe(&successor_root, request)
+                .map(|observed| (observed, successor_root.identity() != root.identity()))
         }
     }
 }
 
+fn condition_satisfied(tree: &UiNode, condition: &UiCondition) -> bool {
+    let scope = match condition.scope_ref.as_deref() {
+        Some(ref_id) => tree.find(ref_id),
+        None => Some(tree),
+    };
+    let Some(scope) = scope else {
+        return matches!(condition.until, Some(ConditionUntil::Absent));
+    };
+    let present = if let Some(ref_id) = condition.r#ref.as_deref() {
+        scope
+            .find(ref_id)
+            .is_some_and(|node| node_matches(node, condition))
+    } else {
+        any_node_matches(scope, condition)
+    };
+    match condition.until.unwrap_or(ConditionUntil::Present) {
+        ConditionUntil::Present => present,
+        ConditionUntil::Absent => !present,
+    }
+}
+
+fn any_node_matches(node: &UiNode, condition: &UiCondition) -> bool {
+    node_matches(node, condition)
+        || node
+            .children
+            .iter()
+            .any(|child| any_node_matches(child, condition))
+}
+
+fn node_matches(node: &UiNode, condition: &UiCondition) -> bool {
+    let text_matches = condition.text.as_deref().is_none_or(|text| {
+        contains_case_insensitive(&node.title, text)
+            || contains_case_insensitive(&node.value, text)
+            || contains_case_insensitive(&node.description, text)
+    });
+    let role_matches = condition
+        .role
+        .as_deref()
+        .is_none_or(|role| outline::canonical_role(&node.role) == outline::canonical_role(role));
+    let value_matches = condition
+        .value
+        .as_deref()
+        .is_none_or(|value| contains_case_insensitive(&node.value, value));
+    text_matches && role_matches && value_matches
+}
+
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    haystack.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn until_name(until: Option<ConditionUntil>) -> &'static str {
+    match until.unwrap_or(ConditionUntil::Present) {
+        ConditionUntil::Present => "present",
+        ConditionUntil::Absent => "absent",
+    }
+}
+
+fn action_name(action: UiActionKind) -> &'static str {
+    match action {
+        UiActionKind::Press => "press",
+        UiActionKind::Click => "click",
+        UiActionKind::SetText => "set_text",
+        UiActionKind::TypeText => "type_text",
+        UiActionKind::Keypress => "keypress",
+        UiActionKind::Scroll => "scroll",
+        UiActionKind::Drag => "drag",
+        UiActionKind::MoveMouse => "move_mouse",
+    }
+}
+
+fn escaped(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace(['\n', '\r'], " ")
+}
+
+fn bounded_success(
+    owner_state: Option<&str>,
+    text: String,
+    mut extra: Vec<ContentBlock>,
+) -> CallToolResult {
+    let text = crate::state::global()
+        .lock()
+        .unwrap()
+        .bound_model_text(owner_state, text);
+    let mut content = vec![ContentBlock::text(text)];
+    content.append(&mut extra);
+    CallToolResult::success(content)
+}
+
+fn backend_error(error: crate::backend::BackendError) -> CallToolResult {
+    let text = serde_json::to_string(&error).unwrap_or_else(|_| error.to_string());
+    CallToolResult::error(vec![ContentBlock::text(text)])
+}
+
+fn tool_error(message: &str) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(message)])
+}
+
 #[cfg(test)]
-mod tests {
+mod scheduling_tests {
     use super::*;
 
     #[test]
-    fn all_tools_are_registered() {
-        let tools = ComputerUseTools::new();
-        let mut names: Vec<_> = tools
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        names.sort();
-        assert_eq!(
-            names,
-            [
-                "act_ui",
-                "expand_ui",
-                "find_roots",
-                "inspect_ui",
-                "observe_ui",
-                "read_text",
-                "search_ui",
-                "wait_for",
-            ]
+    fn per_pid_lanes_allow_other_pids_and_serialize_the_same_pid() {
+        let lanes = ObservationLanes::default();
+        let first_pid = lanes.lane(1001);
+        let same_pid = lanes.lane(1001);
+        let other_pid = lanes.lane(2002);
+        assert!(Arc::ptr_eq(&first_pid, &same_pid));
+        assert!(!Arc::ptr_eq(&first_pid, &other_pid));
+
+        let first_guard = first_pid.try_lock().unwrap();
+        let other_guard = other_pid.try_lock().unwrap();
+        assert!(same_pid.try_lock().is_err());
+
+        drop(first_guard);
+        let same_pid_guard = same_pid.try_lock().unwrap();
+        drop((same_pid_guard, other_guard));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod observation_tests {
+    use super::*;
+    use crate::outline::Frame;
+
+    fn sparse_observation(screenshot: Option<Vec<u8>>) -> RootObservation {
+        RootObservation {
+            root: RootInfo {
+                ref_id: "@r1".into(),
+                app_name: "Canvas App".into(),
+                title: "Canvas".into(),
+                frame: Frame {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 800.0,
+                    h: 600.0,
+                },
+                ..RootInfo::default()
+            },
+            tree: UiNode {
+                role: "window".into(),
+                title: "Canvas".into(),
+                frame: Frame {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 800.0,
+                    h: 600.0,
+                },
+                ..UiNode::default()
+            },
+            text_sparse: true,
+            screenshot,
+            screenshot_mime: "image/jpeg",
+        }
+    }
+
+    #[test]
+    fn auto_with_permission_returns_sparse_flag_and_image() {
+        let permissions = crate::permissions::PermissionStatus {
+            accessibility: true,
+            screen_recording: true,
+        };
+        let policy = capture_policy(
+            crate::config::ImageMode::Auto,
+            Some(ObserveMode::Semantic),
+            &permissions,
         );
+        assert_eq!(policy, CapturePolicy::IfSparse);
+        assert!(policy.should_capture(true));
+
+        let result = save_observation(sparse_observation(Some(vec![0xff, 0xd8, 0xff])), None);
+        assert!(matches!(
+            result.content.as_slice(),
+            [ContentBlock::Text(text), ContentBlock::Image(image)]
+                if text.text.contains("text_sparse: true")
+                    && image.mime_type == "image/jpeg" && image.data == "/9j/"
+        ));
+    }
+
+    #[test]
+    fn never_returns_sparse_flag_without_image() {
+        let permissions = crate::permissions::PermissionStatus {
+            accessibility: true,
+            screen_recording: true,
+        };
+        let policy = capture_policy(
+            crate::config::ImageMode::Never,
+            Some(ObserveMode::Visual),
+            &permissions,
+        );
+        assert_eq!(policy, CapturePolicy::Never);
+        assert!(!policy.should_capture(true));
+
+        let result = save_observation(sparse_observation(None), None);
+        assert!(matches!(
+            result.content.as_slice(),
+            [ContentBlock::Text(text)] if text.text.contains("text_sparse: true")
+        ));
     }
 }

@@ -840,18 +840,16 @@ pub fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
     for file in files {
         header_columns = header_columns.max(display_columns(&file.path));
         for row in &file.all_rows {
-            unified_columns = unified_columns.max(display_columns(rendered_row_text(row)));
+            unified_columns = unified_columns.max(display_columns(&row.text));
         }
         for pair in &file.all_split {
             let columns = pair
                 .left
-                .map(|index| rendered_row_text(&file.all_rows[index]))
-                .map(display_columns)
+                .map(|index| display_columns(&file.all_rows[index].text))
                 .unwrap_or(0)
                 + pair
                     .right
-                    .map(|index| rendered_row_text(&file.all_rows[index]))
-                    .map(display_columns)
+                    .map(|index| display_columns(&file.all_rows[index].text))
                     .unwrap_or(0);
             split_columns = split_columns.max(columns);
         }
@@ -861,10 +859,6 @@ pub fn diff_content_widths(files: &[RenderedFile]) -> (f32, f32) {
         (unified_columns as f32 * MONO_ADVANCE + UNIFIED_CHROME).max(header_width),
         (split_columns as f32 * MONO_ADVANCE + SPLIT_CHROME).max(header_width),
     )
-}
-
-pub fn rendered_row_text(row: &RenderedRow) -> &str {
-    &row.text
 }
 
 pub fn display_columns(text: &str) -> usize {
@@ -878,47 +872,7 @@ pub fn display_columns(text: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
-
-    fn reconstruct_from_disk(abs_path: &std::path::Path, patch: &str) -> Option<(String, String)> {
-        let new_text = std::fs::read_to_string(abs_path).ok()?;
-        if new_text.len() > 512 * 1024 {
-            return None;
-        }
-        reconstruct_from_text(new_text, patch)
-    }
-
-    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
-
-    struct TempDir {
-        path: std::path::PathBuf,
-    }
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "tcode-diff-model-{}-{}",
-                std::process::id(),
-                NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
-            ));
-            std::fs::create_dir(&path).expect("create temporary test directory");
-            Self { path }
-        }
-
-        fn file(&self, name: &str, content: &str) -> std::path::PathBuf {
-            let path = self.path.join(name);
-            std::fs::write(&path, content).expect("write temporary test file");
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.path).expect("remove temporary test directory");
-        }
-    }
 
     fn colors() -> DiffColors {
         DiffColors {
@@ -1059,13 +1013,6 @@ mod tests {
     }
 
     #[test]
-    fn language_name_maps_extensions() {
-        assert_eq!(highlight::language_name_for_path("/x/util.py"), "python");
-        assert_eq!(highlight::language_name_for_path("/x/main.rs"), "rust");
-        assert_eq!(highlight::language_name_for_path("/x/noext"), "text");
-    }
-
-    #[test]
     fn no_wrap_widths_cover_unified_and_split_rows() {
         let rows = vec![
             code(RowKind::Removed, Some(1), None, "short"),
@@ -1079,20 +1026,18 @@ mod tests {
 
     #[test]
     fn reconstructs_matching_unified_patch_into_expandable_full_text() {
-        let temp = TempDir::new();
         let new = "one\ntwo\nthree\nfour\nnew value\nsix\nseven\neight\nnine\nten\n";
         let old = "one\ntwo\nthree\nfour\nold value\nsix\nseven\neight\nnine\nten\n";
-        let path = temp.file("unified.txt", new);
         let patch = "@@ -3,5 +3,5 @@\n three\n four\n-old value\n+new value\n six\n seven\n";
 
         let (reconstructed_old, reconstructed_new) =
-            reconstruct_from_disk(&path, patch).expect("matching patch should reconstruct");
+            reconstruct_from_text(new.into(), patch).expect("matching patch should reconstruct");
         assert_eq!(reconstructed_old, old);
         assert_eq!(reconstructed_new, new);
 
         let file = build_file(
             &FileDiffInput {
-                path: path.to_str().expect("UTF-8 test path"),
+                path: "unified.txt",
                 kind: FileChangeKind::Modify,
                 old_text: Some(&reconstructed_old),
                 new_text: Some(&reconstructed_new),
@@ -1113,54 +1058,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unified_patch_when_disk_is_stale() {
-        let temp = TempDir::new();
-        let path = temp.file("stale.txt", "one\nchanged again\nthree\n");
+    fn rejects_unified_patch_when_current_text_is_stale() {
         let patch = "@@ -1,3 +1,3 @@\n one\n-old\n+new\n three\n";
-        assert_eq!(reconstruct_from_disk(&path, patch), None);
+        assert_eq!(
+            reconstruct_from_text("one\nchanged again\nthree\n".into(), patch),
+            None
+        );
     }
 
     #[test]
     fn reconstructs_matching_bare_write() {
-        let temp = TempDir::new();
         let content = "alpha\nbeta\n";
-        let path = temp.file("write.txt", content);
         assert_eq!(
-            reconstruct_from_disk(&path, "+alpha\n+beta"),
+            reconstruct_from_text(content.into(), "+alpha\n+beta"),
             Some((String::new(), content.to_string()))
         );
     }
 
     #[test]
     fn reconstructs_bare_edit_with_unique_added_block() {
-        let temp = TempDir::new();
         let new = "before\nnew one\nnew two\nafter\n";
         let old = "before\nold one\nold two\nafter\n";
-        let path = temp.file("edit.txt", new);
         let patch = "-old one\n-old two\n+new one\n+new two";
         assert_eq!(
-            reconstruct_from_disk(&path, patch),
+            reconstruct_from_text(new.into(), patch),
             Some((old.to_string(), new.to_string()))
         );
     }
 
     #[test]
     fn rejects_bare_edit_with_ambiguous_added_block() {
-        let temp = TempDir::new();
-        let path = temp.file("ambiguous.txt", "new\nbetween\nnew\n");
         assert_eq!(
-            reconstruct_from_disk(&path, "-old\n+new"),
+            reconstruct_from_text("new\nbetween\nnew\n".into(), "-old\n+new"),
             None,
             "the added block must occur exactly once"
-        );
-    }
-
-    #[test]
-    fn reconstruction_returns_none_for_missing_file() {
-        let temp = TempDir::new();
-        assert_eq!(
-            reconstruct_from_disk(&temp.path.join("missing.txt"), "+content"),
-            None
         );
     }
 

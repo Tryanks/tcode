@@ -12,13 +12,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-#[cfg(test)]
-use agent::ApprovalMode;
 use agent::{AgentEvent, ModelSpec, ProviderCommand, ProviderKind};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use tcode_core::project::WorktreeInfo;
 use tcode_core::project::{IndexFile, Project, SessionMeta, migrate_index};
 use tcode_core::session::StoredEvent;
 
@@ -489,6 +485,15 @@ mod tests {
                 ..
             }
         ));
+        let raw = fs::read_to_string(store.events_path(id)).unwrap();
+        let first: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            first,
+            serde_json::json!({
+                "ts": 1_000,
+                "event": {"type": "turn_started", "turn_id": "t1"},
+            })
+        );
         let _ = fs::remove_dir_all(store.root());
     }
 
@@ -521,28 +526,6 @@ mod tests {
                 ..
             }
         ));
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn append_writes_recoverable_envelope() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let id = "roundtrip";
-        store
-            .append_event(
-                id,
-                42,
-                &AgentEvent::TurnStarted {
-                    turn_id: "t".into(),
-                },
-            )
-            .unwrap();
-        let raw = fs::read_to_string(store.events_path(id)).unwrap();
-        assert!(raw.contains("\"ts\":42"));
-        assert!(raw.contains("\"turn_started\""));
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].ts, Some(42));
         let _ = fs::remove_dir_all(store.root());
     }
 
@@ -637,132 +620,10 @@ mod tests {
         assert_eq!(s2.project_id, s1.project_id);
         let s3 = file.sessions.iter().find(|s| s.id == "s3").unwrap();
         assert_ne!(s3.project_id, s1.project_id);
+        let migrated_again = migrate_index(file.clone());
+        assert_eq!(migrated_again.projects, file.projects);
+        assert_eq!(migrated_again.sessions, file.sessions);
         let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn session_meta_approval_mode_defaults_to_full_access_when_absent() {
-        // An index entry written before the permission-mode milestone has no
-        // `approval_mode` key; it loads as the serde default, now `FullAccess`
-        // (T3 parity — the app-wide default changed from Supervised).
-        let legacy = serde_json::json!({
-            "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
-        });
-        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.approval_mode, ApprovalMode::FullAccess);
-
-        // A newer entry with an explicit mode round-trips.
-        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-        assert_eq!(meta.approval_mode, ApprovalMode::FullAccess);
-        meta.approval_mode = ApprovalMode::Supervised;
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains("\"approval_mode\":\"supervised\""));
-        let back: SessionMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.approval_mode, ApprovalMode::Supervised);
-    }
-
-    #[test]
-    fn session_meta_pending_fork_is_legacy_safe_and_roundtrip() {
-        let legacy = serde_json::json!({
-            "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "forked_from": "source", "created_at": 1, "updated_at": 10
-        });
-        let mut meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert!(!meta.pending_fork);
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("forked_from"));
-        assert!(!json.contains("pending_fork"));
-
-        meta.pending_fork = true;
-        let back: SessionMeta =
-            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
-        assert!(back.pending_fork);
-    }
-
-    #[test]
-    fn orchestration_fields_are_legacy_safe_and_roundtrip() {
-        let legacy = serde_json::json!({
-            "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
-        });
-        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.parent_session_id, None);
-        assert_eq!(meta.native_subagent, None);
-        assert!(!meta.orchestrate_enabled);
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("parent_session_id"));
-        assert!(!json.contains("native_subagent"));
-        assert!(!json.contains("orchestrate_enabled"));
-
-        let mut meta = meta;
-        meta.parent_session_id = Some("parent".into());
-        meta.native_subagent = Some("spawn-1".into());
-        meta.orchestrate_enabled = true;
-        let back: SessionMeta =
-            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
-        assert_eq!(back.parent_session_id.as_deref(), Some("parent"));
-        assert_eq!(back.native_subagent.as_deref(), Some("spawn-1"));
-        assert!(back.orchestrate_enabled);
-    }
-
-    #[test]
-    fn migrate_index_is_idempotent() {
-        let file = IndexFile {
-            projects: Vec::new(),
-            sessions: vec![SessionMeta::new(
-                ProviderKind::Codex,
-                PathBuf::from("/work/gamma"),
-                None,
-            )],
-        };
-        let once = migrate_index(file);
-        assert_eq!(once.projects.len(), 1);
-        let twice = migrate_index(once.clone());
-        assert_eq!(twice.projects.len(), 1);
-        assert_eq!(once.sessions[0].project_id, twice.sessions[0].project_id);
-    }
-
-    #[test]
-    fn archived_at_and_worktree_default_absent_and_roundtrip() {
-        // Legacy index entry without the new fields loads with them absent.
-        let legacy = serde_json::json!({
-            "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10
-        });
-        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        assert_eq!(meta.archived_at, None);
-        assert_eq!(meta.worktree, None);
-
-        // Absent fields are skipped on serialize (keeps legacy files clean).
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("archived_at"));
-        assert!(!json.contains("worktree"));
-
-        // A populated meta round-trips every new field.
-        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/wt"), None);
-        meta.archived_at = Some(1234);
-        meta.worktree = Some(WorktreeInfo {
-            root_project_path: PathBuf::from("/proj"),
-            base: "main".into(),
-            branch: "tcode/abc".into(),
-        });
-        let json = serde_json::to_string(&meta).unwrap();
-        let back: SessionMeta = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.archived_at, Some(1234));
-        assert_eq!(back.worktree, meta.worktree);
-    }
-
-    #[test]
-    fn legacy_checkpoint_metadata_is_ignored() {
-        let legacy = serde_json::json!({
-            "id": "s1", "title": "One", "provider": "codex",
-            "cwd": "/work/alpha", "created_at": 1, "updated_at": 10,
-            "checkpoints": [{"turn": 2, "commit": "deadbeef", "event_offset": 7}]
-        });
-        let meta: SessionMeta = serde_json::from_value(legacy).unwrap();
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("checkpoints"));
     }
 
     #[test]

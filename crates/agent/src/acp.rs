@@ -1314,12 +1314,10 @@ async fn finish_turn(
         Ok(response) => {
             let usage = response.usage.as_ref().map(|usage| TokenUsage {
                 total_processed_tokens: Some(usage.total_tokens),
-                ..crate::normalize::token_usage(
-                    Some(usage.input_tokens),
-                    usage.cached_read_tokens,
-                    Some(usage.output_tokens),
-                    None,
-                )
+                input_tokens: Some(usage.input_tokens),
+                cached_input_tokens: usage.cached_read_tokens,
+                output_tokens: Some(usage.output_tokens),
+                ..TokenUsage::default()
             });
             let (status, message) = stop_reason_status(response.stop_reason);
             (status, message, usage)
@@ -1882,7 +1880,11 @@ impl State {
             // read | search | fetch | switch_mode | other
             _ => tool_call_content(tool, status, self.tool_output(tool)),
         };
-        crate::normalize::thread_item(id, content)
+        ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        }
     }
 
     /// Everything the tool produced, as display text: its content blocks plus
@@ -2012,20 +2014,20 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
         .filter_map(|content| match content {
             acp::ToolCallContent::Diff(diff) => {
                 let path = diff.path.to_string_lossy().into_owned();
-                Some(crate::normalize::file_change(
-                    path.clone(),
-                    match (tool.kind, diff.old_text.as_deref()) {
+                Some(FileChange {
+                    kind: match (tool.kind, diff.old_text.as_deref()) {
                         (acp::ToolKind::Delete, _) => FileChangeKind::Delete,
                         (acp::ToolKind::Move, _) => FileChangeKind::Rename,
                         (_, None | Some("")) => FileChangeKind::Create,
                         _ => FileChangeKind::Modify,
                     },
-                    Some(unified_diff(
+                    diff: Some(unified_diff(
                         &path,
                         diff.old_text.as_deref().unwrap_or(""),
                         &diff.new_text,
                     )),
-                ))
+                    path,
+                })
             }
             _ => None,
         })
@@ -2035,15 +2037,13 @@ fn file_changes(tool: &ToolState) -> Vec<FileChange> {
         changes = tool
             .locations
             .iter()
-            .map(|location| {
-                crate::normalize::file_change(
-                    location.path.to_string_lossy(),
-                    match tool.kind {
-                        acp::ToolKind::Delete => FileChangeKind::Delete,
-                        _ => FileChangeKind::Rename,
-                    },
-                    None,
-                )
+            .map(|location| FileChange {
+                path: location.path.to_string_lossy().into_owned(),
+                kind: match tool.kind {
+                    acp::ToolKind::Delete => FileChangeKind::Delete,
+                    _ => FileChangeKind::Rename,
+                },
+                diff: None,
             })
             .collect();
     }
@@ -2653,18 +2653,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn binary_recipe_runs_as_given() {
-        let (program, args) = launch_command(&AcpLaunch::Binary {
-            command: PathBuf::from("/opt/acp/goose"),
-            args: vec!["acp".into()],
-            env: Vec::new(),
-        })
-        .unwrap();
-        assert_eq!(program, PathBuf::from("/opt/acp/goose"));
-        assert_eq!(args, vec!["acp".to_string()]);
-    }
-
     /// The preview MCP server is a loopback HTTP endpoint: it may only be handed
     /// to agents that advertise `mcpCapabilities.http`.
     #[test]
@@ -3025,7 +3013,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_replaces_the_step_list() {
+    fn plan_update_preserves_turn_and_steps() {
         let mut state = state();
         state.turn = Some("turn-1".into());
         let events = state.apply_update(update(json!({
@@ -3085,16 +3073,6 @@ mod tests {
             }
             other => panic!("expected TokenUsage, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn session_info_update_is_ignored() {
-        let mut state = state();
-        let events = state.apply_update(update(json!({
-            "sessionUpdate": "session_info_update",
-            "title": "the agent's own title"
-        })));
-        assert!(events.is_empty());
     }
 
     #[test]

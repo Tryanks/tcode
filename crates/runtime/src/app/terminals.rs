@@ -222,18 +222,10 @@ impl AppState {
                     .get_mut(&session_id)
                     .unwrap()
                     .terminal_workspace;
-                let mut followup_split = None;
-                let mut output_id = None;
-                let applied = match action {
-                    TerminalSpawnAction::Open { split_after } => {
-                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
-                            let first = workspace.push(terminal);
-                            output_id = Some(first);
-                            followup_split = split_after.map(|direction| (first, direction));
-                            true
-                        } else {
-                            false
-                        }
+                let terminal_id = match action {
+                    TerminalSpawnAction::Open | TerminalSpawnAction::New => {
+                        (workspace.terminals.len() < MAX_TERMINALS_PER_SESSION)
+                            .then(|| workspace.push(terminal))
                     }
                     TerminalSpawnAction::Restart { terminal_id } => {
                         if let Some(entry) = workspace
@@ -242,21 +234,11 @@ impl AppState {
                             .find(|entry| Some(entry.id) == terminal_id)
                         {
                             entry.terminal = terminal.into();
-                            output_id = Some(entry.id);
-                            true
+                            Some(entry.id)
                         } else if terminal_id.is_none() && workspace.terminals.is_empty() {
-                            output_id = Some(workspace.push(terminal));
-                            true
+                            Some(workspace.push(terminal))
                         } else {
-                            false
-                        }
-                    }
-                    TerminalSpawnAction::New => {
-                        if workspace.terminals.len() < MAX_TERMINALS_PER_SESSION {
-                            output_id = Some(workspace.push(terminal));
-                            true
-                        } else {
-                            false
+                            None
                         }
                     }
                     TerminalSpawnAction::Split { first, direction } => {
@@ -265,62 +247,44 @@ impl AppState {
                             && workspace.split_for(first).is_none()
                         {
                             let second = workspace.push(terminal);
-                            output_id = Some(second);
                             workspace.splits.push(TerminalSplit {
                                 first,
                                 second,
                                 direction,
                             });
-                            true
+                            Some(second)
                         } else {
-                            false
+                            None
                         }
                     }
                 };
-                if let Some(terminal_id) = output_id {
-                    state.sync_terminal_handles();
-                    state.terminal_output.insert(
-                        terminal_id,
-                        crate::terminal::OutputReplay {
-                            generation: spawn_id,
-                            bytes: Default::default(),
-                        },
-                    );
-                    state.emit_terminal_output(terminal_id, Vec::new(), true, cx);
-                    let output_cx = cx.clone();
-                    cx.spawn_detached(async move {
-                        while let Ok(bytes) = output.recv().await {
-                            output_cx.enqueue(move |state, cx| {
-                                if state
-                                    .terminal_output
-                                    .get(&terminal_id)
-                                    .is_some_and(|replay| replay.generation == spawn_id)
-                                {
-                                    state.emit_terminal_output(terminal_id, bytes, false, cx);
-                                }
-                            });
-                        }
-                    });
-                }
-                if applied {
-                    state.persist_terminal_resource_count(&session_id, cx);
-                }
-                if let Some((first, direction)) = followup_split {
-                    let cwd = state
-                        .residents
-                        .live
-                        .get(&session_id)
-                        .unwrap()
-                        .meta
-                        .cwd
-                        .clone();
-                    state.schedule_terminal_spawn(
-                        session_id,
-                        cwd,
-                        TerminalSpawnAction::Split { first, direction },
-                        cx,
-                    );
-                }
+                let Some(terminal_id) = terminal_id else {
+                    return;
+                };
+                state.sync_terminal_handles();
+                state.terminal_output.insert(
+                    terminal_id,
+                    crate::terminal::OutputReplay {
+                        generation: spawn_id,
+                        bytes: Default::default(),
+                    },
+                );
+                state.emit_terminal_output(terminal_id, Vec::new(), true, cx);
+                let output_cx = cx.clone();
+                cx.spawn_detached(async move {
+                    while let Ok(bytes) = output.recv().await {
+                        output_cx.enqueue(move |state, cx| {
+                            if state
+                                .terminal_output
+                                .get(&terminal_id)
+                                .is_some_and(|replay| replay.generation == spawn_id)
+                            {
+                                state.emit_terminal_output(terminal_id, bytes, false, cx);
+                            }
+                        });
+                    }
+                });
+                state.persist_terminal_resource_count(&session_id, cx);
             });
         });
     }
@@ -353,15 +317,10 @@ impl AppState {
                     .is_some_and(|spawns| {
                         spawns
                             .values()
-                            .any(|action| matches!(action, TerminalSpawnAction::Open { .. }))
+                            .any(|action| matches!(action, TerminalSpawnAction::Open))
                     });
             if !already_pending {
-                self.schedule_terminal_spawn(
-                    session_id,
-                    cwd,
-                    TerminalSpawnAction::Open { split_after: None },
-                    cx,
-                );
+                self.schedule_terminal_spawn(session_id, cwd, TerminalSpawnAction::Open, cx);
             }
         }
     }

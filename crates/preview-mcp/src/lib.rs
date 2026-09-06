@@ -37,59 +37,7 @@ pub const PREVIEW_PRESETS: &[(&str, u32, u32)] = &[
     ("surface-pro-7", 912, 1368),
 ];
 
-/// A single automation operation requested by the agent, routed to the UI.
-///
-/// Names/semantics mirror T3's preview toolkit, reduced to the subset a raw
-/// WKWebView (`evaluate_script` + `load_url`, no Chrome DevTools Protocol) can
-/// serve.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum PreviewOp {
-    /// Open a URL (creating/showing the webview); `None` just reports status.
-    Open { url: Option<String> },
-    /// Navigate the current webview to `url`.
-    Navigate { url: String },
-    /// Report the current URL / title / loading state.
-    Status,
-    /// Evaluate a JS expression in the page and return its value.
-    Evaluate { js: String },
-    /// Dispatch a real click at the center of the first `selector` match.
-    Click { selector: String },
-    /// Focus `selector` and type `text` into it (dispatching input events).
-    Type { selector: String, text: String },
-    /// Set a fixed WebView canvas, or clear it when both dimensions are `None`.
-    Resize {
-        width: Option<u32>,
-        height: Option<u32>,
-    },
-    /// Dispatch a keyboard press to the focused page element.
-    Press { key: String, modifiers: Vec<String> },
-    /// Scroll the window or the first element matching `selector`.
-    Scroll {
-        delta_x: f64,
-        delta_y: f64,
-        selector: Option<String>,
-    },
-    /// Poll page state until all requested conditions match or time out.
-    WaitFor {
-        selector: Option<String>,
-        text: Option<String>,
-        url_includes: Option<String>,
-        timeout_ms: u64,
-    },
-    /// Build a DOM outline of interactive elements (role/name/selector), capped.
-    Snapshot,
-    /// Capture the visible webview region as a PNG.
-    Screenshot,
-}
-
-/// The UI's answer to a [`PreviewOp`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum PreviewReply {
-    /// A JSON payload (status, snapshot, evaluate result, `{ "ok": true }`, …).
-    Json(serde_json::Value),
-    /// A base64-encoded image plus its MIME type (screenshot).
-    Image { mime: String, data_base64: String },
-}
+pub use tcode_protocol::{PreviewRequest as PreviewOp, PreviewResponse as PreviewReply};
 
 /// One in-flight automation request handed to the UI: an [`PreviewOp`] plus a
 /// bounded channel the UI sends the outcome back on. `Ok` = success payload,
@@ -140,44 +88,5 @@ pub fn start(host: &mut mcp_host::Host) -> PreviewMcpServer {
         url,
         tokens,
         requests: req_rx,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn registry() -> (TokenRegistry, async_channel::Receiver<BrokerRequest>) {
-        let (requests, receiver) = async_channel::unbounded();
-        let broker = Broker::new(
-            requests,
-            Duration::from_secs(2),
-            mcp_host::BrokerErrors {
-                unavailable: "preview UI is not available",
-                dropped: "preview UI dropped the request",
-                timed_out: "preview operation timed out",
-            },
-        );
-        let registry =
-            TokenRegistry::new(move |session_id| tools::service(broker.clone(), session_id));
-        (registry, receiver)
-    }
-
-    #[test]
-    fn registered_tokens_are_distinct() {
-        let (registry, _requests) = registry();
-        let token_a = registry.register("session-a");
-        let token_b = registry.register("session-b");
-        assert_ne!(token_a, token_b);
-        assert!(registry.contains(&token_a));
-        assert!(registry.contains(&token_b));
-    }
-
-    #[test]
-    fn revoked_token_is_removed() {
-        let (registry, _requests) = registry();
-        let token = registry.register("session-a");
-        registry.revoke(&token);
-        assert!(!registry.contains(&token));
     }
 }

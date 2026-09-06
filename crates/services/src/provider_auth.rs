@@ -259,23 +259,29 @@ mod tests {
     #[test]
     fn parses_codex_auth_json() {
         use base64::Engine as _;
-        let claims = serde_json::json!({
-            "email": "dev@example.com",
-            "https://api.openai.com/auth": { "chatgpt_plan_type": "pro" },
-        });
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&claims).unwrap());
-        let json = serde_json::json!({
-            "auth_mode": "chatgpt",
-            "OPENAI_API_KEY": serde_json::Value::Null,
-            "tokens": { "id_token": format!("header.{payload}.signature") },
-        })
-        .to_string();
+        for (plan, label) in [
+            ("pro", "ChatGPT Pro Subscription"),
+            (" PRO-20X ", "ChatGPT Pro 20x Subscription"),
+            ("mystery", "ChatGPT Subscription"),
+        ] {
+            let claims = serde_json::json!({
+                "email": "dev@example.com",
+                "https://api.openai.com/auth": { "chatgpt_plan_type": plan },
+            });
+            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(serde_json::to_vec(&claims).unwrap());
+            let json = serde_json::json!({
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": serde_json::Value::Null,
+                "tokens": { "id_token": format!("header.{payload}.signature") },
+            })
+            .to_string();
 
-        let auth = parse_codex_auth(&json).unwrap();
-        assert_eq!(auth.status, AuthStatus::Authenticated);
-        assert_eq!(auth.label.as_deref(), Some("ChatGPT Pro Subscription"));
-        assert_eq!(auth.email.as_deref(), Some("dev@example.com"));
+            let auth = parse_codex_auth(&json).unwrap();
+            assert_eq!(auth.status, AuthStatus::Authenticated);
+            assert_eq!(auth.label.as_deref(), Some(label));
+            assert_eq!(auth.email.as_deref(), Some("dev@example.com"));
+        }
 
         // API-key mode: no email is exposed.
         let auth = parse_codex_auth(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}"#).unwrap();
@@ -287,26 +293,6 @@ mod tests {
         assert_eq!(auth.status, AuthStatus::Unauthenticated);
 
         assert!(parse_codex_auth("not json").is_none());
-    }
-
-    #[test]
-    fn chatgpt_plan_names_cover_the_t3_vocabulary() {
-        for (raw, expected) in [
-            ("free", "Free"),
-            ("go", "Go"),
-            ("plus", "Plus"),
-            ("pro", "Pro"),
-            ("pro_5x", "Pro 5x"),
-            ("pro_20x", "Pro 20x"),
-            ("team", "Team"),
-            ("business", "Business"),
-            ("enterprise", "Enterprise"),
-            ("edu", "Edu"),
-        ] {
-            assert_eq!(normalize_chatgpt_plan(raw), Some(expected));
-        }
-        // An unknown plan degrades to the generic label rather than inventing one.
-        assert_eq!(normalize_chatgpt_plan("mystery"), None);
     }
 
     #[test]

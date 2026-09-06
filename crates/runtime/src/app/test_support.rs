@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 
-use crate::host::HostMsg;
+use crate::host::HostFn;
 use tcode_protocol::{ClientMessage, ClientPayload, Command, HostMessage, decode_host_line};
 
 pub(super) struct TestStore(SessionStore);
@@ -32,11 +32,11 @@ impl Drop for TestStore {
 /// Plain smol/mailbox replacement for the former gpui test context.
 ///
 /// Tests still exercise the exact production [`HostCx`] seam: background
-/// completions must re-enter through `HostMsg::Enqueued`, and
+/// completions must re-enter through the host mailbox, and
 /// `run_until_parked` is the only code that mutates the owned `AppState`.
 pub(super) struct TestAppContext {
-    mailbox_tx: smol::channel::Sender<HostMsg>,
-    mailbox_rx: smol::channel::Receiver<HostMsg>,
+    mailbox_tx: smol::channel::Sender<HostFn>,
+    mailbox_rx: smol::channel::Receiver<HostFn>,
     outgoing_tx: smol::channel::Sender<String>,
     pub(super) outgoing_rx: smol::channel::Receiver<String>,
     outgoing: Vec<String>,
@@ -61,11 +61,8 @@ impl Default for TestAppContext {
 }
 
 impl TestAppContext {
-    pub(super) fn new_entity(
-        &mut self,
-        build: impl FnOnce(&mut ()) -> TestClientState,
-    ) -> TestEntity {
-        let state = Rc::new(RefCell::new(build(&mut ())));
+    pub(super) fn new_entity(&mut self, state: TestClientState) -> TestEntity {
+        let state = Rc::new(RefCell::new(state));
         self.domain_diff = Some(DomainDiff::new(&state.borrow()));
         self.state = Some(Rc::downgrade(&state));
         TestEntity(state)
@@ -90,14 +87,10 @@ impl TestAppContext {
             let mut had_work = false;
             while let Ok(message) = self.mailbox_rx.try_recv() {
                 had_work = true;
-                match message {
-                    HostMsg::Enqueued(completion) => {
-                        let mut host_cx = self.host_cx();
-                        let mut state = state.borrow_mut();
-                        completion(&mut state, &mut host_cx);
-                        state.sync_terminal_handles();
-                    }
-                }
+                let mut host_cx = self.host_cx();
+                let mut state = state.borrow_mut();
+                message(&mut state, &mut host_cx);
+                state.sync_terminal_handles();
             }
             while let Ok(line) = self.outgoing_rx.try_recv() {
                 self.outgoing.push(line);
@@ -189,7 +182,7 @@ impl TestEntity {
         );
     }
 
-    pub(super) fn host_update<R>(
+    pub(super) fn update<R>(
         &self,
         cx: &mut TestAppContext,
         update: impl FnOnce(&mut TestClientState, &mut HostCx) -> R,
@@ -198,20 +191,8 @@ impl TestEntity {
         update(&mut self.0.borrow_mut(), &mut host_cx)
     }
 
-    pub(super) fn update<R>(
-        &self,
-        cx: &mut TestAppContext,
-        update: impl FnOnce(&mut TestClientState, &mut HostCx) -> R,
-    ) -> R {
-        self.host_update(cx, update)
-    }
-
-    pub(super) fn read_with<R>(
-        &self,
-        _cx: &TestAppContext,
-        read: impl FnOnce(&TestClientState, &()) -> R,
-    ) -> R {
-        read(&self.0.borrow(), &())
+    pub(super) fn read<R>(&self, read: impl FnOnce(&TestClientState) -> R) -> R {
+        read(&self.0.borrow())
     }
 }
 
@@ -219,8 +200,8 @@ impl TestEntity {
 /// Existing lifecycle scenarios use this facade to adopt and park their targets;
 /// every forwarded runtime operation captures its explicit session id.
 pub(super) struct TestClientState {
-    host: AppState,
-    selected: Option<String>,
+    pub(super) host: AppState,
+    pub(super) selected: Option<String>,
 }
 impl std::ops::Deref for TestClientState {
     type Target = AppState;
@@ -289,107 +270,5 @@ impl TestClientState {
     pub(super) fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) {
         self.park_active(cx);
         self.selected = Some(self.host.start_draft(project_id, cwd, cx));
-    }
-    pub(super) fn add_review_comment(&mut self, comment: ReviewComment, _cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.add_review_comment(&target_id, comment, _cx)
-    }
-    pub(super) fn commit_draft(&mut self, cx: &mut HostCx) -> std::io::Result<()> {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.commit_draft(&target_id, cx)
-    }
-    pub(super) fn dispatch_next_queued(&mut self, _cx: &mut HostCx) -> Result<bool, ()> {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.dispatch_next_queued(&target_id, _cx)
-    }
-    pub(super) fn drop_queued(&mut self, id: u64, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.drop_queued(&target_id, id, cx)
-    }
-    pub(super) fn implement_plan(&mut self, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.implement_plan(&target_id, cx)
-    }
-    pub(super) fn interrupt(&mut self, _cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.interrupt(&target_id, _cx)
-    }
-    pub(super) fn native_rewind_pending(&self) -> bool {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.native_rewind_pending(&target_id)
-    }
-    pub(super) fn open_terminal_panel(&mut self, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.open_terminal_panel(&target_id, cx)
-    }
-    pub(super) fn orchestrate_turn(
-        &mut self,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-        cx: &mut HostCx,
-    ) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host
-            .orchestrate_turn(&target_id, text, attachment_paths, cx)
-    }
-    pub(super) fn relay_confirmation(&self) -> Option<(String, String)> {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.relay_confirmation(&target_id)
-    }
-    pub(super) fn review_comments(&self) -> &[ReviewComment] {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.review_comments(&target_id)
-    }
-    pub(super) fn rewind_turn(&mut self, turn: usize, mode: RewindMode, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.rewind_turn(&target_id, turn, mode, cx)
-    }
-    pub(super) fn save_plan_to_workspace(&mut self, markdown: String, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.save_plan_to_workspace(&target_id, markdown, cx)
-    }
-    pub(super) fn schedule_turn(
-        &mut self,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-        fire_at_unix_secs: u64,
-        cx: &mut HostCx,
-    ) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host
-            .schedule_turn(&target_id, text, attachment_paths, fire_at_unix_secs, cx)
-    }
-    pub(super) fn send_turn(
-        &mut self,
-        text: String,
-        attachment_paths: Vec<PathBuf>,
-        cx: &mut HostCx,
-    ) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.send_turn(&target_id, text, attachment_paths, cx)
-    }
-    pub(super) fn set_active_model(
-        &mut self,
-        provider: ProviderKind,
-        model: Option<String>,
-
-        profile_id: Option<String>,
-        cx: &mut HostCx,
-    ) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host
-            .set_active_model(&target_id, provider, model, profile_id, cx)
-    }
-    pub(super) fn steer(&mut self, text: String, attachment_paths: Vec<PathBuf>, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.steer(&target_id, text, attachment_paths, cx)
-    }
-    pub(super) fn steer_queued(&mut self, id: u64, cx: &mut HostCx) {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.steer_queued(&target_id, id, cx)
-    }
-    pub(super) fn terminal_panel_open(&self) -> bool {
-        let target_id = self.selected.clone().unwrap_or_default();
-        self.host.terminal_panel_open(&target_id)
     }
 }

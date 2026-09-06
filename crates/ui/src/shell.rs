@@ -190,34 +190,6 @@ impl AppShell {
         let preview = cx
             .new(|cx| PreviewPanel::new(workspace_store.clone(), window_state.clone(), window, cx));
 
-        // Pump preview automation requests from the MCP server into the live
-        // WebView. The receiver is taken once; requests are resolved on the gpui
-        // main thread (WKWebView `evaluate_script` must run there).
-        #[cfg(all(feature = "local-host", feature = "desktop"))]
-        let requests = workspace_store.update(cx, |store, _cx| store.take_preview_requests());
-        #[cfg(all(feature = "local-host", feature = "desktop"))]
-        if let Some(requests) = requests {
-            let preview = preview.clone();
-            cx.spawn_in(window, async move |_, cx| {
-                while let Ok(request) = requests.recv().await {
-                    let preview_mcp::BrokerRequest {
-                        session_id,
-                        op,
-                        reply,
-                    } = request;
-                    if preview
-                        .update_in(cx, |panel, window, cx| {
-                            panel.handle_op(session_id, op, reply, window, cx)
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .detach();
-        }
-
         #[cfg(feature = "desktop")]
         {
             let requests = workspace_store.read(cx).remote_preview_requests();
@@ -234,21 +206,13 @@ impl AppShell {
                         continue;
                     };
                     let (reply, receiver) = async_channel::bounded(1);
-                    let op = serde_json::to_value(request).and_then(serde_json::from_value);
-                    match op {
-                        Ok(op) => {
-                            if preview
-                                .update_in(cx, |panel, window, cx| {
-                                    panel.handle_op(session_id, op, reply, window, cx)
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(error) => {
-                            let _ = reply.try_send(Err(error.to_string()));
-                        }
+                    if preview
+                        .update_in(cx, |panel, window, cx| {
+                            panel.handle_op(session_id, request, reply, window, cx)
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
                     // Each operation waits independently: a slow wait_for must
                     // not block a second client's navigation or a screenshot.
@@ -258,11 +222,6 @@ impl AppShell {
                             .recv()
                             .await
                             .unwrap_or_else(|_| Err("preview panel dropped request".into()));
-                        let response = response.and_then(|value| {
-                            serde_json::to_value(value)
-                                .and_then(serde_json::from_value)
-                                .map_err(|error| error.to_string())
-                        });
                         store.update(cx, |store, _| store.preview_reply(request_id, response));
                     })
                     .detach();
@@ -484,7 +443,7 @@ impl Render for AppShell {
         if !collapsed || route != Route::Chat {
             self.sidebar_overlay_visible = false;
         }
-        let panel = self.store.read(cx).shell_panel_state();
+        let panel = self.store.read(cx).panel_state();
         let diff_open = panel.right_panel_open;
         let right_tab = panel.right_tab;
         let diff_expanded = panel.right_panel_expanded;
@@ -779,30 +738,21 @@ impl Render for AppShell {
 mod tests {
     use super::*;
 
-    fn transition(current: bool, transition: SidebarHoverTransition) -> bool {
-        next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false)
-    }
-
     #[test]
-    fn trigger_true_opens_overlay() {
-        assert!(transition(false, SidebarHoverTransition::Trigger(true)));
-    }
-
-    #[test]
-    fn trigger_false_preserves_current_visibility() {
-        assert!(!transition(false, SidebarHoverTransition::Trigger(false)));
-        assert!(transition(true, SidebarHoverTransition::Trigger(false)));
-    }
-
-    #[test]
-    fn overlay_true_opens_or_keeps_overlay_open() {
-        assert!(transition(false, SidebarHoverTransition::Overlay(true)));
-        assert!(transition(true, SidebarHoverTransition::Overlay(true)));
-    }
-
-    #[test]
-    fn overlay_false_closes_overlay() {
-        assert!(!transition(true, SidebarHoverTransition::Overlay(false)));
+    fn hover_transitions_open_preserve_and_close_the_overlay() {
+        for (current, transition, visible) in [
+            (false, SidebarHoverTransition::Trigger(true), true),
+            (false, SidebarHoverTransition::Trigger(false), false),
+            (true, SidebarHoverTransition::Trigger(false), true),
+            (false, SidebarHoverTransition::Overlay(true), true),
+            (true, SidebarHoverTransition::Overlay(true), true),
+            (true, SidebarHoverTransition::Overlay(false), false),
+        ] {
+            assert_eq!(
+                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false),
+                visible
+            );
+        }
     }
 
     #[test]

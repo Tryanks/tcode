@@ -1,7 +1,7 @@
 use crate::theme::ActiveTheme as _;
 use gpui::{
-    Action, AsKeystroke, FocusHandle, IntoElement, KeyContext, Keystroke, ParentElement as _,
-    RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, relative,
+    Action, AsKeystroke, IntoElement, KeyContext, Keystroke, ParentElement as _, RenderOnce,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, relative,
 };
 use gpui_base::StyledExt as _;
 
@@ -52,18 +52,6 @@ impl Kbd {
             None => window.highest_precedence_binding_for_action(action),
         }?;
         binding
-            .keystrokes()
-            .first()
-            .map(|key| Self::new(key.as_keystroke().clone()))
-    }
-
-    pub fn binding_for_action_in(
-        action: &dyn Action,
-        focus_handle: &FocusHandle,
-        window: &Window,
-    ) -> Option<Self> {
-        window
-            .highest_precedence_binding_for_action_in(action, focus_handle)?
             .keystrokes()
             .first()
             .map(|key| Self::new(key.as_keystroke().clone()))

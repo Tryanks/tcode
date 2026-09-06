@@ -48,8 +48,7 @@ use tcode_protocol::{
     ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
     RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification as RuntimeEvent,
     RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
-    ThreadExportFormat, Topic,
+    TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -73,12 +72,10 @@ use tcode_services::settings::SettingsStore;
 use tcode_services::store::{SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
-    self, Assessment as ProviderUpdateAssessment, CheckInput as ProviderCheckInput, InstallSource,
-    npm_package, update_command, update_command_string,
+    self, CheckInput as ProviderCheckInput, InstallSource, npm_package, update_command,
+    update_command_string,
 };
-use tcode_services::version_check::{
-    self as app_releases, Assessment as AppReleaseAssessment, fetch_latest_tcode_release_json,
-};
+use tcode_services::version_check::{self as app_releases, fetch_latest_tcode_release_json};
 use tcode_services::workspace::list_workspace;
 use tcode_services::worktree::{
     MergeBackError, MergeBackOutcome, ProvisionError, cleanup_orphans, merge_back, provision,
@@ -207,13 +204,8 @@ fn append_terminal_contexts_to_prompt(prompt: &str, contexts: &[TerminalContext]
 
 #[derive(Debug, Clone, Copy)]
 enum TimelineLoadTarget {
-    Active {
-        mark_idle: bool,
-        read_git_branch: bool,
-    },
-    Background {
-        mark_idle: bool,
-    },
+    Active { mark_idle: bool },
+    Background,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -225,9 +217,7 @@ struct TerminalPreferences {
 
 #[derive(Debug, Clone, Copy)]
 enum TerminalSpawnAction {
-    Open {
-        split_after: Option<TerminalSplitDirection>,
-    },
+    Open,
     Restart {
         terminal_id: Option<u64>,
     },

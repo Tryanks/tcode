@@ -170,12 +170,8 @@ mod tests {
             },
         );
         let expected = Settings {
-            unknown: serde_json::Map::new(),
             language: Some("zh-CN".into()),
             providers,
-            profiles: BTreeMap::new(),
-            codex_binary: None,
-            claude_binary: None,
             theme_mode: ThemeMode::Dark,
             sidebar_collapsed: true,
             word_wrap_diffs: true,
@@ -184,18 +180,6 @@ mod tests {
             live_command_panel_disabled: true,
             provider_update_checks_disabled: true,
             inactive_frame_throttle_disabled: true,
-            abort_on_model_fallback: true,
-            resume_on_limit_reset: true,
-            fallback_review_advisor: false,
-            auto_archive_disabled: false,
-            auto_archive_max_idle_days: 7,
-            auto_archive_keep_count: 30,
-            auto_archive_notice_shown: false,
-            orchestrate: Default::default(),
-            computer_use: Default::default(),
-            browser: Default::default(),
-            title_generation: Default::default(),
-            fallback_review: Default::default(),
             collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
             favorite_models: vec!["opus".into()],
             project_sort: ProjectSort::NameAsc,
@@ -204,7 +188,7 @@ mod tests {
             remote_port: Some(47_420),
             remote_host_name: Some("Desk Mac".into()),
             last_visited: std::collections::HashMap::from([("sess-a".to_string(), 42)]),
-            acp_agents: BTreeMap::new(),
+            ..Settings::default()
         };
 
         store.save(&expected).unwrap();
@@ -212,21 +196,6 @@ mod tests {
         assert_eq!(store.load(), expected);
         let _ = fs::remove_dir_all(root);
     }
-    #[test]
-    fn project_sort_persists() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-settings-sort-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let store = SettingsStore::new(root.clone());
-        let settings = Settings {
-            project_sort: ProjectSort::NameAsc,
-            ..Settings::default()
-        };
-        store.save(&settings).unwrap();
-        assert_eq!(store.load().project_sort, ProjectSort::NameAsc);
-        let _ = fs::remove_dir_all(root);
-    }
-
     #[test]
     fn loads_legacy_file_and_migrates_binary_paths() {
         // A settings.json written before the `providers` map existed must still

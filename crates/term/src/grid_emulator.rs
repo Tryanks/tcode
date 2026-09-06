@@ -402,11 +402,6 @@ impl GridEmulator {
         )
     }
 
-    pub(crate) fn set_cell_size(&self, width_px: u32, height_px: u32) -> bool {
-        let current = self.core.size.load();
-        self.resize_with_cell_size_if_changed(current.cols, current.rows, width_px, height_px)
-    }
-
     pub fn resize_with_cell_size_if_changed(
         &self,
         cols: usize,
@@ -1013,8 +1008,7 @@ mod tests {
     fn cell_metrics_drive_text_area_pixel_size_replies() {
         let emulator = GridEmulator::new();
         let events = emulator.events();
-        emulator.set_cell_size(10, 20);
-        emulator.resize_if_changed(42, 9);
+        emulator.resize_with_cell_size_if_changed(42, 9, 10, 20);
 
         emulator.feed(b"\x1b[14t");
 
@@ -1101,11 +1095,15 @@ mod tests {
     #[test]
     fn kitty_keyboard_mode_is_available_without_consuming_damage() {
         let emulator = GridEmulator::new();
-        emulator.feed(b"\x1b[>1u");
+        emulator.snapshot();
+        emulator.feed(b"\x1b[>1uwritten");
         assert_eq!(
             emulator.keyboard_mode(),
             KeyboardModes::DISAMBIGUATE_ESC_CODES
         );
+        let snapshot = emulator.snapshot();
+        assert!(snapshot.row_damage[0]);
+        assert_eq!(snapshot.damage, TerminalDamage::Partial);
     }
 
     #[test]

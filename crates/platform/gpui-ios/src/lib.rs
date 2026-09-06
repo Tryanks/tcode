@@ -27,12 +27,6 @@ pub fn platform() -> Rc<dyn gpui::Platform> {
     panic!("gpui-ios::platform() is only available when target_os = \"ios\"")
 }
 
-/// Current host-view safe-area insets in logical points.
-#[cfg(not(target_os = "ios"))]
-pub fn safe_area() -> gpui::Edges<gpui::Pixels> {
-    gpui::Edges::default()
-}
-
 /// Current safe-area and software-keyboard insets.
 #[cfg(not(target_os = "ios"))]
 pub fn insets() -> gpui::WindowInsets {

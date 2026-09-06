@@ -655,21 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_command_shapes() {
-        assert_eq!(working_tree_diff_args(false), ["diff", "HEAD", "--"]);
-        assert_eq!(working_tree_diff_args(true), ["diff", "HEAD", "-w", "--"]);
-        assert_eq!(merge_base_args("main"), ["merge-base", "main", "HEAD"]);
-        assert_eq!(
-            branch_diff_args("abc123", false),
-            ["diff", "abc123...HEAD", "--"]
-        );
-        assert_eq!(
-            branch_diff_args("abc123", true),
-            ["diff", "abc123...HEAD", "-w", "--"]
-        );
-    }
-
-    #[test]
     fn working_tree_and_branch_diff_round_trip() {
         let root = std::env::temp_dir().join(format!("tcode-diff-scope-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();

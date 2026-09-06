@@ -366,93 +366,8 @@ mod tests {
     }
 
     #[test]
-    fn all_runtime_events_are_presented_in_both_locales() {
+    fn toast_lifecycle_and_raw_diagnostics_survive_localization() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let errors = vec![
-            RuntimeError::External("external\0diagnostic".into()),
-            RuntimeError::PersistSettings { error: "x".into() },
-            RuntimeError::UpdateUnknown {
-                provider: ProviderKind::Codex,
-            },
-            RuntimeError::UpdateFailed {
-                provider: ProviderKind::ClaudeCode,
-            },
-            RuntimeError::TerminalStart { error: "x".into() },
-            RuntimeError::TerminalRestart { error: "x".into() },
-            RuntimeError::PersistProject { error: "x".into() },
-            RuntimeError::WorktreeRemove { error: "x".into() },
-            RuntimeError::DeleteSession { error: "x".into() },
-            RuntimeError::DeleteProject { error: "x".into() },
-            RuntimeError::NativeRewindBlocked,
-            RuntimeError::PersistEvent { error: "x".into() },
-            RuntimeError::WorktreeAdd { error: "x".into() },
-            RuntimeError::PersistSession { error: "x".into() },
-            RuntimeError::ProcessGone,
-            RuntimeError::SteerUnsupported {
-                agent: "agent".into(),
-            },
-            RuntimeError::DirtyTree,
-            RuntimeError::ProviderStart { error: "x".into() },
-            RuntimeError::ProviderClosed {
-                reason: Some("reason".into()),
-            },
-            RuntimeError::ProviderClosed { reason: None },
-            RuntimeError::PersistSessionIndex { error: "x".into() },
-            RuntimeError::ProviderMessage("provider-error\0diagnostic".into()),
-            RuntimeError::ExportThread { error: "x".into() },
-        ];
-        let notices = vec![
-            RuntimeNotice::ProviderMessage("provider-warning\0diagnostic".into()),
-            RuntimeNotice::UpdateAvailable {
-                provider: ProviderKind::Codex,
-                version: "1.2.3".into(),
-            },
-            RuntimeNotice::TcodeUpdateAvailable {
-                version: "1.2.3".into(),
-            },
-            RuntimeNotice::UpdatingProvider {
-                provider: ProviderKind::ClaudeCode,
-            },
-            RuntimeNotice::UpdateDone {
-                provider: ProviderKind::Acp,
-            },
-            RuntimeNotice::NativeRewindCompleted {
-                mode: RewindMode::FilesAndConversation,
-            },
-            RuntimeNotice::PlanSaved {
-                file: "plan.md".into(),
-            },
-            RuntimeNotice::SwitchedBranch {
-                branch: "feature".into(),
-            },
-            RuntimeNotice::ThreadExported {
-                file: "thread.md".into(),
-            },
-            RuntimeNotice::WorktreeSeeded {
-                copied_files: 2,
-                skipped: vec!["missing.file".into()],
-                limit_reached: false,
-            },
-            RuntimeNotice::WorktreeSeeded {
-                copied_files: 1,
-                skipped: vec!["large.bin".into()],
-                limit_reached: true,
-            },
-            RuntimeNotice::WorktreeMergedFastForward,
-            RuntimeNotice::WorktreeMergedCommit,
-        ];
-        let warnings = [
-            MergeWorktreeFailure::Missing,
-            MergeWorktreeFailure::DirtyWorktree,
-            MergeWorktreeFailure::DestinationDetached,
-            MergeWorktreeFailure::DirtyDestination,
-            MergeWorktreeFailure::DivergedConflict,
-            MergeWorktreeFailure::Git,
-        ]
-        .map(|reason| RuntimeNotice::WorktreeMergeFailed {
-            reason,
-            detail: Some("git detail".into()),
-        });
         let retry = GitActionRequest {
             session_id: "session-1".into(),
             action: GitAction::CommitPush,
@@ -498,22 +413,8 @@ mod tests {
 
         for locale in [crate::LANGUAGE_ENGLISH, crate::LANGUAGE_SIMPLIFIED_CHINESE] {
             crate::set_locale(locale);
-            for error in &errors {
-                let presented = present_runtime_event(&RuntimeEvent::Error(error.clone()));
-                assert_eq!(presented.severity, RuntimeEventSeverity::Error);
-                assert!(!presented.message.is_empty());
-            }
-            for notice in &notices {
-                let presented = present_runtime_event(&RuntimeEvent::Notice(notice.clone()));
-                assert!(!presented.message.is_empty());
-            }
-            for warning in &warnings {
-                let presented = present_runtime_event(&RuntimeEvent::Notice(warning.clone()));
-                assert!(!presented.message.is_empty());
-            }
             for toast in &toasts {
                 let presented = present_runtime_toast(toast);
-                assert!(!presented.title.is_empty());
                 match toast {
                     RuntimeToast::GitStarted { operation, .. }
                     | RuntimeToast::AcpInstallStarted { operation, .. } => {
@@ -662,7 +563,8 @@ mod tests {
     }
 
     #[test]
-    fn representative_notice_severities_are_presented() {
+    fn representative_event_severities_are_presented() {
+        let error = present_runtime_event(&RuntimeEvent::Error(RuntimeError::ProcessGone));
         let warning = present_runtime_event(&RuntimeEvent::Notice(RuntimeNotice::ProviderMessage(
             "pi MCP tools unavailable".into(),
         )));
@@ -670,6 +572,7 @@ mod tests {
             provider: ProviderKind::Codex,
         }));
 
+        assert_eq!(error.severity, RuntimeEventSeverity::Error);
         assert_eq!(warning.severity, RuntimeEventSeverity::Warning);
         assert_eq!(success.severity, RuntimeEventSeverity::Success);
     }

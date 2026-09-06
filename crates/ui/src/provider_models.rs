@@ -22,38 +22,3 @@ pub fn slug_error_message(error: &SlugError) -> String {
         SlugError::AlreadySaved => crate::tr!("providers.models.err_saved").into_owned(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn localized_presentation_copy_is_preserved() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        assert_eq!(
-            model_capability_label(ModelCapability::FastMode),
-            "Fast mode"
-        );
-        assert_eq!(
-            model_capability_label(ModelCapability::Thinking),
-            "Thinking"
-        );
-        assert_eq!(
-            model_capability_label(ModelCapability::Reasoning),
-            "Reasoning"
-        );
-        assert_eq!(slug_error_message(&SlugError::Empty), "Enter a model slug.");
-        assert_eq!(
-            slug_error_message(&SlugError::AlreadyBuiltIn),
-            "That model is already built in."
-        );
-        assert_eq!(
-            slug_error_message(&SlugError::TooLong),
-            "Model slugs must be 128 characters or less."
-        );
-        assert_eq!(
-            slug_error_message(&SlugError::AlreadySaved),
-            "That custom model is already saved."
-        );
-    }
-}

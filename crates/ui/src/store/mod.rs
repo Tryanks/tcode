@@ -45,7 +45,7 @@ mod intents;
 pub(crate) use images::host_image;
 mod snapshots;
 
-pub(crate) use snapshots::{ChatPanelState, ComposerState, DiffPanelChrome, ShellPanelState};
+pub(crate) use snapshots::{ComposerState, PanelState};
 
 /// Payload-free topic discriminant used by views to subscribe only to the
 /// store projections they render.
@@ -102,8 +102,6 @@ pub struct LocalAffordances {
     #[cfg(feature = "terminal")]
     pub terminals: LocalTerminalRegistry,
     #[cfg(feature = "desktop")]
-    pub preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
-    #[cfg(feature = "desktop")]
     pub import_routes: ImportRoutes,
 }
 
@@ -123,8 +121,6 @@ pub struct WorkspaceStore {
     remote_address: Option<String>,
     #[cfg(all(feature = "local-host", feature = "terminal"))]
     terminal_registry: Option<LocalTerminalRegistry>,
-    #[cfg(all(feature = "local-host", feature = "desktop"))]
-    preview_requests: Option<async_channel::Receiver<preview_mcp::BrokerRequest>>,
     #[cfg(all(feature = "local-host", feature = "desktop"))]
     import_routes: Option<ImportRoutes>,
     /// Name of the remote host this store is a client of. `None` means the host
@@ -225,8 +221,6 @@ impl WorkspaceStore {
             #[cfg(all(feature = "local-host", feature = "terminal"))]
             terminal_registry: None,
             #[cfg(all(feature = "local-host", feature = "desktop"))]
-            preview_requests: None,
-            #[cfg(all(feature = "local-host", feature = "desktop"))]
             import_routes: None,
             remote_host: None,
             connection_state: ConnectionState::Connected,
@@ -294,10 +288,10 @@ impl WorkspaceStore {
                             store.apply_domain_event(&envelope);
                         }
                     }
-                    Err(tcode_client::HostEventTryRecvError::Empty) => {
+                    Err(async_channel::TryRecvError::Empty) => {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                    Err(tcode_client::HostEventTryRecvError::Closed) => break,
+                    Err(async_channel::TryRecvError::Closed) => break,
                 }
             }
             if seeded.len() != seed_topics.len() {
@@ -345,8 +339,6 @@ impl WorkspaceStore {
             #[cfg(feature = "terminal")]
             terminals: host.terminals.clone(),
             #[cfg(feature = "desktop")]
-            preview_requests: host.preview_requests.clone(),
-            #[cfg(feature = "desktop")]
             import_routes: host.import_routes.clone(),
         });
         store
@@ -362,7 +354,6 @@ impl WorkspaceStore {
         }
         #[cfg(feature = "desktop")]
         {
-            self.preview_requests = local.preview_requests;
             self.import_routes = Some(local.import_routes);
         }
     }
@@ -1267,10 +1258,6 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn shell_panel_state(&self) -> ShellPanelState {
-        snapshots::shell_panel_state(self.active_conversation_ui())
-    }
-
     pub fn preview_active_identity(&self) -> Option<(String, String)> {
         self.session_status_replica.as_ref().map(|status| {
             (
@@ -1281,7 +1268,7 @@ impl WorkspaceStore {
     }
 
     /// Only the native preview panel prunes by liveness; Linux compiles it out.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
         let mut keys = self
             .index_replica
@@ -1304,18 +1291,6 @@ impl WorkspaceStore {
         self.settings_replica.browser.clone()
     }
 
-    /// Local-handle crossing: take the preview broker receiver exactly once.
-    ///
-    /// Commands and preview registration metadata remain typed; this
-    /// receiver carries native WebView reply senders and is the deliberate
-    /// reverse-RPC affordance documented by the local host seam.
-    #[cfg(all(feature = "local-host", feature = "desktop"))]
-    pub fn take_preview_requests(
-        &mut self,
-    ) -> Option<async_channel::Receiver<preview_mcp::BrokerRequest>> {
-        self.preview_requests.take()
-    }
-
     pub fn provider_profile_kind(&self, profile_id: &str) -> agent::ProviderKind {
         self.settings_replica
             .resolved_profile(profile_id)
@@ -1336,6 +1311,15 @@ impl WorkspaceStore {
             .get(&provider)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn models_loading(&self, provider: agent::ProviderKind) -> bool {
+        self.providers_replica.models_loading.get(&provider) == Some(&true)
+            && self
+                .providers_replica
+                .model_catalogs
+                .get(&provider)
+                .is_none_or(Vec::is_empty)
     }
 
     pub fn picker_models_for_profile(&self, profile_id: &str) -> Vec<ResolvedModel> {
@@ -1635,8 +1619,8 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn diff_panel_chrome_state(&self) -> DiffPanelChrome {
-        snapshots::diff_panel_chrome(
+    pub(crate) fn panel_state(&self) -> PanelState {
+        snapshots::panel_state(
             self.active_conversation_ui(),
             self.session_status_replica.as_ref(),
             self.session_replica.as_ref().map(|(_, timeline)| timeline),
@@ -1922,10 +1906,6 @@ impl WorkspaceStore {
                 || !status.queued_messages.is_empty()
                 || status.native_rewind_pending,
         ))
-    }
-
-    pub(crate) fn chat_panel_state(&self) -> ChatPanelState {
-        snapshots::chat_panel_state(self.active_conversation_ui())
     }
 
     pub fn chat_git_controls(&self) -> Option<(QuickAction, Vec<MenuItem>)> {
@@ -2304,6 +2284,30 @@ mod tests {
             .expect("persist seed session");
         let host = test_host(session_store);
         let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        wait_until(cx, &workspace, "initial session index", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .index_replica
+                    .0
+                    .iter()
+                    .any(|meta| meta.id == seed_session_id)
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .grouped_sessions()
+                    .iter()
+                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+            );
+            assert!(
+                store
+                    .flat_sessions()
+                    .iter()
+                    .any(|meta| meta.id == seed_session_id)
+            );
+            assert!(store.archived_groups().is_empty());
+        });
 
         command(
             &host,
@@ -2337,6 +2341,27 @@ mod tests {
                         .is_some_and(|meta| meta.archived_at.is_some())
                     && store.settings_replica.word_wrap_diffs == expected_word_wrap
             })
+        });
+
+        workspace.read_with(cx, |store, _| {
+            assert!(
+                !store
+                    .grouped_sessions()
+                    .iter()
+                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+            );
+            assert!(
+                !store
+                    .flat_sessions()
+                    .iter()
+                    .any(|meta| meta.id == seed_session_id)
+            );
+            assert!(
+                store
+                    .archived_groups()
+                    .iter()
+                    .any(|group| { group.sessions.iter().any(|meta| meta.id == seed_session_id) })
+            );
         });
 
         let live_index = update_host!(&host, |state, _| {

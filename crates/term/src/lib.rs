@@ -237,7 +237,7 @@ impl Terminal {
 
     fn from_pty(pty: PtyHandle) -> io::Result<Self> {
         let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
-        Self::from_parts(pty, emulator)
+        Self::from_parts(pty, emulator, None)
     }
 
     pub fn grid(&self) -> &GridEmulator {
@@ -251,22 +251,15 @@ impl Terminal {
         let pty = PtyHandle::spawn(cwd)?;
         let emulator = GridEmulator::with_size_and_title(DEFAULT_COLS, DEFAULT_ROWS, pty.label());
         let (tx, rx) = async_channel::unbounded();
-        Ok((Self::from_parts_with_output(pty, emulator, Some(tx))?, rx))
+        Ok((Self::from_parts(pty, emulator, Some(tx))?, rx))
     }
 
-    fn from_parts(pty: PtyHandle, emulator: GridEmulator) -> io::Result<Self> {
-        Self::from_parts_with_output(pty, emulator, None)
-    }
-
-    fn from_parts_with_output(
+    fn from_parts(
         pty: PtyHandle,
         emulator: GridEmulator,
         output: Option<async_channel::Sender<Vec<u8>>>,
     ) -> io::Result<Self> {
         emulator.set_fallback_title(pty.label());
-        if pty.exited() {
-            emulator.set_exited(pty.exit_code());
-        }
 
         let (notifications, events) = async_channel::unbounded();
         let pty_events = pty.events();
@@ -380,16 +373,6 @@ impl Terminal {
         }
     }
 
-    /// Update the physical pixel dimensions of one terminal cell.
-    ///
-    /// This updates rio's graphics sizing and the host PTY pixel winsize even
-    /// when the grid's row and column counts stay unchanged.
-    pub fn set_cell_size(&self, width_px: u32, height_px: u32) {
-        if self.emulator.set_cell_size(width_px, height_px) {
-            let _ = self.pty.resize(self.emulator.window_size());
-        }
-    }
-
     /// Resize the grid and update its physical cell metrics as one operation.
     pub fn resize_with_cell_size(&self, cols: usize, rows: usize, width_px: u32, height_px: u32) {
         if self
@@ -464,8 +447,6 @@ impl Terminal {
     pub fn snapshot(&self) -> TermSnapshot {
         let mut snapshot = self.emulator.snapshot();
         snapshot.title = self.label();
-        snapshot.exited = self.pty.exited();
-        snapshot.exit_code = self.pty.exit_code();
         snapshot
     }
 
@@ -482,19 +463,6 @@ mod tests {
     #[cfg(not(windows))]
     use crate::pty::unix_shell;
     use crate::pty::{default_shell, shell_label};
-
-    fn live_pty_denied() -> bool {
-        std::env::var("TCODE_LIVE_TESTS").is_ok_and(|value| value == "0")
-    }
-
-    macro_rules! require_live_pty {
-        () => {
-            if live_pty_denied() {
-                eprintln!("skipped: TCODE_LIVE_TESTS=0");
-                return;
-            }
-        };
-    }
 
     fn command(script: &str) -> Terminal {
         #[cfg(windows)]
@@ -580,31 +548,9 @@ mod tests {
         assert_eq!(shell_label(r"C:\Windows\system32\cmd.exe"), "cmd");
     }
 
-    #[test]
-    fn local_transport_preserves_terminal_output_and_exit_without_json() {
-        let (sender, receiver) = async_channel::unbounded();
-        let output = vec![0, b'\n', 255];
-        sender
-            .try_send(PtyEvent::Output(output.clone()))
-            .expect("send raw output");
-        sender
-            .try_send(PtyEvent::Exited { exit_code: Some(0) })
-            .expect("send exit status");
-
-        assert_eq!(
-            receiver.try_recv().expect("receive raw output"),
-            PtyEvent::Output(output)
-        );
-        assert_eq!(
-            receiver.try_recv().expect("receive exit status"),
-            PtyEvent::Exited { exit_code: Some(0) }
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn captures_process_output_and_exit() {
-        require_live_pty!();
         let terminal = command("printf 'hello\\n'");
         let state = wait_until(&terminal, |state| {
             state.text().contains("hello") && state.exited
@@ -615,7 +561,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn real_pty_output_uses_raw_byte_boundary() {
-        require_live_pty!();
         let pty = PtyHandle::spawn_command(
             std::env::temp_dir(),
             "/bin/sh".to_string(),
@@ -647,7 +592,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn pty_kill_emits_exit_data_event() {
-        require_live_pty!();
         let pty = PtyHandle::spawn_command(
             std::env::temp_dir(),
             "/bin/sh".to_string(),
@@ -680,29 +624,33 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resizes_grid_and_pty() {
-        require_live_pty!();
-        let terminal = command("sleep 1");
+        let terminal = command("read line; stty size");
         terminal.resize(42, 9);
         let state = terminal.snapshot();
         assert_eq!((state.cols, state.screen_lines), (42, 9));
+        terminal.write_input(b"\r".to_vec());
+        let state = wait_until(&terminal, |state| state.exited);
+        assert!(state.text().contains("9 42"), "{}", state.text());
+        assert_eq!(state.exit_code, Some(0));
     }
 
     #[cfg(unix)]
     #[test]
-    fn accepts_input_and_emulator_replies() {
-        require_live_pty!();
-        let terminal = command("read line; printf '%s\\n' \"$line\"");
+    fn input_reaches_the_child_process() {
+        let terminal = command("read line; printf 'received:%s\\n' \"$line\"");
         terminal.write_input(b"echo tcode-term-ok\r".to_vec());
-        let state = wait_until(&terminal, |state| {
-            state.text().contains("echo tcode-term-ok")
-        });
-        assert!(state.text().contains("echo tcode-term-ok"));
+        let state = wait_until(&terminal, |state| state.exited);
+        assert!(
+            state.text().contains("received:echo tcode-term-ok"),
+            "{}",
+            state.text()
+        );
+        assert_eq!(state.exit_code, Some(0));
     }
 
     #[cfg(unix)]
     #[test]
     fn handles_large_output_and_scrollback() {
-        require_live_pty!();
         let terminal = command("seq 1 5000");
         let state = wait_until(&terminal, |state| {
             state.exited && state.text().contains("5000")
@@ -717,7 +665,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn programmatic_selection_returns_grid_text() {
-        require_live_pty!();
         let terminal = command("printf 'alpha\\nbeta\\n'; sleep 1");
         let state = wait_until(&terminal, |state| state.text().contains("beta"));
         let alpha_row = state
@@ -795,7 +742,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn compatibility_events_cover_consumed_intents() {
-        require_live_pty!();
         let terminal = command("printf '\\033]2;wire-title\\007\\007'");
         let events = terminal.events();
         let start = Instant::now();
@@ -826,7 +772,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn real_pty_mouse_mode_changes_routing_decision() {
-        require_live_pty!();
         let terminal = command("printf '\\033[?1002h\\033[?1006h'; sleep 1");
         let state = wait_until(&terminal, |state| {
             state.mode.contains(Mode::MOUSE_DRAG) && state.mode.contains(Mode::SGR_MOUSE)
@@ -838,7 +783,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn terminal_exposes_active_kitty_keyboard_mode_without_a_snapshot() {
-        require_live_pty!();
         let terminal = command("printf '\\033[>1u'; sleep 1");
         let start = Instant::now();
         while terminal.keyboard_mode() != KeyboardModes::DISAMBIGUATE_ESC_CODES {
@@ -853,7 +797,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn osc52_store_reaches_the_public_terminal_event_stream_decoded() {
-        require_live_pty!();
         let terminal = command("printf '\\033]52;c;dGNvZGU=\\007'; sleep 1");
         let events = terminal.events();
         let start = Instant::now();
@@ -882,7 +825,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn extracts_plain_and_osc8_hyperlinks() {
-        require_live_pty!();
         let plain = command("printf 'see https://example.com/docs?q=1 now\\n'; sleep 1");
         let state = wait_until(&plain, |state| {
             state.text().contains("https://example.com/docs?q=1")
@@ -907,7 +849,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn snapshots_wide_cells_spacers_and_combining_characters() {
-        require_live_pty!();
         let terminal = command("echo '中文e\u{301}'; sleep 1");
         let state = wait_until(&terminal, |state| state.text().contains("中文e\u{301}"));
         let (row, column) = find_char(&state, '中').unwrap();
@@ -925,7 +866,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn forwards_primary_device_attribute_response_to_pty() {
-        require_live_pty!();
         let terminal = command(
             "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=16 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
         );
@@ -947,7 +887,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn interactive_selection_and_clear_preserve_scrollback_semantics() {
-        require_live_pty!();
         let terminal = command("printf 'alpha\\n'; sleep 1");
         let state = wait_until(&terminal, |state| state.text().contains("alpha"));
         let row = state
@@ -987,24 +926,85 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_captures_output_resizes_and_accepts_input() {
-        require_live_pty!();
-        let output = command("echo hello");
-        let state = wait_until(&output, |state| {
-            state.text().contains("hello") && state.exited
+    fn windows_rejects_invalid_spawn_without_hanging() {
+        let executable = std::env::current_exe().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for (cwd, program) in [
+                (executable.clone(), "cmd.exe".to_string()),
+                (executable.join("missing-project"), "cmd.exe".to_string()),
+                (
+                    std::env::temp_dir(),
+                    executable
+                        .join("missing-shell.exe")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            ] {
+                let result = Terminal::spawn_command(cwd, program, vec![], "cmd".into());
+                sender.send(result.is_err()).unwrap();
+            }
         });
+        for _ in 0..3 {
+            assert!(
+                receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("PTY spawn did not return")
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_captures_output_resizes_and_accepts_input() {
+        let output = command(
+            "(for /l %i in (1,1,8192) do @echo terminal-output-%i) & echo tcode-final-line & exit /b 37",
+        );
+        let state = wait_until(&output, |state| state.exited);
+        assert!(
+            state.text().contains("tcode-final-line"),
+            "{}",
+            state.text()
+        );
+        assert_eq!(state.exit_code, Some(37));
+
+        let resized = Terminal::spawn_command(
+            std::env::temp_dir(),
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "$null = [Console]::ReadLine(); Write-Output ('size=' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight)".into(),
+            ],
+            "powershell".into(),
+        )
+        .unwrap();
+        resized.resize(42, 9);
+        resized.write_input(b"\r".to_vec());
+        let state = wait_until(&resized, |state| state.exited);
+        assert_eq!((state.cols, state.screen_lines), (42, 9));
+        assert!(state.text().contains("size=42x9"), "{}", state.text());
         assert_eq!(state.exit_code, Some(0));
 
-        let resized = command("timeout /t 1 >nul");
-        resized.resize(42, 9);
-        assert_eq!(
-            (resized.snapshot().cols, resized.snapshot().screen_lines),
-            (42, 9)
-        );
-
-        let input = command("set /p line= && echo %line%");
+        let input = command("set /p line= && set line");
         input.write_input(b"tcode-term-ok\r".to_vec());
-        let state = wait_until(&input, |state| state.text().contains("tcode-term-ok"));
-        assert!(state.text().contains("tcode-term-ok"));
+        let state = wait_until(&input, |state| state.exited);
+        assert!(
+            state.text().contains("line=tcode-term-ok"),
+            "{}",
+            state.text()
+        );
+        assert_eq!(state.exit_code, Some(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_kills_child_with_pending_input() {
+        let terminal = command("echo tcode-ready & ping -n 30 127.0.0.1 >nul");
+        wait_until(&terminal, |state| state.text().contains("tcode-ready"));
+        terminal.write_input(vec![b'x'; 1024 * 1024]);
+        terminal.kill();
+        let state = wait_until(&terminal, |state| state.exited);
+        assert_eq!(state.exit_code, Some(1));
     }
 }

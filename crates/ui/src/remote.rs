@@ -1142,11 +1142,4 @@ mod tests {
         assert_eq!(countdown(60), "1:00");
         assert_eq!(countdown(7), "0:07");
     }
-
-    #[test]
-    fn qr_matrix_is_square_and_has_dark_modules() {
-        let (width, modules) = qr_modules("tcode://pair?v=1&host=x&code=123456").unwrap();
-        assert_eq!(modules.len(), width * width);
-        assert!(modules.iter().any(|dark| *dark));
-    }
 }

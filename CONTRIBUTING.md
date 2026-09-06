@@ -39,15 +39,24 @@ in **Settings → Providers**.
 
 ## Before you open a pull request
 
-CI runs all four of these on macOS, Windows and Linux, and it is not permitted to
-be yellow — no `continue-on-error`, no `#[allow]` used to dodge a lint:
+CI checks formatting, Clippy, workspace builds and tests on macOS, Windows and
+Linux. Run the same checks locally:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build            # must be warning-free
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
 ```
+
+CI also runs `cargo machete` to catch unused dependencies, and checks iOS, Android
+and Web with `RUSTFLAGS='-D warnings'`. Use the commands and tool version in
+[the workflow](.github/workflows/ci.yml) to reproduce those checks. Fix warnings
+at their source; a platform-specific lint exception needs a concrete reason at
+the declaration. For a dependency imported under a different crate name, use
+Cargo's `package` alias or machete's `renamed` metadata so unused imports remain
+detectable. An `ignored` entry requires an explanation of the generated or
+implicit use it cannot detect.
 
 New user-facing strings must be added to **both** `locales/en.yml` and
 `locales/zh-CN.yml` — a parity test enforces it.
@@ -82,26 +91,27 @@ crates/core              pure domain types and semantics
 crates/services          persistence, filesystem, process, git, import, and probes
 crates/runtime           session and provider lifecycle, queues, orchestration,
                          terminals, and semantic events
-crates/i18n              the sole translation backend
+crates/ui/src/i18n.rs     translation backend
 crates/ui                GPUI views, assets, presentation, and localized rendering
-crates/app/src/main.rs   the sole binary and composition root
+crates/app/src/main.rs   desktop binary and composition root
+crates/headless          headless host binary
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
 crates/term              terminal implementation (PTY)
 crates/preview-mcp       MCP server exposing the preview browser to the agent
 crates/orchestrate-mcp   MCP server for orchestration tools
 ```
 
-The dependency direction is strictly downward: `app -> ui/runtime/services/i18n`;
-`ui -> runtime/core/i18n`; `runtime -> services/core` and lower adapters such as
+The dependency direction is strictly downward: `app -> ui/runtime/services`;
+`ui -> runtime/core`; `runtime -> services/core` and lower adapters such as
 `agent` and `term`; and `services -> core`. No lower layer depends upward.
 Runtime emits semantic events; UI owns their localization and presentation.
-`crates/app/src/main.rs` is the sole binary and composition root, so the normal
-workspace command remains `cargo run`.
+`crates/app/src/main.rs` composes the desktop app. It is the default workspace
+binary, so the normal source command remains `cargo run`.
 
 `crates/agent/src/lib.rs` is the contract between the two halves: every provider
 normalizes into one `AgentEvent` stream and accepts one `SessionCommand` enum, so
-the UI never learns anything provider-shaped. Changing it means touching every
-client — do it deliberately, and never land it without a full-workspace build.
+the UI never learns anything provider-shaped. When changing it, verify every
+client with the workspace checks above, including the full-workspace build.
 
 **Adding a provider** usually means writing one client in `crates/agent` that
 translates its wire protocol into `AgentEvent`, and nothing else. If you find
@@ -115,6 +125,47 @@ against `PATH`/`PATHEXT`. A guard rejects direct `Command::new` usage.
 
 ## Review
 
-I read every PR. Small, focused changes get merged quickly; large ones go faster
-if you open an issue first so we can agree on the shape. Claims get verified —
-"the tests pass" is checked by running them, so please don't guess.
+### Keep one owner for each behaviour
+
+Before adding a type, state field, helper or dependency, find its current owner
+and callers. Extend that owner when it already represents the same concept.
+An abstraction should hide a real policy, platform boundary or lifecycle; a
+forwarder or fallible signature needs a responsibility beyond passing values
+through. Compute derived state where it is consumed unless caching has a
+measured benefit and an explicit invalidation path. Remove obsolete callers,
+conversions, fixtures and dependencies with the code they supported.
+
+### Make tests earn their maintenance
+
+Each test should identify an observable contract or realistic failure that it
+would catch. Derive expected values from that contract, a recorded external
+fixture or a known regression, independently of the implementation. In
+particular, a serialization round trip alone cannot establish wire
+compatibility: assert literal messages or older persisted inputs.
+
+Use the smallest production entry point that exercises the behaviour. Keep
+fixtures limited to setup; assertions should exercise production logic rather
+than an algorithm recreated inside the test. Group inputs that protect the
+same behaviour when that removes repeated setup, while keeping distinct
+failure modes readable. Library behaviour, constant/getter wiring and repeated
+happy paths need a project-specific reason to be tested.
+
+Unavailable credentials or platform facilities must appear as explicit ignored
+tests with a reason, rather than an early return reported as a pass. Keep
+deterministic local integration tests running in CI where supported.
+
+When removing or merging tests, identify the redundant coverage or retired
+contract, and where any remaining contract is covered. Preserve checks for
+permissions, malformed or older data, cancellation, ordering and recovery when
+those behaviours are still supported. For a bug fix, demonstrate that the
+regression test fails without the fix when practical. Test counts and deleted
+line counts are not quality targets.
+
+### Evidence in the pull request
+
+Describe the changed behaviour, why added abstractions are needed or removed
+ones are redundant, and the contract protected by changed tests. Report the
+checks actually run, including any platform or live-service gaps. Review these
+criteria for both human and AI contributions; passing CI cannot decide whether
+an abstraction or a test is useful. Merge only after all checks on the final
+commit pass, including dependency hygiene and mobile/Web checks.

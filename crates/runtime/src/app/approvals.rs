@@ -133,29 +133,6 @@ mod tests {
     }
 
     #[test]
-    fn parked_session_reports_pending_from_the_same_authority() {
-        let (_store, mut state) = state("approval-parked-test");
-        let (commands, _receiver) = smol::channel::unbounded();
-        state
-            .residents
-            .parked
-            .insert("parked".into(), live_session("parked", commands));
-
-        state.record_approval_event(
-            "parked",
-            &AgentEvent::ApprovalRequested(request("approval-parked")),
-        );
-
-        assert!(state.residents.live.is_empty());
-        assert!(
-            state
-                .session_status_snapshot("parked")
-                .unwrap()
-                .pending_approval
-        );
-    }
-
-    #[test]
     fn orchestrated_child_reads_pending_from_the_same_authority() {
         let (_store, mut state) = state("approval-child-test");
         let mut child = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);

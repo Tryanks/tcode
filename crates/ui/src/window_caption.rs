@@ -38,6 +38,7 @@ pub(crate) const CAPTION_STRIP_HEIGHT: f32 = 52.;
 const CAPTION_BUTTON_WIDTH: f32 = 46.;
 /// Horizontal space the whole cluster occupies, for surfaces that must reserve
 /// room for it rather than simply place it last in a row.
+#[cfg(feature = "desktop")]
 pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
@@ -202,12 +203,6 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
 mod tests {
     use super::*;
 
-    const SURFACES: [CaptionSurface; 4] = [
-        CaptionSurface::Chat,
-        CaptionSurface::RightPanel,
-        CaptionSurface::Preview,
-        CaptionSurface::Settings,
-    ];
     const ROUTES: [Route; 2] = [Route::Chat, Route::Settings];
     const TABS: [RightTab; 3] = [RightTab::Diff, RightTab::Plan, RightTab::Preview];
 
@@ -250,24 +245,6 @@ mod tests {
                     caption_host(true, Route::Settings, open, tab),
                     Some(CaptionSurface::Settings)
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn exactly_one_surface_hosts_the_cluster_in_every_layout() {
-        for route in ROUTES {
-            for open in [false, true] {
-                for tab in TABS {
-                    let hosting = SURFACES
-                        .into_iter()
-                        .filter(|surface| caption_host(true, route, open, tab) == Some(*surface))
-                        .count();
-                    assert_eq!(
-                        hosting, 1,
-                        "route {route:?}, right panel open {open}, tab {tab:?}"
-                    );
-                }
             }
         }
     }

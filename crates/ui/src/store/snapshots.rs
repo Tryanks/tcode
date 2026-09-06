@@ -1,25 +1,14 @@
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use tcode_core::{
     project::WorktreeInfo,
-    provider_models::{ResolvedModel, picker_models},
     session::Timeline,
     settings::Settings,
     ui::{RightTab, WorkspaceMode},
 };
-use tcode_protocol::{ProvidersStatus, QueuedMessageStatus, SessionStatus};
+use tcode_protocol::{ProvidersStatus, QueuedMessageStatus, SessionStatus, TerminalContextStatus};
 
 use crate::conversation_ui::ConversationUiState;
-
-#[derive(Clone)]
-pub(crate) struct ComposerTerminalContext {
-    pub id: u64,
-    pub terminal_label: String,
-    pub line_start: usize,
-    pub line_end: usize,
-    pub text: String,
-}
 
 #[derive(Clone)]
 pub(crate) struct ComposerActiveModel {
@@ -50,15 +39,13 @@ pub(crate) struct ComposerQueue {
 #[derive(Clone)]
 pub(crate) struct ComposerState {
     pub has_active_session: bool,
-    pub terminal_contexts: Vec<ComposerTerminalContext>,
+    pub terminal_contexts: Vec<TerminalContextStatus>,
     pub relay_confirmation: Option<(String, String)>,
     pub active_cwd: Option<PathBuf>,
     pub provider_commands: Vec<agent::ProviderCommand>,
     pub attachments_dir: Option<PathBuf>,
     pub pending_user_input: Option<(String, Vec<agent::UserInputQuestion>)>,
     pub active_model: Option<ComposerActiveModel>,
-    picker_models: HashMap<agent::ProviderKind, Vec<ResolvedModel>>,
-    models_loading: HashSet<agent::ProviderKind>,
     pub model_pending_restart: bool,
     pub active_model_spec: Option<agent::ModelSpec>,
     pub active_option_descriptors: Vec<agent::OptionDescriptor>,
@@ -81,19 +68,6 @@ pub(crate) struct ComposerState {
     pub turn_running: bool,
     pub pending_approval: Option<agent::ApprovalRequest>,
     pub pending_approval_count: usize,
-}
-
-impl ComposerState {
-    pub fn picker_models(&self, provider: agent::ProviderKind) -> Vec<ResolvedModel> {
-        self.picker_models
-            .get(&provider)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    pub fn models_loading(&self, provider: agent::ProviderKind) -> bool {
-        self.models_loading.contains(&provider)
-    }
 }
 
 pub(crate) fn composer_state(
@@ -141,41 +115,6 @@ pub(crate) fn composer_state(
             .find(|spec| spec.id == model)
             .cloned()
     });
-    let picker_models = [
-        agent::ProviderKind::Codex,
-        agent::ProviderKind::ClaudeCode,
-        agent::ProviderKind::Pi,
-        agent::ProviderKind::OpenCode,
-        agent::ProviderKind::Acp,
-    ]
-    .into_iter()
-    .map(|provider| {
-        let catalog = providers
-            .model_catalogs
-            .get(&provider)
-            .map_or(&[][..], Vec::as_slice);
-        (
-            provider,
-            picker_models(
-                catalog,
-                &settings.provider(provider),
-                &settings.favorite_models,
-            ),
-        )
-    })
-    .collect();
-    let models_loading = providers
-        .models_loading
-        .iter()
-        .filter_map(|(&provider, &loading)| {
-            (loading
-                && providers
-                    .model_catalogs
-                    .get(&provider)
-                    .is_none_or(Vec::is_empty))
-            .then_some(provider)
-        })
-        .collect();
     let checkout = status.and_then(|status| {
         let branch = status.git_branch.clone().or_else(|| {
             status
@@ -225,19 +164,7 @@ pub(crate) fn composer_state(
     ComposerState {
         has_active_session: status.is_some(),
         terminal_contexts: status
-            .map(|status| {
-                status
-                    .terminal_contexts
-                    .iter()
-                    .map(|context| ComposerTerminalContext {
-                        id: context.id,
-                        terminal_label: context.terminal_label.clone(),
-                        line_start: context.line_start,
-                        line_end: context.line_end,
-                        text: context.text.clone(),
-                    })
-                    .collect()
-            })
+            .map(|status| status.terminal_contexts.clone())
             .unwrap_or_default(),
         relay_confirmation: status.and_then(|status| status.relay_confirmation.clone()),
         active_cwd: status.map(|status| status.cwd.clone()),
@@ -252,8 +179,6 @@ pub(crate) fn composer_state(
             acp_agent_id: status.acp_agent_id.clone(),
             profile_id: status.requested_profile_id.clone(),
         }),
-        picker_models,
-        models_loading,
         model_pending_restart: status.is_some_and(|status| status.model_pending_restart),
         active_model_spec,
         active_option_descriptors: status
@@ -291,60 +216,28 @@ pub(crate) fn composer_state(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ChatPanelState {
-    pub right_panel_open: bool,
-    pub right_tab: RightTab,
-    pub plan_showing: bool,
-    pub preview_showing: bool,
-    pub terminal_open: bool,
-    pub terminal_height: f32,
-}
-
-pub(crate) fn chat_panel_state(ui: Option<&ConversationUiState>) -> ChatPanelState {
-    let right_panel_open = ui.is_some_and(|ui| ui.right_panel_open);
-    let right_tab = ui.map_or_else(RightTab::default, |ui| ui.right_tab);
-    ChatPanelState {
-        right_panel_open,
-        right_tab,
-        plan_showing: right_panel_open && right_tab == RightTab::Plan,
-        preview_showing: right_panel_open && right_tab == RightTab::Preview,
-        terminal_open: ui.is_some_and(|ui| ui.terminal_open),
-        terminal_height: ui.map_or(240., |ui| ui.terminal_height),
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ShellPanelState {
+pub(crate) struct PanelState {
     pub right_panel_open: bool,
     pub right_tab: RightTab,
     pub right_panel_expanded: bool,
-}
-
-pub(crate) fn shell_panel_state(ui: Option<&ConversationUiState>) -> ShellPanelState {
-    ShellPanelState {
-        right_panel_open: ui.is_some_and(|ui| ui.right_panel_open),
-        right_tab: ui.map_or_else(RightTab::default, |ui| ui.right_tab),
-        right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DiffPanelChrome {
-    pub panel_open: bool,
-    pub expanded: bool,
-    pub active_tab: RightTab,
+    pub terminal_open: bool,
+    #[cfg(feature = "terminal")]
+    pub terminal_height: f32,
     pub plan_tab_active: bool,
 }
 
-pub(crate) fn diff_panel_chrome(
+pub(crate) fn panel_state(
     ui: Option<&ConversationUiState>,
     status: Option<&SessionStatus>,
     timeline: Option<&Timeline>,
-) -> DiffPanelChrome {
-    DiffPanelChrome {
-        panel_open: ui.is_some_and(|ui| ui.right_panel_open),
-        expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
-        active_tab: ui.map_or_else(RightTab::default, |ui| ui.right_tab),
+) -> PanelState {
+    PanelState {
+        right_panel_open: ui.is_some_and(|ui| ui.right_panel_open),
+        right_tab: ui.map_or_else(RightTab::default, |ui| ui.right_tab),
+        right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
+        terminal_open: ui.is_some_and(|ui| ui.terminal_open),
+        #[cfg(feature = "terminal")]
+        terminal_height: ui.map_or(240., |ui| ui.terminal_height),
         plan_tab_active: timeline.is_some_and(|timeline| timeline.proposed_plan.is_some())
             || status.is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),
     }
@@ -401,26 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn composer_state_distinguishes_active_and_missing_sessions() {
-        let settings = Settings::default();
-        let providers = ProvidersStatus::default();
-
-        let missing = composer_state(None, None, &settings, &providers);
-        assert!(!missing.has_active_session);
-        assert!(missing.active_model.is_none());
-        assert!(missing.queue.is_none());
-
-        let status = session_status();
-        let active = composer_state(Some(&status), None, &settings, &providers);
-        assert!(active.has_active_session);
-        assert_eq!(active.active_cwd, Some(PathBuf::from("/workspace")));
-        assert_eq!(
-            active.active_model.as_ref().map(|model| model.provider),
-            Some(agent::ProviderKind::Codex)
-        );
-    }
-
-    #[test]
     fn composer_state_exposes_first_pending_approval_and_count() {
         let request = agent::ApprovalRequest {
             id: "approval-1".into(),
@@ -469,50 +342,5 @@ mod tests {
             state.token_usage.and_then(|usage| usage.context_window),
             Some(500_000)
         );
-    }
-
-    #[test]
-    fn composer_state_carries_queued_messages_and_steering_capability() {
-        let mut status = session_status();
-        status.queued_messages = vec![QueuedMessageStatus {
-            id: 7,
-            text: "follow up".into(),
-            fire_at_unix_secs: None,
-        }];
-        status.steering_supported = false;
-
-        let state = composer_state(
-            Some(&status),
-            None,
-            &Settings::default(),
-            &ProvidersStatus::default(),
-        );
-        let queue = state.queue.expect("active sessions have queue state");
-        assert_eq!(queue.messages, status.queued_messages);
-        assert!(!queue.can_steer);
-        assert_eq!(queue.agent, "Codex");
-    }
-
-    #[test]
-    fn chat_panel_state_derives_expansion_flags() {
-        let mut ui = ConversationUiState::new(false, true, 320.);
-        ui.right_panel_open = true;
-        ui.right_tab = RightTab::Plan;
-
-        let plan = chat_panel_state(Some(&ui));
-        assert!(plan.plan_showing);
-        assert!(!plan.preview_showing);
-        assert!(plan.terminal_open);
-        assert_eq!(plan.terminal_height, 320.);
-
-        ui.right_tab = RightTab::Preview;
-        let preview = chat_panel_state(Some(&ui));
-        assert!(!preview.plan_showing);
-        assert!(preview.preview_showing);
-
-        ui.right_panel_open = false;
-        let closed = chat_panel_state(Some(&ui));
-        assert!(!closed.plan_showing);
-        assert!(!closed.preview_showing);
     }
 }

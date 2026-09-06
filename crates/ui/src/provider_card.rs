@@ -3,32 +3,39 @@
 //! A compact, non-expanding row: driver glyph + status dot, name, `v<version>`,
 //! an update icon when a newer CLI exists, the status summary line, a gear button
 //! and the enable switch. The row body and the gear both open the per-profile
-//! settings [`ProviderDialog`], a transactional modal form.
+//! settings dialog, a transactional modal form.
 
-use crate::overlay::OverlayExt as _;
-use crate::theme::ActiveTheme as _;
-use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::switch::Switch;
+use crate::icon::Icon;
+#[cfg(feature = "desktop")]
 use crate::{
-    icon::{Icon, IconName},
+    icon::IconName,
+    overlay::OverlayExt as _,
+    provider_dialog::ProviderDialog,
+    provider_status::{EMAIL_SLOT, StatusDot, redact_email},
     sizing::Sizable as _,
+    store::{TopicKind, WorkspaceStore, observe_store_topics},
+    theme::ActiveTheme as _,
+    widgets::{
+        button::{Button, ButtonVariants as _},
+        switch::Switch,
+    },
 };
+#[cfg(feature = "desktop")]
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
+use gpui::{Styled as _, rgb};
+#[cfg(feature = "desktop")]
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
 
-use crate::provider_dialog::ProviderDialog;
-use crate::provider_status::{EMAIL_SLOT, StatusDot, redact_email};
-use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
-
 /// Claude's official Clay brand color from Anthropic's media resources.
 pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
 
+#[cfg(feature = "desktop")]
 pub struct ProviderCard {
     store: Entity<WorkspaceStore>,
     /// The protocol this card's profile drives (glyph, shared model catalog /
@@ -42,6 +49,7 @@ pub struct ProviderCard {
     _subscription: Subscription,
 }
 
+#[cfg(feature = "desktop")]
 impl ProviderCard {
     pub fn new(
         store: Entity<WorkspaceStore>,
@@ -424,6 +432,7 @@ impl ProviderCard {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A row inside the providers group — the group owns the fill and border.

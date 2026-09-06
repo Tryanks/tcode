@@ -8,7 +8,7 @@ use rmcp::model::{
 };
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -197,168 +197,131 @@ impl PreviewTools {
         }
     }
 
-    /// Open the preview browser, optionally navigating to a URL, and report status.
     #[tool(
         description = "Open the tcode preview browser (optionally at a URL) and return its status."
     )]
-    async fn preview_open(
-        &self,
-        Parameters(params): Parameters<OpenParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self.run(PreviewOp::Open { url: params.url }).await)
+    async fn preview_open(&self, Parameters(params): Parameters<OpenParams>) -> CallToolResult {
+        self.run(PreviewOp::Open { url: params.url }).await
     }
 
-    /// Navigate the preview browser to a URL.
     #[tool(description = "Navigate the tcode preview browser to a URL and return its status.")]
     async fn preview_navigate(
         &self,
         Parameters(params): Parameters<NavigateParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self.run(PreviewOp::Navigate { url: params.url }).await)
+    ) -> CallToolResult {
+        self.run(PreviewOp::Navigate { url: params.url }).await
     }
 
-    /// Report the preview browser's current URL, title, and loading state.
     #[tool(description = "Report the preview browser's current URL, title, and loading state.")]
-    async fn preview_status(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(self.run(PreviewOp::Status).await)
+    async fn preview_status(&self) -> CallToolResult {
+        self.run(PreviewOp::Status).await
     }
 
-    /// Evaluate a JavaScript expression in the page and return its value.
     #[tool(
         description = "Evaluate a JavaScript expression in the preview page and return its value."
     )]
     async fn preview_evaluate(
         &self,
         Parameters(params): Parameters<EvaluateParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self.run(PreviewOp::Evaluate { js: params.js }).await)
+    ) -> CallToolResult {
+        self.run(PreviewOp::Evaluate { js: params.js }).await
     }
 
-    /// Click the first element matching a CSS selector.
     #[tool(description = "Click the first element matching a CSS selector in the preview page.")]
-    async fn preview_click(
-        &self,
-        Parameters(params): Parameters<ClickParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(PreviewOp::Click {
-                selector: params.selector,
-            })
-            .await)
+    async fn preview_click(&self, Parameters(params): Parameters<ClickParams>) -> CallToolResult {
+        self.run(PreviewOp::Click {
+            selector: params.selector,
+        })
+        .await
     }
 
-    /// Type text into the first element matching a CSS selector.
     #[tool(
         description = "Type text into the first element matching a CSS selector in the preview page."
     )]
-    async fn preview_type(
-        &self,
-        Parameters(params): Parameters<TypeParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        Ok(self
-            .run(PreviewOp::Type {
-                selector: params.selector,
-                text: params.text,
-            })
-            .await)
+    async fn preview_type(&self, Parameters(params): Parameters<TypeParams>) -> CallToolResult {
+        self.run(PreviewOp::Type {
+            selector: params.selector,
+            text: params.text,
+        })
+        .await
     }
 
-    /// Set the preview to fill the panel or use a fixed device-sized canvas.
     #[tool(
         description = "Resize the preview canvas. mode is fill or fixed. Fixed mode accepts width/height or one preset: iphone-se, iphone-xr, iphone-12-pro, iphone-14-pro-max, pixel-7, galaxy-s20-ultra, ipad-mini, ipad-air, ipad-pro-12-9, surface-pro-7."
     )]
-    async fn preview_resize(
-        &self,
-        Parameters(params): Parameters<ResizeParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn preview_resize(&self, Parameters(params): Parameters<ResizeParams>) -> CallToolResult {
         let op = match resize_op(params) {
             Ok(op) => op,
-            Err(message) => return Ok(tool_error(message)),
+            Err(message) => return tool_error(message),
         };
-        Ok(self.run(op).await)
+        self.run(op).await
     }
 
-    /// Dispatch a keyboard press to the focused page element.
     #[tool(
         description = "Press a key in the preview page, optionally with Alt, Control, Meta, or Shift modifiers."
     )]
-    async fn preview_press(
-        &self,
-        Parameters(params): Parameters<PressParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn preview_press(&self, Parameters(params): Parameters<PressParams>) -> CallToolResult {
         if let Some(modifier) = params
             .modifiers
             .iter()
             .find(|modifier| !matches!(modifier.as_str(), "Alt" | "Control" | "Meta" | "Shift"))
         {
-            return Ok(tool_error(format!(
+            return tool_error(format!(
                 "invalid modifier {modifier:?}; use Alt, Control, Meta, or Shift"
-            )));
+            ));
         }
-        Ok(self
-            .run(PreviewOp::Press {
-                key: params.key,
-                modifiers: params.modifiers,
-            })
-            .await)
+        self.run(PreviewOp::Press {
+            key: params.key,
+            modifiers: params.modifiers,
+        })
+        .await
     }
 
-    /// Scroll the page window or a selected scroll container.
     #[tool(
         description = "Scroll the preview window or a CSS-selected container by deltaX and deltaY."
     )]
-    async fn preview_scroll(
-        &self,
-        Parameters(params): Parameters<ScrollParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn preview_scroll(&self, Parameters(params): Parameters<ScrollParams>) -> CallToolResult {
         if params.delta_x.is_none() && params.delta_y.is_none() {
-            return Ok(tool_error("preview_scroll requires deltaX or deltaY"));
+            return tool_error("preview_scroll requires deltaX or deltaY");
         }
-        Ok(self
-            .run(PreviewOp::Scroll {
-                delta_x: params.delta_x.unwrap_or(0.0),
-                delta_y: params.delta_y.unwrap_or(0.0),
-                selector: params.selector,
-            })
-            .await)
+        self.run(PreviewOp::Scroll {
+            delta_x: params.delta_x.unwrap_or(0.0),
+            delta_y: params.delta_y.unwrap_or(0.0),
+            selector: params.selector,
+        })
+        .await
     }
 
-    /// Wait until all specified page conditions match.
     #[tool(
         description = "Wait for a selector, document-text substring, and/or URL substring in the preview page."
     )]
     async fn preview_wait_for(
         &self,
         Parameters(params): Parameters<WaitForParams>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> CallToolResult {
         if params.selector.is_none() && params.text.is_none() && params.url_includes.is_none() {
-            return Ok(tool_error(
-                "preview_wait_for requires selector, text, or urlIncludes",
-            ));
+            return tool_error("preview_wait_for requires selector, text, or urlIncludes");
         }
         let timeout_ms = params.timeout_ms.unwrap_or(15_000).clamp(1_000, 60_000) as u64;
-        Ok(self
-            .run(PreviewOp::WaitFor {
-                selector: params.selector,
-                text: params.text,
-                url_includes: params.url_includes,
-                timeout_ms,
-            })
-            .await)
+        self.run(PreviewOp::WaitFor {
+            selector: params.selector,
+            text: params.text,
+            url_includes: params.url_includes,
+            timeout_ms,
+        })
+        .await
     }
 
-    /// Build a DOM outline of the page's interactive elements (role/name/selector).
     #[tool(
         description = "Snapshot the preview page: URL, title, visible text, and interactive elements (role/name/selector)."
     )]
-    async fn preview_snapshot(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(self.run(PreviewOp::Snapshot).await)
+    async fn preview_snapshot(&self) -> CallToolResult {
+        self.run(PreviewOp::Snapshot).await
     }
 
-    /// Capture the visible preview region as a PNG image.
     #[tool(description = "Capture a screenshot of the visible preview browser region as a PNG.")]
-    async fn preview_screenshot(&self) -> Result<CallToolResult, ErrorData> {
-        Ok(self.run(PreviewOp::Screenshot).await)
+    async fn preview_screenshot(&self) -> CallToolResult {
+        self.run(PreviewOp::Screenshot).await
     }
 
     /// Route one op through the broker and map its reply into a tool result.
@@ -403,14 +366,8 @@ impl ServerHandler for PreviewTools {
 pub type Service = StreamableHttpService<PreviewTools, LocalSessionManager>;
 
 pub fn service(broker: Broker, session_id: String) -> Service {
-    let service_session_id = session_id.clone();
     StreamableHttpService::new(
-        move || {
-            Ok(PreviewTools::new(
-                broker.clone(),
-                service_session_id.clone(),
-            ))
-        },
+        move || Ok(PreviewTools::new(broker.clone(), session_id.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
@@ -436,34 +393,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broker_roundtrip_with_fake_resolver() {
-        // Fake UI: echoes op kind back as JSON.
+    async fn tools_preserve_session_and_map_json_and_image_replies() {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
         let broker = broker(tx, std::time::Duration::from_secs(2));
         let resolver = tokio::spawn(async move {
-            while let Ok(request) = rx.recv().await {
-                assert_eq!(request.session_id, "session-a");
-                let reply = match &request.op {
-                    PreviewOp::Status => {
-                        PreviewReply::Json(serde_json::json!({ "url": "https://x/" }))
-                    }
-                    PreviewOp::Screenshot => PreviewReply::Image {
+            for (op, reply) in [
+                (
+                    PreviewOp::Status,
+                    PreviewReply::Json(serde_json::json!({"url":"https://x/"})),
+                ),
+                (
+                    PreviewOp::Screenshot,
+                    PreviewReply::Image {
                         mime: "image/png".into(),
                         data_base64: "AAA".into(),
                     },
-                    _ => PreviewReply::Json(serde_json::json!({ "ok": true })),
-                };
-                let _ = request.reply.send(Ok(reply)).await;
+                ),
+            ] {
+                let request = rx.recv().await.unwrap();
+                assert_eq!(request.session_id, "session-a");
+                assert_eq!(request.op, op);
+                request.reply.send(Ok(reply)).await.unwrap();
             }
         });
-
         let tools = PreviewTools::new(broker, "session-a".into());
-        let status = tools.run(PreviewOp::Status).await;
+        let status = tools.preview_status().await;
         assert_eq!(status.is_error, Some(false));
-        let shot = tools.run(PreviewOp::Screenshot).await;
+        assert!(
+            matches!(status.content.as_slice(), [ContentBlock::Text(text)]
+            if serde_json::from_str::<serde_json::Value>(&text.text).unwrap() == serde_json::json!({"url":"https://x/"}))
+        );
+        let shot = tools.preview_screenshot().await;
         assert_eq!(shot.is_error, Some(false));
-
-        resolver.abort();
+        assert!(
+            matches!(shot.content.as_slice(), [ContentBlock::Image(image)]
+            if image.mime_type == "image/png" && image.data == "AAA")
+        );
+        resolver.await.unwrap();
     }
 
     #[tokio::test]
@@ -472,39 +438,11 @@ mod tests {
         drop(rx); // no UI listening
         let broker = broker(tx, std::time::Duration::from_millis(200));
         let tools = PreviewTools::new(broker, "session-a".into());
-        let result = tools.run(PreviewOp::Status).await;
+        let result = tools.preview_status().await;
         assert_eq!(result.is_error, Some(true));
-    }
-
-    #[test]
-    fn tools_are_registered() {
-        let (tx, _rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        let broker = broker(tx, std::time::Duration::from_secs(1));
-        let tools = PreviewTools::new(broker, "session-a".into());
-        let names: Vec<String> = tools
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|t| t.name.to_string())
-            .collect();
-        for expected in [
-            "preview_open",
-            "preview_navigate",
-            "preview_status",
-            "preview_evaluate",
-            "preview_click",
-            "preview_type",
-            "preview_resize",
-            "preview_press",
-            "preview_scroll",
-            "preview_wait_for",
-            "preview_snapshot",
-            "preview_screenshot",
-        ] {
-            assert!(
-                names.contains(&expected.to_string()),
-                "missing tool {expected}"
-            );
-        }
+        assert!(
+            matches!(result.content.as_slice(), [ContentBlock::Text(text)]
+            if text.text == "preview UI is not available")
+        );
     }
 }

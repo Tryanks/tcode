@@ -11,14 +11,8 @@ mod android;
 #[cfg(target_os = "android")]
 pub use android::{
     init_platform, insets, jni_commit_text, jni_delete_backward, jni_finish_composing_text,
-    jni_key_event, jni_on_back, jni_on_insets, jni_set_composing_text, safe_area,
-    set_back_callback,
+    jni_key_event, jni_on_back, jni_on_insets, jni_set_composing_text, set_back_callback,
 };
-
-#[cfg(not(target_os = "android"))]
-pub fn safe_area() -> gpui::Edges<gpui::Pixels> {
-    gpui::Edges::default()
-}
 
 #[cfg(not(target_os = "android"))]
 pub fn insets() -> gpui::WindowInsets {

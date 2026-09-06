@@ -105,10 +105,6 @@ impl AndroidPlatform {
         self.app.config().density().unwrap_or(160) as f32 / 160.0
     }
 
-    pub(crate) fn safe_area(&self) -> gpui::Edges<gpui::Pixels> {
-        self.insets().safe_area
-    }
-
     pub(crate) fn insets(&self) -> gpui::WindowInsets {
         self.window()
             .map(|window| window.insets())

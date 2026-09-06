@@ -44,83 +44,76 @@ thread_local! {
     static AUTOMATION: RefCell<Option<UIAutomation>> = const { RefCell::new(None) };
 }
 
-pub(super) struct WindowsBackend;
-
-impl WindowsBackend {
-    pub(super) fn list_roots(&self, filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
-        list_roots(filters)
-    }
-
-    pub(super) fn observe(
-        &self,
-        root: &RootInfo,
-        request: ObserveRequest,
-    ) -> Result<RootObservation, BackendError> {
-        let mut live_root = None;
-        let tree = if request.semantic {
-            let opened = open_root(
-                root,
-                BackendErrorCode::ObservationFailed,
-                "opening the UIAutomation root for observation",
-            )?;
-            let tree = observe_tree(&opened, root)?;
-            live_root = Some(opened);
-            tree
-        } else {
-            UiNode {
-                role: root.kind.to_string(),
-                title: root.title.clone(),
-                frame: root.frame,
-                enabled: true,
-                ..UiNode::default()
-            }
-        };
-        let text_sparse = is_text_sparse(&tree);
-        let screenshot = if request.capture.should_capture(text_sparse) {
-            Some(match capture::capture_window(root) {
-                Ok(png) => png,
-                Err(error) => {
-                    log::debug!(
-                        "PrintWindow capture failed for root {}; falling back to UIAutomation: {error}",
-                        root.ref_id
-                    );
-                    if live_root.is_none() {
-                        live_root = Some(open_root(
-                            root,
-                            BackendErrorCode::CaptureFailed,
-                            "opening the UIAutomation root for capture",
-                        )?);
-                    }
-                    let opened = live_root.as_ref().ok_or_else(|| {
-                        backend_error(
-                            BackendErrorCode::CaptureFailed,
-                            "the UIAutomation capture root was unexpectedly unavailable",
-                        )
-                    })?;
-                    capture::capture_element(&opened.element)?
+pub fn observe(root: &RootInfo, request: ObserveRequest) -> Result<RootObservation, BackendError> {
+    let mut live_root = None;
+    let tree = if request.semantic {
+        let opened = open_root(
+            root,
+            BackendErrorCode::ObservationFailed,
+            "opening the UIAutomation root for observation",
+        )?;
+        let tree = observe_tree(&opened, root)?;
+        live_root = Some(opened);
+        tree
+    } else {
+        UiNode {
+            role: root.kind.to_string(),
+            title: root.title.clone(),
+            frame: root.frame,
+            enabled: true,
+            ..UiNode::default()
+        }
+    };
+    let text_sparse = is_text_sparse(&tree);
+    let screenshot = if request.capture.should_capture(text_sparse) {
+        Some(match capture::capture_window(root) {
+            Ok(png) => png,
+            Err(error) => {
+                log::debug!(
+                    "PrintWindow capture failed for root {}; falling back to UIAutomation: {error}",
+                    root.ref_id
+                );
+                if live_root.is_none() {
+                    live_root = Some(open_root(
+                        root,
+                        BackendErrorCode::CaptureFailed,
+                        "opening the UIAutomation root for capture",
+                    )?);
                 }
-            })
-        } else {
-            None
-        };
-        Ok(RootObservation {
-            root: root.clone(),
-            tree,
-            text_sparse,
-            screenshot,
-            screenshot_mime: "image/png",
+                let opened = live_root.as_ref().ok_or_else(|| {
+                    backend_error(
+                        BackendErrorCode::CaptureFailed,
+                        "the UIAutomation capture root was unexpectedly unavailable",
+                    )
+                })?;
+                capture::capture_element(&opened.element)?
+            }
         })
-    }
+    } else {
+        None
+    };
+    Ok(RootObservation {
+        root: root.clone(),
+        tree,
+        text_sparse,
+        screenshot,
+        screenshot_mime: "image/png",
+    })
+}
 
-    pub(super) fn perform_action(
-        &self,
-        root: &RootInfo,
-        request: &ActionRequest,
-    ) -> Result<ActionResult, BackendError> {
-        match request.kind {
-            ActionKind::Press => {
+pub fn perform_action(
+    root: &RootInfo,
+    request: &ActionRequest,
+) -> Result<ActionResult, BackendError> {
+    match request.kind {
+        ActionKind::Press | ActionKind::Click => {
+            if request.kind == ActionKind::Press
+                || (request.target_path.is_some()
+                    && request.button == super::MouseButton::Left
+                    && request.click_count == 1)
+            {
                 let target = target(root, request)?;
-                Ok(match target.press() {
+                return Ok(match target.press() {
                     Ok(message) => ActionResult::worked(message, Delivery::Ax),
                     Err(uia_error) => {
                         let live_frame = target.frame();
@@ -143,229 +136,195 @@ impl WindowsBackend {
                             Delivery::ForegroundHid,
                         )
                     }
-                })
+                });
             }
-            ActionKind::Click => {
-                if request.target_path.is_some()
-                    && request.button == super::MouseButton::Left
-                    && request.click_count == 1
-                {
-                    let target = target(root, request)?;
-                    match target.press() {
-                        Ok(message) => return Ok(ActionResult::worked(message, Delivery::Ax)),
-                        Err(uia_error) => {
-                            let live_frame = target.frame();
-                            let frame = live_frame
-                                .has_area()
-                                .then_some(live_frame)
-                                .or_else(|| request.target_frame.filter(|frame| frame.has_area()));
-                            let Some(frame) = frame else {
-                                return Ok(ActionResult::didnt(
-                                    format!("{uia_error}; the target has no clickable frame"),
-                                    Delivery::None,
-                                ));
-                            };
-                            let (x, y) = frame.center();
-                            let _cursor_guard = CursorGuard::acquire();
-                            let _foreground_guard = ForegroundGuard::acquire(root);
-                            input::click(x, y, request.button, request.click_count)?;
-                            return Ok(ActionResult::unknown(
+            let (x, y) = action_point(root, request)?;
+            let _cursor_guard = CursorGuard::acquire();
+            let _foreground_guard = ForegroundGuard::acquire(root);
+            input::click(x, y, request.button, request.click_count)?;
+            Ok(ActionResult::unknown(
+                "uiautomation mouse events were posted",
+                Delivery::ForegroundHid,
+            ))
+        }
+        ActionKind::SetText => {
+            let text = request.text.as_deref().ok_or_else(|| {
+                BackendError::new(BackendErrorCode::InvalidAction, "set_text requires text")
+            })?;
+            let target = target(root, request)?;
+            match target.set_text(text) {
+                Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
+                Err(uia_error) => {
+                    let focus_failed = target.focus().is_err();
+                    let click_point = if focus_failed {
+                        let frame = target.frame();
+                        if !frame.has_area() {
+                            return Ok(ActionResult::didnt(
                                 format!(
-                                    "{uia_error}; uiautomation mouse events were posted instead"
+                                    "{uia_error}; the target also rejected focus and has no clickable frame"
                                 ),
-                                Delivery::ForegroundHid,
+                                Delivery::None,
                             ));
                         }
+                        Some(frame.center())
+                    } else {
+                        None
+                    };
+                    let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
+                    let _foreground_guard = ForegroundGuard::acquire(root);
+                    if let Some((x, y)) = click_point {
+                        input::click(x, y, super::MouseButton::Left, 1)?;
                     }
+                    input::keypress(&["ctrl+a".into()])?;
+                    input::type_text(text)?;
+                    Ok(ActionResult::unknown(
+                        format!(
+                            "{uia_error}; uiautomation keyboard replacement events were posted instead"
+                        ),
+                        Delivery::ForegroundHid,
+                    ))
                 }
-                let (x, y) = action_point(root, request)?;
-                let _cursor_guard = CursorGuard::acquire();
-                let _foreground_guard = ForegroundGuard::acquire(root);
-                input::click(x, y, request.button, request.click_count)?;
-                Ok(ActionResult::unknown(
-                    "uiautomation mouse events were posted",
-                    Delivery::ForegroundHid,
-                ))
             }
-            ActionKind::SetText => {
-                let text = request.text.as_deref().ok_or_else(|| {
-                    BackendError::new(BackendErrorCode::InvalidAction, "set_text requires text")
-                })?;
+        }
+        ActionKind::TypeText => {
+            let text = request.text.as_deref().ok_or_else(|| {
+                BackendError::new(BackendErrorCode::InvalidAction, "type_text requires text")
+            })?;
+            let click_point = if request.target_path.is_some() {
                 let target = target(root, request)?;
-                match target.set_text(text) {
-                    Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
-                    Err(uia_error) => {
-                        let focus_failed = target.focus().is_err();
-                        let click_point = if focus_failed {
-                            let frame = target.frame();
-                            if !frame.has_area() {
-                                return Ok(ActionResult::didnt(
-                                    format!(
-                                        "{uia_error}; the target also rejected focus and has no clickable frame"
-                                    ),
-                                    Delivery::None,
-                                ));
-                            }
-                            Some(frame.center())
-                        } else {
-                            None
-                        };
-                        let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                        let _foreground_guard = ForegroundGuard::acquire(root);
-                        if let Some((x, y)) = click_point {
+                if target.focus().is_err() {
+                    let frame = target.frame();
+                    if !frame.has_area() {
+                        return Ok(ActionResult::didnt(
+                            "target rejected focus and has no clickable frame",
+                            Delivery::None,
+                        ));
+                    }
+                    Some(frame.center())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
+            let _foreground_guard = ForegroundGuard::acquire(root);
+            if let Some((x, y)) = click_point {
+                input::click(x, y, super::MouseButton::Left, 1)?;
+            }
+            input::type_text(text)?;
+            Ok(ActionResult::unknown(
+                "uiautomation Unicode keyboard events were posted",
+                Delivery::ForegroundHid,
+            ))
+        }
+        ActionKind::Keypress => {
+            let keys = request.keys.as_deref().ok_or_else(|| {
+                BackendError::new(BackendErrorCode::InvalidAction, "keypress requires keys")
+            })?;
+            let click_point = if request.target_path.is_some() {
+                let target = target(root, request)?;
+                if target.focus().is_err() {
+                    let frame = target.frame();
+                    if !frame.has_area() {
+                        return Ok(ActionResult::didnt(
+                            "keypress target rejected focus and has no clickable frame",
+                            Delivery::None,
+                        ));
+                    }
+                    Some(frame.center())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
+            let _foreground_guard = ForegroundGuard::acquire(root);
+            if let Some((x, y)) = click_point {
+                input::click(x, y, super::MouseButton::Left, 1)?;
+            }
+            input::keypress(keys)?;
+            Ok(ActionResult::unknown(
+                "uiautomation keyboard events were posted",
+                Delivery::ForegroundHid,
+            ))
+        }
+        ActionKind::Scroll => {
+            let scroll_x = request.scroll_x.unwrap_or(0.0);
+            let scroll_y = request.scroll_y.unwrap_or(0.0);
+            validate_scroll_deltas(scroll_x, scroll_y)?;
+            if scroll_x == 0.0 && scroll_y == 0.0 {
+                return Ok(ActionResult::worked(
+                    "scroll deltas were zero; no action was needed",
+                    Delivery::None,
+                ));
+            }
+            let target = scroll_target(root, request)?;
+            match target.scroll(scroll_x, scroll_y) {
+                Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
+                Err(uia_error) => {
+                    let frame = target.frame();
+                    let focus_failed = target.focus().is_err();
+                    let mouse_action = if focus_failed {
+                        if !frame.has_area() {
+                            return Ok(ActionResult::didnt(
+                                format!(
+                                    "{uia_error}; the target rejected focus and has no frame for keyboard fallback"
+                                ),
+                                Delivery::None,
+                            ));
+                        }
+                        Some((frame.center(), true))
+                    } else if frame.has_area() {
+                        Some((frame.center(), false))
+                    } else {
+                        None
+                    };
+                    let _cursor_guard = mouse_action.map(|_| CursorGuard::acquire());
+                    let _foreground_guard = ForegroundGuard::acquire(root);
+                    if let Some(((x, y), should_click)) = mouse_action {
+                        if should_click {
                             input::click(x, y, super::MouseButton::Left, 1)?;
-                        }
-                        input::keypress(&["ctrl+a".into()])?;
-                        input::type_text(text)?;
-                        Ok(ActionResult::unknown(
-                            format!(
-                                "{uia_error}; uiautomation keyboard replacement events were posted instead"
-                            ),
-                            Delivery::ForegroundHid,
-                        ))
-                    }
-                }
-            }
-            ActionKind::TypeText => {
-                let text = request.text.as_deref().ok_or_else(|| {
-                    BackendError::new(BackendErrorCode::InvalidAction, "type_text requires text")
-                })?;
-                let click_point = if request.target_path.is_some() {
-                    let target = target(root, request)?;
-                    if target.focus().is_err() {
-                        let frame = target.frame();
-                        if !frame.has_area() {
-                            return Ok(ActionResult::didnt(
-                                "target rejected focus and has no clickable frame",
-                                Delivery::None,
-                            ));
-                        }
-                        Some(frame.center())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                let _foreground_guard = ForegroundGuard::acquire(root);
-                if let Some((x, y)) = click_point {
-                    input::click(x, y, super::MouseButton::Left, 1)?;
-                }
-                input::type_text(text)?;
-                Ok(ActionResult::unknown(
-                    "uiautomation Unicode keyboard events were posted",
-                    Delivery::ForegroundHid,
-                ))
-            }
-            ActionKind::Keypress => {
-                let keys = request.keys.as_deref().ok_or_else(|| {
-                    BackendError::new(BackendErrorCode::InvalidAction, "keypress requires keys")
-                })?;
-                let click_point = if request.target_path.is_some() {
-                    let target = target(root, request)?;
-                    if target.focus().is_err() {
-                        let frame = target.frame();
-                        if !frame.has_area() {
-                            return Ok(ActionResult::didnt(
-                                "keypress target rejected focus and has no clickable frame",
-                                Delivery::None,
-                            ));
-                        }
-                        Some(frame.center())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let _cursor_guard = click_point.map(|_| CursorGuard::acquire());
-                let _foreground_guard = ForegroundGuard::acquire(root);
-                if let Some((x, y)) = click_point {
-                    input::click(x, y, super::MouseButton::Left, 1)?;
-                }
-                input::keypress(keys)?;
-                Ok(ActionResult::unknown(
-                    "uiautomation keyboard events were posted",
-                    Delivery::ForegroundHid,
-                ))
-            }
-            ActionKind::Scroll => {
-                let scroll_x = request.scroll_x.unwrap_or(0.0);
-                let scroll_y = request.scroll_y.unwrap_or(0.0);
-                validate_scroll_deltas(scroll_x, scroll_y)?;
-                if scroll_x == 0.0 && scroll_y == 0.0 {
-                    return Ok(ActionResult::worked(
-                        "scroll deltas were zero; no action was needed",
-                        Delivery::None,
-                    ));
-                }
-                let target = scroll_target(root, request)?;
-                match target.scroll(scroll_x, scroll_y) {
-                    Ok(message) => Ok(ActionResult::worked(message, Delivery::Ax)),
-                    Err(uia_error) => {
-                        let frame = target.frame();
-                        let focus_failed = target.focus().is_err();
-                        let mouse_action = if focus_failed {
-                            if !frame.has_area() {
-                                return Ok(ActionResult::didnt(
-                                    format!(
-                                        "{uia_error}; the target rejected focus and has no frame for keyboard fallback"
-                                    ),
-                                    Delivery::None,
-                                ));
-                            }
-                            Some((frame.center(), true))
-                        } else if frame.has_area() {
-                            Some((frame.center(), false))
                         } else {
-                            None
-                        };
-                        let _cursor_guard = mouse_action.map(|_| CursorGuard::acquire());
-                        let _foreground_guard = ForegroundGuard::acquire(root);
-                        if let Some(((x, y), should_click)) = mouse_action {
-                            if should_click {
-                                input::click(x, y, super::MouseButton::Left, 1)?;
-                            } else {
-                                input::move_mouse(x, y)?;
-                            }
+                            input::move_mouse(x, y)?;
                         }
-                        input::scroll_with_keyboard(scroll_x, scroll_y)?;
-                        Ok(ActionResult::unknown(
-                            format!(
-                                "{uia_error}; uiautomation keyboard scroll events were posted instead"
-                            ),
-                            Delivery::ForegroundHid,
-                        ))
                     }
+                    input::scroll_with_keyboard(scroll_x, scroll_y)?;
+                    Ok(ActionResult::unknown(
+                        format!(
+                            "{uia_error}; uiautomation keyboard scroll events were posted instead"
+                        ),
+                        Delivery::ForegroundHid,
+                    ))
                 }
             }
-            ActionKind::Drag => {
-                let path = request.path.as_deref().ok_or_else(|| {
-                    BackendError::new(BackendErrorCode::InvalidAction, "drag requires a path")
-                })?;
-                let _cursor_guard = CursorGuard::acquire();
-                let _foreground_guard = ForegroundGuard::acquire(root);
-                input::drag(path, request.button)?;
-                Ok(ActionResult::unknown(
-                    "uiautomation mouse drag events were posted",
-                    Delivery::ForegroundHid,
-                ))
-            }
-            ActionKind::MoveMouse => {
-                let (x, y) = action_point(root, request)?;
-                let _foreground_guard = ForegroundGuard::acquire(root);
-                input::move_mouse(x, y)?;
-                Ok(ActionResult::unknown(
-                    "a uiautomation mouse-move event was posted",
-                    Delivery::ForegroundHid,
-                ))
-            }
+        }
+        ActionKind::Drag => {
+            let path = request.path.as_deref().ok_or_else(|| {
+                BackendError::new(BackendErrorCode::InvalidAction, "drag requires a path")
+            })?;
+            let _cursor_guard = CursorGuard::acquire();
+            let _foreground_guard = ForegroundGuard::acquire(root);
+            input::drag(path, request.button)?;
+            Ok(ActionResult::unknown(
+                "uiautomation mouse drag events were posted",
+                Delivery::ForegroundHid,
+            ))
+        }
+        ActionKind::MoveMouse => {
+            let (x, y) = action_point(root, request)?;
+            let _foreground_guard = ForegroundGuard::acquire(root);
+            input::move_mouse(x, y)?;
+            Ok(ActionResult::unknown(
+                "a uiautomation mouse-move event was posted",
+                Delivery::ForegroundHid,
+            ))
         }
     }
 }
 
-fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
+pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> {
     let automation = create_automation(
         BackendErrorCode::ObservationFailed,
         "initializing uiautomation for root enumeration",
