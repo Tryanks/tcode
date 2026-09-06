@@ -159,6 +159,14 @@ struct SelectRowOption<T> {
     selected: bool,
 }
 
+/// A compact *desktop* window still draws the native macOS traffic lights over
+/// its top strip, so the strip's leading content is inset past them.
+const COMPACT_TRAFFIC_LIGHT_INSET: f32 = 80.;
+
+fn compact_clears_traffic_lights(window: &Window) -> bool {
+    cfg!(target_os = "macos") && !window.is_fullscreen()
+}
+
 /// Apply a settings theme mode to the live window (shared with the palette's
 /// "Toggle theme" action).
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
@@ -326,7 +334,8 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        let remote_panel = cx.new(|cx| crate::remote::RemotePanel::new(store.clone(), window, cx));
+        let remote_panel =
+            cx.new(|cx| crate::remote::RemotePanel::new(Some(store.clone()), window, cx));
         // Editable fields start empty and are seeded by `hydrate_inputs` once
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
@@ -700,12 +709,15 @@ impl SettingsPage {
 
     /// The compact list header: just the page title, since the list itself is
     /// the navigation.
-    fn render_compact_header_root(&self, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_compact_header_root(&self, window: &Window, _cx: &mut Context<Self>) -> AnyElement {
         gpui_base::h_flex()
             .flex_none()
             .h(px(52.))
             .w_full()
             .px_4()
+            .when(compact_clears_traffic_lights(window), |row| {
+                row.pl(px(COMPACT_TRAFFIC_LIGHT_INSET))
+            })
             .items_center()
             .child(
                 div()
@@ -717,12 +729,20 @@ impl SettingsPage {
     }
 
     /// The compact detail header: one back control plus the section's name.
-    fn render_compact_header(&self, title: SharedString, cx: &mut Context<Self>) -> AnyElement {
+    fn render_compact_header(
+        &self,
+        title: SharedString,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         gpui_base::h_flex()
             .flex_none()
             .h(px(52.))
             .w_full()
             .px_2()
+            .when(compact_clears_traffic_lights(window), |row| {
+                row.pl(px(COMPACT_TRAFFIC_LIGHT_INSET))
+            })
             .gap_2()
             .items_center()
             .child(
@@ -2393,12 +2413,12 @@ impl Render for SettingsPage {
             return if self.compact_detail {
                 let title = self.section.label();
                 column
-                    .child(self.render_compact_header(title, cx))
+                    .child(self.render_compact_header(title, window, cx))
                     .child(self.render_content(window, cx))
                     .into_any_element()
             } else {
                 column
-                    .child(self.render_compact_header_root(cx))
+                    .child(self.render_compact_header_root(window, cx))
                     .child(self.render_section_list(cx))
                     .into_any_element()
             };

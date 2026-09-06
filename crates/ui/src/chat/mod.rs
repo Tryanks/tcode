@@ -362,6 +362,18 @@ impl ChatView {
         self.composer
             .update(cx, |composer, cx| composer.focus(window, cx));
     }
+
+    #[cfg(test)]
+    pub(crate) fn composer(&self) -> Entity<crate::composer::Composer> {
+        self.composer.clone()
+    }
+
+    /// The thread's terminal workspace. Compact windows have no room to split
+    /// it under the timeline, so the shell shows this same entity as its own
+    /// destination rather than compiling the portable terminal away.
+    pub(crate) fn terminal_drawer(&self) -> Entity<TerminalDrawer> {
+        self.terminal_drawer.clone()
+    }
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
@@ -2389,6 +2401,11 @@ impl Render for ChatView {
         let active = self.workspace_store.read(cx).chat_active_session();
 
         let compact = self.window_state.read(cx).compact;
+        // The composer follows the layout in place. Rebuilding it here would
+        // throw away the draft, its selection and its pending attachments every
+        // time the window crossed the breakpoint.
+        self.composer
+            .update(cx, |composer, cx| composer.set_compact(compact, cx));
         // The phone reads on T1 paper; the desktop keeps the glass canvas.
         let root = v_flex().size_full().min_w_0().bg(if compact {
             crate::material::content_surface(cx)

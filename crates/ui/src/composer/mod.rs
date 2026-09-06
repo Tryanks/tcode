@@ -93,9 +93,22 @@ pub enum ComposerEvent {
     Submitted,
 }
 
+/// How far the draft field may grow before it scrolls. A compact window has to
+/// leave room for the keyboard, so it starts taller and stops sooner.
+fn auto_grow_rows(compact: bool) -> (usize, usize) {
+    if compact { (2, 5) } else { (1, 8) }
+}
+
+fn draft_placeholder(compact: bool) -> String {
+    if compact {
+        crate::tr!("mobile.message").into_owned()
+    } else {
+        crate::tr!("composer.placeholder").into_owned()
+    }
+}
+
 pub struct Composer {
     compact: bool,
-    placeholder_online: Option<bool>,
     workspace_store: Entity<WorkspaceStore>,
     input: Entity<TextareaState>,
     /// Dedicated free-form answer field shown inside an agent question card.
@@ -184,6 +197,38 @@ impl Composer {
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
+
+    /// Follow the window onto the other layout. Updated in place on purpose: a
+    /// rebuilt composer would drop the draft, its selection and its pending
+    /// attachments, and the user only resized a window.
+    #[cfg(test)]
+    pub(crate) fn draft(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.replace_all(text, window, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_compact(&self) -> bool {
+        self.compact
+    }
+
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact == compact {
+            return;
+        }
+        self.compact = compact;
+        let (min_rows, max_rows) = auto_grow_rows(compact);
+        // The placeholder has one owner in `render`; nudge it to re-apply there.
+        self.applied_placeholder.clear();
+        self.input
+            .update(cx, |input, cx| input.set_auto_grow(min_rows, max_rows, cx));
+        cx.notify();
+    }
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
         window: &mut Window,
@@ -198,15 +243,15 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (min_rows, max_rows) = auto_grow_rows(compact);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(if compact { 2 } else { 1 }, if compact { 5 } else { 8 })
-                .submit_on_enter(!compact || !cfg!(any(target_os = "ios", target_os = "android")))
-                .placeholder(if compact {
-                    crate::tr!("mobile.message")
-                } else {
-                    crate::tr!("composer.placeholder")
-                })
+                .auto_grow(min_rows, max_rows)
+                // Whether Enter sends is an input-device question, not a width
+                // one: a wide tablet still types on glass, and a desktop window
+                // dragged narrow still has a hardware Enter key.
+                .submit_on_enter(!crate::window_seam::soft_keyboard())
+                .placeholder(draft_placeholder(compact))
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
@@ -332,7 +377,6 @@ impl Composer {
 
         Self {
             compact,
-            placeholder_online: None,
             workspace_store,
             input,
             user_input_custom,
@@ -1010,8 +1054,10 @@ impl Render for Composer {
         // turn, so promising refinement there would misdescribe what Enter does.
         let desired_placeholder = if plan_ready_title.is_some() && self.refines_the_plan(cx) {
             crate::tr!("plan.refine_placeholder").into_owned()
+        } else if self.compact && !self.interactive(cx) {
+            crate::tr!("mobile.offline_message").into_owned()
         } else {
-            crate::tr!("composer.placeholder").into_owned()
+            draft_placeholder(self.compact)
         };
         if self.applied_placeholder != desired_placeholder {
             self.applied_placeholder = desired_placeholder.clone();
@@ -1095,17 +1141,6 @@ impl Render for Composer {
 
         // Focus swaps the hairline to primary in one frame. Geometry stays
         // fixed: focus never changes border width, radius, or layout.
-        if self.compact && self.placeholder_online != Some(self.interactive(cx)) {
-            self.placeholder_online = Some(self.interactive(cx));
-            let placeholder = if self.interactive(cx) {
-                crate::tr!("mobile.message")
-            } else {
-                crate::tr!("mobile.offline_message")
-            };
-            self.input.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            });
-        }
         let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
             .w_full()

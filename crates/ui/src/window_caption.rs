@@ -75,6 +75,12 @@ fn caption_host(
     })
 }
 
+/// The compact layout has exactly one top strip, so it always owns the corner
+/// where this platform expects its caption buttons.
+pub(crate) fn compact_hosts_caption() -> bool {
+    CLIENT_DECORATED
+}
+
 /// Whether `surface` must render the caption cluster this frame.
 pub(crate) fn hosts_caption_for_state(
     surface: CaptionSurface,

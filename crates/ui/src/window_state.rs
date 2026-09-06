@@ -4,7 +4,9 @@ use crate::store::WorkspaceStore;
 
 /// Window-global UI state owned by the GPUI layer.
 pub struct WindowState {
-    /// Opt-in touch layout; desktop windows keep the default rendering.
+    /// The layout the window's current width calls for. Derived from the
+    /// viewport by [`crate::window_seam::compact_for`] and never persisted:
+    /// widening a window is not a preference.
     pub compact: bool,
     pub route: Route,
     pub palette_open: bool,
@@ -32,10 +34,22 @@ impl WindowState {
         self
     }
 
-    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
-        if self.compact {
-            cx.emit(OpenThread);
+    /// Set the layout for the width the window now has. Returns whether the
+    /// rule flipped, so the shell only reconciles navigation when it did.
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) -> bool {
+        if self.compact == compact {
+            return false;
         }
+        self.compact = compact;
+        cx.notify();
+        true
+    }
+
+    /// "Show me this thread." It is a navigation intent, not a layout decision:
+    /// every width emits it and the shell decides how to present it — a wide
+    /// window already shows the thread beside the list, a compact one pushes it.
+    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
+        cx.emit(OpenThread);
     }
 
     pub fn toggle_sidebar_collapsed(

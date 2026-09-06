@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyView, App, AppContext as _, Context, ElementId, Entity, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div,
+    Render, Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::theme::ActiveTheme as _;
@@ -96,19 +96,34 @@ impl Render for OverlayHost {
             })
             .collect::<Vec<_>>();
 
+        // Dialogs and toasts share the shell's one safe content rectangle: a
+        // dialog centred in the raw window would sit under a notch, and a toast
+        // pinned to the corner would sit under the status bar.
+        let seam = crate::window_seam::WindowSeam::current(cx).content_insets();
         div()
             .relative()
             .size_full()
             .bg(cx.theme().background)
             .child(self.view.clone())
-            .children(dialogs)
+            .when(!dialogs.is_empty(), |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .pt(seam.top)
+                        .pb(seam.bottom)
+                        .pl(seam.left)
+                        .pr(seam.right)
+                        .children(dialogs),
+                )
+            })
             .child(
                 div()
                     .absolute()
                     .top_0()
                     .right_0()
-                    .mt_4()
-                    .mr_4()
+                    .mt(seam.top + px(16.))
+                    .mr(seam.right + px(16.))
                     .child(self.notifications.clone()),
             )
     }
