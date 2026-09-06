@@ -3,10 +3,6 @@
 use serde::Deserialize;
 use tcode_core::provider_status::{AuthStatus, ProviderAuth};
 
-// ---------------------------------------------------------------------------
-// Claude: `claude auth status --json`
-// ---------------------------------------------------------------------------
-
 /// The subset of `claude auth status --json` we consume. Verified against
 /// claude 2.1.x, which prints:
 /// `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty",
@@ -79,10 +75,6 @@ fn normalize_claude_plan(raw: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Codex: `$CODEX_HOME/auth.json`
-// ---------------------------------------------------------------------------
 
 /// Parse Codex's `auth.json`. Verified against codex 0.5x: the file carries
 /// `auth_mode` (`chatgpt` | `apikey`), an optional `OPENAI_API_KEY`, and — for

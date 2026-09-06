@@ -1,13 +1,13 @@
 # gpui-android
 
-Android platform backend for the `gpui-pre` 0.3.3 snapshot used by EAuth. The
+Android platform backend for the `gpui-pre` 0.3.3 snapshot used by tcode. The
 crate is an ordinary Rust dependency on every target, but its implementation is
 compiled only for Android. Calling `platform()` elsewhere fails with a clear
 panic instead of pulling Android libraries into host builds.
 
 ## Architecture
 
-`eauth-android` enters through `android_main`, initializes this crate with the
+`tcode-android` enters through `android_main`, initializes this crate with the
 `android_activity::AndroidApp`, and constructs `gpui::Application` with the
 process-local platform. Android's native activity loop remains the GPUI
 foreground executor. Work submitted to the background executor is distributed
@@ -23,32 +23,23 @@ device pixels into GPUI logical pixels. `uiMode` supplies light/dark appearance.
 
 `CosmicTextSystem` is populated from `/system/fonts` because fontdb does not
 load Android system fonts automatically. This includes Android's Noto CJK fonts
-and allows mixed Latin/Chinese strings to shape and render without bundling a
-font in the APK.
+for mixed Latin/Chinese text. The loader excludes the system Noto Color Emoji
+face so the application's bundled CBDT/CBLC font can supply supported color
+bitmap glyphs. tcode also registers its shared UI and monospace fonts.
 
 ## Java/JNI surface
 
-The Gradle host supplies `com.eauth.gpui.GpuiActivity`, a `NativeActivity`
+The Gradle host supplies `com.tryanks.tcode.GpuiActivity`, a `NativeActivity`
 subclass with a one-pixel focusable editor view. Its `BaseInputConnection`
 provides the IME protocol Android requires without covering or intercepting the
 native rendering surface.
 
-Rust calls these activity methods on Android's Java UI thread:
-
-- `gpuiShowKeyboard()` and `gpuiHideKeyboard()`
-- `gpuiConfigureInput(boolean, int, boolean, int)`
-- `gpuiFinish()`
-
-Java calls these exported JNI functions; each is queued and handled on the
-native activity/GPUI thread:
-
-- `nativeCommitText(String)`
-- `nativeSetComposingText(String)`
-- `nativeFinishComposingText()`
-- `nativeDeleteBackward()`
-- `nativeKeyEvent(int, boolean, int, int)`
-- `nativeOnInsets(int, int, int, int, int)`
-- `nativeOnBack(boolean)`
+The Java declarations live in
+[GpuiActivity.java](../../android/host/app/src/main/java/com/tryanks/tcode/GpuiActivity.java).
+The matching JNI exports in [tcode-android](../../android/src/lib.rs) forward
+callbacks to this backend. Rust calls activity methods on Android's Java UI
+thread; incoming callbacks are queued for the native activity/GPUI thread.
+Keep the method signatures at these two ends synchronized.
 
 Committed and composing text is applied through `PlatformInputHandler` using
 UTF-16 ranges. Hardware/IME key events become GPUI `KeyDown`/`KeyUp` events.
@@ -70,17 +61,37 @@ press and `ScrollPhysics::android()`. Tap synthesis, touch slop, scroll capture,
 drag-cancels-click, velocity sampling, and momentum are therefore shared with
 iOS rather than reimplemented in this backend.
 
+## Build and run
+
+From the repository root, with the Android SDK/NDK, JDK and `cargo-ndk`
+installed:
+
+```sh
+crates/android/host/build.sh
+adb install -r crates/android/host/app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -W -n com.tryanks.tcode/.GpuiActivity
+```
+
+The script builds the arm64 Rust library and Gradle Debug APK. Set
+`ANDROID_HOME`, `ANDROID_NDK_HOME` and `JAVA_HOME` to your local installations;
+the script's defaults are Homebrew paths. `CARGO_NDK_PLATFORM` defaults to 26.
+The debug build embeds the shared font/SVG assets so it does not depend on
+source paths from the development machine.
+
+See [mobile design](../../../docs/mobile-design.md) for application behavior and
+platform verification, and [remote work mode](../../../docs/remote.md) for
+pairing with a host. Android emulator loopback is the emulator itself; use a
+host address reachable from the device.
+
 ## Current limitations
 
 - Android supports a single GPUI window; desktop window management operations
   are intentionally no-ops.
 - Generic GPUI file dialogs, system credential storage, notifications,
   accessibility bridging, and URL intents are not implemented in this backend;
-  applications can provide those services in their Java/Kotlin host (as EAuth
-  does).
-- The text clipboard is bridged to Android `ClipboardManager`; GPUI clipboard
-  representations other than text are not exposed yet. EAuth's application
-  Host additionally marks copied codes sensitive and clears them on a timer.
+  applications must provide any required services in their host.
+- The text clipboard is bridged to Android `ClipboardManager`. Non-text GPUI
+  clipboard data is retained only in-process.
 - Raw multi-touch reaches the portable gesture arena, but this backend does not
   yet translate stylus buttons, hover, or hardware mouse-wheel axes.
 

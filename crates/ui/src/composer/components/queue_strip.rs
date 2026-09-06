@@ -17,12 +17,8 @@ fn truncate_queued(text: &str) -> String {
 }
 
 impl Composer {
-    /// The 64px thumbnail strip above the control row (T3), when images are
-    /// attached; each thumbnail opens an expanded preview and has a remove `x`.
-    /// The queue strip shown ABOVE the card whenever messages are waiting for
-    /// the running turn to finish: one row per queued message (truncated text),
-    /// each with a send-now/steer button and an ✕ (drop it). Scheduled rows add
-    /// a live countdown; rows are reorderable-by-removal only.
+    /// Queued messages with edit, send-now and removal actions. Scheduled
+    /// messages also show a live countdown.
     pub(in super::super) fn render_queue_strip(
         &mut self,
         cx: &mut Context<Self>,

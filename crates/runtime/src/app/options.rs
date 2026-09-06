@@ -94,8 +94,6 @@ impl AppState {
         self.preview_draft_or_persist_active(target_id, cx);
     }
 
-    // -- traits (option selections) -----------------------------------------
-
     /// Set (or clear) the persisted value of one option descriptor for the
     /// active session. `value` is a string (select) or bool (boolean); passing
     /// `None` removes the selection so it resolves back to its default. Takes
@@ -137,15 +135,12 @@ impl AppState {
     }
 
     /// Arm an Ultrathink turn: the next send is prefixed with `Ultrathink:\n`.
-    /// T3 does not persist this as an option (it resolves back to the default),
-    /// so it lives as a transient per-send flag.
+    /// This is a transient per-send flag, not a persisted option.
     pub fn select_ultrathink(&mut self, target_id: &str, _cx: &mut HostCx) {
         if let Some(active) = self.resident_mut(target_id) {
             active.pending_ultrathink = true;
         }
     }
-
-    // -- interaction mode (Build / Plan) ------------------------------------
 
     /// The active session's Build/Plan interaction mode (`Build` when none).
     pub(crate) fn active_interaction_mode(&self, target_id: &str) -> InteractionMode {
@@ -154,9 +149,8 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    /// Set the Build/Plan interaction mode for the active session. Both
-    /// providers switch live (Codex per turn, Claude via a control request), so
-    /// no restart is scheduled.
+    /// Set Build/Plan mode on the resident session and notify its adapter.
+    /// Adapters apply it live or on the next turn without a restart.
     pub fn set_interaction_mode(
         &mut self,
         target_id: &str,
@@ -184,8 +178,6 @@ impl AppState {
         };
         self.set_interaction_mode(target_id, next, cx);
     }
-
-    // -- proposed-plan flow -------------------------------------------------
 
     /// Accept the proposed plan: send the verbatim implementation prompt, switch
     /// to Build mode, and persist the decision before dispatching the turn.
@@ -378,8 +370,6 @@ impl AppState {
             ),
         }
     }
-
-    // -- git branch picker (checkout row) -----------------------------------
 
     /// Load the local branches for the active session's cwd in the background
     /// (called when the checkout-row popover opens).

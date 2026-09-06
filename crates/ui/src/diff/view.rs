@@ -103,10 +103,6 @@ fn render_file(
     )
 }
 
-// ---------------------------------------------------------------------------
-// Panel entity
-// ---------------------------------------------------------------------------
-
 /// Cache of rendered files, invalidated when the session, selected turn, or
 /// theme brightness changes (highlight colors are theme-resolved).
 struct DiffCache {
@@ -649,8 +645,6 @@ impl DiffPanel {
         self.cache.as_ref().is_some_and(|c| !c.files.is_empty())
     }
 
-    // -- top strip (tab look + right icon cluster) --------------------------
-
     fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let chrome = self.workspace_store.read(cx).panel_state();
         let panel_open = chrome.right_panel_open;
@@ -668,7 +662,7 @@ impl DiffPanel {
             active,
         );
         // The second tab is "Plan" when a plan exists or the session is in Plan
-        // mode, else "Tasks" (S1 §6).
+        // mode, else "Tasks".
         let plan_label = if plan_tab_active {
             crate::tr!("plan.tab_plan")
         } else {
@@ -806,8 +800,6 @@ impl DiffPanel {
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
             .into_any_element()
     }
-
-    // -- toolbar (turn selector + view controls) ----------------------------
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let active_state = self.workspace_store.read(cx).diff_active_state();
@@ -1160,8 +1152,6 @@ impl DiffPanel {
         }
         toolbar.into_any_element()
     }
-
-    // -- body ---------------------------------------------------------------
 
     fn expand_gap(
         &mut self,
@@ -1875,9 +1865,7 @@ impl Render for DiffPanel {
             .text_color(cx.theme().foreground)
             .child(self.render_tab_strip(window, cx));
         root = match tab {
-            // Preview is rendered by its own panel (see ui/mod.rs); the diff
-            // container only handles Diff/Plan, so treat Preview as the diff view
-            // for the unreachable fallback.
+            // AppShell mounts Preview separately; this container handles Diff/Plan.
             RightTab::Diff | RightTab::Preview => root
                 .child(self.render_toolbar(cx))
                 .child(self.render_body(cx)),

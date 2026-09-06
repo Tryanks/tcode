@@ -110,8 +110,6 @@ impl Composer {
                         .small()
                         .text_color(color);
                     match dictation {
-                        // While recording, a glow behind the glyph tracks the
-                        // live input level: visible proof the mic hears you.
                         Some(d) => div()
                             .rounded_full()
                             .p(px(2.))
@@ -317,7 +315,6 @@ mod tests {
         assert_eq!(range, 5..5);
         (committed, volatile) = (c, v);
 
-        // A longer hypothesis replaces the shorter one it grew from.
         let (range, c, v) = transcript_edit(anchor, committed, volatile, 6, false);
         assert_eq!(range, 5..7);
         (committed, volatile) = (c, v);
@@ -327,7 +324,6 @@ mod tests {
         assert_eq!((c, v), (6, 0));
         (committed, volatile) = (c, v);
 
-        // The next hypothesis is inserted after the committed text.
         let (range, ..) = transcript_edit(anchor, committed, volatile, 3, false);
         assert_eq!(range, 11..11);
     }

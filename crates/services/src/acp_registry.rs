@@ -65,10 +65,6 @@ impl From<std::io::Error> for RegistryError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Schema
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
@@ -130,10 +126,6 @@ struct CachedRegistry {
     registry: Registry,
 }
 
-// ---------------------------------------------------------------------------
-// Visibility + platform resolution
-// ---------------------------------------------------------------------------
-
 /// The agents the marketplace may show: everything except adapters over our own
 /// native CLIs.
 pub fn visible_agents(registry: &Registry) -> Vec<&RegistryAgent> {
@@ -149,7 +141,7 @@ pub fn platform_key() -> String {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         "windows" => "windows",
-        other => other, // "linux"
+        other => other,
     };
     // `x86_64` / `aarch64` are already the registry's own spellings.
     let arch = std::env::consts::ARCH;
@@ -180,10 +172,6 @@ fn pairs(env: &BTreeMap<String, String>) -> Vec<(String, String)> {
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Fetch + cache
-// ---------------------------------------------------------------------------
 
 fn cache_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CACHE_FILE)
@@ -270,10 +258,6 @@ fn http_get(url: &str) -> Result<Vec<u8>, RegistryError> {
         .map_err(|err| RegistryError::Network(err.to_string()))?;
     Ok(bytes)
 }
-
-// ---------------------------------------------------------------------------
-// Install
-// ---------------------------------------------------------------------------
 
 /// Where an agent's files live: `<data>/acp-agents/<id>/<version>/`.
 pub fn install_dir(data_dir: &Path, id: &str, version: &str) -> PathBuf {
@@ -479,10 +463,6 @@ fn make_executable(path: &Path) -> std::io::Result<()> {
 fn make_executable(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

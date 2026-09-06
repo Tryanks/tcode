@@ -1,12 +1,6 @@
-//! The "Frosted Instrument" material system (docs/visual-redesign.md) carrying
-//! the Beautiful UI component metrics (docs/beautiful-ui-redesign.md).
-//!
-//! The window canvas (theme `background`) is the only intentionally translucent
-//! tier; reading surfaces sit on top of it at near-full opacity so body text
-//! never lands on the raw blur. Semantic colors stay on `cx.theme()` — this
-//! module owns the material tiers, the role-based radius scale, and the few
-//! light effects (faded hairlines, the primary-button top light) the spec
-//! defines.
+//! Shared material surfaces, radii and layout helpers.
+//! Reading surfaces remain near-opaque over the translucent window canvas;
+//! semantic colors come from the active theme.
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
@@ -35,12 +29,8 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     .into()
 }
 
-/// The canvas flattened to full opacity. Painted under the glass tiers only
-/// while the window is fullscreen: a fullscreen Space has nothing but black
-/// behind the vibrancy material, and the canvas alpha compositing against it
-/// muddies every surface above. Same fallback Windows Acrylic's `FallbackColor`
-/// and macOS "Reduce Transparency" apply. Windowed, the canvas stays
-/// translucent and Root owns it (docs/visual-redesign.md §0).
+/// Flatten the canvas over fullscreen vibrancy, where its translucent color
+/// would otherwise composite against black.
 pub fn opaque_canvas(cx: &App) -> Hsla {
     cx.theme().background.opacity(1.)
 }
@@ -56,7 +46,6 @@ pub fn content_surface(cx: &App) -> Hsla {
     }
 }
 
-// Role-based radius scale — no magic corner numbers outside this table.
 /// Popovers, menus, dialogs, toasts.
 pub fn radius_overlay() -> Pixels {
     px(10.)
@@ -77,11 +66,11 @@ pub fn radius_button() -> Pixels {
 pub fn radius_chip() -> Pixels {
     px(6.)
 }
-/// The composer field — the hero element.
+/// Composer field corners.
 pub fn radius_composer() -> Pixels {
     px(14.)
 }
-/// The phone's bottom sheet, top corners only (docs/mobile-design.md §5).
+/// The phone's bottom sheet, top corners only.
 pub fn radius_overlay_sheet() -> Pixels {
     px(14.)
 }
@@ -152,11 +141,7 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
     group
 }
 
-/// The sidebar brand wordmark — bold "tcode" + the "DEV" channel pill. The main
-/// sidebar's app row (`sidebar.rs`) and the settings left-nav header are
-/// round-trip counterparts, so this shares the exact chrome without either side
-/// reimplementing it. Neutral helper: sidebar.rs keeps its own inline copy, this
-/// only lets the settings nav wear the same treatment.
+/// Shared wordmark and DEV channel badge.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     gpui_base::h_flex()
         .items_center()
@@ -193,8 +178,7 @@ pub fn scrim(progress: f32, cx: &App) -> Hsla {
     }
 }
 
-/// The bottom sheet's drag handle (docs/mobile-design.md §3.0): 36×5 at 30%
-/// muted, in its own 16pt-tall strip above the title row.
+/// Drag handle above a compact sheet's title row.
 pub fn sheet_grabber(cx: &App) -> impl IntoElement {
     div()
         .flex_none()
@@ -212,10 +196,7 @@ pub fn sheet_grabber(cx: &App) -> impl IntoElement {
         )
 }
 
-/// The phone's empty state (docs/mobile-design.md §3.0): a muted 24pt icon, a
-/// 17pt semibold title and a ≤2-line 15pt body, centered in a 280pt column.
-/// Callers append their own primary action. Compact surfaces only — the desktop
-/// keeps its own richer empty states.
+/// Compact empty state; callers append their primary action.
 pub fn empty_state(
     icon: crate::icon::Icon,
     title: impl Into<SharedString>,
@@ -250,12 +231,8 @@ pub fn empty_state(
         )
 }
 
-/// The phone's segmented-control track (docs/mobile-design.md §3.5): 40pt
-/// tall, 10 radius, T2 fill. Callers fill it with [`segment`]s.
-///
-/// The track scrolls horizontally rather than clipping its labels: a provider
-/// can describe six reasoning levels, and "Extra High" ellipsized to "Extra…"
-/// names nothing. With room to spare the segments still divide the full width.
+/// Track for [`segment`] controls. Long labels scroll horizontally instead
+/// of clipping; shorter groups divide the available width.
 pub fn segmented_track(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     gpui_base::h_flex()
         .id(id)
@@ -299,11 +276,6 @@ pub fn segment(
         .child(div().flex_none().child(label))
 }
 
-/// A compact metadata chip in chat's idiom (the plan/subagent badges in
-/// `chat.rs`): pill radius, 11px medium text, a tinted fill and same-hue
-/// foreground. Callers pass the semantic 12%-tint background and its foreground.
-/// It hugs its content (`flex_none`) so it never stretches into a full-width
-/// validation bar.
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
     div()
         .flex_none()

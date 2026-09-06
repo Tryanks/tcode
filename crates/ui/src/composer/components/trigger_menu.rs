@@ -1,7 +1,6 @@
 use super::super::*;
 
 impl Composer {
-    /// Whether a trigger menu should currently be shown.
     pub(in super::super) fn menu_visible(&self) -> bool {
         self.active_trigger.is_some() && !self.menu_dismissed
     }
@@ -272,10 +271,8 @@ impl Composer {
                     }),
             );
         } else {
-            // T3 §5: the `/` menu groups rows under `Built-in` / `Provider`
-            // headers, and `$` under `Skills`. A header is emitted whenever the
-            // group changes; headers are not selectable, so row indices (and the
-            // arrow-key highlight) still index `rows` directly.
+            // Group headers are not selectable, so keyboard selection
+            // continues to index `rows` directly.
             let mut last_group: Option<&'static str> = None;
             for (index, row) in rows.iter().enumerate() {
                 if let Some(group) = row.group
@@ -365,8 +362,6 @@ impl Composer {
                 .w_full()
                 .max_h(px(288.))
                 .overflow_y_scroll()
-                // T3 overlay contour: popover fill + hairline border + shadow_xl
-                // at the 14px overlay radius (this menu floats over the card).
                 .rounded(crate::material::radius_overlay())
                 .border_1()
                 .border_color(cx.theme().border)

@@ -42,8 +42,6 @@ impl SettingsStore {
         }
     }
 
-    // -- sensitive env values (secrets.json, 0600) --------------------------
-
     /// Every stored secret, keyed by provider key then variable name.
     pub fn load_secrets(&self) -> BTreeMap<String, BTreeMap<String, String>> {
         fs::read(&self.secrets_path)

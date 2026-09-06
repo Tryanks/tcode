@@ -39,7 +39,7 @@ enum Page {
     Thread,
 }
 impl Page {
-    /// Position in the three-level stack (docs/mobile-design.md §2).
+    /// Position in the three-level stack.
     fn depth(self) -> usize {
         match self {
             Page::Hosts => 1,
@@ -84,7 +84,7 @@ impl Render for PageView {
 enum Sheet {
     Pair,
     Remove(PairedHost),
-    /// The pinned certificate stopped matching (§4); explains and offers to
+    /// The pinned certificate stopped matching; explains and offers to
     /// pair again.
     CertificateChanged,
     Projects,
@@ -478,9 +478,7 @@ impl MobileRoot {
         cx.notify();
     }
 
-    /// The three pages, built once the root entity exists. Whatever page the
-    /// launch path already chose (a remembered host goes straight to the thread
-    /// list, §2) is restored without animating.
+    /// Mount the navigation stack at the launch destination without animating.
     fn ensure_pages(&mut self, cx: &mut Context<Self>) {
         if !self.pages.is_empty() {
             return;
@@ -498,7 +496,7 @@ impl MobileRoot {
     }
 
     /// Move to `page`, driving the `NavStack` by the difference in depth so a
-    /// step in either direction animates (docs/mobile-design.md §3.0).
+    /// step in either direction animates.
     fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
         if self.page == page {
             return;
@@ -614,7 +612,7 @@ fn button(
         .active(|s| s.bg(theme.foreground.opacity(0.08)))
         .child(div().min_w_0().truncate().child(title))
 }
-/// A nav-bar icon button (§3.0): 44×44, a 20pt stroke icon in `foreground`.
+/// A nav-bar icon button: 44×44, a 20pt stroke icon in `foreground`.
 /// Blue is reserved for primary actions and live state.
 fn icon_button(
     id: impl Into<ElementId>,
@@ -697,7 +695,7 @@ impl Render for MobileRoot {
         let safe = insets.safe_area;
         let bottom = safe.bottom.max(insets.ime.bottom);
         let width = window.viewport_size().width;
-        // 200ms lateral push/pop (§3.0). GPUI has no paint transform, so each
+        // 200ms lateral push/pop. GPUI has no paint transform, so each
         // page is offset by its own insets; setting `left` and `right` in
         // opposite directions slides it without resizing it.
         let stack = NavStack::new(&self.nav)
@@ -732,7 +730,6 @@ impl Render for MobileRoot {
         v_flex()
             .relative()
             .size_full()
-            // T1 paper under every page, up into the status bar (§3.0).
             .bg(material::content_surface(cx))
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())

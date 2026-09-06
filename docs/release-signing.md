@@ -1,17 +1,17 @@
 # macOS release signing & notarization
 
-The release workflow (`.github/workflows/release.yml`) signs and notarizes the
-macOS app **only when the six secrets below are present**. Until you add them,
-tagged releases keep publishing unsigned builds — nothing breaks, the signing
-step just no-ops. Once the secrets exist, every `v*` tag ships a Developer ID
-signed, notarized, and stapled `Tcode.app` (in both the `.zip` and `.dmg`), so
-users no longer need `xattr -dr com.apple.quarantine`.
+The [release workflow](../.github/workflows/release.yml) signs and notarizes
+`Tcode.app` and its DMG when all six signing secrets below are configured.
+With none configured it publishes unsigned builds; a partial set fails the
+packaging step with the missing secret names. Both the ZIP's app and the DMG's
+app carry the stapled ticket, and the DMG is separately signed and stapled.
 
-Everything here needs your Apple Developer account; it cannot be automated.
+The certificate and notarization credentials must come from the maintainer's
+Apple Developer account.
 
 ## What you need first
 
-- An **Apple Developer Program** membership ($99/yr).
+- An **Apple Developer Program** membership.
 - A **Developer ID Application** certificate (Xcode → Settings → Accounts →
   Manage Certificates → `+` → *Developer ID Application*, or create it at
   <https://developer.apple.com/account/resources/certificates>).
@@ -33,8 +33,7 @@ New repository secret**:
 
 ## Verify after adding
 
-Cut a prerelease tag (e.g. `v0.0.0-signtest`) and watch the **Sign and
-notarize macOS app** step: it should print `macOS build signed and notarized`.
+Cut a prerelease tag (e.g. `v0.0.0-signtest`) and watch the **Sign, notarize, and package macOS** step: it should print `macOS build signed and notarized`.
 Download the `.dmg` and the `.zip`, then locally:
 
 ```sh
@@ -50,5 +49,5 @@ xcrun stapler validate /Applications/Tcode.app    # → "The validate action wor
 
 - **Windows code signing** (an OV/EV certificate would remove SmartScreen
   friction) — the workflow ships unsigned Windows zips today.
-- **A self-updating installer** (Sparkle appcast, etc.) — deliberately deferred
-  until signed builds exist; the in-app update-available check is already live.
+- **Automatic update installation** — the app checks for releases, but this
+  workflow does not provide a Sparkle-style updater.

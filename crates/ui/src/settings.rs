@@ -32,7 +32,7 @@ pub use tcode_core::settings::{
     BrowserSettings, ChildApprovalMode, EnvVar, ImageMode, OrchestrateChildModel,
     OrchestrateSettings, ProjectSort, ProviderSettings, Settings, ThemeMode, provider_label,
 };
-/// The six accent presets offered by the provider card (T3 §2).
+/// The six accent presets offered by the provider card.
 pub const ACCENT_PRESETS: [&str; 6] = [
     "#2563eb", "#16a34a", "#ea580c", "#dc2626", "#7c3aed", "#0891b2",
 ];

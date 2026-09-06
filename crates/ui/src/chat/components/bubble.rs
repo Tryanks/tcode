@@ -66,7 +66,6 @@ pub(crate) fn native_rewind_button(
         return None;
     }
 
-    // Same 24px icon-only geometry as Copy: one row, one button shape.
     let trigger = assistant::action_button(
         SharedString::from(format!("rewind-{turn}")),
         IconName::Undo,
@@ -240,8 +239,6 @@ pub(crate) fn user_bubble(
         .items_end()
         .gap(px(2.))
         .when_some(steering, |column, steering| {
-            // Flush against the bubble's top-trailing corner: chip and bubble
-            // read as one unit instead of a label floating above a message.
             column.child(
                 div()
                     .h(px(18.))

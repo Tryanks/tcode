@@ -1,6 +1,4 @@
-//! The right-panel "Plan / Tasks" tab: the captured proposed plan (with its
-//! Copy / Download / Save actions) plus the latest structured plan steps
-//! (S1 §6). Hosted alongside the diff view.
+//! Proposed-plan Markdown and structured task steps, hosted beside the diff view.
 
 use std::time::Duration;
 
@@ -221,20 +219,16 @@ impl PlanPanel {
                 .text_color(muted)
                 .into_any_element(),
             PlanStepStatus::InProgress => Spinner::new().xsmall().color(primary).into_any_element(),
-            PlanStepStatus::Pending =>
-            // An outlined circle with a muted dot.
-            {
-                div()
-                    .size(px(14.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(muted)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().size(px(4.)).rounded_full().bg(muted))
-                    .into_any_element()
-            }
+            PlanStepStatus::Pending => div()
+                .size(px(14.))
+                .rounded_full()
+                .border_1()
+                .border_color(muted)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(px(4.)).rounded_full().bg(muted))
+                .into_any_element(),
         };
 
         let mut text = div()

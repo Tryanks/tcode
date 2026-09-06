@@ -42,9 +42,8 @@ pub fn project_name_from_root(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-/// Where a session's worktree lives, when it runs in dedicated-worktree mode
-/// (Group C). The session's `cwd` is the worktree path; this records what it was
-/// derived from so the worktree can be cleaned up on deletion.
+/// Source checkout and branch of a session-owned worktree, used for cleanup.
+/// The session's `cwd` holds the worktree path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     /// The main project checkout the worktree was created from (its git root).
@@ -75,16 +74,16 @@ pub struct SessionMeta {
     pub model: Option<String>,
     /// Set when the thread is archived (unix secs). Archived threads vanish from
     /// the sidebar and are reversible from Settings → Archived Threads. Absent in
-    /// legacy files (defaults to "not archived"). (Group A)
+    /// legacy files (defaults to "not archived").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
     /// Dedicated-worktree mode metadata, when the session runs in its own git
-    /// worktree instead of the project checkout. Absent = local checkout. (Group C)
+    /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeInfo>,
     /// The user-facing permission model for this session. Older index files
     /// predate the field; a missing value defaults to `ApprovalMode::default()`
-    /// (now `FullAccess`, matching T3).
+    /// (`FullAccess`).
     #[serde(default)]
     pub approval_mode: ApprovalMode,
     #[serde(default)]
@@ -427,7 +426,7 @@ pub fn order_sessions_with_children(sessions: Vec<SessionMeta>) -> Vec<SessionMe
 }
 
 /// On-disk shape of `sessions.json` (current schema). Old files were a bare
-/// `Vec<SessionMeta>`; the compatibility persistence layer tolerates both.
+/// `Vec<SessionMeta>`; the store loader tolerates both.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexFile {
     #[serde(default)]

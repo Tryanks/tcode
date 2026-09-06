@@ -218,7 +218,7 @@ impl AppState {
             log::warn!("send deferred until the pending conversation relay is confirmed");
             return;
         }
-        // Group C: a draft in worktree mode creates its worktree in the
+        // A draft in worktree mode creates its worktree in the
         // background on first send, then re-enters send_turn once ready.
         if let Some(active) = self.resident(target_id)
             && active.draft
@@ -534,8 +534,8 @@ impl AppState {
     ///   * no turn running → there is nothing to steer into, so just send;
     ///   * turn running, provider can't steer (ACP) → queue it and say so.
     ///
-    /// A steered message IS part of the conversation, so it is recorded to the
-    /// session JSONL as a user message (unlike a merely queued one).
+    /// Persist the steering request before delivery; its acceptance or rejection
+    /// is recorded separately so pending input survives replay.
     pub fn steer(
         &mut self,
         target_id: &str,
@@ -582,9 +582,7 @@ impl AppState {
                 } else {
                     wire_text
                 };
-                // The steered message joins the running turn, so it belongs in
-                // the transcript exactly like any other user message. (A merely
-                // *queued* message does not — see `dispatch_next_queued`.)
+                // Persist the pending request before handing it to the provider.
                 let request_id = self.record_steer_request(&session_id, &text, &attachments, cx);
 
                 let Some(active) = self.resident_mut(target_id) else {
@@ -623,7 +621,7 @@ impl AppState {
     }
 
     /// Queue strip: drop a queued message (the row's ✕). It was never recorded,
-    /// so nothing needs undoing. A submitted head cannot be removed until its
+    /// so nothing needs undoing. A submitted entry cannot be removed until its
     /// correlated provider acknowledgement commits it.
     pub fn drop_queued(&mut self, target_id: &str, id: u64, cx: &mut HostCx) {
         if let Some(active) = self.resident_mut(target_id) {

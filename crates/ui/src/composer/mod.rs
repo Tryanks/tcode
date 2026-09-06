@@ -55,8 +55,7 @@ use tcode_core::attachments::{mime_from_path, validate_attachment};
 use tcode_core::ui::WorkspaceMode;
 use tcode_protocol::PathEntry;
 
-/// Blue-500 (normal meter) and red-500 (>90% overloaded), matching T3. Shared
-/// with the usage bars so both instruments read the same.
+/// Context-meter colors, shared with provider usage bars.
 use crate::usage::{METER_BLUE, METER_RED};
 /// File mentions are potentially unbounded; command and skill feeds are not
 /// capped and instead use the trigger menu's scrolling viewport.
@@ -68,7 +67,7 @@ const PICKER_PROVIDER_KINDS: [ProviderKind; 4] = [
     ProviderKind::OpenCode,
 ];
 
-/// T3's circular stop button red-orange.
+/// Stop-button red-orange.
 const STOP_TINT: u32 = 0xF4562E;
 /// Below this measured control-row width the row collapses its context /
 /// permission / mode chips into a "⋯" overflow popover so nothing spills past
@@ -201,7 +200,6 @@ impl Composer {
     ) -> Self {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                // The phone keeps a 2-row (44pt) minimum and caps at 5 rows (§3.4).
                 .auto_grow(if compact { 2 } else { 1 }, if compact { 5 } else { 8 })
                 .submit_on_enter(!compact || !cfg!(any(target_os = "ios", target_os = "android")))
                 .placeholder(if compact {
@@ -288,13 +286,11 @@ impl Composer {
                     _ => {}
                 },
             ),
-            // Keeps the review card's Send button in step with its draft field.
             cx.subscribe(&fallback_review_input, |_, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
                 }
             }),
-            // Live-filter the model picker as the user types in its search box.
             cx.subscribe(&model_search, |_, _, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -476,9 +472,8 @@ impl Composer {
         {
             return;
         }
-        // While a user-input question is pending, normal send is suppressed
-        // (S1 §7). Typed text becomes the current question's custom answer and
-        // flows through the same advance-or-submit path as clicking an option.
+        // Pending questions use this text as the current custom answer,
+        // advancing through the same path as an option click.
         if self.pending_user_input(cx).is_some() {
             self.submit_custom_user_input(input, window, cx);
             return;
@@ -519,8 +514,7 @@ impl Composer {
             cx.notify();
             return;
         }
-        // Intercept the minimal `/`-command set (S1 §4/§7): `/plan` and
-        // `/default` switch mode and are stripped; `/model` opens the picker.
+        // Local mode and picker commands are consumed without sending a turn.
         if terminal_contexts.is_empty()
             && let Some(command) = slash_command(&text)
         {
@@ -639,20 +633,7 @@ impl Composer {
         cx.notify();
     }
 
-    // -- inline triggers (@ mentions / $ skills / commands) ----------------
-
-    // -- image attachments --------------------------------------------------
-
-    // -- control-row popovers ----------------------------------------------
-
-    // -- trigger menu + image strip ----------------------------------------
-
-    // -- send / stop --------------------------------------------------------
-
-    /// The phone's single round control (docs/mobile-design.md §3.4): send while
-    /// idle, a red stop square while a turn runs, and — running with text typed —
-    /// send again with a "Queue" caption under it. Never a spinner, a send *and*
-    /// a stop button side by side.
+    /// Compact control that switches between Send, Queue and Stop.
     fn render_compact_primary_action(
         &self,
         turn_running: bool,
@@ -689,8 +670,7 @@ impl Composer {
         } else {
             (cx.theme().muted, cx.theme().muted_foreground)
         };
-        // 44pt hit area around the 40pt circle: the spec's touch minimum and its
-        // button size are both honored.
+        // Keep the touch target larger than the visible circle.
         let button = crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
             .size(px(44.))
             .flex()
@@ -763,7 +743,6 @@ impl Composer {
             let mut row = h_flex()
                 .gap_2()
                 .items_center()
-                // Blue activity spinner.
                 .child(Spinner::new().small().color(cx.theme().primary));
             if steers {
                 let queue_hint = crate::tr!(
@@ -803,7 +782,6 @@ impl Composer {
                 );
             }
             return row
-                // Circular red-orange stop button.
                 .child(
                     crate::material::accessible_clickable(
                         div(),
@@ -833,8 +811,7 @@ impl Composer {
                 .into_any_element();
         }
 
-        // Group C: while the first send is creating a worktree, show a disabled
-        // "Preparing worktree…" pill instead of the send button.
+        // First-send worktree preparation temporarily disables the send control.
         if self
             .workspace_store
             .read(cx)
@@ -914,10 +891,6 @@ impl Composer {
         }
         self.render_send_or_stop(turn_running, cx)
     }
-
-    // -- user-input question panel (S1 §7) ---------------------------------
-
-    // -- below-card + approval ---------------------------------------------
 }
 
 impl Render for Composer {
@@ -964,7 +937,6 @@ impl Render for Composer {
             .gap_1()
             .items_center();
 
-        // Absent unless this machine has a dictation engine (macOS 26+).
         #[cfg(all(feature = "desktop", target_os = "macos"))]
         let mic = if self.compact {
             None
@@ -1025,7 +997,6 @@ impl Render for Composer {
             }
         });
 
-        // Plan-ready state: a "Plan Ready" header strip + refine placeholder.
         let plan_ready_title = self
             .workspace_store
             .read(cx)
@@ -1061,7 +1032,6 @@ impl Render for Composer {
             .active_fallback_review()
             .cloned();
 
-        // Dropping image files onto the card attaches them (T3 drag-drop).
         let composer = cx.entity();
         let terminal_contexts = self
             .workspace_store
@@ -1152,8 +1122,7 @@ impl Render for Composer {
             } else {
                 cx.theme().border
             })
-            // White console on paper (T3-grade fill): the glass `background`
-            // token would render as a murky translucent wash here.
+            // The editor needs an opaque fill over the translucent canvas.
             .bg(cx.theme().popover)
             .shadow_md()
             // The editor binds Secondary+V to Paste, which consumes the keystroke
@@ -1222,8 +1191,7 @@ impl Render for Composer {
             })
             .when(has_terminal_contexts, |this| this.child(context_chips))
             .when(has_review_comments, |this| this.child(review_chips))
-            // Prose typography per the Beautiful UI spec (13.5px / 21px), so
-            // text reads the same while typed as it does once sent.
+            // Match sent-message typography while composing.
             .child(
                 Textarea::new(&self.input)
                     .appearance(false)
@@ -1248,7 +1216,6 @@ impl Render for Composer {
             }))
             .pt_1()
             .pb_2()
-            // Shift+Tab toggles Build ↔ Plan (S1 §4).
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
                     this.workspace_store

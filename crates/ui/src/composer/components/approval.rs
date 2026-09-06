@@ -225,11 +225,8 @@ impl Composer {
                 this.child(row)
             })
             .when(request.options.is_empty(), |this| {
-                // T3 order (S2 §4): Cancel turn, Decline, Always allow this
-                // session, Approve once. Compact (docs/mobile-design.md §3.4):
-                // [Deny][Allow] on one row, then "Always allow" and "Cancel
-                // turn" as full-width rows so long localized labels never
-                // overlap a neighbour.
+                // Keep long localized approval labels on separate compact rows
+                // so they cannot overlap the Deny/Allow controls.
                 let compact = self.compact;
                 let interactive = self.interactive(cx);
                 let half = |button: Button| {

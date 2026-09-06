@@ -432,7 +432,6 @@ impl Render for AppShell {
         let route = self.window_state.read(cx).route;
         let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
-        // Focus the palette's search input on the open transition.
         if palette_open && !self.palette_was_open {
             self.palette.update(cx, |p, cx| p.focus(window, cx));
         }
@@ -457,13 +456,8 @@ impl Render for AppShell {
         self.preview
             .update(cx, |preview, cx| preview.sync_visibility(cx));
 
-        // The full-page settings route replaces the chat workspace entirely.
-        // It composes exactly like the chat workspace below — Root owns the
-        // translucent glass canvas; the settings page paints its own nav
-        // (translucent `sidebar`) and content paper (`content_surface`) so the
-        // window material is byte-identical across navigation. Painting an
-        // opaque paper across the whole window here (behind the nav) is what
-        // made settings feel like "a different app".
+        // Root owns the translucent canvas across both routes; Settings
+        // paints its own sidebar and content surfaces over it.
         if route == Route::Settings {
             return div()
                 .id("app-shell")
@@ -560,13 +554,11 @@ impl Render for AppShell {
             self.right_sized = false;
         }
 
-        // The chat and right columns are reading surfaces (T1): they sit on a
-        // near-opaque plane over the vibrancy canvas (docs/visual-redesign.md).
+        // Chat and right-panel reading surfaces sit above the translucent canvas.
         let chat_panel = resizable_panel().visible(chat_visible).child(
             gpui_base::v_flex()
                 .size_full()
                 .bg(crate::material::content_surface(cx))
-                // T1 paper floats above the glass canvas.
                 .shadow_sm()
                 .children(self.render_connection_banner(cx))
                 .child(div().flex_1().min_h_0().child(self.chat.clone())),
@@ -579,12 +571,10 @@ impl Render for AppShell {
                 div()
                     .size_full()
                     .bg(crate::material::content_surface(cx))
-                    // T1 paper floats above the glass canvas.
                     .shadow_sm()
                     .child(right_panel(self)),
             );
 
-        // Remember a dragged width so re-opening the panel restores it.
         let remembered_right = self.right_width.clone();
         let remembered_sidebar = self.sidebar_width.clone();
         let group = |id: &'static str| {
@@ -713,7 +703,7 @@ impl Render for AppShell {
             // Fullscreen only: a fullscreen Space has nothing but black behind
             // the vibrancy material, which muddies the translucent canvas —
             // cover it with its opaque base. Windowed, paint nothing here:
-            // Root owns the glass canvas (docs/visual-redesign.md §0).
+            // Root owns the translucent canvas.
             .when(fullscreen, |this| {
                 this.bg(crate::material::opaque_canvas(cx))
             })

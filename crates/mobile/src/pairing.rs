@@ -181,9 +181,7 @@ impl MobileRoot {
         );
         cx.notify();
     }
-    /// "Nearby hosts" (§3.2): what DNS-SD found, at most three rows. Tapping a
-    /// row fills the endpoint and its advertised fingerprint and drops the
-    /// caret in the code field, which is all that is left to type.
+    /// Discovery results prefill the endpoint and fingerprint, then focus the code field.
     fn nearby_hosts(&self, form: Div, cx: &mut Context<Self>) -> Div {
         if self.host.fixed_pairing_endpoint().is_some()
             || (!self.pair.browsing && self.pair.discovered.is_empty())
@@ -191,8 +189,7 @@ impl MobileRoot {
             return form;
         }
         let busy = self.pair.busy;
-        // The heading and its rows are one group at 8, not three form fields
-        // at 16 (§3.2).
+        // Group discovery results more tightly than the surrounding form fields.
         let mut nearby = v_flex().gap(px(8.)).child(
             h_flex()
                 .gap(px(6.))
@@ -251,7 +248,7 @@ impl MobileRoot {
         form.child(nearby)
     }
 
-    /// Paired, not yet connected (§3.2): the pinned fingerprint next to the one
+    /// Paired, not yet connected: the pinned fingerprint next to the one
     /// the host shows, so a swapped certificate is caught before any traffic.
     fn render_pair_confirm(&self, cx: &mut Context<Self>) -> Div {
         v_flex()
@@ -279,8 +276,7 @@ impl MobileRoot {
             )
     }
 
-    /// The pairing sheet's body (§3.2). The sheet chrome — grabber, title,
-    /// Cancel — belongs to `render_sheet`; this is scan, form, error, submit.
+    /// Pairing content; `render_sheet` supplies its title and dismissal controls.
     pub(super) fn render_pair(&mut self, cx: &mut Context<Self>) -> Div {
         if self.pair.paired.is_some() {
             return self.render_pair_confirm(cx);

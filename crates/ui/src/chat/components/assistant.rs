@@ -23,7 +23,6 @@ use super::super::model::{MdSync, md_sync};
 /// Markdown state mirrored from a timeline entry.
 pub(crate) struct MdState {
     pub(crate) state: Entity<MarkdownState>,
-    /// The text currently mirrored into `state`.
     pub(crate) synced: Arc<str>,
 }
 

@@ -29,8 +29,8 @@ impl Drop for CanvasObserver {
     }
 }
 
-/// GPUI prepares its own graphics canvas asynchronously. Adopt that canvas
-/// (including a replacement on WebGPU → WebGL fallback), as Eauth does.
+/// Adopt GPUI's asynchronously prepared canvas, including replacements
+/// created when WebGPU falls back to WebGL.
 fn prepare_canvas(canvas_id: &str) -> Result<(), JsValue> {
     let document = window().document().ok_or("missing document")?;
     let placeholder = document

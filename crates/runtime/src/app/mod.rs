@@ -264,7 +264,7 @@ pub use sessions::ResidentSessions;
 pub(crate) use snapshots::DomainDiff;
 use store_write::{StoreWrite, run_store_write};
 
-/// The result of a provider version check (Group C / s3 §6).
+/// The result of a provider version check.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderVersionState {
     /// Installed version (raw string, e.g. `"2.1.206"`); `None` if `--version` failed.

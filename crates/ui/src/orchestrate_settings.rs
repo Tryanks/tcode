@@ -347,7 +347,6 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    /// A 13px row title carrying its optional inline reset affordance.
     fn row_title(
         &self,
         title: impl Into<gpui::SharedString>,
@@ -373,8 +372,6 @@ impl OrchestrateSettingsPanel {
             .display_name(provider, model, profile_id, cx)
     }
 
-    /// A status message in the shared rail language: inline copy beside a
-    /// semantic 2px rail, with no enclosing surface.
     fn status_note(
         &self,
         accent: gpui::Hsla,
@@ -404,8 +401,6 @@ impl OrchestrateSettingsPanel {
             .into_any_element()
     }
 
-    /// Quiet helper text, System-Settings style: a muted caption under the
-    /// section, not a colored callout box.
     fn render_intro(&self, cx: &mut Context<Self>) -> AnyElement {
         v_flex()
             .w_full()
@@ -451,8 +446,6 @@ impl OrchestrateSettingsPanel {
             }
             ChildApprovalMode::Manual => crate::tr!("orchestrate.child_approval.manual"),
         };
-        // A quiet resting trigger that only tints on hover, consistent with the
-        // General page dropdowns and the composer picker.
         let trigger = Button::new("orchestrate-child-approval-dropdown")
             .ghost()
             .outline()
@@ -763,7 +756,6 @@ impl OrchestrateSettingsPanel {
             ));
         }
 
-        // Child profiles: one grouped list, rows split by inset hairlines.
         let mut rows: Vec<AnyElement> = Vec::new();
         for (index, row) in self.child_rows.iter().enumerate().skip(offset).take(count) {
             let Some(profile) = models.get(index) else {

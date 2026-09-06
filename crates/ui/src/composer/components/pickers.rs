@@ -6,7 +6,6 @@ struct ModelRow {
     /// Provider-native model id (the favorites key + selection value), or the
     /// ACP agent's registry id when `acp` is set.
     id: String,
-    /// Display name.
     name: String,
     provider: ProviderKind,
     /// Which provider profile this row belongs to (`None` = the built-in profile
@@ -42,7 +41,7 @@ fn tinted_profile_glyph(profile_id: &str, store: &WorkspaceStore) -> Icon {
 
 impl Composer {
     /// The rail the picker shows: an explicit user choice, else Favorites when
-    /// any favorites exist (S1 §2), else the active session's profile.
+    /// any favorites exist, else the active session's profile.
     pub(in super::super) fn rail_for(
         &self,
         provider: ProviderKind,
@@ -88,7 +87,7 @@ impl Composer {
         let display = current_model_name_resolved(&resolved, &catalog, current_model.as_deref());
 
         // Build the filtered row list for the current frame. Favorites open
-        // first when any exist (S1 §2). The favorites sweep covers every
+        // first when any exist. The favorites sweep covers every
         // enabled profile — built-ins *and* third-party (e.g. a Kimi endpoint)
         // — in rail order, so a starred custom-profile model is not lost.
         let query = self.model_search.read(cx).value().to_lowercase();
@@ -287,7 +286,7 @@ impl Composer {
         };
         let muted = cx.theme().muted_foreground;
         // The reasoning section is locked while the prompt text itself contains
-        // "ultrathink" (T3).
+        // "ultrathink".
         let locked = self
             .input
             .read(cx)
@@ -345,7 +344,7 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The Build/Plan interaction-mode chip (S1 §4).
+    /// The Build/Plan interaction-mode chip.
     pub(in super::super) fn render_mode_chip(&self, cx: &mut Context<Self>) -> AnyElement {
         let mode = self
             .workspace_store
@@ -603,7 +602,6 @@ fn render_model_pane(
             cx,
         ));
     }
-    // …then one entry per installed ACP agent (Settings → Providers → ACP Agents).
     for (id, name) in acp_agents {
         rail_col = rail_col.child(rail_icon(
             gpui::SharedString::from(format!("rail-acp-{id}")),
@@ -626,7 +624,6 @@ fn render_model_pane(
         .overflow_y_scroll()
         .child(rail_col);
 
-    // Main pane: search + rows.
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
     for (index, row) in rows.iter().enumerate() {
         list = list.child(render_model_row(
@@ -691,7 +688,6 @@ fn render_model_pane(
         );
     }
 
-    // Secondary+1-9 selects the corresponding row while the popover is open.
     let key_rows: Vec<ModelRow> = rows.iter().take(9).cloned().collect();
     let store_key = store_entity.clone();
     let popover_key = popover.clone();
@@ -726,7 +722,7 @@ fn render_model_pane(
         .child(pane);
     if compact {
         // The phone pins Effort and Approval mode to the bottom of the model
-        // sheet as segmented controls (§3.5); choosing applies at once.
+        // sheet as segmented controls; choosing applies at once.
         return v_flex()
             .w_full()
             .min_h_0()
@@ -742,7 +738,7 @@ fn render_model_pane(
     .into_any_element()
 }
 
-/// The compact model sheet's pinned footer (docs/mobile-design.md §3.5):
+/// The compact model sheet's pinned footer:
 /// "Effort" — only when the active model describes a `reasoningEffort` select —
 /// over "Approval mode", both as segmented controls. Selecting applies
 /// immediately and leaves the sheet open.
@@ -762,8 +758,7 @@ fn render_compact_model_footer(
                 default_value,
                 ..
             } if id == "reasoningEffort" => Some((
-                // The audited phone copy, not the provider's own descriptor
-                // label (§1: one word per concept, in both locales).
+                // Use the localized shared label instead of provider-specific copy.
                 crate::tr!("mobile.effort").into_owned(),
                 // "Ultrathink" is a one-shot arming action, not a persisted
                 // effort level, so it stays out of the segmented control.
@@ -900,7 +895,6 @@ fn render_model_row(
         .when(is_current, |row| row.aria_active_descendant())
         .flex_none()
         .w_full()
-        // 52pt rows on the phone (docs/mobile-design.md §3.5).
         .min_h(px(if compact { 52. } else { 28. }))
         .px_2()
         .py_1()
@@ -1483,9 +1477,7 @@ fn render_overflow_pane(
         .into_any_element()
 }
 
-/// The circular context-window meter's popover (T3's `ContextWindowMeter`
-/// hover card): title, percentage · used/max, a progress bar, and the
-/// "<Provider> automatically compacts its context when needed." line.
+/// Context usage, model capacity and provider rate-limit windows.
 fn render_context_meter_pane(
     usage: Option<TokenUsage>,
     account_usage: Option<tcode_core::usage::ProviderUsage>,
@@ -1502,7 +1494,6 @@ fn render_context_meter_pane(
     };
     let mut pane = v_flex().w(px(256.)).p_3().gap_2();
 
-    // Header: "Context Window" + "N% · used/max" (or just used tokens).
     let used = usage.as_ref().and_then(context_meter::used_tokens);
     let max = usage.and_then(|u| u.context_window);
     let pct_label = context_meter::format_percentage(pct);
@@ -1543,7 +1534,6 @@ fn render_context_meter_pane(
             .child(stat),
     );
 
-    // Progress bar (only when the window size is known).
     if max.is_some() {
         let fraction = pct.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0;
         pane = pane.child(
@@ -1578,7 +1568,6 @@ fn render_context_meter_pane(
         );
     }
 
-    // "<Provider> automatically compacts its context when needed."
     if let Some(provider) = provider {
         pane = pane.child(
             div()
@@ -1592,9 +1581,7 @@ fn render_context_meter_pane(
         );
     }
 
-    // Account rate-limit windows, exactly as the provider reported them: a
-    // Codex Pro account shows only its weekly window, a Claude Max account
-    // shows 5h + weekly + any model-scoped weekly.
+    // Show only the rate-limit windows reported by the provider.
     if let Some(account) = account_usage.filter(|a| a.error.is_some() || !a.windows.is_empty()) {
         pane = pane.child(crate::material::faded_hairline(cx));
         // 256px only affords one trailing fact: the plan when the provider

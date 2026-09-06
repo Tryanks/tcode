@@ -23,8 +23,7 @@ mod highlight;
 pub mod i18n;
 pub mod icon;
 pub mod markdown;
-// The phone shell paints with the same material tiers as the desktop
-// (docs/mobile-design.md §3.0), so the module is part of the crate API.
+// Shared material helpers are also used by the phone shell.
 pub mod material;
 #[cfg(feature = "desktop")]
 mod orchestrate_settings;

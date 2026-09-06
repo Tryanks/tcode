@@ -1,8 +1,7 @@
 //! Circular context-window meter math and token formatting.
 //!
-//! A faithful port of the numeric parts of T3's `lib/contextWindow.ts` +
-//! `ContextWindowMeter.tsx`: derive the used-percentage from a [`TokenUsage`],
-//! flag the >90% overloaded state, and format token counts (`42k`, `1.2m`).
+//! Numeric formatting adapted from T3 Code's `lib/contextWindow.ts` and
+//! `ContextWindowMeter.tsx`.
 
 use agent::TokenUsage;
 
@@ -13,7 +12,7 @@ pub fn used_tokens(usage: &TokenUsage) -> Option<u64> {
 }
 
 /// Used-percentage of the context window (0..=100), or `None` when either the
-/// used count or the window size is unknown. Capped at 100 (T3).
+/// used count or the window size is unknown. Capped at 100.
 pub fn used_percentage(usage: &TokenUsage) -> Option<f32> {
     let used = used_tokens(usage)? as f32;
     let max = usage.context_window? as f32;
@@ -28,8 +27,8 @@ pub fn is_overloaded(percentage: f32) -> bool {
     percentage > 90.0
 }
 
-/// Format the percentage label the way T3 does: one decimal below 10%
-/// (trimming a trailing `.0`), otherwise a whole number. `None` propagates.
+/// One decimal below 10% (trim `.0`), otherwise a whole number.
+/// `None` or a non-finite input returns `None`.
 pub fn format_percentage(percentage: Option<f32>) -> Option<String> {
     let value = percentage?;
     if !value.is_finite() {
@@ -44,9 +43,8 @@ pub fn format_percentage(percentage: Option<f32>) -> Option<String> {
     }
 }
 
-/// Format a token count exactly like T3's `formatContextWindowTokens`:
-/// `<1000` verbatim, `<10_000` → `x.yk` (trim `.0`), `<1_000_000` → `Nk`,
-/// else `x.ym` (trim `.0`).
+/// Compact token count: `<1000` verbatim, `<10_000` as `x.yk`,
+/// `<1_000_000` as `Nk`, otherwise `x.ym`; trailing `.0` is omitted.
 pub fn format_tokens(value: Option<u64>) -> String {
     let Some(v) = value else {
         return "0".to_string();
@@ -83,12 +81,10 @@ mod tests {
             used_percentage(&usage(Some(100_000), Some(200_000))),
             Some(50.0)
         );
-        // Capped at 100 even past the window.
         assert_eq!(
             used_percentage(&usage(Some(300_000), Some(200_000))),
             Some(100.0)
         );
-        // Unknown window → None.
         assert_eq!(used_percentage(&usage(Some(100), None)), None);
         assert!(is_overloaded(95.0));
         assert!(!is_overloaded(90.0));

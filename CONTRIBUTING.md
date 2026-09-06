@@ -67,13 +67,14 @@ visual contract: when the code and the doc disagree, one of them is a bug.
 ## Verifying real behaviour
 
 **Provider-layer probes** (no GUI — print the raw canonical event trace):
+Use an existing working directory and image path in these examples.
 
 ```sh
 cargo run -p agent --example probe -- claude "Reply with exactly: PONG" /tmp/smoke
-cargo run -p agent --example interrupt_probe -- claude /tmp/smoke
-cargo run -p agent --example steer_probe -- codex /tmp/smoke
-cargo run -p agent --example image_probe -- claude /tmp/blue.png \
-    "What color is this image? Reply with just the color." /tmp/smoke
+cargo run -p agent --example probe -- claude "Run sleep 30, then reply DONE" /tmp/smoke --interrupt-after 5
+cargo run -p agent --example probe -- codex "Run sleep 30, then reply DONE" /tmp/smoke --steer "Stop and reply PONG"
+cargo run -p agent --example probe -- claude \
+    "What color is this image? Reply with just the color." /tmp/smoke --image /tmp/blue.png
 ```
 
 `TCODE_DATA_DIR` points tcode at a throwaway profile (its own sessions, settings
@@ -134,6 +135,13 @@ forwarder or fallible signature needs a responsibility beyond passing values
 through. Compute derived state where it is consumed unless caching has a
 measured benefit and an explicit invalidation path. Remove obsolete callers,
 conversions, fixtures and dependencies with the code they supported.
+
+Keep documentation with the behaviour it describes: update or retire plans,
+reference assets and development scripts when their work is complete. Link to
+the owner instead of copying API lists or values. Comments should explain a
+constraint or a reason the code cannot express; remove narrated steps, empty
+section headings and historical progress notes. Verify old comments and tests
+against the intended contract before preserving their claims.
 
 ### Make tests earn their maintenance
 

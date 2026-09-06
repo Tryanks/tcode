@@ -1,6 +1,4 @@
-//! The command palette (⌘K), V2-M6. A centered modal over the workspace with a
-//! search input and grouped results (Actions + Threads), matching reference
-//! shot 27-cmdk.png.
+//! Command palette with action, thread-title and message-content search.
 //!
 //! Rendered by [`crate::AppShell`] as a full-window overlay only while
 //! [`crate::WindowState::palette_open`] is set. Sources:
@@ -9,7 +7,7 @@
 //! - Actions: "New thread…" per project, "Open settings", "Toggle theme",
 //!   "Toggle diff panel".
 //!
-//! Fuzzy matching is a hand-rolled subsequence scorer ([`fuzzy_score`], no deps).
+//! Title and action search use [`fuzzy_score`]; message search runs through the host.
 
 #[cfg(feature = "desktop")]
 use std::sync::{Arc, Mutex};
@@ -247,7 +245,7 @@ impl CommandPalette {
     }
 
     /// Build the grouped result list for the current query. A leading `>`
-    /// restricts results to Actions (T3 §4).
+    /// restricts results to Actions.
     fn groups(&self, cx: &Context<Self>) -> Vec<Group> {
         let raw = self.query.read(cx).value().to_string();
         let actions_only = raw.trim_start().starts_with('>');
@@ -262,7 +260,6 @@ impl CommandPalette {
         };
         let store = self.store.read(cx);
 
-        // Actions.
         let mut actions: Vec<(i32, Item)> = Vec::new();
         let mut push_action = |label: String, icon: IconName, action: Action| {
             if let Some(score) = fuzzy_score(&query, &label) {
@@ -555,7 +552,6 @@ impl Render for CommandPalette {
         }
         let muted = cx.theme().muted_foreground;
 
-        // Build the result list, tracking a running flat index for highlight.
         let mut list_content = v_flex().w_full().px_2().py_2().gap_1();
         let mut flat = 0usize;
         for group in &groups {
@@ -620,7 +616,6 @@ impl Render for CommandPalette {
                                     )
                                 }),
                         )
-                        // Thread rows: provider glyph + relative last-activity time.
                         .when_some(item.provider, |this, provider| {
                             this.child(
                                 h_flex()
@@ -662,7 +657,6 @@ impl Render for CommandPalette {
             .overflow_y_scroll()
             .child(list_content);
 
-        // Centered modal card, anchored ~15% from the top over a dim backdrop.
         let card = crate::material::overlay_contour(
             v_flex()
                 .w(if self.window_state.read(cx).compact {
