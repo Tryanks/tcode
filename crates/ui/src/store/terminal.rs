@@ -353,6 +353,34 @@ mod tests {
         );
     }
 
+    /// Scroll offset and selection never cross the wire, so two viewers of the
+    /// same host terminal read different parts of it without disturbing each
+    /// other. Applying the same frame to both is exactly what the store does.
+    #[test]
+    fn two_viewers_of_one_grid_keep_their_own_scroll_and_selection() {
+        let mut history = frame(&["visible"], 10);
+        history.history = (0..40).map(|_| text_row("scrolled")).collect();
+        let (mut one, mut two) = (
+            TerminalModel::new("tab".into()),
+            TerminalModel::new("tab".into()),
+        );
+        one.apply_frame(history.clone());
+        two.apply_frame(history);
+
+        one.scroll(12);
+        one.start_selection(SelectionKind::Lines, (0, 0), SelectionSide::Left);
+        assert_eq!(one.display_offset(), 12);
+        assert_eq!(
+            one.selected_text().map(|(_, _, text)| text),
+            Some("scrolled".into())
+        );
+
+        assert_eq!(two.display_offset(), 0);
+        assert!(!two.has_selection());
+        two.scroll(3);
+        assert_eq!((one.display_offset(), two.display_offset()), (12, 3));
+    }
+
     #[test]
     fn plain_urls_and_osc8_links_resolve_under_the_pointer() {
         let mut model = model(&["see https://example.com/docs?q=1 now"], 40);
