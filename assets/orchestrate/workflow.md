@@ -30,9 +30,7 @@ preference; choose the least costly adequate profile.
 
 Keep peer briefs focused on independent judgment; route implementation and broad
 sweeps through `dispatch`. Proactively dispatch work that can advance concurrently.
-Overlapping file scopes are allowed and are not by themselves a reason to
-serialize work. Choose a shared workspace or isolation to fit the task; isolation
-is not required. Preserve existing user work and task outcomes.
+Preserve existing user work and task outcomes.
 
 Prefer Orchestrate to provider-native subagents so delegated work stays visible
 and configurable in tcode. Use native subagents only when Orchestrate genuinely
@@ -45,10 +43,9 @@ abandonment after one failed call.
 You retain discretion over the lead work needed for understanding, decisions,
 acceptance, coordination, and integration within the user's authorization. Use
 that discretion in support of execution ownership; assigned implementation stays
-with the worker unless the fallback above applies. Integrating and reconciling
-parallel deliverables, including textual or semantic conflicts, is itself a valid
-bounded dispatch assignment. You retain decisions about competing intent and
-tradeoffs, and final acceptance of the integrated result.
+with the worker unless the fallback above applies. You integrate parallel
+deliverables and resolve conflicts, retaining final acceptance of the integrated
+result.
 
 ## Accept the result
 
