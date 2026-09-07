@@ -195,12 +195,16 @@ impl Composer {
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| input.focus(window, cx));
+        if !self.compact {
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+        }
     }
 
-    /// Follow the window onto the other layout. Updated in place on purpose: a
-    /// rebuilt composer would drop the draft, its selection and its pending
-    /// attachments, and the user only resized a window.
+    #[cfg(test)]
+    pub(crate) fn input_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
+        self.input.read(cx).focus_handle(cx)
+    }
+
     #[cfg(test)]
     pub(crate) fn draft(&self, cx: &App) -> String {
         self.input.read(cx).value().to_string()
@@ -217,6 +221,9 @@ impl Composer {
         self.compact
     }
 
+    /// Follow the window onto the other layout. Updated in place on purpose: a
+    /// rebuilt composer would drop the draft, its selection and its pending
+    /// attachments, and the user only resized a window.
     pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
         if self.compact == compact {
             return;
@@ -452,13 +459,15 @@ impl Composer {
         self.set_input_text(prefill, window, cx);
     }
 
-    /// Replace the composer text with `text`, caret at the end, focused.
+    /// Replace the composer text with `text`, caret at the end; focus in wide layout.
     fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
-            state.focus(window, cx);
+            if !self.compact {
+                state.focus(window, cx);
+            }
         });
         self.recompute_trigger(cx);
     }
@@ -479,7 +488,9 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(selection, cx);
-            state.focus(window, cx);
+            if !self.compact {
+                state.focus(window, cx);
+            }
         });
         self.recompute_trigger(cx);
     }

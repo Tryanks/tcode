@@ -920,8 +920,11 @@ dispatch response.
 
 The workspace does not sit on a blank page. When no conversation is open — at
 launch, or because the thread on screen was archived or deleted — it opens the
-new-thread draft of the project the user last interacted with, composer focused
-and ready. "Last interacted" is set by user navigation only (opening a thread,
+new-thread draft of the project the user last interacted with. In wide layout
+the composer is focused and ready. Compact conversations start unfocused,
+including restored conversations and drafts; only tapping the composer focuses
+it. Compact navigation away from or between conversations blurs the focused
+element and dismisses the software keyboard. "Last interacted" is set by user navigation only (opening a thread,
 starting a draft); background model activity and archive timestamps never move
 it, and it is persisted, so a launch lands where the user left off. A remembered
 project that no longer exists falls back to the first project in the sidebar.

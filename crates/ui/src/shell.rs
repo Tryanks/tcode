@@ -340,7 +340,10 @@ impl AppShell {
             // The one place navigation reaches the stack: whoever moved the
             // history — a nav bar, the sidebar, the palette, Android Back —
             // gets the same push or pop out of it.
-            cx.observe(&window_state, |this, _, cx| {
+            cx.observe_in(&window_state, window, |this, _, window, cx| {
+                if this.mounted != this.window_state.read(cx).history() {
+                    this.blur_compact_navigation(window, cx);
+                }
                 this.sync_nav(NavMotion::Animated, cx);
                 this.schedule_navigation_save(cx);
                 cx.notify();
@@ -581,6 +584,7 @@ impl AppShell {
             log::error!("this client cannot reach {target:?}");
             return;
         }
+        self.blur_compact_navigation(window, cx);
         self.attach(target, window, cx);
     }
 
@@ -637,6 +641,7 @@ impl AppShell {
                     && attachment.observed_session_id != selected
                 {
                     attachment.observed_session_id = selected.clone();
+                    this.blur_compact_navigation(window, cx);
                     if selected.is_some() {
                         this.window_state
                             .update(cx, |state, cx| state.leave_route_for_chat(cx));
@@ -867,6 +872,12 @@ impl AppShell {
         self.mounted.extend(pushed);
     }
 
+    fn blur_compact_navigation(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) {
+            window.blur(cx);
+        }
+    }
+
     fn go(&mut self, destination: Destination, cx: &mut Context<Self>) {
         self.window_state
             .update(cx, |state, cx| state.go(destination, cx));
@@ -884,6 +895,7 @@ impl AppShell {
         {
             self.pending_navigation_restore = None;
         }
+        self.blur_compact_navigation(window, cx);
         if self.compact(cx) {
             self.go(Destination::Thread, cx);
         } else {
@@ -2499,6 +2511,19 @@ mod tests {
         });
         restore_index(&shell, &host, true, cx);
         restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        draw(cx);
+        cx.update(|window, cx| {
+            let composer = shell
+                .read(cx)
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat
+                .read(cx)
+                .composer();
+            assert!(!composer.read(cx).input_focus_handle(cx).is_focused(window));
+        });
         let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
             ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
         )).count();
@@ -2717,6 +2742,62 @@ mod tests {
                 [Destination::Hosts, Destination::Threads, Destination::Hosts]
             )
         });
+    }
+
+    #[gpui::test]
+    fn conversation_navigation_only_focuses_the_wide_composer(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        let store = store_of(&shell, cx);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
+        for id in ["thread-1", "thread-2"] {
+            cx.update(|window, cx| {
+                if id == "thread-2" {
+                    focus.focus(window, cx);
+                }
+                store.update(cx, |store, _| store.select_session(id.into()));
+                let state = shell.read(cx).window_state();
+                state.update(cx, |_, cx| cx.emit(OpenThread));
+            });
+            draw(cx);
+            cx.update(|window, _| assert!(!focus.is_focused(window)));
+        }
+        cx.update(|window, cx| {
+            focus.focus(window, cx);
+            shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+        });
+        draw(cx);
+        cx.update(|window, cx| {
+            assert!(!focus.is_focused(window));
+            shell.update(cx, |shell, cx| shell.open_thread(window, cx));
+        });
+        draw(cx);
+        cx.update(|window, _| assert!(!focus.is_focused(window)));
+        for destination in [
+            Destination::Panel,
+            Destination::Hosts,
+            Destination::Settings,
+        ] {
+            cx.update(|window, cx| {
+                focus.focus(window, cx);
+                shell.update(cx, |shell, cx| shell.go(destination, cx));
+            });
+            draw(cx);
+            cx.update(|window, cx| {
+                assert!(!focus.is_focused(window));
+                shell.update(cx, |shell, cx| shell.open_thread(window, cx));
+            });
+            draw(cx);
+            cx.update(|window, _| assert!(!focus.is_focused(window)));
+        }
+        resize(cx, 1024.);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
+        draw(cx);
+        cx.update(|window, _| assert!(focus.is_focused(window)));
     }
 
     fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
