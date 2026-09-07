@@ -197,7 +197,14 @@ launch behavior is unchanged.
   New thread starts a draft directly when the machine has one project and
   otherwise opens the command palette, which already owns "new thread in
   ‹project›" and can search. **Recent** is the default: all unarchived threads
-  across projects ordered by last activity, with the project name beside the
+  across projects ordered by the latest activity of each parent and its children,
+  with children ordered by their own activity directly below their parent.
+  Both views indent children 16pt beyond the row inset and use lighter titles;
+  status glyphs and washes are unchanged. A parent’s child-count disclosure
+  toggles the same per-parent collapse state as the wide sidebar. Collapsing
+  hides children without changing family ordering; running children keep their
+  parent in Recent. Children with archived or missing parents remain top-level
+  with a muted “(parent unavailable)” subtitle. Recent shows the project name beside the
   relative time in the muted subtitle. **By project** keeps the grouped list.
   The list header has a 44pt layout toggle sharing the wide sidebar’s persisted
   Flat/Grouped setting; search opens the shared palette in either view. Both

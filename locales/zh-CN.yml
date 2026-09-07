@@ -90,6 +90,7 @@ markdown:
   link_copy_text: "复制链接文字"
   path_copy_relative: "复制相对路径"
 sidebar:
+  parent_unavailable: "（父对话不可用）"
   collapse: "折叠侧边栏"
   expand: "展开侧边栏"
   search: "搜索"

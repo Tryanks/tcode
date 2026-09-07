@@ -90,6 +90,7 @@ markdown:
   link_copy_text: "Copy link text"
   path_copy_relative: "Copy relative path"
 sidebar:
+  parent_unavailable: "(parent unavailable)"
   collapse: "Collapse sidebar"
   expand: "Expand sidebar"
   search: "Search"
