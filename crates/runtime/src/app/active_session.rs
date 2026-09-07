@@ -553,8 +553,10 @@ impl ActiveSession {
 }
 
 pub(super) fn conversation_destination(active: &ActiveSession) -> ConversationDestination {
-    if active.draft {
-        ConversationDestination::ProjectDraft(active.meta.id.clone())
+    if active.draft
+        && let Some(project_id) = active.meta.project_id.clone()
+    {
+        ConversationDestination::ProjectDraft(project_id)
     } else {
         ConversationDestination::Thread(active.meta.id.clone())
     }
