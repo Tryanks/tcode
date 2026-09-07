@@ -126,6 +126,7 @@ impl AndroidWindow {
         let logical_size = logical_size(physical_size, scale_factor);
         let bounds = Bounds::new(point(px(0.0), px(0.0)), logical_size);
         display.set_bounds(bounds);
+        crate::FIRST_FRAME_RENDERED.store(false, std::sync::atomic::Ordering::Release);
         let renderer = WgpuRenderer::new(
             gpu_context.clone(),
             &surface,
@@ -831,7 +832,9 @@ impl PlatformWindow for AndroidWindow {
     fn draw(&self, scene: &Scene) {
         let mut state = self.0.state.borrow_mut();
         if state.native_surface.is_some() {
-            let _ = state.renderer.draw(scene);
+            if state.renderer.draw(scene) {
+                crate::FIRST_FRAME_RENDERED.store(true, std::sync::atomic::Ordering::Release);
+            }
         }
     }
 

@@ -30,3 +30,13 @@ pub fn platform() -> Rc<dyn gpui::Platform> {
 pub fn platform() -> Rc<dyn gpui::Platform> {
     panic!("gpui-android::platform() is only available on Android")
 }
+
+#[cfg(target_os = "android")]
+static FIRST_FRAME_RENDERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the current native window has successfully presented its first GPUI frame.
+#[cfg(target_os = "android")]
+pub fn first_frame_rendered() -> bool {
+    FIRST_FRAME_RENDERED.load(std::sync::atomic::Ordering::Acquire)
+}

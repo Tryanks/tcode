@@ -105,6 +105,14 @@ mod jni_exports {
     };
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFirstFrameRendered(
+        _env: JNIEnv,
+        _activity: JObject,
+    ) -> jboolean {
+        u8::from(gpui_android::first_frame_rendered())
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeCommitText(
         mut env: JNIEnv,
         _activity: JObject,

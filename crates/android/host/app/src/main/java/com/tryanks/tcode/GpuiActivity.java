@@ -65,10 +65,15 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeOnBack(boolean enabled);
     private native void nativeQrScanCompleted(long requestId, int status, String value);
 
+    private native boolean nativeFirstFrameRendered();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        androidx.core.splashscreen.SplashScreen splash =
+                androidx.core.splashscreen.SplashScreen.installSplashScreen(this);
         ensureNativeLibraryVisibleToJvm();
         super.onCreate(savedInstanceState);
+        splash.setKeepOnScreenCondition(() -> !nativeFirstFrameRendered());
         configureEdgeToEdgeWindow();
 
         inputView = new GpuiInputView(this);

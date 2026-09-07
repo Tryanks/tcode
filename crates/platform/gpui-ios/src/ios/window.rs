@@ -44,6 +44,7 @@ pub(crate) struct IosWindow {
     mouse_position: Cell<Point<Pixels>>,
     modifiers: Cell<Modifiers>,
     background: Cell<WindowBackgroundAppearance>,
+    first_frame_rendered: Cell<bool>,
     insets: RefCell<WindowInsets>,
     input_handler: RefCell<Option<PlatformInputHandler>>,
     renderer: RefCell<WgpuRenderer>,
@@ -162,6 +163,7 @@ impl IosWindow {
             mouse_position: Cell::new(Point::default()),
             modifiers: Cell::new(Modifiers::default()),
             background: Cell::new(WindowBackgroundAppearance::Opaque),
+            first_frame_rendered: Cell::new(false),
             insets: RefCell::new(metrics.insets()),
             input_handler: RefCell::new(None),
             renderer: RefCell::new(renderer),
@@ -583,7 +585,9 @@ impl PlatformWindow for IosWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        let _ = self.renderer.borrow_mut().draw(scene);
+        if self.renderer.borrow_mut().draw(scene) && !self.first_frame_rendered.replace(true) {
+            super::ffi::host_first_frame_rendered();
+        }
     }
 
     fn schedule_frame(&self) {

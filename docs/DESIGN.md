@@ -95,6 +95,16 @@ T3 child surfaces (popovers, menus, dialogs, drawers and toasts) use the fully
 opaque `popover.background` token so lower layers never show through; they do
 not receive native Acrylic.
 
+### Launch
+
+Mobile launch screens show only the app icon glyph centered on the embedded
+theme’s opaque canvas, with system light/dark variants and matching system bars.
+Android uses the system splash through AndroidX and holds it until GPUI’s first
+successful frame presentation; iOS uses the same canvas and glyph in its native
+launch screen and a matching cover held until the first GPUI presentation.
+Native host backgrounds keep that canvas until the shell draws,
+so startup never exposes a default white/black window or decorative backdrop.
+
 ## Layout metrics (at 1440×900)
 
 - Sidebar is resizable. Collapsed it occupies **0px** —

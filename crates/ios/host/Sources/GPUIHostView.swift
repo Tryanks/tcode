@@ -29,6 +29,7 @@ final class GPUIHostViewController: UIViewController {
     private var started = false
     private var displayLink: CADisplayLink?
     private var appBackgroundDark: Bool?
+    private var launchCover: UIView?
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
         let dark = appBackgroundDark
@@ -49,6 +50,21 @@ final class GPUIHostViewController: UIViewController {
     override func loadView() {
         view = GPUIHostView(frame: .zero)
         GPUIHostBridge.controller = self
+        let cover = UIView(frame: view.bounds)
+        cover.backgroundColor = UIColor(named: "LaunchBackground")
+        cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        let glyph = UIImageView(image: UIImage(named: "LaunchGlyph"))
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        glyph.contentMode = .scaleAspectFit
+        cover.addSubview(glyph)
+        NSLayoutConstraint.activate([
+            glyph.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+            glyph.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
+            glyph.widthAnchor.constraint(equalToConstant: 96),
+            glyph.heightAnchor.constraint(equalToConstant: 96),
+        ])
+        view.addSubview(cover)
+        launchCover = cover
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -78,6 +94,14 @@ final class GPUIHostViewController: UIViewController {
         gpui_ios_request_frame()
     }
 
+    func firstFrameRendered() {
+        // Let the submitted Metal drawable reach the compositor before uncovering it.
+        DispatchQueue.main.async { [weak self] in
+            self?.launchCover?.removeFromSuperview()
+            self?.launchCover = nil
+        }
+    }
+
     func resumeFrames() {
         displayLink?.isPaused = false
     }
@@ -88,9 +112,9 @@ final class GPUIHostViewController: UIViewController {
 
     func setAppBackgroundDark(_ dark: Bool) {
         appBackgroundDark = dark
-        view.backgroundColor = dark
-            ? UIColor(red: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 1)
-            : UIColor(red: 245 / 255, green: 245 / 255, blue: 247 / 255, alpha: 1)
+        view.backgroundColor = UIColor(named: "LaunchBackground")?.resolvedColor(
+            with: UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
+        )
         setNeedsStatusBarAppearanceUpdate()
     }
 
@@ -125,7 +149,7 @@ final class GPUIHostView: UIView, UITextViewDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true
-        backgroundColor = UIColor(red: 245 / 255, green: 245 / 255, blue: 247 / 255, alpha: 1)
+        backgroundColor = UIColor(named: "LaunchBackground", in: nil, compatibleWith: traitCollection)
         isMultipleTouchEnabled = true
         contentScaleFactor = traitCollection.displayScale
 
