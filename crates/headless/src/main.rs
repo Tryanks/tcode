@@ -256,3 +256,5 @@ fn wait_for_interrupt() {
     use std::io::Read as _;
     let _ = std::io::stdin().read(&mut [0_u8]);
 }
+
+// Temporary CI scope probe; this branch is never merged.
