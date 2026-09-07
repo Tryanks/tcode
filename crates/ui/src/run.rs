@@ -69,6 +69,22 @@ impl Default for ShellOptions {
     }
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+impl ShellOptions {
+    /// Register the bundled monospace family and select it anywhere the shared
+    /// theme asks for the desktop-only SF Mono family.
+    pub fn with_bundled_monospace(mut self) -> Self {
+        self.fonts.extend([
+            Cow::Borrowed(crate::assets::LILEX_REGULAR),
+            Cow::Borrowed(crate::assets::LILEX_BOLD),
+            Cow::Borrowed(crate::assets::LILEX_ITALIC),
+            Cow::Borrowed(crate::assets::LILEX_BOLD_ITALIC),
+        ]);
+        self.theme_json = Cow::Owned(self.theme_json.replace("SF Mono", "Lilex"));
+        self
+    }
+}
+
 /// Open this client's window on the shared shell.
 ///
 /// Returns the window and its shell, so bootstrap can keep doing whatever is

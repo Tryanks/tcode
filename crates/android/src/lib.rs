@@ -11,7 +11,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
     use std::borrow::Cow;
     use std::rc::Rc;
     use tcode_client::host::ClientHost;
-    use tcode_ui::{ShellOptions, ShellSetup, WindowSeam, assets};
+    use tcode_ui::{ShellOptions, ShellSetup, WindowSeam};
 
     android_logger::init_once(
         android_logger::Config::default()
@@ -62,17 +62,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
                         window_background: WindowBackgroundAppearance::Opaque,
                         ..Default::default()
                     },
-                    fonts: vec![
-                        Cow::Borrowed(assets::DM_SANS),
-                        Cow::Borrowed(assets::LILEX_REGULAR),
-                        Cow::Borrowed(assets::LILEX_BOLD),
-                        Cow::Borrowed(assets::LILEX_ITALIC),
-                        Cow::Borrowed(assets::LILEX_BOLD_ITALIC),
-                    ],
-                    // Android has no SF Mono; the bundled Lilex takes its place.
-                    theme_json: Cow::Owned(
-                        tcode_ui::flattened_theme_json().replace("SF Mono", "Lilex"),
-                    ),
+                    theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
                     setup: ShellSetup {
                         initial: tcode_ui::last_host_target(host.as_ref()),
@@ -82,7 +72,8 @@ pub fn android_main(app: android_activity::AndroidApp) {
                         seed_blocking: false,
                     },
                     ..Default::default()
-                },
+                }
+                .with_bundled_monospace(),
             );
 
             let (back_sender, mut back_receiver) = mpsc::unbounded();

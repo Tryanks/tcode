@@ -37,7 +37,6 @@ pub extern "C" fn tcode_ios_start() {
                             window_background: WindowBackgroundAppearance::Opaque,
                             ..Default::default()
                         },
-                        fonts: vec![Cow::Borrowed(tcode_ui::assets::DM_SANS)],
                         theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                         activate: true,
                         setup: ShellSetup {
@@ -49,7 +48,8 @@ pub extern "C" fn tcode_ios_start() {
                             seed_blocking: false,
                         },
                         ..Default::default()
-                    },
+                    }
+                    .with_bundled_monospace(),
                 );
             });
         if slot.set(handle).is_err() {

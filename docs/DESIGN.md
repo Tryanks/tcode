@@ -57,10 +57,10 @@ geometry and radii. Use those definitions rather than maintaining a second
 palette in documentation.
 
 DM Sans is bundled for UI text and comes from the same font resource on every
-client. Desktop monospace text uses the configured system family; Android
-registers the bundled Lilex in its place and adds the packaged Noto Color Emoji
-fallback. Native debug builds embed fonts and SVGs in the package rather than
-reading a development machine's asset path.
+client. Desktop monospace text uses the configured system family; iOS and
+Android register the bundled Lilex in its place, and Android adds the packaged
+Noto Color Emoji fallback. Native debug builds embed fonts and SVGs in the
+package rather than reading a development machine's asset path.
 The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.
