@@ -1270,33 +1270,43 @@ pub(super) fn render_orchestrate_configuration(
                         }))
             })
             .map(|entry| {
+                let catalog = catalogs
+                    .get(&entry.provider)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
                 (
                     entry,
-                    orchestrate_efforts(
-                        entry.provider,
-                        &entry.model,
-                        catalogs
-                            .get(&entry.provider)
-                            .map(Vec::as_slice)
-                            .unwrap_or_default(),
-                        collaboration,
-                    ),
+                    model_missing_from_loaded_catalog(catalog, &entry.model),
+                    orchestrate_efforts(entry.provider, &entry.model, catalog, collaboration),
                 )
             })
-            .filter(|(_, choices)| !collaboration || !choices.is_empty())
+            .filter(|(_, unavailable, choices)| {
+                *unavailable || !collaboration || !choices.is_empty()
+            })
             .collect();
         if available.is_empty() {
             text.push_str(&format!(
                 "No eligible configured models; `{tool}` is unavailable with the current configuration.\n"
             ));
         }
-        for (entry, choices) in available {
+        for (entry, unavailable, choices) in available {
             let profile = entry
                 .profile_id
                 .as_ref()
                 .map(|id| format!(" — profile `{}`", escape_markdown_inline(id)))
                 .unwrap_or_default();
             let fast = if entry.fast { " — fast mode" } else { "" };
+            if unavailable {
+                text.push_str(&format!(
+                    "\n#### `{}` / `{}` — unavailable{fast}{profile}\n\nUnavailable: model `{}` is not present in the loaded `{}` catalog.\n\n{}\n",
+                    provider_name(entry.provider),
+                    escape_markdown_inline(&entry.model),
+                    escape_markdown_inline(&entry.model),
+                    provider_name(entry.provider),
+                    entry.description.trim()
+                ));
+                continue;
+            }
             let efforts = if choices.is_empty() {
                 "omit (provider default)".to_string()
             } else {
@@ -1442,15 +1452,18 @@ fn resolve_orchestrate_profiles(
             if enabled.is_empty() { "none" } else { &enabled }
         )
     })?;
-    let available = orchestrate_efforts(
-        provider,
-        &child.model,
-        catalogs
-            .get(&provider)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        collaboration,
-    );
+    let catalog = catalogs
+        .get(&provider)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if model_missing_from_loaded_catalog(catalog, &child.model) {
+        return Err(format!(
+            "model `{}` is unavailable for provider `{}`: not present in the loaded catalog",
+            child.model,
+            provider_name(provider)
+        ));
+    }
+    let available = orchestrate_efforts(provider, &child.model, catalog, collaboration);
     let selected_effort = match requested_effort {
         Some(requested) => Some(
             available
@@ -1488,6 +1501,10 @@ fn resolve_orchestrate_profiles(
         child.fast,
         child.profile_id.clone(),
     ))
+}
+
+fn model_missing_from_loaded_catalog(catalog: &[agent::ModelSpec], model: &str) -> bool {
+    !catalog.is_empty() && !catalog.iter().any(|spec| spec.id == model)
 }
 
 pub(super) fn resolve_dispatch_access(access: Option<&str>) -> Result<ApprovalMode, String> {

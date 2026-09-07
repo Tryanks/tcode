@@ -995,7 +995,33 @@ impl AppState {
     /// Switch the main area into a draft for `project_id` (rooted at `cwd`): an
     /// empty timeline with a focused, functional composer. The session is
     /// created lazily on the first send (see `send_turn`/`commit_draft`).
+    ///
+    /// A New thread surface keeps at most one unsent draft: reopening the same
+    /// project at the same root returns the draft already standing, because the
+    /// composer's attachments and the draft's terminal follow that session id.
+    /// A second root (another client viewing the same project elsewhere) is a
+    /// different surface and gets its own draft.
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut HostCx) -> String {
+        let standing = self
+            .residents
+            .live
+            .values()
+            .chain(self.residents.parked.values())
+            .find(|active| {
+                active.draft
+                    && active.meta.project_id.as_deref() == Some(project_id.as_str())
+                    && active.meta.cwd == cwd
+            })
+            .map(|active| active.meta.id.clone());
+        if let Some(session_id) = standing {
+            if let Some(mut parked) = self.residents.adopt(&session_id) {
+                parked.idle_since = None;
+                self.restore_terminal_workspace(&mut parked);
+                self.residents.live.insert(session_id.clone(), parked);
+            }
+            self.refresh_git_status(&session_id, cx);
+            return session_id;
+        }
         let (provider, model, acp_agent_id, profile_id, reasoning_effort) =
             self.draft_defaults(&project_id);
         let provider_commands = self.cached_provider_commands(provider, acp_agent_id.as_deref());

@@ -176,16 +176,20 @@ impl OrchestrateSettingsPanel {
         self.input_subscriptions.clear();
         self.child_rows.clear();
         let orchestrate = self.store.read(cx).settings().orchestrate;
-        let excluded: Vec<_> = orchestrate
+        let decision_excluded: Vec<_> = orchestrate
             .decision_models
             .iter()
-            .chain(&orchestrate.child_models)
+            .map(|entry| (entry.provider, entry.model.clone()))
+            .collect();
+        let child_excluded: Vec<_> = orchestrate
+            .child_models
+            .iter()
             .map(|entry| (entry.provider, entry.model.clone()))
             .collect();
         self.decision_model_picker
-            .update(cx, |picker, cx| picker.set_excluded(excluded.clone(), cx));
+            .update(cx, |picker, cx| picker.set_excluded(decision_excluded, cx));
         self.child_model_picker
-            .update(cx, |picker, cx| picker.set_excluded(excluded, cx));
+            .update(cx, |picker, cx| picker.set_excluded(child_excluded, cx));
 
         for (index, entry) in orchestrate
             .decision_models
@@ -244,23 +248,29 @@ impl OrchestrateSettingsPanel {
 
     fn add_child(&mut self, option: &ModelOption, decision: bool, cx: &mut Context<Self>) {
         let settings = self.store.read(cx).settings().orchestrate;
-        if settings
-            .decision_models
+        let models = if decision {
+            &settings.decision_models
+        } else {
+            &settings.child_models
+        };
+        if models
             .iter()
-            .chain(&settings.child_models)
             .any(|entry| entry.provider == option.provider && entry.model == option.id)
         {
             return;
         }
+        let description = if decision {
+            OrchestrateSettings::builtin_decision_definition(option.provider, &option.id)
+        } else {
+            OrchestrateSettings::builtin_child_definition(option.provider, &option.id)
+        };
         let profile = OrchestrateChildModel {
             provider: option.provider,
             model: option.id.clone(),
             profile_id: option.profile_id.clone(),
             enabled: true,
             fast: false,
-            description: OrchestrateSettings::builtin_child_definition(option.provider, &option.id)
-                .unwrap_or_default()
-                .to_string(),
+            description: description.unwrap_or_default().to_string(),
         };
         self.update_models(
             decision,
@@ -302,7 +312,8 @@ impl OrchestrateSettingsPanel {
             .into_iter()
             .chain(settings.orchestrate.child_models)
             .collect();
-        let Some(target) = builtin_child_target(&models, index) else {
+        let (decision, _) = self.profile_location(index, cx);
+        let Some(target) = builtin_child_target(&models, index, decision) else {
             return;
         };
         let provider = target.provider;
@@ -780,7 +791,7 @@ impl OrchestrateSettingsPanel {
             } else {
                 format!("{} · {}", provider_label(provider), row.model)
             };
-            let reset = builtin_child_target(&models, index)
+            let reset = builtin_child_target(&models, index, decision)
                 .filter(|target| target.description != profile.description)
                 .map(|_| {
                     self.reset_button(
@@ -862,13 +873,13 @@ impl OrchestrateSettingsPanel {
                             ),
                     )
                     .child({
-                        let choices = orchestrate_efforts(
-                            provider,
-                            &row.model,
-                            &self.store.read(cx).provider_model_catalog(provider),
-                            decision,
-                        );
-                        let efforts = if choices.is_empty() {
+                        let catalog = self.store.read(cx).provider_model_catalog(provider);
+                        let unavailable =
+                            !catalog.is_empty() && !catalog.iter().any(|spec| spec.id == row.model);
+                        let choices = orchestrate_efforts(provider, &row.model, &catalog, decision);
+                        let efforts = if unavailable {
+                            crate::tr!("orchestrate.children.model_unavailable").into_owned()
+                        } else if choices.is_empty() {
                             if decision {
                                 crate::tr!("orchestrate.decisions.effort_unavailable").into_owned()
                             } else {
@@ -960,17 +971,21 @@ fn model_fast_supported(catalog: &[agent::ModelSpec], model: &str) -> bool {
         })
 }
 
-/// The bundled description for this model, independent of effort or endpoint.
+/// The bundled description for this model and role, independent of endpoint.
 fn builtin_child_target(
     rows: &[OrchestrateChildModel],
     index: usize,
+    decision: bool,
 ) -> Option<OrchestrateChildModel> {
     let row = rows.get(index)?;
     let defaults = OrchestrateSettings::default();
+    let defaults = if decision {
+        defaults.decision_models
+    } else {
+        defaults.child_models
+    };
     defaults
-        .decision_models
         .into_iter()
-        .chain(defaults.child_models)
         .find(|entry| entry.provider == row.provider && entry.model == row.model)
 }
 
@@ -1020,5 +1035,23 @@ mod tests {
         }];
 
         assert!(model_fast_supported(&catalog, "gpt-6-astra"));
+    }
+
+    #[test]
+    fn bundled_astra_restore_target_is_role_aware() {
+        let settings = OrchestrateSettings::default();
+        let decision_count = settings.decision_models.len();
+        let rows: Vec<_> = settings
+            .decision_models
+            .into_iter()
+            .chain(settings.child_models)
+            .collect();
+
+        let peer = builtin_child_target(&rows, 0, true).unwrap();
+        let executor = builtin_child_target(&rows, decision_count, false).unwrap();
+        assert_eq!(peer.model, "gpt-6-astra");
+        assert_eq!(executor.model, "gpt-6-astra");
+        assert_ne!(peer.description, executor.description);
+        assert!(executor.description.contains("Default to low effort"));
     }
 }

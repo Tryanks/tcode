@@ -46,6 +46,20 @@ impl WorkspaceStore {
         self.dispatch(Command::PatchSettings { patch });
     }
 
+    /// Record the project the user navigated into. Called only from user
+    /// navigation (opening a thread, starting a draft), because the empty
+    /// workspace returns here: background activity must not move it.
+    fn remember_project(&mut self, project_id: Option<String>) {
+        let Some(project_id) = project_id else {
+            return;
+        };
+        if self.settings_replica.last_project_id.as_deref() == Some(project_id.as_str()) {
+            return;
+        }
+        self.settings_replica.last_project_id = Some(project_id.clone());
+        self.patch_settings(SettingsPatch::LastProject(Some(project_id)));
+    }
+
     pub fn set_language(&mut self, value: Option<String>) {
         self.patch_settings(SettingsPatch::Language(value));
     }
@@ -254,6 +268,13 @@ impl WorkspaceStore {
         if self.selected_session_id.as_ref() == Some(&session_id) {
             return;
         }
+        let project_id = self
+            .index_replica
+            .0
+            .iter()
+            .find(|meta| meta.id == session_id)
+            .and_then(|meta| meta.project_id.clone());
+        self.remember_project(project_id);
         self.leave_session();
         self.selected_session_id = Some(session_id.clone());
         self.session_status_replica = self.session_statuses.get(&session_id).cloned();
@@ -460,13 +481,16 @@ impl WorkspaceStore {
         self.dispatch(Command::DeleteProject { project_id });
     }
     pub fn start_draft(&mut self, project_id: String, cwd: PathBuf, cx: &mut Context<Self>) {
+        self.remember_project(Some(project_id.clone()));
         self.create_and_select(Command::StartDraft { project_id, cwd }, cx);
     }
     fn create_and_select(&mut self, command: Command, cx: &mut Context<Self>) {
         let request = self.command(command, cx);
         let selected = self.selected_session_id.clone();
         cx.spawn(async move |this, cx| {
-            if let Ok(CommandResponse::SessionId(Some(id))) = request.await {
+            let response = request.await;
+            let _ = this.update(cx, |store, _| store.draft_fallback_pending = false);
+            if let Ok(CommandResponse::SessionId(Some(id))) = response {
                 let _ = this.update(cx, |store, cx| {
                     if store.selected_session_id == selected {
                         store.select_session(id);
