@@ -259,7 +259,8 @@ const LEGACY_FABLE_DECISION_DEFINITION: &str = "Decision collaboration: examine 
 
 const OLD_DEFAULT_SOL_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
 const OLD_DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
-const DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Baseline execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Default to low effort for a clear brief; raise effort only when a specific piece demonstrably needs more depth. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
+const OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Baseline execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Default to low effort for a clear brief; raise effort only when a specific piece demonstrably needs more depth. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
+const DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, evidence gathering, and computer use. It is exceptionally strong at driving and reading real UIs (find_roots → observe_ui → search_ui / inspect_ui / read_text, and act_ui / wait_for when the brief allows), so route eyes-on-screen verification and UI-driving work here first. Always dispatch it at low effort: low outperforms the former Sol executor at xhigh on quality and at a fraction of the token cost, so medium or higher is never justified for this profile and only wastes money; a task that seems to need more depth needs a better brief, not more effort. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
 const DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const DEFAULT_ASTRA_DEFINITION: &str = include_str!("../../../assets/orchestrate/astra.md");
 const DEFAULT_FABLE_DEFINITION: &str = include_str!("../../../assets/orchestrate/fable-5-1.md");
@@ -426,6 +427,13 @@ impl LegacyOrchestrateModel {
             && self.entry.description == OLD_DEFAULT_OPUS_DEFINITION
         {
             self.entry.description = DEFAULT_OPUS_DEFINITION.into();
+        }
+        if !collaboration
+            && self.entry.provider == ProviderKind::Codex
+            && self.entry.model == "gpt-6-astra"
+            && self.entry.description == OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION
+        {
+            self.entry.description = DEFAULT_GPT_6_EXECUTION_DEFINITION.into();
         }
         let entry = &mut self.entry;
         let legacy = self.effort.is_some();
@@ -1358,7 +1366,7 @@ mod tests {
         assert!(
             defaults.child_models[0]
                 .description
-                .contains("Default to low effort")
+                .contains("Always dispatch it at low effort")
         );
         assert_ne!(
             defaults.child_models[0].description,
@@ -1448,6 +1456,22 @@ mod tests {
             migrated.child_models,
             OrchestrateSettings::default().child_models
         );
+    }
+
+    #[test]
+    fn orchestrate_refreshes_untouched_previous_gpt_6_execution_text() {
+        let old_json = format!(
+            r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-6-astra","description":{},"enabled":true,"fast":false}}]}}"#,
+            serde_json::to_string(OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION).unwrap()
+        );
+        let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
+        assert_eq!(
+            migrated.child_models[0].description,
+            DEFAULT_GPT_6_EXECUTION_DEFINITION
+        );
+        let customized = old_json.replace(OLD_DEFAULT_GPT_6_EXECUTION_DEFINITION, "mine");
+        let kept: OrchestrateSettings = serde_json::from_str(&customized).unwrap();
+        assert_eq!(kept.child_models[0].description, "mine");
     }
 
     #[test]

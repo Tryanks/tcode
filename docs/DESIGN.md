@@ -350,8 +350,9 @@ a read-only list of available reasoning efforts, and a Fast switch when supporte
 (or when a stored value needs to remain visible). Effort is selected per tool call
 from the live provider catalog, with bundled startup fallbacks. There is no saved
 fixed-effort field. Collaboration is limited to medium/high; omitted effort uses
-medium when available. GPT-6 execution starts at low as the baseline and escalates
-only when a specific piece demonstrably needs depth. Fast mode remains independent.
+medium when available. The GPT-6 executor is dispatched at low only; higher efforts
+are never used for it. Its description names computer use as a headline strength.
+Fast mode remains independent.
 Once a provider catalog is loaded, a configured model absent from it is rendered
 unavailable with the catalog mismatch and dispatch or collaboration is rejected;
 an empty pre-discovery catalog continues to use bundled fallbacks.

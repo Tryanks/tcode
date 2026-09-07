@@ -12,9 +12,10 @@ If Orchestrate tool schemas are deferred, discover and load them before starting
 delegated execution. Read the current fleet, compare enabled execution profiles
 across all providers, and select a task-fit model, endpoint profile, and per-call
 effort using the configured strengths and caveats. Provider family gives no
-preference. The bundled GPT-6 executor at low effort is the baseline; raise its
-effort only when a specific piece demonstrably needs more depth, or choose
-another profile when its description better fits the task.
+preference. The bundled GPT-6 executor is dispatched at low effort only: never
+pass it medium or above, since higher efforts cost more without better results.
+Route UI-driving and eyes-on-screen verification to it first. Choose another
+profile only when its description better fits the task.
 
 ## Route the work
 
