@@ -217,7 +217,8 @@ impl PreviewTools {
     #[tool(
         description = "Report the preview browser's current URL, title, and loading state; call this first for browser work. \
                        If no automation-capable preview is attached, call preview_open before concluding the browser is unavailable. \
-                       Do not fall back to Chrome, Playwright, or another browser merely because the preview is initially closed or a first call fails; fall back only when preview_open explicitly reports unsupported or unavailable."
+                       Do not fall back to Chrome, Playwright, or another browser merely because the preview is initially closed or a first call fails; fall back only when preview_open explicitly reports unsupported or unavailable. \
+                       Includes load_error with the platform error when the last navigation failed, e.g. an untrusted certificate."
     )]
     async fn preview_status(&self) -> CallToolResult {
         self.run(PreviewOp::Status).await

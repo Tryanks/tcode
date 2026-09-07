@@ -1,0 +1,365 @@
+//! The last navigation failure reported by the native webview.
+//!
+//! A failed navigation is invisible to JavaScript: WebKit and WebView2 keep the
+//! previous document loaded, so the status probe keeps reporting the old URL and
+//! an agent cannot tell an untrusted certificate from a slow dev server. Both
+//! engines *do* report the failure to their navigation delegate, so we keep the
+//! last one per native webview and surface it from `preview_status` and
+//! `preview_wait_for`.
+//!
+//! The map is keyed by the native webview pointer because the macOS callback is
+//! a plain Objective-C IMP that cannot carry Rust state. Everything here runs on
+//! the UI thread that owns the webviews, hence `thread_local!`.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+/// One failed navigation, as the platform described it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LoadError {
+    pub(crate) url: String,
+    /// `NSURLErrorDomain -1202` on macOS, `CertificateIsInvalid` on Windows.
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+impl LoadError {
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "url": self.url,
+            "code": self.code,
+            "message": self.message,
+        })
+    }
+
+    /// The one-line form used where a tool can only answer with an error.
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "navigation to {} failed: {} ({})",
+            self.url, self.message, self.code
+        )
+    }
+}
+
+thread_local! {
+    static LAST: RefCell<HashMap<usize, LoadError>> = RefCell::new(HashMap::new());
+}
+
+fn clear(webview: usize) {
+    LAST.with_borrow_mut(|last| last.remove(&webview));
+}
+
+fn record(webview: usize, error: LoadError) {
+    log::info!("preview: {}", error.describe());
+    LAST.with_borrow_mut(|last| last.insert(webview, error));
+}
+
+/// Start reporting failed navigations for a freshly created webview.
+pub(crate) fn install(raw: &wry::WebView) {
+    imp::install(raw);
+}
+
+pub(crate) fn get(raw: &wry::WebView) -> Option<LoadError> {
+    let webview = imp::key(raw);
+    LAST.with_borrow(|last| last.get(&webview).cloned())
+}
+
+/// Drop the record for a webview that is going away, so a later allocation at
+/// the same address cannot inherit it.
+pub(crate) fn forget(raw: &wry::WebView) {
+    clear(imp::key(raw));
+}
+
+#[cfg(target_os = "macos")]
+mod imp {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::{ffi, sel};
+    use objc2_foundation::{NSError, NSURL, NSURLErrorFailingURLErrorKey};
+    use objc2_web_kit::WKWebView;
+    use wry::WebViewExtMacOS as _;
+
+    use super::LoadError;
+
+    pub(super) fn key(raw: &wry::WebView) -> usize {
+        Retained::as_ptr(&raw.webview()) as usize
+    }
+
+    /// wry's `WryNavigationDelegate` implements navigation policy, `didCommit`
+    /// and `didFinish` only, so nothing observes a failed load. Add the three
+    /// missing callbacks to its class — once for the process, and only where a
+    /// future wry does not define them itself.
+    pub(super) fn install(raw: &wry::WebView) {
+        static PATCHED: std::sync::Once = std::sync::Once::new();
+
+        let webview = raw.webview();
+        let Some(delegate) = (unsafe { webview.navigationDelegate() }) else {
+            log::debug!("preview: webview has no navigation delegate to observe");
+            return;
+        };
+        // SAFETY: any Objective-C object may be viewed as an `AnyObject`.
+        let class = unsafe { &*Retained::as_ptr(&delegate).cast::<AnyObject>() }.class();
+        PATCHED.call_once(|| {
+            let start: unsafe extern "C-unwind" fn(
+                *mut AnyObject,
+                Sel,
+                *mut AnyObject,
+                *mut AnyObject,
+            ) = did_start;
+            let fail: unsafe extern "C-unwind" fn(
+                *mut AnyObject,
+                Sel,
+                *mut AnyObject,
+                *mut AnyObject,
+                *mut NSError,
+            ) = did_fail;
+            // SAFETY: both functions use the Objective-C calling convention and
+            // match the encodings below.
+            unsafe {
+                let start: Imp = std::mem::transmute(start);
+                let fail: Imp = std::mem::transmute(fail);
+                add_method(
+                    class,
+                    sel!(webView:didStartProvisionalNavigation:),
+                    c"v@:@@",
+                    start,
+                );
+                add_method(
+                    class,
+                    sel!(webView:didFailProvisionalNavigation:withError:),
+                    c"v@:@@@",
+                    fail,
+                );
+                add_method(
+                    class,
+                    sel!(webView:didFailNavigation:withError:),
+                    c"v@:@@@",
+                    fail,
+                );
+            }
+        });
+        // WKWebView caches which delegate methods exist when the delegate is
+        // assigned, so re-assign it: without this the very first webview (whose
+        // delegate was installed before the patch above) never calls them.
+        unsafe {
+            webview.setNavigationDelegate(None);
+            webview.setNavigationDelegate(Some(&delegate));
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `imp` must be an `extern "C"` function whose signature matches `types`.
+    unsafe fn add_method(class: &AnyClass, selector: Sel, types: &std::ffi::CStr, imp: Imp) {
+        if class.responds_to(selector) {
+            return;
+        }
+        let class = std::ptr::from_ref(class).cast_mut();
+        let added = unsafe { ffi::class_addMethod(class, selector, imp, types.as_ptr()) };
+        if !added.as_bool() {
+            log::debug!("preview: failed to observe {selector} on the navigation delegate");
+        }
+    }
+
+    unsafe extern "C-unwind" fn did_start(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        webview: *mut AnyObject,
+        _navigation: *mut AnyObject,
+    ) {
+        super::clear(webview as usize);
+    }
+
+    unsafe extern "C-unwind" fn did_fail(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        webview: *mut AnyObject,
+        _navigation: *mut AnyObject,
+        error: *mut NSError,
+    ) {
+        // SAFETY: WebKit hands us a live error for the failing web view.
+        let Some(error) = (unsafe { error.as_ref() }) else {
+            return;
+        };
+        super::record(
+            webview as usize,
+            LoadError {
+                url: failing_url(error)
+                    .or_else(|| current_url(webview))
+                    .unwrap_or_default(),
+                code: format!("{} {}", error.domain(), error.code()),
+                message: error.localizedDescription().to_string(),
+            },
+        );
+    }
+
+    /// The URL WebKit was loading, which is *not* `WKWebView.URL` for a
+    /// provisional failure — that still points at the page left on screen.
+    fn failing_url(error: &NSError) -> Option<String> {
+        let info = error.userInfo();
+        let failing = unsafe { info.objectForKey(NSURLErrorFailingURLErrorKey) }?;
+        let url = failing.downcast::<NSURL>().ok()?;
+        url.absoluteString().map(|url| url.to_string())
+    }
+
+    fn current_url(webview: *mut AnyObject) -> Option<String> {
+        // SAFETY: WebKit passes the live web view that failed.
+        let webview: &WKWebView = unsafe { webview.cast::<WKWebView>().as_ref() }?;
+        let url = unsafe { webview.URL() }?;
+        url.absoluteString().map(|url| url.to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod imp {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_WEB_ERROR_STATUS, COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET, COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE,
+        COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE, COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT,
+        COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR,
+        COREWEBVIEW2_WEB_ERROR_STATUS_VALID_AUTHENTICATION_CREDENTIALS_REQUIRED,
+        COREWEBVIEW2_WEB_ERROR_STATUS_VALID_PROXY_AUTHENTICATION_REQUIRED, ICoreWebView2,
+    };
+    use webview2_com::{
+        NavigationCompletedEventHandler, NavigationStartingEventHandler, take_pwstr,
+    };
+    use windows_core::Interface as _;
+    use wry::WebViewExtWindows as _;
+
+    use super::LoadError;
+
+    pub(super) fn key(raw: &wry::WebView) -> usize {
+        raw.webview().as_raw() as usize
+    }
+
+    /// WebView2 reports a failed navigation only through `NavigationCompleted`;
+    /// the page itself keeps showing the previous document.
+    pub(super) fn install(raw: &wry::WebView) {
+        let webview = raw.webview();
+        let mut token = 0i64;
+        let started = NavigationStartingEventHandler::create(Box::new(move |webview, _| {
+            if let Some(webview) = webview {
+                super::clear(webview.as_raw() as usize);
+            }
+            Ok(())
+        }));
+        if let Err(error) = unsafe { webview.add_NavigationStarting(&started, &mut token) } {
+            log::debug!("preview: failed to observe navigation start: {error}");
+        }
+        let completed = NavigationCompletedEventHandler::create(Box::new(move |webview, args| {
+            let (Some(webview), Some(args)) = (webview, args) else {
+                return Ok(());
+            };
+            let mut succeeded = windows_core::BOOL::default();
+            unsafe { args.IsSuccess(&mut succeeded)? };
+            if succeeded.as_bool() {
+                return Ok(());
+            }
+            let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+            unsafe { args.WebErrorStatus(&mut status)? };
+            super::record(
+                webview.as_raw() as usize,
+                LoadError {
+                    url: source_url(&webview),
+                    code: status_name(status).to_string(),
+                    message: format!("WebView2 error status {}", status.0),
+                },
+            );
+            Ok(())
+        }));
+        if let Err(error) = unsafe { webview.add_NavigationCompleted(&completed, &mut token) } {
+            log::debug!("preview: failed to observe navigation completion: {error}");
+        }
+    }
+
+    fn source_url(webview: &ICoreWebView2) -> String {
+        let mut source = windows_core::PWSTR::null();
+        match unsafe { webview.Source(&mut source) } {
+            Ok(()) => take_pwstr(source),
+            Err(error) => {
+                log::debug!("preview: failed to read the failing URL: {error}");
+                String::new()
+            }
+        }
+    }
+
+    /// WebView2 statuses are a plain integer newtype; report the SDK name so the
+    /// agent (and the user) can recognise e.g. a self-signed certificate.
+    fn status_name(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> &'static str {
+        match status {
+            COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT => {
+                "CertificateCommonNameIsIncorrect"
+            }
+            COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED => "CertificateExpired",
+            COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS => {
+                "ClientCertificateContainsErrors"
+            }
+            COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED => "CertificateRevoked",
+            COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => "CertificateIsInvalid",
+            COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE => "ServerUnreachable",
+            COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => "Timeout",
+            COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE => {
+                "ErrorHttpInvalidServerResponse"
+            }
+            COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED => "ConnectionAborted",
+            COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET => "ConnectionReset",
+            COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED => "Disconnected",
+            COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT => "CannotConnect",
+            COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED => "HostNameNotResolved",
+            COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED => "OperationCanceled",
+            COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED => "RedirectFailed",
+            COREWEBVIEW2_WEB_ERROR_STATUS_UNEXPECTED_ERROR => "UnexpectedError",
+            COREWEBVIEW2_WEB_ERROR_STATUS_VALID_AUTHENTICATION_CREDENTIALS_REQUIRED => {
+                "ValidAuthenticationCredentialsRequired"
+            }
+            COREWEBVIEW2_WEB_ERROR_STATUS_VALID_PROXY_AUTHENTICATION_REQUIRED => {
+                "ValidProxyAuthenticationRequired"
+            }
+            _ => "Unknown",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoadError;
+
+    fn certificate_failure() -> LoadError {
+        LoadError {
+            url: "https://localhost:8443/".into(),
+            code: "NSURLErrorDomain -1202".into(),
+            message: "The certificate for this server is invalid.".into(),
+        }
+    }
+
+    #[test]
+    fn load_error_reports_the_platform_error_verbatim() {
+        assert_eq!(
+            certificate_failure().describe(),
+            "navigation to https://localhost:8443/ failed: \
+             The certificate for this server is invalid. (NSURLErrorDomain -1202)"
+        );
+    }
+
+    #[test]
+    fn load_error_json_is_url_code_message() {
+        assert_eq!(
+            certificate_failure().to_json(),
+            serde_json::json!({
+                "url": "https://localhost:8443/",
+                "code": "NSURLErrorDomain -1202",
+                "message": "The certificate for this server is invalid.",
+            })
+        );
+    }
+}

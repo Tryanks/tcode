@@ -9030,6 +9030,8 @@ dependencies = [
  "tcode-voice",
  "term",
  "web-time",
+ "webview2-com",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
