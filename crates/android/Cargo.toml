@@ -14,7 +14,7 @@ gpui-android = { path = "../platform/gpui-android" }
 log = "0.4"
 tcode-client = { path = "../client" }
 tcode-remote = { path = "../remote", default-features = false, features = ["client"] }
-tcode-ui = { path = "../ui", default-features = false }
+tcode-ui = { path = "../ui", default-features = false, features = ["native-preview"] }
 async-channel = "2"
 
 [target.'cfg(target_os = "android")'.dependencies]

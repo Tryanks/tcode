@@ -41,7 +41,7 @@ use crate::palette::CommandPalette;
 use crate::preview_panel::PreviewPanel;
 #[cfg(all(
     feature = "native-preview",
-    any(target_os = "macos", target_os = "windows")
+    any(target_os = "macos", target_os = "windows", target_os = "android")
 ))]
 use crate::preview_panel::lifecycle::BrowserLifecycle;
 use crate::remote::{AttachmentTarget, RemotePanel};
@@ -425,7 +425,7 @@ impl AppShell {
 
     #[cfg(all(
         feature = "native-preview",
-        any(target_os = "macos", target_os = "windows")
+        any(target_os = "macos", target_os = "windows", target_os = "android")
     ))]
     #[allow(private_interfaces)]
     #[doc(hidden)]
@@ -1514,6 +1514,14 @@ impl AppShell {
             .as_ref()
             .map(|pending| pending.panel.id());
         let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
+        attachment.preview.update(cx, |preview, cx| {
+            preview.set_compact_panel_selected(
+                self.pending_navigation_restore.is_none()
+                    && !terminal
+                    && panel.right_tab == RightTab::Preview,
+                cx,
+            );
+        });
         let mut segments = crate::material::segmented_track("compact-panel-track", cx);
         for (id, label, selected) in [
             (

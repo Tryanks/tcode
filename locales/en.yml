@@ -847,6 +847,7 @@ attach:
   too_large: "'%{name}' exceeds the 10MB attachment limit."
   too_many: "You can attach up to 8 images per message."
 preview:
+  load_error: "Could not load %{url}: %{message} (%{code})"
   title: "Preview"
   no_session: "Open a session to use the preview browser."
   url_placeholder: "Enter a URL or localhost port"

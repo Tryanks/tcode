@@ -25,7 +25,7 @@ const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly
 
 /// The error `preview_screenshot` reports where native-webview snapshots have no
 /// implementation.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", target_os = "android"), allow(dead_code))]
 const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS";
 
 fn wait_timeout_message(pending: &[String]) -> String {
@@ -40,6 +40,7 @@ pub(super) struct Backend {
     /// The lifecycle holds this only weakly so an async Windows completion
     /// cannot install after its owning panel has been dropped.
     _owner: Rc<()>,
+    compact_panel_selected: bool,
 }
 
 impl Backend {
@@ -49,11 +50,19 @@ impl Backend {
         Self {
             lifecycle,
             _owner: owner,
+            compact_panel_selected: false,
         }
     }
 }
 
 impl PreviewPanel {
+    /// The compact shell owns which panel segment is mounted, including Terminal
+    /// (which does not change the stored right-panel tab).
+    pub(crate) fn set_compact_panel_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
+        self.backend.compact_panel_selected = selected;
+        self.sync_visibility(cx);
+    }
+
     fn lifecycle_entity(&self) -> gpui::Entity<BrowserLifecycle> {
         self.backend.lifecycle.clone()
     }
@@ -120,7 +129,11 @@ impl PreviewPanel {
             active.as_deref(),
             window_state.route(),
             window_state.palette_open,
-            self.store.read(cx).preview_panel_showing(),
+            self.store.read(cx).preview_panel_showing()
+                && self.store.read(cx).preview_browser_settings().enabled
+                && (!window_state.compact
+                    || (self.backend.compact_panel_selected
+                        && window_state.destination() == crate::window_state::Destination::Panel)),
         )
         .map(str::to_string);
         self.lifecycle_entity().update(cx, |lifecycle, cx| {
@@ -273,6 +286,9 @@ impl PreviewPanel {
     }
 
     pub(super) fn rescan_ports(&mut self, cx: &mut Context<Self>) {
+        if cfg!(target_os = "android") || self.store.read(cx).is_remote() {
+            return;
+        }
         self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
         let generation = self.port_scan_generation;
         cx.spawn(async move |this, cx| {
@@ -296,6 +312,23 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(target_os = "android")]
+        if let Some(key) = active {
+            let url = self
+                .lifecycle_entity()
+                .read(cx)
+                .ready_view(key)
+                .map(|view| view.read(cx).url())
+                .filter(|url| !url.is_empty());
+            if let Some(url) = url
+                && self.store.read(cx).preview_url(key).as_ref() != Some(&url)
+            {
+                self.store
+                    .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
+                self.url_input
+                    .update(cx, |input, cx| input.set_value(url, window, cx));
+            }
+        }
         let body: AnyElement = match active {
             Some(id) => match self.ensure_webview(id, window, cx) {
                 Availability::Ready(view) => {
@@ -340,6 +373,32 @@ impl PreviewPanel {
         // `ensure_webview` creates children hidden; make the owning
         // conversation visible only after the current layout owns it.
         self.sync_mounted_visibility(cx);
+        #[cfg(target_os = "android")]
+        if let Some(error) =
+            active.and_then(|key| self.lifecycle_entity().read(cx).load_error(key, cx))
+        {
+            return v_flex()
+                .size_full()
+                .child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().danger)
+                        .child(
+                            crate::tr!(
+                                "preview.load_error",
+                                url = error.url,
+                                message = error.message,
+                                code = error.code
+                            )
+                            .into_owned(),
+                        ),
+                )
+                .child(body)
+                .into_any_element();
+        }
         body
     }
 
@@ -526,12 +585,23 @@ impl PreviewPanel {
         // The page cannot see a failed navigation, so the JS probe would
         // keep describing whatever was on screen before it.
         let load_error = self.lifecycle_entity().read(cx).load_error(key, cx);
+        #[cfg(target_os = "android")]
+        let native_metadata = self
+            .lifecycle_entity()
+            .read(cx)
+            .ready_view(key)
+            .map(|view| view.read(cx).metadata());
         let (status_reply, status_result) = async_channel::bounded(1);
         cx.spawn(async move |_, _| {
             let result = match status_result.recv().await {
                 Ok(Ok(PreviewResponse::Json(mut value))) => {
                     if let Some(object) = value.as_object_mut() {
                         object.insert("canvas".into(), canvas);
+                        #[cfg(target_os = "android")]
+                        if let Some((url, title)) = native_metadata {
+                            object.insert("url".into(), url.into());
+                            object.insert("title".into(), title.into());
+                        }
                         if let Some(load_error) = load_error {
                             object.insert("load_error".into(), load_error.to_json());
                         }
@@ -750,7 +820,12 @@ impl PreviewPanel {
                 Some(key),
                 window_state.route(),
                 window_state.palette_open,
-                self.store.read(cx).preview_panel_showing(),
+                self.store.read(cx).preview_panel_showing()
+                    && self.store.read(cx).preview_browser_settings().enabled
+                    && (!window_state.compact
+                        || (self.backend.compact_panel_selected
+                            && window_state.destination()
+                                == crate::window_state::Destination::Panel)),
             ) == Some(key)
         };
         if !visible {
@@ -793,9 +868,65 @@ impl PreviewPanel {
         .detach();
     }
 
+    #[cfg(target_os = "android")]
+    fn screenshot(
+        &mut self,
+        session_id: &str,
+        key: &str,
+        reply: ReplyTx,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.window_state.read(cx);
+        if self.store.read(cx).active_session_id().as_deref() != Some(session_id)
+            || !self.store.read(cx).preview_panel_showing()
+            || state.palette_open
+            || state.route() != crate::window_state::Route::Chat
+            || (state.compact
+                && (state.destination() != crate::window_state::Destination::Panel
+                    || !self.backend.compact_panel_selected))
+        {
+            let _ = reply.try_send(Err(
+                "preview is not visible; open the Preview panel before taking a screenshot".into(),
+            ));
+            return;
+        }
+        let Some(view) = self.lifecycle_entity().read(cx).ready_view(key) else {
+            let _ = reply.try_send(Err("preview browser is not open".into()));
+            return;
+        };
+        let request = view.read(cx).raw().screenshot();
+        cx.spawn(async move |_, cx| {
+            use base64::Engine as _;
+            let result = futures::future::select(
+                Box::pin(request),
+                Box::pin(cx.background_executor().timer(Duration::from_secs(5))),
+            )
+            .await;
+            let result = match result {
+                futures::future::Either::Left((
+                    Ok(gpui_android::webview::Reply::Png(bytes)),
+                    _,
+                )) => Ok(PreviewResponse::Image {
+                    mime: "image/png".into(),
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                }),
+                futures::future::Either::Left((Err(error), _)) => Err(error),
+                futures::future::Either::Left(_) => {
+                    Err("preview screenshot returned no image".into())
+                }
+                futures::future::Either::Right(_) => {
+                    Err("preview screenshot timed out after 5 seconds".into())
+                }
+            };
+            let _ = reply.try_send(result);
+        })
+        .detach();
+    }
+
     /// See the macOS implementation: screen capture has no portable
     /// equivalent, so this is a plain tool error off macOS.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "android")))]
     fn screenshot(
         &mut self,
         _session_id: &str,

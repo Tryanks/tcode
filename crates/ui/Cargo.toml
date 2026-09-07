@@ -27,6 +27,7 @@ native-dialogs = []
 # Embedded webview preview backend. Only macOS and Windows have one; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
+    "dep:gpui-android",
     "dep:gpui-wry",
     "dep:wry",
     "dep:raw-window-handle",
@@ -89,7 +90,6 @@ tcode-remote = { path = "../remote", default-features = false, optional = true }
 gpui-wry = { version = "0.6.0", optional = true }
 wry = { version = "0.53.3", package = "lb-wry", optional = true }
 raw-window-handle = { version = "0.6", features = ["std"], optional = true }
-preview-mcp = { path = "../preview-mcp", optional = true }
 # Only the Windows WebContext needs it, but Cargo has no per-feature target
 # narrower than this.
 async-lock = { version = "3", optional = true }
@@ -143,3 +143,10 @@ tcode-services = { path = "../services" }
 [[bench]]
 name = "markdown_perf"
 harness = false
+
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "android"))'.dependencies]
+preview-mcp = { path = "../preview-mcp", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+gpui-android = { path = "../platform/gpui-android", optional = true }
+futures = "0.3"

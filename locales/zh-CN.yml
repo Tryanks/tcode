@@ -841,6 +841,7 @@ attach:
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
   too_many: "每条消息最多只能附加 8 张图片。"
 preview:
+  load_error: "无法加载 %{url}：%{message}（%{code}）"
   title: "预览"
   no_session: "打开一个会话以使用预览浏览器。"
   url_placeholder: "输入网址或本地端口"

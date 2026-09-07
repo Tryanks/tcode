@@ -20,9 +20,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Weak;
 use std::time::Duration;
 
+#[cfg(target_os = "android")]
+use super::android::WebView;
 use gpui::{App, AppContext as _, Context, Entity, Window};
+#[cfg(not(target_os = "android"))]
 use gpui_wry::WebView;
+#[cfg(not(target_os = "android"))]
 use preview_mcp::js;
+#[cfg(not(target_os = "android"))]
 use tcode_protocol::PreviewResponse;
 
 use super::load_error::{self, LoadError};
@@ -66,7 +71,7 @@ impl Availability {
 }
 
 enum WebViewSlot {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     Creating {
         id: u64,
         phase: CreationPhase,
@@ -78,7 +83,7 @@ enum WebViewSlot {
 impl WebViewSlot {
     fn ready(&self) -> Option<&Entity<WebView>> {
         match self {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Creating { .. } => None,
             Self::Ready(view) => Some(view),
         }
@@ -90,7 +95,7 @@ impl WebViewSlot {
 
     fn availability(&self) -> Availability {
         match self {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Creating { phase, .. } => Availability::Starting(*phase),
             Self::Ready(view) => Availability::Ready(view.clone()),
         }
@@ -194,13 +199,13 @@ impl BrowserLifecycle {
                     }
                 }
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "android"))]
             Availability::Starting(_) => {
                 if let Some(WebViewSlot::Creating { pending_url, .. }) = self.slots.get_mut(key) {
                     *pending_url = Some(url.to_string());
                 }
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "android")))]
             Availability::Starting(_) => {}
             Availability::Unavailable => {}
         }
@@ -385,15 +390,20 @@ impl BrowserLifecycle {
             let _ = reply.try_send(Err("preview browser is not open".into()));
             return;
         };
-        let result = view.read(cx).raw().evaluate_script_with_callback(script, {
-            let reply = reply.clone();
-            move |raw: String| {
-                let value = js::parse_result(&raw);
-                let _ = reply.try_send(Ok(PreviewResponse::Json(value)));
+        #[cfg(target_os = "android")]
+        view.read(cx).raw().evaluate_json(script, reply, cx);
+        #[cfg(not(target_os = "android"))]
+        {
+            let result = view.read(cx).raw().evaluate_script_with_callback(script, {
+                let reply = reply.clone();
+                move |raw: String| {
+                    let value = js::parse_result(&raw);
+                    let _ = reply.try_send(Ok(PreviewResponse::Json(value)));
+                }
+            });
+            if result.is_err() {
+                let _ = reply.try_send(Err("failed to evaluate script in preview".into()));
             }
-        });
-        if result.is_err() {
-            let _ = reply.try_send(Err("failed to evaluate script in preview".into()));
         }
     }
 
@@ -417,7 +427,7 @@ impl BrowserLifecycle {
         cx.notify();
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     fn has_creation(&self, creation_id: u64) -> bool {
         self.slots.values().any(|slot| {
             matches!(
@@ -440,7 +450,7 @@ impl BrowserLifecycle {
         false
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "android"))]
     fn remove_creation(&mut self, creation_id: u64) -> Option<(String, Option<String>)> {
         let key = self.slots.iter().find_map(|(key, slot)| {
             matches!(
@@ -501,6 +511,7 @@ fn set_webview_visible(view: &mut WebView, visible: bool) {
     // observable instead of silently discarded.
     if visible {
         view.show();
+        #[cfg(not(target_os = "android"))]
         if let Err(error) = view.raw().set_visible(true) {
             log::debug!("preview: failed to show native webview: {error}");
         }
@@ -515,7 +526,7 @@ fn set_webview_visible(view: &mut WebView, visible: bool) {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "android")))]
 mod platform {
     use raw_window_handle::HasWindowHandle as _;
 
@@ -779,5 +790,83 @@ mod platform {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(raw))).is_err() {
             log::error!("preview: raw webview drop panicked for {key} after {reason}");
         }
+    }
+}
+
+#[cfg(target_os = "android")]
+mod platform {
+    use super::*;
+    use futures::StreamExt as _;
+    pub(super) struct Adapter {
+        next_creation_id: u64,
+    }
+    impl Adapter {
+        pub(super) fn new() -> Result<Self, String> {
+            Ok(Self {
+                next_creation_id: 0,
+            })
+        }
+    }
+    pub(super) fn start(
+        lifecycle: &mut BrowserLifecycle,
+        key: &str,
+        initial_url: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<BrowserLifecycle>,
+    ) -> Availability {
+        let (raw, mut events) = match super::super::android::RawWebView::new() {
+            Ok(created) => created,
+            Err(error) => {
+                lifecycle.record_unavailable(error, cx);
+                return Availability::Unavailable;
+            }
+        };
+        let Creator::Available(adapter) = &mut lifecycle.creator else {
+            return Availability::Unavailable;
+        };
+        adapter.next_creation_id = adapter.next_creation_id.wrapping_add(1).max(1);
+        let id = adapter.next_creation_id;
+        lifecycle.slots.insert(
+            key.to_owned(),
+            WebViewSlot::Creating {
+                id,
+                phase: CreationPhase::Queued,
+                pending_url: initial_url.map(str::to_owned),
+            },
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let created = futures::future::select(
+                Box::pin(events.next()),
+                Box::pin(cx.background_executor().timer(Duration::from_secs(10))),
+            )
+            .await;
+            let result = match created {
+                futures::future::Either::Left((Some(event), _)) if event.kind == 7 => Ok(()),
+                futures::future::Either::Left((Some(event), _)) => Err(event.message),
+                _ => Err("Android WebView creation timed out or was cancelled".into()),
+            };
+            let _ = this.update(cx, |lifecycle, cx| {
+                if !lifecycle.owner_is_live() || !lifecycle.has_creation(id) {
+                    return;
+                }
+                match result {
+                    Err(error) => lifecycle.record_unavailable(error, cx),
+                    Ok(()) => {
+                        let Some((key, pending_url)) = lifecycle.remove_creation(id) else {
+                            return;
+                        };
+                        if let Some(url) = pending_url {
+                            let _ = raw.load_url(&url);
+                        }
+                        let view = cx.new(|cx| WebView::new(raw, events, cx));
+                        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+                        lifecycle.slots.insert(key, WebViewSlot::Ready(view));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        Availability::Starting(CreationPhase::Queued)
     }
 }
