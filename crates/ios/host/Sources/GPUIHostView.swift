@@ -36,6 +36,12 @@ final class GPUIHostViewController: UIViewController {
         return dark ? .lightContent : .darkContent
     }
 
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        traitCollection.userInterfaceIdiom == .pad
+            ? .all
+            : [.portrait, .landscapeLeft, .landscapeRight]
+    }
+
     private var hostView: GPUIHostView {
         view as! GPUIHostView
     }
@@ -103,6 +109,7 @@ final class GPUIHostView: UIView, UITextViewDelegate {
     private var touchIdentifiers: [ObjectIdentifier: UInt64] = [:]
     private var resettingKeyboardProxy = false
     private var hasForwardedMarkedText = false
+    private var keyboardFrameInScreen: CGRect?
     private let keyboardProxy = GPUIKeyboardProxy(
         frame: CGRect(x: -2, y: -2, width: 1, height: 1)
     )
@@ -212,6 +219,8 @@ final class GPUIHostView: UIView, UITextViewDelegate {
             height: bounds.height * contentScaleFactor
         )
         if attached {
+            sendSafeArea()
+            sendKeyboardCover()
             sendGeometry()
         }
     }
@@ -244,13 +253,25 @@ final class GPUIHostView: UIView, UITextViewDelegate {
         guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
               notification.name != UIResponder.keyboardWillHideNotification
         else {
-            gpui_ios_keyboard_frame_changed(0)
+            keyboardFrameInScreen = nil
+            sendKeyboardCover()
             return
         }
 
-        let localFrame = convert(frame, from: nil)
-        let covered = bounds.intersection(localFrame)
-        gpui_ios_keyboard_frame_changed(Float(covered.isNull ? 0 : covered.height))
+        keyboardFrameInScreen = frame
+        sendKeyboardCover()
+    }
+
+    private func sendKeyboardCover() {
+        let coveredHeight: CGFloat
+        if let keyboardFrameInScreen {
+            let localFrame = convert(keyboardFrameInScreen, from: nil)
+            let covered = bounds.intersection(localFrame)
+            coveredHeight = covered.isNull ? 0 : covered.height
+        } else {
+            coveredHeight = 0
+        }
+        gpui_ios_keyboard_frame_changed(Float(coveredHeight))
     }
 
     func showKeyboard() {

@@ -36,6 +36,13 @@ priority, delayed work through `dispatch_after_f`, and realtime work to a
 named Rust thread. `CADisplayLink` calls `gpui_ios_request_frame` so animations,
 touch gesture deadlines, and fling momentum keep advancing.
 
+The host is a universal iPhone/iPad app. iPhone supports portrait and both
+landscapes; iPad additionally supports upside-down portrait. During rotation,
+UIKit forwards the new safe-area and keyboard cover before the new logical
+bounds, then `IosWindow` resizes the renderer's drawable and notifies GPUI's
+window-bounds observer. Rotation therefore crosses the shared responsive
+breakpoint without rebuilding the shell or its state.
+
 `IosTextSystem` uses CoreText for shaping and `zed-font-kit`'s CoreText loader
 for metrics and rasterization. The default family is
 `.AppleSystemUIFont`; CoreText's cascade supplies PingFang for Chinese and
