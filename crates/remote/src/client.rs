@@ -8,7 +8,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use async_tungstenite::WebSocketStream;
@@ -17,10 +17,10 @@ use serde::Deserialize;
 use smol::Async;
 use tungstenite::Message;
 
-pub use tcode_client::ConnectionState;
 pub use tcode_client::pairing::{
     PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
 };
+pub use tcode_client::{ConnectionFailure, ConnectionState};
 
 pub struct RemoteClient {
     pub to_host: Sender<String>,
@@ -225,72 +225,85 @@ async fn connection_loop(
     CERT_ERRORS.lock().unwrap().remove(&host.host_id);
     let mut buffered = VecDeque::<String>::new();
     let mut subscriptions = HashMap::<String, String>::new();
-    let mut attempt = 0_u32;
+    let mut attempt = 1_u32;
+    let mut reason = None;
     while !outgoing.is_closed() && !incoming.is_closed() {
-        attempt = attempt.saturating_add(1);
-        let _ = state.send(ConnectionState::Reconnecting { attempt }).await;
-        let mut connected = None;
-        for address in host.addrs.clone() {
-            match open_websocket(&address, &mut host, &device_name).await {
-                Ok(websocket) => {
-                    connected = Some(websocket);
-                    break;
-                }
-                Err(error) if error.contains(CERT_CHANGED) => {
-                    CERT_ERRORS.lock().unwrap().insert(host.host_id.clone());
-                    let _ = state.send(ConnectionState::Offline).await;
-                    incoming.close();
-                    return;
-                }
-                Err(_) => log::debug!("remote connection attempt failed"),
-            }
-        }
-        if let Some(mut websocket) = connected {
-            let mut ready = true;
-            for line in subscriptions.values() {
-                if websocket
-                    .send(Message::Text(line.trim_end().to_owned().into()))
+        let _ = state
+            .send(ConnectionState::Reconnecting { attempt, reason })
+            .await;
+        let failure = match race_addresses(&mut host, &device_name).await {
+            Ok(mut websocket) => {
+                let _ = state.send(ConnectionState::Syncing).await;
+                let mut failure = None;
+                for line in subscriptions.values() {
+                    if let Err(error) = send_bounded(
+                        &mut websocket,
+                        Message::Text(line.trim_end().to_owned().into()),
+                    )
                     .await
-                    .is_err()
-                {
-                    ready = false;
-                    break;
-                }
-            }
-            if ready {
-                while let Some(line) = buffered.pop_front() {
-                    if subscription_key(&line).is_some() {
-                        continue;
-                    }
-                    if websocket
-                        .send(Message::Text(line.trim_end().to_owned().into()))
-                        .await
-                        .is_err()
                     {
-                        buffered.push_front(line);
-                        ready = false;
+                        failure = Some(error);
                         break;
                     }
                 }
+                if failure.is_none() {
+                    while let Some(line) = buffered.pop_front() {
+                        if subscription_key(&line).is_some() {
+                            continue;
+                        }
+                        if let Err(error) = send_bounded(
+                            &mut websocket,
+                            Message::Text(line.trim_end().to_owned().into()),
+                        )
+                        .await
+                        {
+                            buffered.push_front(line);
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
+                match failure {
+                    Some(error) => error,
+                    None => {
+                        let (error, healthy) = relay_connected(
+                            &mut websocket,
+                            &outgoing,
+                            &incoming,
+                            &mut subscriptions,
+                            &mut buffered,
+                            &state,
+                        )
+                        .await;
+                        if healthy {
+                            attempt = 0;
+                        }
+                        error
+                    }
+                }
             }
-            if ready {
-                attempt = 0;
-                let _ = state.send(ConnectionState::Connected).await;
-                relay_connected(
-                    &mut websocket,
-                    &outgoing,
-                    &incoming,
-                    &mut subscriptions,
-                    &mut buffered,
-                )
+            Err(error) => error,
+        };
+        if failure.is_terminal() {
+            if failure == ConnectionFailure::CertificateChanged {
+                CERT_ERRORS.lock().unwrap().insert(host.host_id.clone());
+            }
+            let _ = state
+                .send(ConnectionState::Offline { reason: failure })
                 .await;
-            }
+            incoming.close();
+            return;
         }
         if outgoing.is_closed() || incoming.is_closed() {
             break;
         }
-        let backoff_attempt = attempt.clamp(1, 6);
-        let seconds = (1_u64 << (backoff_attempt - 1)).min(30);
+        reason = Some(failure);
+        let seconds = (1_u64 << attempt.clamp(1, 6).saturating_sub(1)).min(30);
+        attempt = attempt.saturating_add(1).max(1);
+        // Publish loss before sleeping, so the UI never claims this socket is alive.
+        let _ = state
+            .send(ConnectionState::Reconnecting { attempt, reason })
+            .await;
         buffer_during_backoff(
             &outgoing,
             &mut buffered,
@@ -299,53 +312,123 @@ async fn connection_loop(
         )
         .await;
     }
-    let _ = state.send(ConnectionState::Offline).await;
+    let _ = state
+        .send(ConnectionState::Offline {
+            reason: ConnectionFailure::HostClosed,
+        })
+        .await;
     incoming.close();
+}
+
+type WebSocket = WebSocketStream<futures_rustls::client::TlsStream<Async<TcpStream>>>;
+
+fn connection_failure(error: String) -> ConnectionFailure {
+    if error.contains(CERT_CHANGED) {
+        ConnectionFailure::CertificateChanged
+    } else {
+        ConnectionFailure::Unreachable
+    }
+}
+
+async fn race_addresses(
+    host: &mut PairedHost,
+    device_name: &str,
+) -> Result<WebSocket, ConnectionFailure> {
+    let mut attempts = futures_util::stream::FuturesUnordered::new();
+    for (index, address) in host.addrs.clone().into_iter().enumerate() {
+        let mut candidate = host.clone();
+        attempts.push(async move {
+            smol::Timer::after(Duration::from_millis(250 * index as u64)).await;
+            let result = futures_lite::future::race(
+                open_websocket(&address, &mut candidate, device_name),
+                async {
+                    smol::Timer::after(Duration::from_secs(15)).await;
+                    Err(ConnectionFailure::Timeout)
+                },
+            )
+            .await;
+            (result, candidate)
+        });
+    }
+    let mut failure = ConnectionFailure::Unreachable;
+    while let Some((result, candidate)) = attempts.next().await {
+        match result {
+            Ok(socket) => {
+                *host = candidate;
+                return Ok(socket);
+            }
+            Err(error) if error.is_terminal() => return Err(error),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+async fn send_bounded(socket: &mut WebSocket, message: Message) -> Result<(), ConnectionFailure> {
+    send_before(socket, message, Instant::now() + Duration::from_secs(10)).await
+}
+
+async fn send_before(
+    socket: &mut WebSocket,
+    message: Message,
+    deadline: Instant,
+) -> Result<(), ConnectionFailure> {
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
+    futures_lite::future::race(
+        async {
+            socket
+                .send(message)
+                .await
+                .map_err(|_| ConnectionFailure::Unreachable)
+        },
+        async {
+            smol::Timer::at(deadline).await;
+            Err(ConnectionFailure::Timeout)
+        },
+    )
+    .await
 }
 
 async fn open_websocket(
     address: &str,
     host: &mut PairedHost,
     device_name: &str,
-) -> Result<WebSocketStream<futures_rustls::client::TlsStream<Async<TcpStream>>>, String> {
+) -> Result<WebSocket, ConnectionFailure> {
     // A foreground reconnect can still carry the UI's original legacy record.
     // Consult the durable pin before allowing TOFU again.
     if host.fingerprint.is_empty() {
         let path = HOST_PATHS.lock().unwrap().get(&host.host_id).cloned();
         if let Some(path) = path
             && let Some(saved) = load_hosts(&path)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| connection_failure(e.to_string()))?
                 .into_iter()
                 .find(|saved| saved.host_id == host.host_id)
         {
             host.fingerprint = saved.fingerprint;
         }
     }
-    let socket = socket_addr(address, host.port)?;
-    let (config, seen) = tls_client_config(&host.fingerprint)?;
-    let stream = futures_lite::future::race(
-        async {
-            let tcp = Async::<TcpStream>::connect(socket)
-                .await
-                .map_err(tls_error)?;
-            futures_rustls::TlsConnector::from(config)
-                .connect(ServerName::try_from("tcode.local").unwrap(), tcp)
-                .await
-                .map_err(tls_error)
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(5)).await;
-            Err("connection timed out".into())
-        },
-    )
-    .await?;
+    let socket = smol::unblock({
+        let address = address.to_owned();
+        let port = host.port;
+        move || socket_addr(&address, port)
+    })
+    .await
+    .map_err(connection_failure)?;
+    let (config, seen) = tls_client_config(&host.fingerprint).map_err(connection_failure)?;
+    let tcp = Async::<TcpStream>::connect(socket)
+        .await
+        .map_err(|e| connection_failure(tls_error(e)))?;
+    let stream = futures_rustls::TlsConnector::from(config)
+        .connect(ServerName::try_from("tcode.local").unwrap(), tcp)
+        .await
+        .map_err(|e| connection_failure(tls_error(e)))?;
     if host.fingerprint.is_empty() {
-        persist_tofu_pin(host, &seen.lock().unwrap())?;
+        persist_tofu_pin(host, &seen.lock().unwrap()).map_err(connection_failure)?;
     }
     let url = format!("wss://{}/ws", authority(address, host.port));
     let (mut websocket, _) = async_tungstenite::client_async(url, stream)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| connection_failure(e.to_string()))?;
     let hello = serde_json::json!({
         "type": "hello",
         "protocol_version": tcode_protocol::PROTOCOL_VERSION,
@@ -355,11 +438,11 @@ async fn open_websocket(
     websocket
         .send(Message::Text(hello.to_string().into()))
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| connection_failure(error.to_string()))?;
     match websocket.next().await {
         Some(Ok(Message::Text(text))) => {
-            let value: serde_json::Value =
-                serde_json::from_str(&text).map_err(|error| error.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| connection_failure(error.to_string()))?;
             if value.get("type").and_then(serde_json::Value::as_str) == Some("hello_ok")
                 && value
                     .get("protocol_version")
@@ -368,12 +451,19 @@ async fn open_websocket(
             {
                 Ok(websocket)
             } else {
-                Err("host rejected remote hello".into())
+                Err(if value["type"].as_str() == Some("hello_rejected") {
+                    ConnectionFailure::hello_rejected(value["reason"].as_str())
+                } else if value["type"].as_str() == Some("hello_ok") {
+                    ConnectionFailure::ProtocolMismatch
+                } else {
+                    ConnectionFailure::Unreachable
+                })
             }
         }
-        Some(Ok(_)) => Err("host sent a non-text hello response".into()),
-        Some(Err(error)) => Err(error.to_string()),
-        None => Err("host closed during hello".into()),
+        Some(Ok(Message::Close(_))) => Err(ConnectionFailure::HostClosed),
+        Some(Ok(_)) => Err(ConnectionFailure::Unreachable),
+        Some(Err(error)) => Err(connection_failure(error.to_string())),
+        None => Err(ConnectionFailure::HostClosed),
     }
 }
 
@@ -397,55 +487,95 @@ fn persist_tofu_pin(host: &mut PairedHost, observed: &str) -> Result<(), String>
 }
 
 async fn relay_connected(
-    websocket: &mut WebSocketStream<futures_rustls::client::TlsStream<Async<TcpStream>>>,
+    websocket: &mut WebSocket,
     outgoing: &Receiver<String>,
     incoming: &Sender<String>,
     subscriptions: &mut HashMap<String, String>,
     buffered: &mut VecDeque<String>,
-) {
+    state: &Sender<ConnectionState>,
+) -> (ConnectionFailure, bool) {
+    let mut healthy = false;
+    let mut connected = false;
+    let mut deadline = Instant::now() + Duration::from_secs(10);
+    let mut probing = false;
     loop {
         enum Input {
             Outgoing(Result<String, async_channel::RecvError>),
             WebSocket(Option<Result<Message, tungstenite::Error>>),
+            Timer,
         }
         let input = {
             let outbound = outgoing.recv().fuse();
             let websocket_input = websocket.next().fuse();
-            futures_util::pin_mut!(outbound, websocket_input);
+            let timer = futures_util::FutureExt::fuse(smol::Timer::at(deadline));
+            futures_util::pin_mut!(outbound, websocket_input, timer);
             futures_util::select! {
                 line = outbound => Input::Outgoing(line),
                 message = websocket_input => Input::WebSocket(message),
+                _ = timer => Input::Timer,
             }
         };
-        match input {
+        if matches!(&input, Input::WebSocket(Some(Ok(message))) if !matches!(message, Message::Close(_)))
+        {
+            healthy = true;
+            probing = false;
+            deadline = Instant::now() + Duration::from_secs(10);
+        }
+        let failure = match input {
+            Input::Timer if probing => Some(ConnectionFailure::Timeout),
+            Input::Timer => {
+                probing = true;
+                // Keep the silence window absolute so timer scheduling does not
+                // accumulate beyond the 10 + 20 second liveness budget.
+                deadline += Duration::from_secs(20);
+                send_before(websocket, Message::Ping(Vec::new().into()), deadline)
+                    .await
+                    .err()
+            }
             Input::Outgoing(Ok(line)) => {
                 remember_subscription(&line, subscriptions);
-                if websocket
-                    .send(Message::Text(line.trim_end().to_owned().into()))
-                    .await
-                    .is_err()
-                {
+                let send_deadline = if probing {
+                    deadline
+                } else {
+                    Instant::now() + Duration::from_secs(10)
+                };
+                let failure = send_before(
+                    websocket,
+                    Message::Text(line.trim_end().to_owned().into()),
+                    send_deadline,
+                )
+                .await
+                .err();
+                if failure.is_some() {
                     buffered.push_back(line);
-                    return;
                 }
+                failure
             }
-            Input::Outgoing(Err(_)) => return,
+            Input::Outgoing(Err(_)) => Some(ConnectionFailure::HostClosed),
             Input::WebSocket(Some(Ok(Message::Text(line)))) => {
-                let mut line = line.to_string();
-                if !line.ends_with('\n') {
-                    line.push('\n');
+                if !connected {
+                    connected = true;
+                    let _ = state.send(ConnectionState::Connected).await;
                 }
-                if incoming.send(line).await.is_err() {
-                    return;
-                }
+                incoming
+                    .send(format!("{}\n", line.trim_end()))
+                    .await
+                    .err()
+                    .map(|_| ConnectionFailure::HostClosed)
             }
             Input::WebSocket(Some(Ok(Message::Ping(payload)))) => {
-                if websocket.send(Message::Pong(payload)).await.is_err() {
-                    return;
-                }
+                send_before(websocket, Message::Pong(payload), deadline)
+                    .await
+                    .err()
             }
-            Input::WebSocket(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) => return,
-            Input::WebSocket(Some(Ok(_))) => {}
+            Input::WebSocket(Some(Ok(Message::Close(_))) | None) => {
+                Some(ConnectionFailure::HostClosed)
+            }
+            Input::WebSocket(Some(Err(_))) => Some(ConnectionFailure::Unreachable),
+            Input::WebSocket(Some(Ok(_))) => None,
+        };
+        if let Some(failure) = failure {
+            return (failure, healthy);
         }
     }
 }
@@ -520,8 +650,7 @@ static PIN_MIGRATION: Mutex<()> = Mutex::new(());
 static HOST_PATHS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static CERT_ERRORS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-/// The shared ConnectionState stays transport-neutral; Offline carries this
-/// distinguishable reason through the native host's status accessor.
+/// Retain the repair affordance for saved hosts after detaching their live link.
 pub fn certificate_changed(host_id: &str) -> bool {
     CERT_ERRORS.lock().unwrap().contains(host_id)
 }

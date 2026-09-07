@@ -295,10 +295,12 @@ settings page.
 | State | Presentation |
 | --- | --- |
 | Connecting | The initial index has not arrived; the thread list shows a loading skeleton |
-| Connected | Index ready and the link healthy; no status banner |
-| Reconnecting | Content is kept; the banner names the retry attempt |
-| Offline | Shown after 30 seconds disconnected; transient failures keep retrying quietly |
-| Certificate changed | An explicit error and an **Add again** entry point outrank every other status; native clients stop retrying that identity |
+| Syncing | Hello accepted; waiting for the first host message |
+| Connected | First host message received and the link healthy; no status banner |
+| Reconnecting | Content is kept; the banner names the retry attempt and failure reason |
+| Offline | Terminal certificate, authentication or protocol failure; the banner explains how to recover |
+| Certificate changed / authentication rejected | An explicit error and a **Pair again** entry point; retrying stops |
+| Protocol mismatch | **Update the app**; retrying stops |
 
 Offline keeps the last received replica readable and disables writes; visited
 threads keep their events, and unvisited ones may have only their list summary.
@@ -724,7 +726,13 @@ answer from a superseded attempt is discarded rather than applied; and a client
 that can only reach the origin that served it (a browser) fixes the address and
 port, hides discovery, and hides the camera scan unless it has one. A machine
 whose certificate no longer matches the pinned one cannot be connected to —
-the row offers **Add again** instead.
+the row offers **Pair again** instead. Rejected authentication offers the same
+repair action. Protocol mismatch says **Update the app**. The shell banner and
+attached machine row show the connection failure reason; syncing and reconnecting
+use a warning dot, terminal offline failures use a danger dot, and only a
+connection that has received its first host message uses a success dot. Syncing
+remains visible between hello acceptance and that first message. Connection loss
+updates the banner immediately, before the retry delay.
 
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 

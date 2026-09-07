@@ -396,17 +396,25 @@ does not add encryption to them.
 | Connection rejected after adding the machine | Check whether the device was removed. Add the machine again with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
 | Preview cannot load a dev server | Make the dev server listen on all interfaces, open its own port and check the first address saved for the added machine. The tcode port does not carry the preview page connection. |
 
-**Connecting…** means this device is opening the machine. **Reconnecting ·
-attempt N** means it is retrying a lost connection. Retry delays grow from one
-to thirty seconds. This device shows **Offline** after thirty seconds without a
-connection, but transport retries continue. Bring the app to the foreground or
-make the browser page visible to retry promptly.
+**Syncing…** means the authenticated socket is open and waiting for its first
+host message. **Reconnecting · attempt N** appears immediately when a connection
+is lost, with its failure reason. Retry delays grow from one to thirty seconds;
+only traffic received after the hello handshake resets backoff. Native clients
+race saved addresses at 250 ms intervals, with one 15 s budget per address for
+TCP, TLS, WebSocket upgrade and hello. The first successful address wins.
 
-A disconnected device keeps the cached thread content it has for reading and
-disables writes; unvisited threads may have only cached list information. After
-reconnecting, subscriptions resume and thread records catch up. A certificate
-mismatch is different from a temporary network failure: it stops the native
-connection until you resolve the identity change.
+Native clients probe after 10 s without an inbound frame and reconnect if no
+frame arrives in the next 20 s. Every connected write has a 10 s deadline.
+Browsers send an application ping after 15 s without an inbound message and
+reconnect after another 20 s without a reply. Browser timers may be delayed in
+background tabs; making the page visible or coming online wakes reconnection.
+
+A disconnected device keeps cached thread content for reading and disables
+writes; unvisited threads may have only cached list information. Subscriptions
+resume after reconnecting. Temporary network failures keep retrying. Certificate
+changes and rejected authentication stop at **Offline** with **Pair again**;
+protocol mismatches stop with **Update the app**. Compare a changed security ID
+through a trusted channel before pairing again.
 
 ## Limits
 

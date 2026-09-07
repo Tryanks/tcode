@@ -931,9 +931,17 @@ remote:
     empty: "尚无设备连接过这台主机。"
     paired_on: "连接于 %{date}"
     revoke: "移除"
+  failure:
+    unreachable: "无法连接主机"
+    timeout: "连接超时"
+    certificate_changed: "安全标识已变化 · 重新配对"
+    authentication_rejected: "访问被拒绝 · 重新配对"
+    protocol_mismatch: "协议版本不匹配 · 更新应用"
+    host_closed: "主机已关闭连接"
   banner:
+    syncing: "正在与 %{host} 同步…"
     reconnecting: "正在重新连接 %{host}…（第 %{attempt} 次）"
-    offline: "离线 —— 无法连接到 %{host}"
+    offline: "离线 —— %{host}"
 
 hosts:
   title: "主机"
@@ -948,7 +956,7 @@ hosts:
   last_connected: "%{ago}连接过"
   never_connected: "从未连接"
   certificate_changed: "安全标识已变化 —— 请重新添加这台主机以确认新的安全标识。"
-  pair_again: "重新添加"
+  pair_again: "重新配对"
   nearby: "附近的主机"
   nearby_empty: "附近没有可添加的主机。"
   nearby_searching: "正在查找附近的主机…"

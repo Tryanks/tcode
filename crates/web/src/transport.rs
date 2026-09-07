@@ -5,7 +5,11 @@ use std::collections::{BTreeMap, VecDeque};
 
 use async_channel::{Receiver, Sender};
 use futures_lite::future::race;
-use tcode_client::{ConnectionState, host::Transport};
+use tcode_client::{
+    ConnectionFailure, ConnectionState,
+    heartbeat::{Heartbeat, Tick},
+    host::Transport,
+};
 use wasm_bindgen::{JsCast as _, prelude::*};
 
 use crate::host::window;
@@ -146,7 +150,7 @@ pub fn connect(token: String, device_name: String) -> Transport {
             },
         )
         .await;
-        let _ = state_tx.try_send(ConnectionState::Offline);
+
         incoming.close();
         outgoing.close();
     });
@@ -189,11 +193,12 @@ async fn connection_loop(
     let mut buffered = VecDeque::<String>::new();
     let mut attempt = 1_u32;
     let mut delay = 0;
+    let mut reason = None;
     loop {
         if outgoing.is_closed() {
             return;
         }
-        let _ = state.try_send(ConnectionState::Reconnecting { attempt });
+        let _ = state.try_send(ConnectionState::Reconnecting { attempt, reason });
         // Each attempt has its own event queue, including foreground wakeups.
         let (tx, events) = async_channel::unbounded();
         let wake_tx = tx.clone();
@@ -221,9 +226,12 @@ async fn connection_loop(
         // Discard any backoff timer/wakeup already queued before opening.
         while events.try_recv().is_ok() {}
         let mut immediate = false;
+        reason = Some(ConnectionFailure::Unreachable);
         if let Ok(socket) = Socket::new(&tx) {
-            let mut handshake_timer = Some(Timer::new(5000, tx.clone()));
+            let mut timer = Some(Timer::new(15000, tx.clone()));
             let mut ready = false;
+            let mut connected = false;
+            let mut heartbeat = Heartbeat::new(now_ms());
             loop {
                 match next(outgoing, &events).await {
                     Input::Line(Err(_)) => return,
@@ -249,13 +257,33 @@ async fn connection_loop(
                     Input::Event(Event::Text(line)) if !ready => {
                         let hello: serde_json::Value =
                             serde_json::from_str(&line).unwrap_or_default();
+                        let failure = if hello["type"].as_str() == Some("hello_rejected") {
+                            Some(ConnectionFailure::hello_rejected(hello["reason"].as_str()))
+                        } else if hello["type"].as_str() == Some("hello_ok")
+                            && hello["protocol_version"].as_u64()
+                                != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                        {
+                            Some(ConnectionFailure::ProtocolMismatch)
+                        } else {
+                            None
+                        };
+                        if let Some(failure) = failure {
+                            if failure.is_terminal() {
+                                let _ =
+                                    state.try_send(ConnectionState::Offline { reason: failure });
+                                return;
+                            }
+                            reason = Some(failure);
+                            break;
+                        }
                         if hello["type"].as_str() != Some("hello_ok")
                             || hello["protocol_version"].as_u64()
                                 != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
                         {
                             break;
                         }
-                        handshake_timer.take();
+                        let _ = state.try_send(ConnectionState::Syncing);
+                        timer.take();
                         if subscriptions
                             .values()
                             .any(|line| socket.send(line).is_err())
@@ -274,10 +302,17 @@ async fn connection_loop(
                             break;
                         }
                         ready = true;
-                        attempt = 0;
-                        let _ = state.try_send(ConnectionState::Connected);
+                        heartbeat.received(now_ms());
+                        timer = Some(Timer::new(15000, tx.clone()));
                     }
                     Input::Event(Event::Text(line)) => {
+                        heartbeat.received(now_ms());
+                        timer = Some(Timer::new(15000, tx.clone()));
+                        attempt = 0;
+                        if !connected {
+                            connected = true;
+                            let _ = state.try_send(ConnectionState::Connected);
+                        }
                         if incoming.try_send(format!("{}\n", line.trim_end())).is_err() {
                             return;
                         }
@@ -286,8 +321,42 @@ async fn connection_loop(
                         immediate = true;
                         break;
                     }
-                    Input::Event(Event::Timeout) if ready => {}
-                    Input::Event(Event::Lost | Event::Timeout) => break,
+                    Input::Event(Event::Timeout) if ready => {
+                        match heartbeat.tick(now_ms()) {
+                            Tick::Wait(ms) => timer = Some(Timer::new(ms as i32, tx.clone())),
+                            Tick::Ping => {
+                                // ID zero is reserved for transport probes; HostLink starts at one.
+                                let ping = tcode_protocol::ClientMessage {
+                                    id: 0,
+                                    payload: tcode_protocol::ClientPayload::Query(
+                                        tcode_protocol::Query::Ping,
+                                    ),
+                                };
+                                if socket
+                                    .send(
+                                        &serde_json::to_string(&ping)
+                                            .expect("heartbeat serialization"),
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                timer = Some(Timer::new(20000, tx.clone()));
+                            }
+                            Tick::Lost => {
+                                reason = Some(ConnectionFailure::Timeout);
+                                break;
+                            }
+                        }
+                    }
+                    Input::Event(Event::Timeout) => {
+                        reason = Some(ConnectionFailure::Timeout);
+                        break;
+                    }
+                    Input::Event(Event::Lost) => {
+                        reason = Some(ConnectionFailure::HostClosed);
+                        break;
+                    }
                 }
             }
         }
@@ -310,4 +379,11 @@ fn remember(
     } else {
         buffered.push_back(line);
     }
+}
+
+fn now_ms() -> u64 {
+    window()
+        .performance()
+        .expect("browser performance clock")
+        .now() as u64
 }

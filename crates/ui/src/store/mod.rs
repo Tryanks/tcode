@@ -2732,7 +2732,10 @@ mod tests {
             workspace.read_with(cx, |store, _| store.session_records["reconnect"].len() == 3)
         });
         host.link()
-            .set_connection_state(tcode_client::ConnectionState::Reconnecting { attempt: 1 });
+            .set_connection_state(tcode_client::ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
         host.link()
             .set_connection_state(tcode_client::ConnectionState::Connected);
         command(&host, Command::ClearRelaunchMarker);

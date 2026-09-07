@@ -491,7 +491,7 @@ async fn websocket(
     {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
-            "reason": "protocol version mismatch",
+            "reason": "protocol",
             "expected": tcode_protocol::PROTOCOL_VERSION,
             "received": hello.protocol_version
         });
@@ -509,7 +509,7 @@ async fn websocket(
     let Some(token) = token.map(|hello| hello.token) else {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
-            "reason": "invalid hello or token"
+            "reason": "token"
         });
         let _ = websocket
             .send(Message::Text(rejected.to_string().into()))

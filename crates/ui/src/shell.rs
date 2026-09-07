@@ -1568,15 +1568,27 @@ impl AppShell {
         let host = store.remote_host_name()?;
         let (text, accent) = match store.connection_state() {
             tcode_client::ConnectionState::Connected => return None,
-            tcode_client::ConnectionState::Reconnecting { attempt } => (
+            tcode_client::ConnectionState::Syncing => (
+                crate::tr!("remote.banner.syncing", host = host).into_owned(),
+                cx.theme().warning,
+            ),
+            tcode_client::ConnectionState::Reconnecting { attempt, .. } => (
                 crate::tr!("remote.banner.reconnecting", host = host, attempt = attempt)
                     .into_owned(),
                 cx.theme().warning,
             ),
-            tcode_client::ConnectionState::Offline => (
+            tcode_client::ConnectionState::Offline { .. } => (
                 crate::tr!("remote.banner.offline", host = host).into_owned(),
                 cx.theme().danger,
             ),
+        };
+        let text = match store.connection_state() {
+            tcode_client::ConnectionState::Offline { reason }
+            | tcode_client::ConnectionState::Reconnecting {
+                reason: Some(reason),
+                ..
+            } => format!("{text} · {}", crate::remote::failure_label(*reason)),
+            _ => text,
         };
         let reconnecting = matches!(
             store.connection_state(),

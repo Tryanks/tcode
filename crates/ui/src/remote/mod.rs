@@ -304,8 +304,11 @@ impl RemotePanel {
             .map(|store| store.read(cx).connection_state())
         {
             Some(tcode_client::ConnectionState::Connected) | None => cx.theme().success,
-            Some(tcode_client::ConnectionState::Reconnecting { .. }) => cx.theme().warning,
-            Some(tcode_client::ConnectionState::Offline) => cx.theme().danger,
+            Some(
+                tcode_client::ConnectionState::Syncing
+                | tcode_client::ConnectionState::Reconnecting { .. },
+            ) => cx.theme().warning,
+            Some(tcode_client::ConnectionState::Offline { .. }) => cx.theme().danger,
         };
         div()
             .flex_none()
@@ -362,7 +365,24 @@ impl RemotePanel {
     /// matches the pinned one refuses to connect and offers repair instead:
     /// pairing again is the only way to accept a new certificate.
     fn host_row(&self, host: &PairedHost, current: bool, cx: &mut Context<Self>) -> AnyElement {
-        let changed = self
+        let reason = if current {
+            self.store
+                .as_ref()
+                .and_then(|store| match store.read(cx).connection_state() {
+                    tcode_client::ConnectionState::Offline { reason } => Some(*reason),
+                    tcode_client::ConnectionState::Reconnecting { reason, .. } => *reason,
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        let changed = matches!(
+            reason,
+            Some(
+                tcode_client::ConnectionFailure::CertificateChanged
+                    | tcode_client::ConnectionFailure::AuthenticationRejected
+            )
+        ) || self
             .client(cx)
             .is_some_and(|client| client.certificate_changed(&host.host_id));
         let address = host
@@ -409,16 +429,18 @@ impl RemotePanel {
                         .truncate()
                         .child(subtitle),
                 )
-                .when(changed, |column| {
+                .when(changed || reason.is_some(), |column| {
                     column.child(
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().danger_foreground)
-                            .child(crate::tr!("hosts.certificate_changed")),
+                            .child(failure_label(reason.unwrap_or(
+                                tcode_client::ConnectionFailure::CertificateChanged,
+                            ))),
                     )
                 }),
         )
-        .when(current && !changed, |row| row.child(self.status_glyph(cx)))
+        .when(current, |row| row.child(self.status_glyph(cx)))
         .when(changed, |row| {
             row.child(
                 Button::new(SharedString::from(format!("repair-{}", host.host_id)))
@@ -855,4 +877,18 @@ impl RemotePanel {
         cx.global::<ClientAttachment>().remove_host(&action.0);
         cx.notify();
     }
+}
+
+/// The same recovery wording is used in the shell and the machine row.
+pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
+    use tcode_client::ConnectionFailure::*;
+    match reason {
+        Unreachable => crate::tr!("remote.failure.unreachable"),
+        Timeout => crate::tr!("remote.failure.timeout"),
+        CertificateChanged => crate::tr!("remote.failure.certificate_changed"),
+        AuthenticationRejected => crate::tr!("remote.failure.authentication_rejected"),
+        ProtocolMismatch => crate::tr!("remote.failure.protocol_mismatch"),
+        HostClosed => crate::tr!("remote.failure.host_closed"),
+    }
+    .into_owned()
 }

@@ -1,5 +1,6 @@
 //! Transport-agnostic client endpoint for a tcode host.
 
+pub mod heartbeat;
 pub mod host;
 pub mod pairing;
 
@@ -17,8 +18,43 @@ use tcode_protocol::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
     Connected,
-    Reconnecting { attempt: u32 },
-    Offline,
+    Syncing,
+    Reconnecting {
+        attempt: u32,
+        reason: Option<ConnectionFailure>,
+    },
+    Offline {
+        reason: ConnectionFailure,
+    },
+}
+
+/// Transport-neutral cause of a connection failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionFailure {
+    Unreachable,
+    Timeout,
+    CertificateChanged,
+    AuthenticationRejected,
+    ProtocolMismatch,
+    HostClosed,
+}
+
+impl ConnectionFailure {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::CertificateChanged | Self::AuthenticationRejected | Self::ProtocolMismatch
+        )
+    }
+
+    /// Older hosts did not send machine-readable rejection reasons.
+    pub fn hello_rejected(reason: Option<&str>) -> Self {
+        match reason {
+            Some("token") => Self::AuthenticationRejected,
+            Some("protocol") => Self::ProtocolMismatch,
+            _ => Self::Unreachable,
+        }
+    }
 }
 
 struct HostLinkInner {
@@ -363,6 +399,22 @@ mod tests {
     use tcode_protocol::{IndexSnapshot, ServerEvent};
 
     #[test]
+    fn hello_rejection_reasons_preserve_legacy_retry_behavior() {
+        for (wire, expected) in [
+            (Some("token"), ConnectionFailure::AuthenticationRejected),
+            (Some("protocol"), ConnectionFailure::ProtocolMismatch),
+            (None, ConnectionFailure::Unreachable),
+            (
+                Some("invalid hello or token"),
+                ConnectionFailure::Unreachable,
+            ),
+            (Some("future reason"), ConnectionFailure::Unreachable),
+        ] {
+            assert_eq!(ConnectionFailure::hello_rejected(wire), expected);
+        }
+    }
+
+    #[test]
     fn reconnect_replays_the_cursor_applied_by_the_store_and_retired_topics() {
         let (to_host, outgoing) = async_channel::unbounded();
         let (_incoming, from_host) = async_channel::unbounded();
@@ -382,14 +434,20 @@ mod tests {
             updated.payload,
             ClientPayload::Subscribe(Subscription { after: Some(7), .. })
         ));
-        link.set_connection_state(ConnectionState::Reconnecting { attempt: 1 });
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
         link.set_connection_state(ConnectionState::Connected);
         let replay = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert_eq!(updated.payload, replay.payload);
         link.unsubscribe(Subscription { topic, after: None })
             .unwrap();
         outgoing.try_recv().unwrap();
-        link.set_connection_state(ConnectionState::Reconnecting { attempt: 2 });
+        link.set_connection_state(ConnectionState::Reconnecting {
+            attempt: 2,
+            reason: None,
+        });
         link.set_connection_state(ConnectionState::Connected);
         assert!(matches!(
             tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap())

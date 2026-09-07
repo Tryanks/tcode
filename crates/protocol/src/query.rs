@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Query {
+    Ping,
     ListActiveWorkspace {
         session_id: String,
     },
@@ -75,6 +76,7 @@ pub const MAX_THREAD_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum QueryResponse {
+    Pong,
     ActiveWorkspace(Vec<PathEntry>),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),

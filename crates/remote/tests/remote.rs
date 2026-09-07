@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
-use tcode_remote::client::{ConnectionState, connect, pair};
+use tcode_remote::client::{ConnectionFailure, ConnectionState, connect, pair};
 use tcode_remote::{HostMux, RemoteConfig, serve};
 use tungstenite::Message;
 
@@ -182,8 +182,8 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     let host_b = pair("127.0.0.1", port, &code_b.code, "B").unwrap();
     let client_a = connect(host_a, "A".into());
     let client_b = connect(host_b, "B".into());
-    wait_state(&client_a, ConnectionState::Connected);
-    wait_state(&client_b, ConnectionState::Connected);
+    wait_state(&client_a, ConnectionState::Syncing);
+    wait_state(&client_b, ConnectionState::Syncing);
     let subscribe = |id| {
         json!({"id": id, "payload": {"type": "subscribe", "content": {"topic": "index"}}})
             .to_string()
@@ -194,6 +194,8 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     recv_type(&client_b, "event", None);
     recv_type(&client_a, "ack", Some(10));
     recv_type(&client_b, "ack", Some(20));
+    wait_state(&client_a, ConnectionState::Connected);
+    wait_state(&client_b, ConnectionState::Connected);
     let create = json!({
         "id": 11,
         "payload": {"type": "command", "content": {"type": "create_project", "content": {"root": "/tmp/project"}}}
@@ -213,7 +215,13 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     }
 
     server.shutdown();
-    wait_state(&client_a, ConnectionState::Reconnecting { attempt: 1 });
+    wait_state(
+        &client_a,
+        ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: Some(ConnectionFailure::HostClosed),
+        },
+    );
     let restarted = serve(mux, config(data.0.clone(), port)).unwrap();
     wait_state(&client_a, ConnectionState::Connected);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -258,6 +266,7 @@ fn wrong_token_gets_rejected_and_closed() {
         };
         let reply: Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(reply["type"], "hello_rejected");
+        assert_eq!(reply["reason"], "token");
         assert!(matches!(
             websocket.next().await,
             None | Some(Ok(Message::Close(_)))
@@ -311,6 +320,7 @@ fn devices_are_listed_and_revoking_refuses_the_token() {
         };
         let reply: Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(reply["type"], "hello_rejected");
+        assert_eq!(reply["reason"], "token");
     });
     server.shutdown();
 }
@@ -384,7 +394,7 @@ fn tls_pinned_handshake_and_tofu_pairing() {
     let host = pair_pinned("127.0.0.1", port, &code.code, "pinned", &code.fp).unwrap();
     assert_eq!(host.fingerprint, code.fp);
     let client = connect(host, "pinned".into());
-    wait_state(&client, ConnectionState::Connected);
+    wait_state(&client, ConnectionState::Syncing);
     client.to_host.close();
     let code = server.new_pairing_code();
     let mut host = pair("127.0.0.1", port, &code.code, "TOFU").unwrap();
@@ -392,7 +402,12 @@ fn tls_pinned_handshake_and_tofu_pairing() {
     host.fingerprint = wrong_pin;
     let id = host.host_id.clone();
     let client = connect(host, "changed".into());
-    wait_state(&client, ConnectionState::Offline);
+    wait_state(
+        &client,
+        ConnectionState::Offline {
+            reason: ConnectionFailure::CertificateChanged,
+        },
+    );
     assert!(tcode_remote::client::certificate_changed(&id));
     other_server.shutdown();
     server.shutdown();
@@ -410,7 +425,7 @@ fn legacy_first_connect_persists_pin_and_identity_survives_restart() {
     host.fingerprint.clear();
     tcode_remote::client::save_hosts(&client_data.0, &[host.clone()]).unwrap();
     let client = connect(host.clone(), "legacy".into());
-    wait_state(&client, ConnectionState::Connected);
+    wait_state(&client, ConnectionState::Syncing);
     let hosts = tcode_remote::client::load_hosts(&client_data.0).unwrap();
     assert_eq!(hosts[0].fingerprint, code.fp);
     client.to_host.close();
@@ -420,7 +435,12 @@ fn legacy_first_connect_persists_pin_and_identity_survives_restart() {
     let other_server = serve(other_mux, config(other.0.clone(), 0)).unwrap();
     host.port = other_server.local_addr().port();
     let retry = connect(host.clone(), "stale legacy UI".into());
-    wait_state(&retry, ConnectionState::Offline);
+    wait_state(
+        &retry,
+        ConnectionState::Offline {
+            reason: ConnectionFailure::CertificateChanged,
+        },
+    );
     assert!(tcode_remote::client::certificate_changed(&host.host_id));
     assert_eq!(
         tcode_remote::client::load_hosts(&client_data.0).unwrap()[0].fingerprint,
@@ -464,5 +484,80 @@ fn listener_never_serves_plaintext_http() {
     let mut reply = [0u8; 512];
     let read = socket.read(&mut reply).unwrap_or(0);
     assert!(!reply[..read].starts_with(b"HTTP/"));
+    server.shutdown();
+}
+
+#[test]
+fn upgrade_stall_uses_the_remaining_handshake_budget() {
+    let data = TestDir::new();
+    let (mux, _) = fake_host();
+    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
+    let code = server.new_pairing_code();
+    let mut host = pair(
+        "127.0.0.1",
+        server.local_addr().port(),
+        &code.code,
+        "deadline",
+    )
+    .unwrap();
+    let cert = rustls::pki_types::CertificateDer::from(
+        std::fs::read(data.0.join("remote-cert.der")).unwrap(),
+    );
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
+        std::fs::read(data.0.join("remote-key.der")).unwrap(),
+    );
+    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert], key.into())
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    host.port = listener.local_addr().unwrap().port();
+    let (upgraded, saw_tls) = async_channel::bounded(1);
+    let (release, held) = async_channel::bounded::<()>(1);
+    let fixture = std::thread::spawn(move || {
+        smol::block_on(async {
+            let listener = smol::Async::new(listener).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let _tls = futures_rustls::TlsAcceptor::from(Arc::new(tls))
+                .accept(stream)
+                .await
+                .unwrap();
+            upgraded.send(()).await.unwrap();
+            // Keep the authenticated TCP/TLS connection open, but never answer the upgrade.
+            let _ = held.recv().await;
+        })
+    });
+    let start = Instant::now();
+    let client = connect(host, "deadline".into());
+    saw_tls.recv_blocking().unwrap();
+    smol::block_on(async {
+        futures_lite::future::race(
+            async {
+                loop {
+                    if let ConnectionState::Reconnecting {
+                        reason: Some(reason),
+                        ..
+                    } = client.state.recv().await.unwrap()
+                    {
+                        assert_eq!(reason, ConnectionFailure::Timeout);
+                        break;
+                    }
+                }
+            },
+            async {
+                smol::Timer::after(Duration::from_millis(15_250)).await;
+                panic!("upgrade escaped the handshake deadline");
+            },
+        )
+        .await;
+    });
+    assert!(start.elapsed() < Duration::from_millis(15_250));
+    client.to_host.close();
+    release.close();
+    fixture.join().unwrap();
     server.shutdown();
 }

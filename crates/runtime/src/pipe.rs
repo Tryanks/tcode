@@ -526,6 +526,7 @@ fn dispatch_query(
     query: Query,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
+        Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app
                 .resident(&session_id)
