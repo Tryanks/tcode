@@ -1,0 +1,170 @@
+name: Desktop check
+description: Run the existing desktop checks with Cargo-Rail's validated package scope.
+
+inputs:
+  artifact:
+    description: Name of the uploaded Cargo-Rail plan bundle.
+    required: true
+  host-full:
+    description: Whether repository policy widened host checks to the workspace.
+    required: true
+  build:
+    description: Whether cargo.build is required.
+    required: true
+  clippy:
+    description: Whether cargo.clippy is required.
+    required: true
+  test:
+    description: Whether cargo.test is required.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download validated CI plan
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact }}
+        path: ${{ runner.temp }}/ci-plan
+
+    - name: Install native Cargo-Rail 0.25.0
+      shell: bash
+      run: python3 .github/scripts/install_cargo_rail.py
+
+    - name: Verify CI plan
+      shell: bash
+      env:
+        PLAN_DIR: ${{ runner.temp }}/ci-plan
+      run: |
+        chmod +x "$PLAN_DIR/read.py"
+        python3 "$PLAN_DIR/read.py" verify-checkout "$PLAN_DIR/plan.json"
+
+    - name: Enforce process helper boundaries
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        violations=0
+
+        smol_unblock_violations="$(
+          grep -rn "smol::unblock" crates --include="*.rs" \
+            | grep -v -e "crates/runtime/src/host.rs:" -e "crates/agent/src/process.rs:" \
+            | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' \
+            || true
+        )"
+        if [[ -n "$smol_unblock_violations" ]]; then
+          echo "Direct smol::unblock calls found outside approved helpers:"
+          echo "$smol_unblock_violations"
+          violations=1
+        fi
+
+        command_new_violations="$(
+          grep -rn "Command::new(" crates --include="*.rs" \
+            | grep -v -e "crates/services/src/process.rs:" -e "crates/agent/src/process.rs:" \
+            -e "crates/voice/build.rs:" \
+            | grep -v '^[^:]*:[0-9]*:[[:space:]]*//' \
+            || true
+        )"
+        if [[ -n "$command_new_violations" ]]; then
+          echo "Direct Command::new calls found outside approved helpers:"
+          echo "$command_new_violations"
+          violations=1
+        fi
+
+        if (( violations != 0 )); then
+          exit 1
+        fi
+
+    - name: Disable Windows Defender real-time scanning
+      if: runner.os == 'Windows'
+      shell: pwsh
+      continue-on-error: true
+      run: Set-MpPreference -DisableRealtimeMonitoring $true
+
+    - name: Install stable Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache Cargo build data
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ci-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential clang cmake pkg-config libssl-dev libzstd-dev \
+          libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-dev \
+          libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libgbm-dev \
+          libvulkan-dev xvfb
+        if cargo tree -e normal -i glib-sys >/dev/null 2>&1; then
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev
+        fi
+
+    - name: Check formatting
+      shell: bash
+      run: cargo fmt --all --check
+
+    - name: Run Clippy
+      if: inputs.clippy == 'true'
+      shell: bash
+      env:
+        HOST_FULL: ${{ inputs.host-full }}
+        PLAN_DIR: ${{ runner.temp }}/ci-plan
+      run: |
+        full=()
+        if [[ "$HOST_FULL" == true ]]; then
+          full+=(--host-full)
+        fi
+        python3 .github/scripts/run_rail_cargo.py \
+          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --work cargo.clippy "${full[@]}" clippy --all-targets --locked -- -D warnings
+
+    - name: Build affected packages
+      if: inputs.build == 'true'
+      shell: bash
+      env:
+        HOST_FULL: ${{ inputs.host-full }}
+        PLAN_DIR: ${{ runner.temp }}/ci-plan
+      run: |
+        full=()
+        if [[ "$HOST_FULL" == true ]]; then
+          full+=(--host-full)
+        fi
+        python3 .github/scripts/run_rail_cargo.py \
+          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --work cargo.build "${full[@]}" build --locked
+
+    - name: Run affected package tests under Xvfb
+      if: inputs.test == 'true' && runner.os == 'Linux'
+      shell: bash
+      env:
+        HOST_FULL: ${{ inputs.host-full }}
+        PLAN_DIR: ${{ runner.temp }}/ci-plan
+      run: |
+        full=()
+        if [[ "$HOST_FULL" == true ]]; then
+          full+=(--host-full)
+        fi
+        python3 .github/scripts/run_rail_cargo.py \
+          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --work cargo.test --xvfb "${full[@]}" test --locked
+
+    - name: Run affected package tests
+      if: inputs.test == 'true' && runner.os != 'Linux'
+      shell: bash
+      env:
+        HOST_FULL: ${{ inputs.host-full }}
+        PLAN_DIR: ${{ runner.temp }}/ci-plan
+      run: |
+        full=()
+        if [[ "$HOST_FULL" == true ]]; then
+          full+=(--host-full)
+        fi
+        python3 .github/scripts/run_rail_cargo.py \
+          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --work cargo.test "${full[@]}" test --locked
