@@ -1,7 +1,6 @@
-//! The commit dialog (ported from T3's `GitActionsControl.tsx` commit flow):
-//! a changed-files list with include/exclude checkboxes, the current branch,
-//! a default-branch safeguard banner, and a commit-message textarea pre-filled
-//! by AI generation (with a regenerate button).
+//! Commit dialog with a changed-files list, include/exclude checkboxes, the
+//! current branch, a default-branch safeguard banner, and a commit-message
+//! textarea pre-filled by AI generation (with a regenerate button).
 
 use std::collections::HashSet;
 

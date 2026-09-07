@@ -1,7 +1,4 @@
-//! Circular context-window meter math and token formatting.
-//!
-//! Numeric formatting adapted from T3 Code's `lib/contextWindow.ts` and
-//! `ContextWindowMeter.tsx`.
+//! Circular context-window meter math and compact token formatting.
 
 use agent::TokenUsage;
 
@@ -109,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn token_format_matches_t3() {
+    fn token_format_uses_compact_suffixes() {
         assert_eq!(format_tokens(Some(0)), "0");
         assert_eq!(format_tokens(Some(999)), "999");
         assert_eq!(format_tokens(Some(1_500)), "1.5k");

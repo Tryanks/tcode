@@ -53,7 +53,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_copy_is_t3_verbatim() {
+    fn error_copy_matches_locale_strings() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         assert_eq!(
             attach_error_message(&AttachError::UnsupportedType {

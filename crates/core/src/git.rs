@@ -1,6 +1,5 @@
-//! Git quick-actions support (ported from T3's `GitActionsControl.logic.ts`,
-//! `GitWorkflowService.ts` and `GitVcsDriverCore.ts`, trimmed to the local,
-//! single-SCM subset — no PR/MR, no publish-to-provider wizard).
+//! Git quick-actions for the local, single-SCM workflow. This excludes PR/MR
+//! operations and publish-to-provider wizards.
 //!
 //! This core owns status parsing, the adaptive quick-action state machine,
 //! path-spec selection, slug generation, and prompt builders. Process-backed
@@ -45,8 +44,8 @@ pub struct GitFileEntry {
     pub deletions: u32,
 }
 
-/// A snapshot of a repository's state, driving the adaptive quick-action
-/// button. Mirrors the subset of T3's `VcsStatusResult` we act on.
+/// A snapshot of the repository state needed by the adaptive quick-action
+/// button.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GitStatus {
     /// `cwd` is inside a git working tree.
@@ -153,9 +152,8 @@ impl QuickAction {
 /// Resolve the primary quick-action for `status`. `is_busy` is true while an
 /// action is already running (the button is disabled with an in-progress hint).
 ///
-/// Ported/trimmed from T3's `resolveQuickAction` — the PR/MR and
-/// publish-repository branches collapse to `PublishBranch` (push `-u`) and the
-/// disabled hints.
+/// PR/MR and publish-repository workflows are out of scope; a branch without
+/// an upstream instead resolves to `PublishBranch` (push `-u`).
 pub fn quick_action(status: &GitStatus, is_busy: bool) -> QuickAction {
     if is_busy {
         return QuickAction::hint(GitAction::Commit, GitHint::InProgress);
@@ -207,9 +205,8 @@ pub struct MenuItem {
     pub hint: Option<GitHint>,
 }
 
-/// Build the quick-action dropdown items for `status`. Always offers the
-/// actions that make sense for the repo shape, disabling the inapplicable ones
-/// with a reason (T3's `buildMenuItems` + the exact disabled hints).
+/// Build the quick-action dropdown items for `status`. Offers the actions that
+/// make sense for the repository shape and gives disabled actions a reason.
 pub fn menu_items(status: &GitStatus, is_busy: bool) -> Vec<MenuItem> {
     if !status.is_repo {
         return vec![MenuItem {
@@ -298,8 +295,7 @@ fn pull_disabled_hint(status: &GitStatus) -> GitHint {
 ///
 /// Returns `None` when nothing is excluded (stage everything: `git add -A`),
 /// otherwise `Some(included)` — the checked subset, staged explicitly so
-/// unchecked files are left out of the commit. Ported from T3's
-/// `selectedFiles`/`filePaths` handling in `GitActionsControl.tsx`.
+/// unchecked files are left out of the commit.
 pub fn included_paths(all: &[GitFileEntry], excluded: &HashSet<String>) -> Option<Vec<String>> {
     if excluded.is_empty() {
         return None;
@@ -312,9 +308,9 @@ pub fn included_paths(all: &[GitFileEntry], excluded: &HashSet<String>) -> Optio
     )
 }
 
-/// Sanitize an arbitrary string into a lowercase git ref fragment (T3's
-/// `sanitizeBranchFragment`): strip quotes, collapse separators, cap at 48
-/// chars. Falls back to `"update"` when empty.
+/// Sanitize an arbitrary string into a lowercase git ref fragment: strip
+/// quotes, collapse separators, and cap at 48 chars. Falls back to `"update"`
+/// when empty.
 pub fn sanitize_branch_fragment(raw: &str) -> String {
     let is_valid =
         |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '_' | '-');
@@ -342,7 +338,7 @@ pub fn sanitize_branch_fragment(raw: &str) -> String {
         }
     }
 
-    // Collapse runs of '/' and of '-' (underscores are preserved, as in T3).
+    // Collapse runs of '/' and of '-'; underscores are preserved.
     let mut collapsed = String::with_capacity(out.len());
     let mut prev: Option<char> = None;
     for ch in out.chars() {
@@ -797,7 +793,7 @@ mod tests {
             sanitize_branch_fragment("Add: Feature!! Foo"),
             "add-feature-foo"
         );
-        // Underscores are preserved (T3 semantics); separator edges are trimmed.
+        // Underscores are preserved; separator edges are trimmed.
         assert_eq!(
             sanitize_branch_fragment("  --Weird__Name--  "),
             "weird__name"
