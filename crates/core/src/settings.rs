@@ -738,6 +738,7 @@ pub enum SettingsPatch {
     RemoteHostingEnabled(bool),
     RemotePort(Option<u16>),
     RemoteHostName(Option<String>),
+    LastProject(Option<String>),
 }
 
 impl Default for BrowserSettings {
@@ -876,6 +877,12 @@ pub struct Settings {
     /// UI state; absent in legacy files.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub last_visited: HashMap<String, u64>,
+    /// Project the user last navigated to or started a thread in. A workspace
+    /// with no conversation open (launch, or the thread on screen going away)
+    /// opens this project's new-thread draft. Set from user navigation only, so
+    /// background activity cannot move it. UI state; absent in legacy files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_project_id: Option<String>,
     /// ACP agents the user installed from the marketplace (or defined by hand),
     /// keyed by registry id. Each carries its resolved launch recipe, so a
     /// session can start without consulting the registry again.
@@ -940,6 +947,7 @@ impl Default for Settings {
             remote_port: None,
             remote_host_name: None,
             last_visited: HashMap::new(),
+            last_project_id: None,
             acp_agents: BTreeMap::new(),
             unknown: serde_json::Map::new(),
         }
@@ -1042,6 +1050,7 @@ impl Settings {
             SettingsPatch::RemoteHostingEnabled(value) => self.remote_hosting_enabled = value,
             SettingsPatch::RemotePort(value) => self.remote_port = value,
             SettingsPatch::RemoteHostName(value) => self.remote_host_name = value,
+            SettingsPatch::LastProject(value) => self.last_project_id = value,
         }
     }
 }

@@ -395,8 +395,27 @@ dispatch response.
 
 ### Empty state
 
-Centered "Pick a thread to continue" (20px semibold) over "Select an existing
-thread or create a new one to get started." (14px muted). No composer rendered.
+The workspace does not sit on a blank page. When no conversation is open — at
+launch, or because the thread on screen was archived or deleted — it opens the
+new-thread draft of the project the user last interacted with, composer focused
+and ready. "Last interacted" is set by user navigation only (opening a thread,
+starting a draft); background model activity and archive timestamps never move
+it, and it is persisted, so a launch lands where the user left off. A remembered
+project that no longer exists falls back to the first project in the sidebar.
+That project keeps a single standing draft, so returning to it preserves its
+composer attachments.
+
+A thread that is archived while on screen — an Orchestrate child auto-archived
+on completion is the common case — hands the workspace to its parent when the
+parent is still visible, with the parent's scroll position and panels intact.
+Archiving a thread the user is not viewing changes nothing.
+
+Only a workspace with no projects at all reaches the empty page: centered
+"Add a project to get started" (15px semibold) over "tcode works inside a
+project folder. Add one to open its first thread." (13px muted) and an
+**Add project** button. No composer is rendered. The same page, titled "Pick a
+thread to continue" over a list of recent projects, covers the moment before a
+draft opens.
 
 ## Accessibility
 

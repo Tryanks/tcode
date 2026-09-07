@@ -2201,6 +2201,10 @@ impl ChatView {
                 crate::add_project_dialog::open(this.workspace_store.clone(), window, cx);
             }));
 
+        // With a project on file the store opens that project's draft instead
+        // of this page, so the empty workspace is the deliberate
+        // add-a-project state; the launcher below only covers the moment
+        // before the draft arrives.
         let mut content = v_flex()
             .w_full()
             .max_w(px(420.))
@@ -2211,7 +2215,11 @@ impl ChatView {
                 div()
                     .text_size(px(15.))
                     .font_semibold()
-                    .child(crate::tr!("chat.empty_title")),
+                    .child(if projects.is_empty() {
+                        crate::tr!("chat.no_projects_title")
+                    } else {
+                        crate::tr!("chat.empty_title")
+                    }),
             );
         if projects.is_empty() {
             content = content
@@ -2219,7 +2227,7 @@ impl ChatView {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("chat.empty_description")),
+                        .child(crate::tr!("chat.no_projects_description")),
                 )
                 .child(add_project);
         } else {
@@ -3248,10 +3256,11 @@ mod tests {
                 .generation
         });
 
-        workspace_store.update(cx, |store, _| {
+        workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(
                 session_id,
                 single_assistant_timeline("large", &latest),
+                cx,
             );
         });
         view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
@@ -3284,8 +3293,12 @@ mod tests {
         let view = view.root(cx).expect("chat window should have a root");
         assert!(view.read_with(cx, |chat, _| chat.pending_md_builds.contains_key("large")));
 
-        workspace_store.update(cx, |store, _| {
-            store.set_session_replica_for_test("replacement-session".into(), Timeline::default());
+        workspace_store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(
+                "replacement-session".into(),
+                Timeline::default(),
+                cx,
+            );
         });
         view.update(cx, |chat, cx| chat.sync_markdown_states(cx));
         cx.run_until_parked();
@@ -3432,8 +3445,8 @@ This begins after the hard break."#;
         }))
         .expect("seed markdown host");
         let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new_local(&host, cx));
-        workspace_store.update(cx, |store, _| {
-            store.set_session_replica_for_test(session_id, timeline);
+        workspace_store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::new(false));
 
@@ -3579,8 +3592,8 @@ This begins after the hard break."#;
         }))
         .expect("seed markdown host");
         let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
-        workspace_store.update(cx, |store, _| {
-            store.set_session_replica_for_test(session_id.clone(), timeline);
+        workspace_store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
         let window_state = cx.new(|_| WindowState::new(false));
         (workspace_store, window_state, session_id)
