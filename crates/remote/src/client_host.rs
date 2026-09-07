@@ -3,7 +3,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use tcode_client::host::{
@@ -264,15 +264,80 @@ impl ClientHost for NativeClientHost {
     }
 }
 
-/// This machine's name, shared by desktop and native-client defaults.
+/// This machine's name, shared by desktop, headless, and native-client defaults.
 pub fn default_device_name() -> String {
-    ["HOSTNAME", "HOST", "COMPUTERNAME"]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(fs::read_to_string("/etc/hostname").ok())
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(resolve_default_device_name).clone()
+}
+
+fn resolve_default_device_name() -> String {
+    resolve_device_name(
+        ["HOSTNAME", "HOST", "COMPUTERNAME"]
+            .iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find_map(|name| clean_name(Some(name))),
+        macos_computer_name(),
+        system_host_name(),
+        fs::read_to_string("/etc/hostname").ok(),
+    )
+}
+
+fn resolve_device_name(
+    env_name: Option<String>,
+    computer_name: Option<String>,
+    host_name: Option<String>,
+    etc_hostname: Option<String>,
+) -> String {
+    clean_name(env_name)
+        .or_else(|| clean_name(computer_name))
+        .or_else(|| {
+            clean_name(host_name).and_then(|name| clean_name(Some(strip_local_suffix(name))))
+        })
+        .or_else(|| clean_name(etc_hostname))
         .unwrap_or_else(|| "tcode".into())
+}
+
+fn clean_name(name: Option<String>) -> Option<String> {
+    name.map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+}
+
+fn strip_local_suffix(name: String) -> String {
+    name.strip_suffix(".local").unwrap_or(&name).to_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_computer_name() -> Option<String> {
+    use core_foundation::{base::TCFType as _, string::CFString};
+    use system_configuration_sys::dynamic_store_copy_specific::SCDynamicStoreCopyComputerName;
+
+    let mut encoding = 0;
+    // SAFETY: a null store requests the current system value. The returned
+    // CFString follows the Create Rule and is transferred to the wrapper.
+    let name = unsafe { SCDynamicStoreCopyComputerName(std::ptr::null_mut(), &mut encoding) };
+    (!name.is_null()).then(|| unsafe { CFString::wrap_under_create_rule(name) }.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_computer_name() -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn system_host_name() -> Option<String> {
+    let mut bytes = [0_u8; 256];
+    // SAFETY: `bytes` is a valid writable buffer and its exact length is
+    // supplied to gethostname. It starts zeroed so the terminator is findable.
+    if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
+        return None;
+    }
+    let length = bytes.iter().position(|byte| *byte == 0)?;
+    String::from_utf8(bytes[..length].to_vec()).ok()
+}
+
+#[cfg(not(unix))]
+fn system_host_name() -> Option<String> {
+    None
 }
 
 fn write_private(data_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
@@ -296,6 +361,31 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn device_name_prefers_environment_override() {
+        assert_eq!(
+            resolve_device_name(
+                Some(" Explicit name ".into()),
+                Some("Friendly Mac".into()),
+                Some("host.local".into()),
+                Some("etc-host".into()),
+            ),
+            "Explicit name"
+        );
+    }
+
+    #[test]
+    fn device_name_strips_local_suffix_from_system_hostname() {
+        assert_eq!(
+            resolve_device_name(None, None, Some("studio.local".into()), None),
+            "studio"
+        );
+        assert_eq!(
+            resolve_device_name(None, None, Some("studio.localdomain".into()), None),
+            "studio.localdomain"
+        );
+    }
 
     struct TestDir(PathBuf);
 

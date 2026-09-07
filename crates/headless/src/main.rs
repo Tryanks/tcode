@@ -5,6 +5,7 @@ use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use tcode_remote::PairingCode;
 use tcode_remote::client::{PairInvite, pair_url};
+use tcode_remote::client_host::default_device_name;
 use tcode_remote::discovery::start_beacon;
 use tcode_remote::{HostMux, RemoteConfig, serve};
 use tcode_runtime::pipe::{HostServices, spawn_host};
@@ -57,7 +58,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         .unwrap_or_else(|| DEFAULT_LISTEN.to_owned())
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
-    let name = option_value(args, "--name").unwrap_or_else(default_host_name);
+    let name = option_value(args, "--name").unwrap_or_else(default_device_name);
     let data_dir = option_value(args, "--data-dir").map(PathBuf::from);
     reject_unknown_options(args, &["--listen", "--name", "--data-dir"])?;
     let store = match data_dir {
@@ -231,16 +232,6 @@ fn reject_unknown_options(args: &[String], options_with_values: &[&str]) -> Resu
         }
     }
     Ok(())
-}
-
-fn default_host_name() -> String {
-    ["HOSTNAME", "HOST", "COMPUTERNAME"]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(std::fs::read_to_string("/etc/hostname").ok())
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
-        .unwrap_or_else(|| "tcode-machine".into())
 }
 
 #[cfg(unix)]

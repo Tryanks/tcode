@@ -40,3 +40,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"], optional = true }
 mdns-sd = "0.20"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+system-configuration-sys = "0.6"
