@@ -221,6 +221,10 @@ public final class GpuiActivity extends NativeActivity {
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).restartInput(inputView);
     }
 
+    public int[] gpuiRasterizeEmoji(int glyph, float size) throws java.io.IOException {
+        return SystemEmoji.rasterize(glyph, size);
+    }
+
     public void gpuiFinish() { finish(); }
 
     public String gpuiDataDir() {

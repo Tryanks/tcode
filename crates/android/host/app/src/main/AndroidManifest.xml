@@ -10,7 +10,6 @@
     <application
         android:allowBackup="false"
         android:enableOnBackInvokedCallback="false"
-        android:extractNativeLibs="true"
         android:hasCode="true"
         android:icon="@mipmap/ic_launcher"
         android:label="tcode"

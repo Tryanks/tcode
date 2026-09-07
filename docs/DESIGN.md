@@ -71,8 +71,8 @@ palette in documentation.
 
 DM Sans is bundled for UI text and comes from the same font resource on every
 client. Desktop monospace text uses the configured system family; iOS and
-Android register the bundled Lilex in its place, and Android adds the packaged
-Noto Color Emoji fallback. Native debug builds embed fonts and SVGs in the
+Android register the bundled Lilex in its place. Android uses the system
+Noto Color Emoji fallback, including COLRv1 color glyphs on modern devices. Native debug builds embed fonts and SVGs in the
 package rather than reading a development machine's asset path.
 Android loads the device's system fonts and explicitly prefers Noto Sans CJK SC,
 Noto Sans SC, then Source Han Sans SC for missing UI glyphs; CJK fonts are not

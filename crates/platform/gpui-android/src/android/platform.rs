@@ -2,6 +2,7 @@ use super::{
     dispatcher::AndroidDispatcher,
     display::AndroidDisplay,
     host::{self, HostEvent},
+    text::AndroidTextSystem,
     window::{AndroidWindow, AndroidWindowInner, KeyResult},
 };
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent, input::InputEvent};
@@ -295,17 +296,13 @@ impl AndroidPlatform {
 }
 
 fn load_android_text_system() -> Arc<dyn PlatformTextSystem> {
-    let text_system = Arc::new(CosmicTextSystem::new_without_system_fonts("Roboto"));
+    let text_system = CosmicTextSystem::new_without_system_fonts("Roboto");
     let mut font_paths = fs::read_dir("/system/fonts")
         .into_iter()
         .flatten()
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
-            // COLRv1 is unsupported by the wgpu text path, so let the bundled CBDT face win.
-            if path.file_name().and_then(|name| name.to_str()) == Some("NotoColorEmoji.ttf") {
-                return false;
-            }
             matches!(
                 path.extension().and_then(|extension| extension.to_str()),
                 Some("ttf" | "otf" | "ttc")
@@ -326,7 +323,7 @@ fn load_android_text_system() -> Arc<dyn PlatformTextSystem> {
     if let Err(error) = text_system.add_fonts(fonts) {
         log::error!("failed to register Android system fonts: {error:#}");
     }
-    text_system
+    Arc::new(AndroidTextSystem::new(text_system))
 }
 
 struct AndroidKeyboardLayout;

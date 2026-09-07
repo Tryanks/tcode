@@ -26,25 +26,28 @@ pub fn android_main(app: android_activity::AndroidApp) {
     gpui::Application::with_platform(gpui_android::platform())
         .with_assets(tcode_ui::assets::Assets)
         .run(move |cx| {
-            // cosmic-text's Android fallback scans registered faces when
-            // the primary lacks a glyph. Register before shaping; loading as a
-            // primary family would trigger upstream's ASCII-m font filter.
-            use std::io::Read as _;
-            let font_path = std::ffi::CString::new("fonts/NotoColorEmoji.ttf").unwrap();
-            if let Some(mut asset) = app.asset_manager().open(&font_path) {
-                let mut font = Vec::new();
-                if asset.read_to_end(&mut font).is_ok() {
-                    if let Err(error) = cx
-                        .text_system()
-                        .add_fonts(vec![std::borrow::Cow::Owned(font)])
-                    {
-                        log::error!("failed registering emoji fallback: {error}");
+            // Standard Android images provide this face through /system/fonts.
+            // Custom ROM hosts may supply a bitmap fallback asset if it is absent.
+            if !std::path::Path::new("/system/fonts/NotoColorEmoji.ttf").exists() {
+                use std::io::Read as _;
+                let path = std::ffi::CString::new("fonts/NotoColorEmoji.ttf").unwrap();
+                if let Some(mut asset) = app.asset_manager().open(&path) {
+                    let mut font = Vec::new();
+                    match asset.read_to_end(&mut font) {
+                        Ok(_) => {
+                            if let Err(error) = cx.text_system().add_fonts(vec![Cow::Owned(font)]) {
+                                log::error!(
+                                    "failed registering custom-ROM emoji fallback: {error:#}"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            log::error!("failed reading custom-ROM emoji fallback: {error}")
+                        }
                     }
                 } else {
-                    log::error!("bundled Noto Color Emoji font could not be read");
+                    log::warn!("system emoji font absent; custom-ROM fallback asset not supplied");
                 }
-            } else {
-                log::error!("bundled Noto Color Emoji font is missing");
             }
 
             let (native_host, system_locale) = host::native_host(app.clone(), cx)
