@@ -475,6 +475,9 @@ mod tests {
             request_id: Some(request.id),
             topic: subscription.topic,
             event: ServerEvent::SessionSnapshot {
+                total: 0,
+                total_turns: 0,
+                truncated: false,
                 from: 0,
                 records: vec![],
             },

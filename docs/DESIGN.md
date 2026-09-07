@@ -149,6 +149,21 @@ skeleton. Selecting that conversation again sends no requests. Changing selectio
 retires the old subscription generation; its late snapshot cannot replace the new
 conversation.
 
+## Timeline history
+
+A newly opened conversation starts with the last 200 event records. Earlier
+history is available through **Load earlier messages** above the timeline and
+loads automatically when the reader scrolls to the top. Only one page loads at
+a time; leaving the conversation cancels it. The control reports loading and
+retains a readable error if the host cannot supply the page.
+
+Prepending preserves the visible turn and its offset in pixels. Existing list
+measurements and markdown state remain resident; only new or changed turns need
+measurement. A page may complete a partially loaded turn. Live replay cursors
+remain absolute event positions, independent of how much earlier history is
+currently visible. Snapshots and pages fit within 8 MiB including their serialized
+envelope; a single record that cannot fit produces an explicit error.
+
 ## Scrolling contract
 
 Potentially unbounded content always has its own resolved-height viewport and a

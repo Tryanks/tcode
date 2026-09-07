@@ -905,6 +905,10 @@ impl TurnIndexCache {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ListSync {
     None,
+    Prepend {
+        count: usize,
+        remeasure: Vec<usize>,
+    },
     Reset {
         count: usize,
     },
@@ -1153,6 +1157,28 @@ fn list_sync_with<'a>(
     session_changed: bool,
     new_at: impl Fn(usize) -> &'a TurnListItem,
 ) -> ListSync {
+    if !session_changed && !old.is_empty() && new_len > old.len() {
+        let count = new_len - old.len();
+        // A page can complete the first partial turn; subsequent turns retain
+        // their identity and their measured heights after the prefix insertion.
+        let has_stable_entry = old.iter().enumerate().any(|(index, item)| {
+            item.entry_count > 0 && item.identity == new_at(index + count).identity
+        });
+        if has_stable_entry
+            && (0..old.len())
+                .all(|index| index == 0 || old[index].identity == new_at(index + count).identity)
+            && old
+                .last()
+                .is_some_and(|item| item.identity == new_at(new_len - 1).identity)
+        {
+            let remeasure = (0..old.len())
+                .filter_map(|index| {
+                    (old[index].content != new_at(index + count).content).then_some(index + count)
+                })
+                .collect();
+            return ListSync::Prepend { count, remeasure };
+        }
+    }
     let common = old.len().min(new_len);
     let replaced = (0..common).any(|index| {
         let old = &old[index];
@@ -1192,6 +1218,45 @@ mod tests {
     use std::sync::Arc;
     use tcode_core::project::{Project, SessionMeta};
     use tcode_core::session::{EntryContent, SteeringStatus, TimelineEntry, TurnMeta, TurnTiming};
+
+    #[test]
+    fn live_empty_turn_append_is_not_mistaken_for_history_prepend() {
+        let first = Arc::new(TimelineEntry {
+            id: "first".into(),
+            ts: None,
+            turn: 0,
+            content: EntryContent::Item(ItemContent::AssistantMessage {
+                text: "First response".into(),
+            }),
+        });
+        let second = Arc::new(TimelineEntry {
+            id: "second".into(),
+            ts: None,
+            turn: 1,
+            content: EntryContent::Item(ItemContent::AssistantMessage {
+                text: "Second response".into(),
+            }),
+        });
+        let old = index_turns(
+            &vec![TurnMeta::default(); 2],
+            std::slice::from_ref(&first),
+            None,
+            &HashSet::new(),
+        );
+        let new = index_turns(
+            &vec![TurnMeta::default(); 3],
+            &[first, second],
+            None,
+            &HashSet::new(),
+        );
+        assert_eq!(
+            list_sync(&old, &new, false),
+            ListSync::Incremental {
+                append: Some(2..3),
+                remeasure: vec![1]
+            }
+        );
+    }
 
     const REAL_DIFF: &str = "--- a/src/foo.rs\n\
                              +++ b/src/foo.rs\n\

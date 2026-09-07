@@ -178,23 +178,7 @@ impl AppState {
             Topic::SessionStatus { session_id } => {
                 ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?)
             }
-            Topic::SessionEvents { session_id } => {
-                let stored;
-                let records = if let Some(records) = self.event_records.get(session_id) {
-                    records.as_slice()
-                } else {
-                    stored = self.store.read_events(session_id);
-                    &stored
-                };
-                let from = subscription
-                    .after
-                    .filter(|after| *after <= records.len() as u64)
-                    .unwrap_or(0);
-                ServerEvent::SessionSnapshot {
-                    from,
-                    records: records[from as usize..].to_vec(),
-                }
-            }
+            Topic::SessionEvents { .. } => self.session_events_snapshot(subscription),
             Topic::RuntimeEvents => return None,
             Topic::Preview { .. } => return None,
             // Retained latest-run status, so a client that subscribes after a

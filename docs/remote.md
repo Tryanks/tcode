@@ -439,3 +439,25 @@ reported as unreachable.
   ```sh
   adb install -r tcode-VERSION-android-arm64-debug.apk
   ```
+
+## History replay limits
+
+Protocol version 3 requires both host and client to support bounded history;
+older peers receive the existing update-required handshake response. Opening a
+conversation subscribes to its latest 200 event records. A session
+snapshot includes the absolute `from` offset and `total` record count; the client
+can request older records with `SessionHistoryPage { session_id, before, limit }`.
+The exclusive `before` cursor pages backwards; replies are always chronological
+and include their absolute `from`. Backwards pages contain at most 200 records.
+
+Each snapshot or history page is capped at 8 MiB including its serialized wire
+envelope. The host shrinks the contiguous range and sets `truncated` when the byte
+limit reduces the requested count. A record that cannot fit alone returns
+`history_record_too_large`; records are never split or silently skipped.
+
+`Subscription.after` remains the absolute next event cursor, not a count of loaded
+records. A reconnect replays from that cursor exactly. Byte-limited forward tails
+start at `after`; advancing the applied cursor obtains the next contiguous tail.
+A fresh subscription (no cursor) starts at the latest history window. Switching
+conversations retires its subscription request IDs, and stale replies cannot
+replace the currently selected conversation.

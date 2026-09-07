@@ -401,6 +401,13 @@ impl ChatView {
             let chat = chat.clone();
             window.defer(cx, move |_, cx| {
                 let _ = chat.update(cx, |chat, cx| {
+                    if visible_turns.start == 0
+                        && !chat.list_state.is_following_tail()
+                        && chat.workspace_store.read(cx).history_error().is_none()
+                    {
+                        chat.workspace_store
+                            .update(cx, |store, cx| store.load_earlier_messages(cx));
+                    }
                     chat.set_markdown_visible_turns(visible_turns, cx);
                 });
             });
@@ -530,6 +537,12 @@ impl ChatView {
 
         match list_sync {
             ListSync::None => {}
+            ListSync::Prepend { count, remeasure } => {
+                self.list_state.splice(0..0, count);
+                for index in remeasure {
+                    self.list_state.remeasure_items(index..index + 1);
+                }
+            }
             ListSync::Reset { count } => {
                 self.list_state.reset(count);
                 if session_changed {
@@ -2466,7 +2479,18 @@ impl Render for ChatView {
         });
 
         if self.workspace_store.read(cx).chat_loading() {
-            return root.child(crate::material::loading_skeleton(cx));
+            return root.child(
+                v_flex()
+                    .size_full()
+                    .when_some(
+                        self.workspace_store
+                            .read(cx)
+                            .history_error()
+                            .map(str::to_owned),
+                        |container, error| container.child(div().px_4().child(error)),
+                    )
+                    .child(crate::material::loading_skeleton(cx)),
+            );
         }
 
         let Some((title, cwd, is_draft)) = active else {
@@ -2609,6 +2633,44 @@ impl Render for ChatView {
                     .flex_1()
                     .min_h_0()
                     .relative()
+                    .when(
+                        self.workspace_store.read(cx).history_available(),
+                        |container| {
+                            let loading = self.workspace_store.read(cx).history_loading();
+                            container.child(
+                                div()
+                                    .id("load-earlier-messages")
+                                    .role(Role::Button)
+                                    .aria_label(crate::tr!("chat.load_earlier").into_owned())
+                                    .flex_none()
+                                    .py_2()
+                                    .text_center()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.workspace_store.update(cx, |store, cx| {
+                                            store.load_earlier_messages(cx)
+                                        });
+                                    }))
+                                    .child(if loading {
+                                        crate::tr!("chat.history_loading")
+                                    } else {
+                                        crate::tr!("chat.load_earlier")
+                                    }),
+                            )
+                        },
+                    )
+                    .when_some(
+                        self.workspace_store
+                            .read(cx)
+                            .history_error()
+                            .map(str::to_owned),
+                        |container, error| {
+                            container
+                                .child(div().flex_none().px_4().text_size(px(12.)).child(error))
+                        },
+                    )
                     .child(timeline)
                     .when(
                         self.list_state.is_scrolled_to_end() == Some(false),
@@ -3187,6 +3249,49 @@ mod tests {
         assert!(candidates.constructions < timeline.entries.len());
         assert!(candidates.entries.iter().any(|entry| entry.turn == 5));
         assert!(candidates.entries.iter().any(|entry| entry.turn == 199));
+    }
+
+    #[gpui::test]
+    fn prepending_history_preserves_the_visible_turn_and_pixel_offset(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, px};
+        let full = synthetic_markdown_timeline(60);
+        let mut tail = synthetic_markdown_timeline(60);
+        tail.turns.drain(..20);
+        tail.entries.retain(|entry| entry.turn >= 20);
+        for entry in &mut tail.entries {
+            std::sync::Arc::make_mut(entry).turn -= 20;
+        }
+        let (store, window_state, session_id) = seed_chat(cx, tail);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(1024.), px(700.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        list.set_follow_mode(FollowMode::Normal);
+        list.scroll_to(ListOffset {
+            item_ix: 10,
+            offset_in_item: px(7.),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, full, cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let anchor = list.logical_scroll_top();
+        assert_eq!(
+            anchor.item_ix, 30,
+            "the same turn must remain visible after 20 earlier turns"
+        );
+        assert_eq!(anchor.offset_in_item, px(7.));
+        assert!(!list.is_following_tail());
     }
 
     #[gpui::test]

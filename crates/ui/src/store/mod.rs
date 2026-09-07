@@ -35,6 +35,7 @@ use terminal::TerminalWorkspace;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
+mod history;
 mod images;
 mod intents;
 pub(crate) use images::host_image;
@@ -144,6 +145,12 @@ pub struct WorkspaceStore {
     hydrated_sessions: HashSet<String>,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
+    session_from: HashMap<String, u64>,
+    selection_generation: u64,
+    session_turn_offset: usize,
+    history_task: Option<Task<()>>,
+    history_error: Option<String>,
+    session_catching_up: bool,
     session_statuses: HashMap<String, SessionStatus>,
     git_statuses: HashMap<String, GitStatusStatus>,
     session_replica: Option<(String, Timeline)>,
@@ -312,6 +319,12 @@ impl WorkspaceStore {
             hydrated_sessions: HashSet::new(),
             selected_session_id: None,
             session_records: HashMap::new(),
+            session_from: HashMap::new(),
+            selection_generation: 0,
+            session_turn_offset: 0,
+            history_task: None,
+            history_error: None,
+            session_catching_up: false,
             session_statuses: HashMap::new(),
             git_statuses: HashMap::new(),
             session_replica: None,
@@ -636,6 +649,7 @@ impl WorkspaceStore {
 
     /// End this store's one-link lifetime before its views are replaced.
     pub fn detach(&mut self, cx: &mut App) {
+        self.history_task = None;
         self.attachment_tasks.clear();
         self.address_refresh.take();
         for subscription in self.host.subscriptions() {
@@ -833,21 +847,36 @@ impl WorkspaceStore {
                     );
                 }
             }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error)) => {
+                if self.selected_session_id.as_ref() == Some(session_id) {
+                    self.history_error = Some(history::history_error_message(error.clone()));
+                }
+            }
             (
                 Topic::SessionEvents { session_id },
-                ServerEvent::SessionSnapshot { from, records },
+                ServerEvent::SessionSnapshot {
+                    from,
+                    records,
+                    total,
+                    total_turns,
+                    ..
+                },
             ) => {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
                 let held = self.session_records.entry(session_id.clone()).or_default();
+                let start = self.session_from.entry(session_id.clone()).or_insert(*from);
                 if *from == 0 {
                     held.clear();
-                } else if *from != held.len() as u64 {
+                    *start = 0;
+                } else if *from != *start + held.len() as u64 {
                     held.clear();
+                    self.session_from.remove(session_id);
                     self.session_replica = None;
                     self.hydrated_sessions.remove(session_id);
                     self.baseline_topics.remove(&envelope.topic);
+                    self.session_catching_up = false;
                     let _ = self.host.subscribe(Subscription {
                         topic: envelope.topic.clone(),
                         after: None,
@@ -855,9 +884,17 @@ impl WorkspaceStore {
                     return;
                 }
                 if records.is_empty() && *from != 0 && self.session_replica.is_some() {
+                    self.baseline_topics.insert(envelope.topic.clone());
+                    self.hydrated_sessions.insert(session_id.clone());
                     return;
                 }
                 held.extend(records.iter().cloned());
+                let after = *start + held.len() as u64;
+                self.session_catching_up = after < *total;
+                let _ = self.host.update_after(&envelope.topic, after);
+                if self.session_catching_up {
+                    return;
+                }
                 let mut timeline = Timeline::fold_events(held.iter().cloned());
                 if !self
                     .session_status_replica
@@ -868,16 +905,21 @@ impl WorkspaceStore {
                 }
                 self.baseline_topics.insert(envelope.topic.clone());
                 self.hydrated_sessions.insert(session_id.clone());
+                self.session_turn_offset =
+                    (*total_turns as usize).saturating_sub(timeline.turns.len());
                 self.session_replica = Some((session_id.clone(), timeline));
-                let _ = self.host.update_after(&envelope.topic, held.len() as u64);
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
+                if self.session_catching_up || !self.session_from.contains_key(session_id) {
+                    return;
+                }
                 let held = self.session_records.entry(session_id.clone()).or_default();
                 held.push(record.clone());
-                let _ = self.host.update_after(&envelope.topic, held.len() as u64);
+                let after = self.session_from[session_id] + held.len() as u64;
+                let _ = self.host.update_after(&envelope.topic, after);
                 // A new turn means the user moved on; the recovery card for the
                 // stopped one is stale.
                 if matches!(record.event, agent::AgentEvent::TurnStarted { .. }) {
@@ -946,6 +988,7 @@ impl WorkspaceStore {
             }
             _ => {}
         }
+        self.load_pending_chat_history(cx);
         // Every index mutation re-decides the destination in one place.
         if envelope.topic == Topic::Index {
             self.reconcile_destination(cx);
@@ -2194,11 +2237,13 @@ impl WorkspaceStore {
         self.pending_chat_turn
             .as_ref()
             .filter(|(id, _)| id == session_id)
-            .map(|(_, turn)| *turn)
+            .and_then(|(_, turn)| turn.checked_sub(self.session_turn_offset))
     }
 
     pub(crate) fn take_pending_chat_turn(&mut self, session_id: &str, turn: usize) {
-        if self.pending_chat_turn.as_ref() == Some(&(session_id.to_string(), turn)) {
+        if self.pending_chat_turn.as_ref()
+            == Some(&(session_id.to_string(), turn + self.session_turn_offset))
+        {
             self.pending_chat_turn = None;
         }
     }
@@ -2662,6 +2707,9 @@ mod tests {
                         session_id: "one".into(),
                     },
                     event: ServerEvent::SessionSnapshot {
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
                         from: 0,
                         records: vec![],
                     },
@@ -2673,6 +2721,116 @@ mod tests {
                 "retired load must not replace the skeleton"
             );
             assert!(store.session_replica.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn paged_history_keeps_event_and_turn_cursors_absolute(cx: &mut TestAppContext) {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let host = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        workspace.update(cx, |store, cx| {
+            store.select_session("large".into());
+            let records = (450..500)
+                .flat_map(|index| {
+                    [
+                        AgentEvent::TurnStarted {
+                            turn_id: index.to_string(),
+                        }
+                        .into(),
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            id: format!("user-{index}"),
+                            parent_item_id: None,
+                            content: ItemContent::UserMessage {
+                                text: format!("Message {index}"),
+                                attachments: vec![],
+                                context_len: None,
+                            },
+                        })
+                        .into(),
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            id: format!("assistant-{index}"),
+                            parent_item_id: None,
+                            content: ItemContent::AssistantMessage {
+                                text: format!("Response {index}"),
+                            },
+                        })
+                        .into(),
+                        AgentEvent::TurnCompleted {
+                            turn_id: index.to_string(),
+                            status: TurnStatus::Completed,
+                            usage: None,
+                        }
+                        .into(),
+                    ]
+                })
+                .collect();
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "large".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        from: 1800,
+                        records,
+                        total: 2000,
+                        total_turns: 500,
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
+            assert_eq!(store.session_turn_offset, 450);
+            assert_eq!(
+                host.subscriptions()
+                    .iter()
+                    .find(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                    .unwrap()
+                    .after,
+                Some(2000)
+            );
+            while outgoing.try_recv().is_ok() {}
+            store.rewind_turn(2, agent::RewindMode::Conversation);
+            let command =
+                tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+            assert!(matches!(
+                command.payload,
+                tcode_protocol::ClientPayload::Command(Command::RewindTurn { turn: 452, .. })
+            ));
+            let topic = Topic::SessionEvents {
+                session_id: "large".into(),
+            };
+            store.baseline_topics.remove(&topic);
+            let retained_entry = store.session_replica.as_ref().unwrap().1.entries[0].clone();
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: topic.clone(),
+                    event: ServerEvent::SessionSnapshot {
+                        from: 2000,
+                        records: vec![],
+                        total: 2000,
+                        total_turns: 500,
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
+            assert!(
+                store.baseline_topics.contains(&topic),
+                "an empty reconnect tail still establishes readiness"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(
+                    &retained_entry,
+                    &store.session_replica.as_ref().unwrap().1.entries[0]
+                ),
+                "empty replay must retain the existing timeline"
+            );
         });
     }
 
@@ -2756,6 +2914,9 @@ mod tests {
                     ServerEvent::SessionSnapshot {
                         from: 0,
                         records: vec![],
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
                     },
                 ),
             ];
@@ -3129,6 +3290,9 @@ mod tests {
                         session_id: "reconnect".into(),
                     },
                     event: ServerEvent::SessionSnapshot {
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
                         from: 2,
                         records: vec![],
                     },

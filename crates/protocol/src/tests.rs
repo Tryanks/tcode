@@ -772,3 +772,48 @@ fn thread_export_and_project_creation_use_their_documented_wire_shapes() {
         rejected
     );
 }
+
+#[test]
+fn history_paging_literal_json_contract() {
+    let query = r#"{"type":"session_history_page","content":{"session_id":"thread","before":1800,"limit":200}}"#;
+    assert_eq!(
+        serde_json::from_str::<Query>(query).unwrap(),
+        Query::SessionHistoryPage {
+            session_id: "thread".into(),
+            before: 1800,
+            limit: 200
+        }
+    );
+    let response = QueryResponse::SessionHistoryPage {
+        records: vec![],
+        from: 1600,
+        truncated: true,
+    };
+    assert_eq!(
+        serde_json::to_string(&response).unwrap(),
+        r#"{"type":"session_history_page","content":{"records":[],"from":1600,"truncated":true}}"#
+    );
+    let snapshot = ServerEvent::SessionSnapshot {
+        from: 1800,
+        records: vec![],
+        total: 2000,
+        total_turns: 0,
+        truncated: false,
+    };
+    assert_eq!(
+        serde_json::to_string(&snapshot).unwrap(),
+        r#"{"type":"session_snapshot","content":{"from":1800,"records":[],"total":2000,"total_turns":0,"truncated":false}}"#
+    );
+    assert!(matches!(
+        serde_json::from_str::<ServerEvent>(
+            r#"{"type":"session_snapshot","content":{"from":0,"records":[]}}"#
+        )
+        .unwrap(),
+        ServerEvent::SessionSnapshot {
+            total: 0,
+            total_turns: 0,
+            truncated: false,
+            ..
+        }
+    ));
+}

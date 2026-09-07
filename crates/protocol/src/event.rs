@@ -110,7 +110,16 @@ pub enum ServerEvent {
     SessionSnapshot {
         from: u64,
         records: Vec<StoredEvent>,
+        #[serde(default)]
+        total: u64,
+        /// Absolute turn count keeps turn-addressed actions correct in a window.
+        #[serde(default)]
+        total_turns: u64,
+        /// The byte budget reduced this reply below the requested record count.
+        #[serde(default)]
+        truncated: bool,
     },
+    SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
     /// The current (or latest) external-import run for one project. `None`

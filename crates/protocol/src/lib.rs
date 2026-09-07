@@ -22,9 +22,9 @@ pub use event::{
     Topic,
 };
 pub use query::{
-    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, MAX_THREAD_EXPORT_BYTES, PathEntry,
-    Query, QueryResponse, RecentDir, STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit,
-    SourceTool,
+    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, MAX_SESSION_HISTORY_BYTES,
+    MAX_THREAD_EXPORT_BYTES, PathEntry, Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS,
+    STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
@@ -32,7 +32,8 @@ pub use wire::{
     decode_host_line, encode_line,
 };
 
-pub const PROTOCOL_VERSION: u32 = 2;
+// Older clients interpret a nonzero fresh snapshot offset as a corrupt tail.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[cfg(test)]
 mod tests;

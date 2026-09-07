@@ -8,6 +8,12 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Query {
     Ping,
+    /// Records strictly before the absolute event cursor, oldest first.
+    SessionHistoryPage {
+        session_id: String,
+        before: u64,
+        limit: u32,
+    },
     ListActiveWorkspace {
         session_id: String,
     },
@@ -73,10 +79,15 @@ pub const STORED_OUTPUT_ROWS: u16 = 16;
 pub const MAX_THREAD_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Typed response paired with a [`Query`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum QueryResponse {
     Pong,
+    SessionHistoryPage {
+        records: Vec<crate::SessionEventRecord>,
+        from: u64,
+        truncated: bool,
+    },
     ActiveWorkspace(Vec<PathEntry>),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
@@ -206,3 +217,7 @@ pub struct RecentDir {
     pub last_active_ms: u64,
     pub threads: Vec<ExternalThread>,
 }
+
+/// Fresh history and backwards pages are bounded independently of live cursors.
+pub const SESSION_HISTORY_RECORDS: usize = 200;
+pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;

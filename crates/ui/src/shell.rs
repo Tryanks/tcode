@@ -2594,6 +2594,9 @@ mod tests {
                 ServerEvent::SessionSnapshot {
                     from: 0,
                     records: Vec::new(),
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
                 },
             ),
         ] {
@@ -3319,6 +3322,9 @@ mod tests {
                     session_id: session.into(),
                 },
                 ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
                     from: 0,
                     records: vec![
                         agent::AgentEvent::TurnStarted {

@@ -236,6 +236,7 @@ mod active_session;
 mod approvals;
 mod events;
 mod git;
+mod history;
 mod lifecycle;
 mod options;
 mod orchestrate;

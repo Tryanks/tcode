@@ -1,6 +1,10 @@
 app:
   name: "tcode"
 chat:
+  history_record_too_large: A history record exceeds the 8 MiB response limit.
+  load_earlier: Load earlier messages
+  history_loading: Loading earlier messages…
+  history_unavailable: Earlier history is unavailable.
   relayed: "Relayed from %{from} to %{to}"
   model_changed: "Model changed: %{from} → %{to}"
   model_changed_to: "Model changed to %{to}"

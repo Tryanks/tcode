@@ -526,6 +526,14 @@ fn dispatch_query(
     query: Query,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
+        Query::SessionHistoryPage {
+            session_id,
+            before,
+            limit,
+        } => {
+            let result = app.session_history_page(&session_id, before, limit);
+            cx.spawn_background(async move { result })
+        }
         Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app

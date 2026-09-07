@@ -217,6 +217,11 @@ impl WorkspaceStore {
         self.dispatch(Command::MarkSessionUnread { session_id });
     }
     pub(crate) fn leave_session(&mut self) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.history_task = None;
+        self.history_error = None;
+        self.session_turn_offset = 0;
+        self.session_catching_up = false;
         self.clear_terminal_topics();
         if let Some(status) = &self.session_status_replica
             && !status.draft
@@ -284,7 +289,10 @@ impl WorkspaceStore {
             .unwrap_or_default();
         let records = self.session_records.entry(session_id.clone()).or_default();
         self.session_replica = None;
-        let after = Some(records.len() as u64);
+        let after = self
+            .session_from
+            .get(&session_id)
+            .map(|from| from + records.len() as u64);
         for topic in [
             tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.clone(),
@@ -401,7 +409,7 @@ impl WorkspaceStore {
     pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode) {
         self.dispatch(Command::RewindTurn {
             session_id: self.active_session_id().unwrap_or_default(),
-            turn,
+            turn: turn + self.session_turn_offset,
             mode,
         });
     }
