@@ -432,7 +432,6 @@ struct RenameState {
 }
 
 pub struct SessionsSidebar {
-    loading: bool,
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     /// Project ids whose thread list is expanded past the collapsed limit.
@@ -454,17 +453,9 @@ pub struct SessionsSidebar {
 }
 
 impl SessionsSidebar {
-    pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
-        if self.loading != loading {
-            self.loading = loading;
-            cx.notify();
-        }
-    }
-
     fn compact(&self, cx: &gpui::App) -> bool {
         self.window_state.read(cx).compact
     }
-
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
@@ -523,7 +514,6 @@ impl SessionsSidebar {
             initial_collapsed_parents(&sessions, active_id.as_deref())
         };
         Self {
-            loading: false,
             store,
             window_state,
             expanded_groups: HashSet::new(),
@@ -2275,7 +2265,6 @@ fn proceed_delete(
 }
 
 const COMPACT_PAGE_PADDING: f32 = 16.;
-const COMPACT_ROW_HEIGHT: f32 = 56.;
 const COMPACT_SEARCH_HEIGHT: f32 = 40.;
 
 impl SessionsSidebar {
@@ -2309,42 +2298,20 @@ impl SessionsSidebar {
             (groups, collapsed, sessions, flags, store.sidebar_layout())
         };
 
-        let body = if self.loading {
-            v_flex()
-                .flex_1()
-                .px(px(COMPACT_PAGE_PADDING))
-                .pt(px(8.))
-                .gap(px(4.))
-                .children((0..3).map(|_| {
-                    v_flex()
-                        .h(px(COMPACT_ROW_HEIGHT))
-                        .justify_center()
-                        .gap(px(8.))
-                        .opacity(0.3)
-                        .child(
-                            div()
-                                .w(gpui::relative(0.7))
-                                .h(px(14.))
-                                .rounded(px(4.))
-                                .bg(cx.theme().secondary),
-                        )
-                        .child(
-                            div()
-                                .w(gpui::relative(0.35))
-                                .h(px(11.))
-                                .rounded(px(4.))
-                                .bg(cx.theme().secondary),
-                        )
-                }))
-                .into_any_element()
+        let body = if self.store.read(cx).threads_loading() {
+            crate::material::loading_skeleton(cx)
         } else if groups.is_empty() {
-            crate::material::empty_state(
-                Icon::new(IconName::Folder),
-                crate::tr!("mobile.projects_empty"),
-                crate::tr!("mobile.projects_help"),
-                cx,
-            )
-            .into_any_element()
+            div()
+                .id("threads-empty")
+                .debug_selector(|| "threads-empty".into())
+                .size_full()
+                .child(crate::material::empty_state(
+                    Icon::new(IconName::Folder),
+                    crate::tr!("mobile.projects_empty"),
+                    crate::tr!("mobile.projects_help"),
+                    cx,
+                ))
+                .into_any_element()
         } else {
             let mut list = v_flex().w_full().pb(px(24.));
             if layout == SidebarLayout::Flat {
@@ -2903,7 +2870,11 @@ impl Render for SessionsSidebar {
             .child(self.render_search_row(cx))
             .child(self.render_feature_rows(cx))
             .child(header)
-            .child(thread_list)
+            .child(if self.store.read(cx).threads_loading() {
+                crate::material::loading_skeleton(cx)
+            } else {
+                thread_list
+            })
             .child(self.render_footer(cx))
             .into_any_element()
     }
@@ -3144,8 +3115,7 @@ mod tests {
             cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(393.), px(852.)));
-        sidebar.update(cx, |sidebar, cx| {
-            sidebar.loading = false;
+        sidebar.update(cx, |_, cx| {
             cx.notify();
         });
         draw(cx);

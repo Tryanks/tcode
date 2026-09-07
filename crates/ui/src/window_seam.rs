@@ -20,7 +20,10 @@ pub const COMPACT_BREAKPOINT: f32 = 900.;
 
 /// Where the system occludes this window, and where the keyboard is.
 #[derive(Clone)]
-pub struct WindowSeam(Rc<dyn Fn() -> WindowInsets>);
+pub struct WindowSeam {
+    insets: Rc<dyn Fn() -> WindowInsets>,
+    lifecycle: Option<Rc<dyn gpui::Platform>>,
+}
 
 impl Global for WindowSeam {}
 
@@ -28,7 +31,31 @@ impl WindowSeam {
     /// `insets` is read every frame; give it the platform's live accessor
     /// (`gpui_ios::insets`, `gpui_android::insets`) rather than a snapshot.
     pub fn new(insets: impl Fn() -> WindowInsets + 'static) -> Self {
-        Self(Rc::new(insets))
+        Self {
+            insets: Rc::new(insets),
+            lifecycle: None,
+        }
+    }
+
+    pub fn with_lifecycle(mut self, platform: Rc<dyn gpui::Platform>) -> Self {
+        self.lifecycle = Some(platform);
+        self
+    }
+
+    pub(crate) fn lifecycle_wakes(
+        &self,
+    ) -> Option<async_channel::Receiver<tcode_client::recovery::Wake>> {
+        let platform = self.lifecycle.as_ref()?;
+        let (sender, receiver) = async_channel::unbounded();
+        let started = std::time::Instant::now();
+        let mut lifecycle = tcode_client::recovery::Lifecycle::default();
+        platform.on_app_lifecycle(Box::new(move |phase| {
+            let now = started.elapsed().as_millis() as u64;
+            if let Some(wake) = lifecycle_wake(&mut lifecycle, phase, now) {
+                let _ = sender.try_send(wake);
+            }
+        }));
+        Some(receiver)
     }
 
     /// A window the system does not occlude: a desktop window, and a browser
@@ -39,7 +66,7 @@ impl WindowSeam {
     }
 
     pub fn insets(&self) -> WindowInsets {
-        (self.0)()
+        (self.insets)()
     }
 
     /// The one safe content rectangle shared by pages, palette, dialogs and
@@ -62,6 +89,23 @@ impl WindowSeam {
 /// [`COMPACT_BREAKPOINT`]. At exactly 900 the layout is wide.
 pub fn compact_for(viewport_width: Pixels, insets: &WindowInsets) -> bool {
     viewport_width - insets.safe_area.left - insets.safe_area.right < px(COMPACT_BREAKPOINT)
+}
+
+fn lifecycle_wake(
+    lifecycle: &mut tcode_client::recovery::Lifecycle,
+    phase: gpui::AppLifecyclePhase,
+    now_ms: u64,
+) -> Option<tcode_client::recovery::Wake> {
+    match phase {
+        gpui::AppLifecyclePhase::Background => {
+            lifecycle.background(now_ms);
+            None
+        }
+        gpui::AppLifecyclePhase::Foreground | gpui::AppLifecyclePhase::Active => {
+            lifecycle.foreground(now_ms)
+        }
+        _ => None,
+    }
 }
 
 /// [`compact_for`] applied to this window and its installed seam.
@@ -102,6 +146,27 @@ pub(crate) fn override_soft_keyboard_for_test(cx: &mut App, value: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_lifecycle_phase_hook_probes_or_reconnects_once() {
+        use gpui::AppLifecyclePhase as Phase;
+        use tcode_client::recovery::{Lifecycle, Wake};
+        let mut lifecycle = Lifecycle::default();
+        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Background, 0), None);
+        assert_eq!(
+            lifecycle_wake(&mut lifecycle, Phase::Foreground, 9_999),
+            Some(Wake::Probe)
+        );
+        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Active, 10_000), None);
+        assert_eq!(
+            lifecycle_wake(&mut lifecycle, Phase::Background, 20_000),
+            None
+        );
+        assert_eq!(
+            lifecycle_wake(&mut lifecycle, Phase::Active, 30_000),
+            Some(Wake::Reconnect)
+        );
+    }
 
     fn insets(left: f32, right: f32, bottom: f32, ime_bottom: f32) -> WindowInsets {
         WindowInsets {

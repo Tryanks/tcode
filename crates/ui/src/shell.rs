@@ -441,16 +441,10 @@ impl AppShell {
 
         let store = link.store.clone();
         window.set_window_title(&store.read(cx).shell_window_title());
-        let remote = matches!(link.target, AttachmentTarget::Remote(_));
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
-        let sidebar = cx.new(|cx| {
-            let mut sidebar = SessionsSidebar::new(store.clone(), self.window_state.clone(), cx);
-            // A remote workspace has nothing to show until its first index
-            // snapshot arrives; a local one is already seeded.
-            sidebar.set_loading(remote, cx);
-            sidebar
-        });
+        let sidebar =
+            cx.new(|cx| SessionsSidebar::new(store.clone(), self.window_state.clone(), cx));
         let subscriptions = vec![
             cx.observe_in(&store, window, move |this, store, window, cx| {
                 window.set_window_title(&store.read(cx).shell_window_title());
@@ -474,13 +468,6 @@ impl AppShell {
                 &store,
                 window,
                 |this, _, change: &StoreChange, window, cx| {
-                    if change.topic == TopicKind::Index
-                        && let Some(attachment) = &this.attachment
-                    {
-                        attachment
-                            .sidebar
-                            .update(cx, |sidebar, cx| sidebar.set_loading(false, cx));
-                    }
                     if change.topic == TopicKind::Settings {
                         this.adopt_host_settings(window, cx);
                     }
@@ -618,6 +605,12 @@ impl AppShell {
 impl AppShell {
     fn compact(&self, cx: &App) -> bool {
         self.window_state.read(cx).compact
+    }
+
+    pub(crate) fn wake_connection(&self, wake: tcode_client::recovery::Wake) {
+        if let Some(attachment) = &self.attachment {
+            attachment.link.link().wake(wake);
+        }
     }
 
     /// Recompute the layout from the window. Only a flip does anything, and a

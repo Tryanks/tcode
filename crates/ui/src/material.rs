@@ -436,6 +436,39 @@ pub fn accessible_clickable(
         .aria_label(label)
 }
 
+/// Neutral rows shared by unhydrated workspace and conversation views.
+pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
+    v_flex()
+        .id("baseline-loading")
+        .debug_selector(|| "baseline-loading".into())
+        .flex_1()
+        .px(px(COMPACT_PAGE_INSET))
+        .pt(px(8.))
+        .gap(px(4.))
+        .children((0..3).map(|_| {
+            v_flex()
+                .h(px(56.))
+                .justify_center()
+                .gap(px(8.))
+                .opacity(0.3)
+                .child(
+                    div()
+                        .w(gpui::relative(0.7))
+                        .h(px(14.))
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary),
+                )
+                .child(
+                    div()
+                        .w(gpui::relative(0.35))
+                        .h(px(11.))
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary),
+                )
+        }))
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

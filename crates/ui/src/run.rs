@@ -162,6 +162,20 @@ pub fn run_shell(
         .take()
         .expect("the shell is built while the window opens");
     crate::shell::set_back_target(window.into(), &shell, cx);
+    if let Some(wakes) = WindowSeam::current(cx).lifecycle_wakes() {
+        let shell = shell.downgrade();
+        cx.spawn(async move |cx| {
+            while let Ok(wake) = wakes.recv().await {
+                if shell
+                    .update(cx, |shell, _| shell.wake_connection(wake))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
     let _ = window.update(cx, |_, window, _| {
         if options.activate {
             window.activate_window();

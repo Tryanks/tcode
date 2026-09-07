@@ -128,6 +128,19 @@ so startup never exposes a default white/black window or decorative backdrop.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
 
+## Connection baseline
+
+Before the first Index and Settings snapshots are applied, Threads and the wide
+sidebar show the same neutral loading rows. Chat also waits for the selected
+thread's SessionStatus and SessionEvents baseline. No empty-workspace or
+empty-conversation message appears while that content is unknown. Empty messages
+are reserved for an applied, genuinely empty baseline.
+
+A reconnect keeps cached lists and conversations visible. The connection banner
+and dot show **Syncing / 同步中** until the workspace and selected thread have
+received their replayed baseline, then **Connected**. Loading state belongs to
+the attachment's store and survives layout changes.
+
 ## Scrolling contract
 
 Potentially unbounded content always has its own resolved-height viewport and a

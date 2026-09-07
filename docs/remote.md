@@ -364,10 +364,14 @@ use their own transports.
 | Connection rejected after adding the machine | Check whether the device was removed. Add the machine again with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
 | Preview cannot load a dev server | Make the dev server listen on all interfaces, open its own port and check the first address saved for the added machine. The tcode port does not carry the preview page connection. |
 
-**Syncing…** means the authenticated socket is open and waiting for its first
-host message. **Reconnecting · attempt N** appears immediately when a connection
-is lost, with its failure reason. Retry delays grow from one to thirty seconds;
-only traffic received after the hello handshake resets backoff. Native clients
+**Syncing… / 同步中** means the workspace is waiting for its baseline: applied
+Index and Settings snapshots, plus SessionStatus and SessionEvents for the
+selected thread. A newly attached workspace shows neutral loading rows until
+these arrive; it never labels an unknown list as empty. Cached lists and thread
+content remain visible during reconnect, with Syncing until replay completes. **Reconnecting · attempt N** appears immediately when a connection
+is lost, with its failure reason. Retry delays grow exponentially from one to thirty seconds with ±20% jitter
+(and a final 30 s cap). Only a connection stable for at least 30 s resets backoff;
+a quick handshake followed by another disconnect does not. Native clients
 race addresses resolved for the saved origin at 250 ms intervals, with one 15 s budget per address for
 TCP, optional TLS, WebSocket upgrade and hello. The first successful address wins.
 
@@ -376,6 +380,24 @@ frame arrives in the next 20 s. Every connected write has a 10 s deadline.
 Browsers send an application ping after 15 s without an inbound message and
 reconnect after another 20 s without a reply. Browser timers may be delayed in
 background tabs; making the page visible or coming online wakes reconnection.
+
+Native foreground cancels pending backoff. After at least 10 s in the background
+it opens a new socket and replays subscriptions from applied cursors. After a
+shorter absence it probes once, allowing 3 s for a reply before reconnecting.
+Foreground and Active from the same return do not issue duplicate probes.
+Native network-path callbacks are not installed; lifecycle wake is the native
+wake signal.
+
+When a saved HTTP LAN origin is unreachable or times out, the native client
+browses nearby machines during retry. A changed LAN hint for the same machine ID
+updates and persists the origin and wakes an immediate retry. The token is never
+changed. HTTPS tunnels and the browser's fixed origin skip this refresh.
+
+Outgoing commands and queries are bounded to 256 lines and 8 MiB per attachment,
+including lines held for retry. A full queue rejects the new line with
+`queue_full` (QueueFull) and logs the error; older lines are retained. Subscription
+updates coalesce by topic outside those slots. The store exposes the pending
+count through `queued_outgoing()`.
 
 A disconnected device keeps cached thread content for reading and disables
 writes; unvisited threads may have only cached list information. Subscriptions

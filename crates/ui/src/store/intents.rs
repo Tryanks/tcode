@@ -268,6 +268,14 @@ impl WorkspaceStore {
         self.remember_project(project_id);
         self.leave_session();
         self.selected_session_id = Some(session_id.clone());
+        self.baseline_topics
+            .remove(&tcode_protocol::Topic::SessionStatus {
+                session_id: session_id.clone(),
+            });
+        self.baseline_topics
+            .remove(&tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.clone(),
+            });
         self.session_status_replica = self.session_statuses.get(&session_id).cloned();
         self.git_status_replica = self
             .git_statuses

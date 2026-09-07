@@ -137,6 +137,11 @@ pub struct WorkspaceStore {
     /// defaults it was constructed with. Views that copy a setting into an
     /// editable input must not treat the defaults as the host's answer.
     settings_hydrated: bool,
+    baseline_topics: HashSet<Topic>,
+    index_hydrated: bool,
+    last_refresh_attempt: Option<u32>,
+    address_refresh: Option<Task<()>>,
+    hydrated_sessions: HashSet<String>,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
     session_statuses: HashMap<String, SessionStatus>,
@@ -300,6 +305,11 @@ impl WorkspaceStore {
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
             settings_hydrated: false,
+            baseline_topics: HashSet::new(),
+            index_hydrated: false,
+            last_refresh_attempt: None,
+            address_refresh: None,
+            hydrated_sessions: HashSet::new(),
             selected_session_id: None,
             session_records: HashMap::new(),
             session_statuses: HashMap::new(),
@@ -406,7 +416,14 @@ impl WorkspaceStore {
                 while let Ok(state) = changes.recv().await {
                     if this
                         .update(cx, |store, cx| {
-                            store.connection_state = state;
+                            store.refresh_address(&state, cx);
+                            store.apply_connection_state(state);
+                            cx.emit(StoreChange {
+                                topic: TopicKind::Index,
+                            });
+                            cx.emit(StoreChange {
+                                topic: TopicKind::SessionStatus,
+                            });
                             cx.notify();
                         })
                         .is_err()
@@ -434,7 +451,8 @@ impl WorkspaceStore {
             while let Ok(state) = changes.recv().await {
                 if this
                     .update(cx, |store, cx| {
-                        store.connection_state = state;
+                        store.refresh_address(&state, cx);
+                        store.apply_connection_state(state);
                         cx.notify();
                     })
                     .is_err()
@@ -498,12 +516,115 @@ impl WorkspaceStore {
     }
 
     pub fn connection_state(&self) -> &ConnectionState {
-        &self.connection_state
+        if matches!(
+            self.connection_state,
+            ConnectionState::Connected | ConnectionState::Syncing
+        ) {
+            if self.baseline_ready() {
+                &ConnectionState::Connected
+            } else {
+                &ConnectionState::Syncing
+            }
+        } else {
+            &self.connection_state
+        }
+    }
+
+    fn refresh_address(&mut self, state: &ConnectionState, cx: &mut Context<Self>) {
+        if matches!(
+            state,
+            ConnectionState::Connected | ConnectionState::Syncing | ConnectionState::Offline { .. }
+        ) {
+            self.address_refresh.take();
+            self.last_refresh_attempt = None;
+        }
+        let ConnectionState::Reconnecting {
+            attempt,
+            reason:
+                Some(
+                    tcode_client::ConnectionFailure::Unreachable
+                    | tcode_client::ConnectionFailure::Timeout,
+                ),
+        } = state
+        else {
+            return;
+        };
+        if self.last_refresh_attempt == Some(*attempt) {
+            return;
+        }
+        self.last_refresh_attempt = Some(*attempt);
+        let Some(host_id) = self.remote_host_id().map(str::to_owned) else {
+            return;
+        };
+        let Some(client) = self.client_host.clone() else {
+            return;
+        };
+        self.address_refresh = Some(cx.spawn(async move |this, cx| {
+            if let Some(origin) = client.refresh_origin(&host_id).await {
+                let _ = this.update(cx, |store, _| {
+                    if let Ok(url) = url::Url::parse(&origin)
+                        && let Some(address) = url.host_str()
+                    {
+                        store.set_remote_address(address.to_owned());
+                    }
+                    store
+                        .host
+                        .wake(tcode_client::recovery::Wake::Origin(origin));
+                });
+            }
+        }));
+    }
+
+    fn apply_connection_state(&mut self, state: ConnectionState) {
+        if matches!(
+            state,
+            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+        ) {
+            self.baseline_topics.clear();
+        }
+        self.connection_state = state;
+    }
+
+    pub fn queued_outgoing(&self) -> usize {
+        self.host.queued_outgoing()
+    }
+
+    pub fn baseline_ready(&self) -> bool {
+        self.baseline_topics.contains(&Topic::Index)
+            && self.baseline_topics.contains(&Topic::Settings)
+            && self.selected_session_id.as_ref().is_none_or(|id| {
+                self.baseline_topics.contains(&Topic::SessionStatus {
+                    session_id: id.clone(),
+                }) && self.baseline_topics.contains(&Topic::SessionEvents {
+                    session_id: id.clone(),
+                })
+            })
+    }
+
+    /// Cached content remains readable while a new baseline is replayed.
+    pub fn threads_loading(&self) -> bool {
+        !self.index_hydrated
+            || !self.settings_hydrated
+            || (!matches!(self.connection_state(), ConnectionState::Connected)
+                && self.index_replica.0.is_empty()
+                && self.index_replica.1.is_empty())
+    }
+
+    pub fn chat_loading(&self) -> bool {
+        if !self.index_hydrated || !self.settings_hydrated {
+            return true;
+        }
+        if let Some(id) = &self.selected_session_id {
+            !self.hydrated_sessions.contains(id) || !self.session_statuses.contains_key(id)
+        } else {
+            self.threads_loading()
+        }
     }
 
     /// End this store's one-link lifetime before its views are replaced.
     pub fn detach(&mut self, cx: &mut App) {
         self.attachment_tasks.clear();
+        self.address_refresh.take();
         for subscription in self.host.subscriptions() {
             let _ = self.host.unsubscribe(subscription);
         }
@@ -634,6 +755,8 @@ impl WorkspaceStore {
                     .insert(project_id.clone(), status.clone());
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
+                self.index_hydrated = true;
+                self.baseline_topics.insert(Topic::Index);
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
@@ -658,6 +781,9 @@ impl WorkspaceStore {
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
                 self.settings_replica = settings.clone();
                 self.settings_hydrated = true;
+                if matches!(envelope.event, ServerEvent::SettingsSnapshot(_)) {
+                    self.baseline_topics.insert(Topic::Settings);
+                }
             }
             (Topic::Providers, ServerEvent::ProvidersReplaced(status)) => {
                 self.providers_replica = status.clone();
@@ -671,6 +797,7 @@ impl WorkspaceStore {
             (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
                 if status.session_id == *session_id =>
             {
+                self.baseline_topics.insert(envelope.topic.clone());
                 self.session_statuses
                     .insert(session_id.clone(), status.clone());
                 if self.selected_session_id.as_ref() == Some(session_id) {
@@ -706,6 +833,8 @@ impl WorkspaceStore {
                 } else if *from != held.len() as u64 {
                     held.clear();
                     self.session_replica = None;
+                    self.hydrated_sessions.remove(session_id);
+                    self.baseline_topics.remove(&envelope.topic);
                     let _ = self.host.subscribe(Subscription {
                         topic: envelope.topic.clone(),
                         after: None,
@@ -721,6 +850,8 @@ impl WorkspaceStore {
                 {
                     timeline.mark_idle();
                 }
+                self.baseline_topics.insert(envelope.topic.clone());
+                self.hydrated_sessions.insert(session_id.clone());
                 self.session_replica = Some((session_id.clone(), timeline));
                 let _ = self.host.update_after(&envelope.topic, held.len() as u64);
             }
@@ -2338,6 +2469,76 @@ mod tests {
 
     use super::{ConversationDestination, WorkspaceStore, effective_client_settings};
 
+    #[gpui::test]
+    fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
+        use gpui::{px, size};
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                tcode_client::HostLink::new(to_host, from_host),
+                super::WorkspaceAttachment::Remote {
+                    host_id: "test".into(),
+                    host_name: "Test".into(),
+                    address: None,
+                },
+                None,
+                false,
+                cx,
+            )
+        });
+        let window_state =
+            cx.new(|_| crate::window_state::WindowState::new(false).with_compact(true));
+        let (_sidebar, cx) = cx.add_window_view(|_, cx| {
+            crate::sidebar::SessionsSidebar::new(store.clone(), window_state, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "Threads must render a skeleton before Index arrives"
+        );
+        assert!(cx.debug_bounds("threads-empty").is_none());
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(Settings::default()),
+                },
+                cx,
+            );
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        sessions: vec![],
+                        projects: vec![],
+                        activity: Default::default(),
+                    }),
+                },
+                cx,
+            );
+            cx.emit(super::StoreChange {
+                topic: super::TopicKind::Index,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("baseline-loading").is_none());
+        assert!(
+            cx.debug_bounds("threads-empty").is_some(),
+            "An applied empty baseline must render the empty message"
+        );
+    }
+
     #[test]
     fn client_preferences_persist_and_override_host_settings_only_when_set() {
         use tcode_client::host::{ClientHost as _, ClientPreferences};
@@ -2414,6 +2615,77 @@ mod tests {
             smol::block_on(smol::Timer::after(std::time::Duration::from_millis(1)));
         }
         panic!("timed out waiting for {description}");
+    }
+
+    #[gpui::test]
+    fn reconnect_retains_replicas_until_all_selected_thread_baselines_arrive(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_client::ConnectionState;
+        let root = scratch_root("baseline-replay");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project_at("p", &root)).unwrap();
+        disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        workspace.update(cx, |store, _| store.select_session("one".into()));
+        wait_until(cx, &workspace, "selected thread baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
+        workspace.update(cx, |store, cx| {
+            let status = store.session_status_replica.clone().unwrap();
+            let snapshots = [
+                (
+                    Topic::Index,
+                    ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        sessions: store.index_replica.0.clone(),
+                        projects: store.index_replica.1.clone(),
+                        activity: Default::default(),
+                    }),
+                ),
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(store.settings_replica.clone()),
+                ),
+                (
+                    Topic::SessionStatus {
+                        session_id: "one".into(),
+                    },
+                    ServerEvent::SessionStatusReplaced(status),
+                ),
+                (
+                    Topic::SessionEvents {
+                        session_id: "one".into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        from: 0,
+                        records: vec![],
+                    },
+                ),
+            ];
+            store.apply_connection_state(ConnectionState::Reconnecting {
+                attempt: 2,
+                reason: None,
+            });
+            store.apply_connection_state(ConnectionState::Syncing);
+            assert!(!store.threads_loading(), "cached list remains visible");
+            assert!(!store.chat_loading(), "cached thread remains visible");
+            assert_eq!(store.active_session_id().as_deref(), Some("one"));
+            for (topic, event) in snapshots {
+                assert_eq!(store.connection_state(), &ConnectionState::Syncing);
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    },
+                    cx,
+                );
+            }
+            assert_eq!(store.connection_state(), &ConnectionState::Connected);
+        });
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn scratch_root(label: &str) -> std::path::PathBuf {

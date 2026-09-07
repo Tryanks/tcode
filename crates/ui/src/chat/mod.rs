@@ -2465,6 +2465,10 @@ impl Render for ChatView {
             cx.theme().background
         });
 
+        if self.workspace_store.read(cx).chat_loading() {
+            return root.child(crate::material::loading_skeleton(cx));
+        }
+
         let Some((title, cwd, is_draft)) = active else {
             return root
                 .when(!self.window_state.read(cx).compact, |el| {
