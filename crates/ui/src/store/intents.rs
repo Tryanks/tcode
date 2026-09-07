@@ -283,10 +283,7 @@ impl WorkspaceStore {
             .cloned()
             .unwrap_or_default();
         let records = self.session_records.entry(session_id.clone()).or_default();
-        self.session_replica = Some((
-            session_id.clone(),
-            tcode_core::session::Timeline::fold_events(records.iter().cloned()),
-        ));
+        self.session_replica = None;
         let after = Some(records.len() as u64);
         for topic in [
             tcode_protocol::Topic::SessionStatus {

@@ -76,6 +76,18 @@ pub struct HostLink {
     inner: Arc<HostLinkInner>,
 }
 
+/// A request owns its waiter, including when its future is cancelled.
+struct PendingRequest<'a> {
+    link: &'a HostLink,
+    id: u64,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.link.inner.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
 pub type CommandFuture =
     Pin<Box<dyn Future<Output = Result<CommandResponse, ProtocolError>> + Send + 'static>>;
 
@@ -176,6 +188,7 @@ impl HostLink {
 
     async fn request(&self, payload: ClientPayload) -> Result<HostMessage, ProtocolError> {
         let id = self.next_id();
+        let _pending = PendingRequest { link: self, id };
         self.begin_request(id, payload)?
             .recv()
             .await
@@ -197,6 +210,7 @@ impl HostLink {
         let id = self.next_id();
         let link = self.clone();
         let future = async move {
+            let _pending = PendingRequest { link: &link, id };
             let receiver = link.begin_request(id, ClientPayload::Command(command))?;
             match receiver.recv().await.map_err(transport_error)? {
                 HostMessage::Ack { result, .. } => result,
@@ -265,11 +279,20 @@ impl HostLink {
     }
 
     pub fn unsubscribe(&self, subscription: Subscription) -> Result<(), ProtocolError> {
-        self.inner
+        let removed = self
+            .inner
             .subscribed_topics
             .lock()
             .unwrap()
             .remove(&subscription.topic);
+        self.inner
+            .subscription_requests
+            .lock()
+            .unwrap()
+            .remove(&subscription.topic);
+        if removed.is_none() {
+            return Ok(());
+        }
         self.inner
             .retired_topics
             .lock()
@@ -431,6 +454,50 @@ mod tests {
         let error = smol::block_on(link.command(Command::OpenLatestSession)).unwrap_err();
         assert_eq!(error.code, "queue_full");
         assert_eq!(link.queued_outgoing(), 256);
+        assert!(link.inner.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retired_subscription_rejects_queued_reply_and_releases_generation() {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let subscription = Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "one".into(),
+            },
+            after: None,
+        };
+        link.subscribe(subscription.clone()).unwrap();
+        let request = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        link.unsubscribe(subscription.clone()).unwrap();
+        let reply = EventEnvelope {
+            request_id: Some(request.id),
+            topic: subscription.topic,
+            event: ServerEvent::SessionSnapshot {
+                from: 0,
+                records: vec![],
+            },
+        };
+        assert!(!link.subscription_reply_is_current(&reply));
+        assert!(link.inner.subscription_requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_request_releases_pending_waiter() {
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        for _ in 0..20 {
+            let mut query = std::pin::pin!(link.query(Query::Ping));
+            assert!(
+                std::future::Future::poll(
+                    query.as_mut(),
+                    &mut std::task::Context::from_waker(std::task::Waker::noop())
+                )
+                .is_pending()
+            );
+        }
         assert!(link.inner.pending.lock().unwrap().is_empty());
     }
 

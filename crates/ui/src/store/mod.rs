@@ -626,7 +626,9 @@ impl WorkspaceStore {
             return true;
         }
         if let Some(id) = &self.selected_session_id {
-            !self.hydrated_sessions.contains(id) || !self.session_statuses.contains_key(id)
+            self.session_loading()
+                || !self.hydrated_sessions.contains(id)
+                || !self.session_statuses.contains_key(id)
         } else {
             self.threads_loading()
         }
@@ -850,6 +852,9 @@ impl WorkspaceStore {
                         topic: envelope.topic.clone(),
                         after: None,
                     });
+                    return;
+                }
+                if records.is_empty() && *from != 0 && self.session_replica.is_some() {
                     return;
                 }
                 held.extend(records.iter().cloned());
@@ -2352,10 +2357,23 @@ impl WorkspaceStore {
         )
     }
 
+    pub(crate) fn session_loading(&self) -> bool {
+        self.selected_session_id.is_some()
+            && (self.session_replica.is_none() || self.session_status_replica.is_none())
+    }
+
     pub fn chat_active_session(&self) -> Option<(String, PathBuf, bool)> {
         self.session_status_replica
             .as_ref()
             .map(|status| (status.title.clone(), status.cwd.clone(), status.draft))
+            .or_else(|| {
+                let selected = self.selected_session_id.as_ref()?;
+                self.index_replica
+                    .0
+                    .iter()
+                    .find(|meta| &meta.id == selected)
+                    .map(|meta| (meta.title.clone(), meta.cwd.clone(), false))
+            })
     }
 
     pub fn chat_requested_model(&self) -> Option<String> {
@@ -2487,7 +2505,9 @@ mod tests {
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
 
-    use super::{ConversationDestination, WorkspaceStore, effective_client_settings};
+    use super::{
+        ConversationDestination, WorkspaceAttachment, WorkspaceStore, effective_client_settings,
+    };
 
     #[gpui::test]
     fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
@@ -2599,6 +2619,61 @@ mod tests {
             "clearing the client override must reveal the replicated host fallback"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn rapid_selection_is_immediate_idempotent_and_retires_old_loads(cx: &mut TestAppContext) {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let host = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        workspace.update(cx, |store, cx| {
+            let task_count = store.attachment_tasks.len();
+            for index in 0..20 {
+                let id = if index % 2 == 0 { "one" } else { "two" };
+                store.select_session(id.into());
+                assert_eq!(store.active_session_id().as_deref(), Some(id));
+                assert!(store.session_loading());
+                let messages = outgoing.len();
+                store.select_session(id.into());
+                assert_eq!(outgoing.len(), messages, "second tap must send nothing");
+                assert_eq!(store.attachment_tasks.len(), task_count);
+                assert_eq!(
+                    host.subscriptions()
+                        .iter()
+                        .filter(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    host.subscriptions()
+                        .iter()
+                        .filter(|sub| matches!(sub.topic, Topic::SessionStatus { .. }))
+                        .count(),
+                    1
+                );
+            }
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "one".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        from: 0,
+                        records: vec![],
+                    },
+                },
+                cx,
+            );
+            assert!(
+                store.session_loading(),
+                "retired load must not replace the skeleton"
+            );
+            assert!(store.session_replica.is_none());
+        });
     }
 
     fn test_host(store: SessionStore) -> SpawnedHost {

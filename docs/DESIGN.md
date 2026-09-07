@@ -141,6 +141,14 @@ and dot show **Syncing / 同步中** until the workspace and selected thread hav
 received their replayed baseline, then **Connected**. Loading state belongs to
 the attachment's store and survives layout changes.
 
+## Opening a conversation
+
+The first tap selects the sidebar row and pushes the compact Thread destination
+immediately. Until both status and timeline arrive, the chat shows a muted message
+skeleton. Selecting that conversation again sends no requests. Changing selection
+retires the old subscription generation; its late snapshot cannot replace the new
+conversation.
+
 ## Scrolling contract
 
 Potentially unbounded content always has its own resolved-height viewport and a

@@ -1733,8 +1733,9 @@ impl SessionsSidebar {
                 is_active,
                 has_direct_children,
             );
-            this.store.update(cx, |store, _cx| {
+            this.store.update(cx, |store, cx| {
                 store.select_session(session_id.clone());
+                cx.notify();
             });
             this.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
@@ -2612,6 +2613,10 @@ impl SessionsSidebar {
         .when(state.is_child, |row| {
             row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
         })
+        .when(
+            self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
+            |row| row.bg(cx.theme().list_active).aria_selected(true),
+        )
         // Rows needing the user carry a 6% semantic wash; everything else sits
         // on the paper with only hover and pressed tints.
         .when(state.waiting_for_approval, |row| {
@@ -2622,8 +2627,14 @@ impl SessionsSidebar {
             |row| row.bg(cx.theme().primary.opacity(0.06)),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.store.update(cx, |store, _cx| {
+            if this.store.read(cx).session_loading()
+                && this.store.read(cx).active_session_id().as_deref() == Some(click_id.as_str())
+            {
+                return;
+            }
+            this.store.update(cx, |store, cx| {
                 store.select_session(click_id.clone());
+                cx.notify();
             });
             this.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
