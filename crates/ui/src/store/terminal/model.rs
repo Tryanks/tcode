@@ -7,7 +7,7 @@
 
 use tcode_protocol::terminal::{
     CellWidth, CursorShape, KeyboardModes, TerminalCell, TerminalClipboard, TerminalDelta,
-    TerminalFrame, TerminalMode, TerminalOverlay, TerminalRow, TerminalStyle,
+    TerminalFrame, TerminalMode, TerminalRow, TerminalStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,21 +226,6 @@ impl TerminalModel {
 
     pub fn display_offset(&self) -> usize {
         self.display_offset
-    }
-
-    pub fn images(&self) -> &[tcode_protocol::terminal::TerminalImage] {
-        &self.frame.images
-    }
-
-    /// Placements laid out by the host against a viewport anchored at the
-    /// oldest retained row; the renderer shifts them by its own scroll.
-    pub fn overlays(&self) -> &[TerminalOverlay] {
-        &self.frame.overlays
-    }
-
-    /// Rows between the host's viewport top and this client's, in cell units.
-    pub fn overlay_row_offset(&self) -> f32 {
-        (self.frame.history.len() - self.display_offset) as f32
     }
 
     pub fn row_damaged(&self, row: usize) -> bool {

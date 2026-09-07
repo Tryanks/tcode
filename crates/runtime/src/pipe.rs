@@ -604,6 +604,24 @@ fn dispatch_query(
             let task = app.search_session_content(query, limit, cx);
             cx.spawn_background(async move { Ok(QueryResponse::SessionContentHits(task.await)) })
         }
+        Query::RenderStoredOutput {
+            session_id,
+            item_id,
+            cols,
+        } => {
+            let Some(output) = app.stored_command_output(&session_id, &item_id) else {
+                return cx.spawn_background(async move {
+                    Err(ProtocolError {
+                        code: "unknown_stored_output".into(),
+                        message: format!("no stored command output {item_id} in {session_id}"),
+                    })
+                });
+            };
+            let task = cx.unblock(move || crate::terminal::render_stored_output(&output, cols));
+            cx.spawn_background(
+                async move { Ok(QueryResponse::TerminalFrame(Box::new(task.await))) },
+            )
+        }
     }
 }
 
@@ -716,6 +734,103 @@ mod tests {
         }))
         .expect_err("unknown session must be refused");
         assert_eq!(missing.code, "unknown_session");
+
+        link.shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        std::fs::remove_dir_all(data_root).expect("remove test data");
+    }
+
+    /// Stored command output is re-wrapped by the host, not by the client: the
+    /// same item asked for at two widths comes back as two grids, each carrying
+    /// the styles the shell wrote.
+    #[test]
+    fn rendering_stored_output_rewraps_at_the_requested_width() {
+        use tcode_protocol::terminal::{CellFlags, TerminalColor};
+
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-stored-output-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            data_root.join("workspace"),
+            Some("opus".into()),
+        );
+        meta.id = "stored-output-session".into();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "cmd-1".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::CommandExecution {
+                        command: "echo red".into(),
+                        // Bold red, 25 characters: it fits one 40-column row and
+                        // wraps onto a second at 20.
+                        output: "\u{1b}[1;31mabcdefghijklmnopqrstuvwxy\u{1b}[0m".into(),
+                        exit_code: Some(0),
+                        status: agent::ItemStatus::Completed,
+                    },
+                }),
+            )
+            .expect("append event");
+        store.upsert_meta(&meta).expect("write meta");
+
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let link = host.link();
+        // The host only renders what it has folded; a client reads a thread by
+        // subscribing to it, which is what makes the timeline resident.
+        link.subscribe(tcode_protocol::Subscription {
+            topic: Topic::SessionEvents {
+                session_id: meta.id.clone(),
+            },
+            after: None,
+        })
+        .expect("subscribe to the session");
+
+        let frame = |cols: u16| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match smol::block_on(link.query(Query::RenderStoredOutput {
+                    session_id: meta.id.clone(),
+                    item_id: "cmd-1".into(),
+                    cols,
+                })) {
+                    Ok(QueryResponse::TerminalFrame(frame)) => return *frame,
+                    Ok(other) => panic!("unexpected stored-output response: {other:?}"),
+                    Err(error) if std::time::Instant::now() < deadline => {
+                        assert_eq!(error.code, "unknown_stored_output");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("stored output never became readable: {error:?}"),
+                }
+            }
+        };
+
+        let narrow = frame(40);
+        assert_eq!((narrow.cols, narrow.rows), (40, 1));
+        assert_eq!(narrow.visible[0].cells[20].text, "u");
+        let style = narrow.style(&narrow.visible[0].cells[0]);
+        assert_eq!(style.fg, TerminalColor::Indexed(1));
+        assert!(style.flags().contains(CellFlags::BOLD));
+
+        let narrower = frame(20);
+        assert_eq!((narrower.cols, narrower.rows), (20, 2));
+        assert_eq!(narrower.visible[1].cells[0].text, "u");
+        assert!(narrower.history.is_empty() && narrower.cursor.is_none());
+
+        // A width no screen has is answered at the nearest one the host renders.
+        assert_eq!(frame(4).cols, 20);
+        assert_eq!(frame(4000).cols, 400);
+
+        let missing = smol::block_on(link.query(Query::RenderStoredOutput {
+            session_id: meta.id.clone(),
+            item_id: "no-such-item".into(),
+            cols: 80,
+        }))
+        .expect_err("an unknown item must be refused");
+        assert_eq!(missing.code, "unknown_stored_output");
 
         link.shutdown_blocking().expect("stop host");
         host.stopped.recv_blocking().expect("host thread stopped");

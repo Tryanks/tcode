@@ -1,31 +1,45 @@
-use std::{collections::HashMap, fmt::Write as _, sync::Arc};
+//! The expanded command block: the command line, then its captured output.
+//!
+//! No client owns a terminal emulator, so the output grid is the host's answer
+//! to "render this stored item at N columns". Until that answer arrives the
+//! panel shows the raw text, which is always something rather than a gap.
+
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use gpui::{
     AnyElement, App, ContentMask, Hsla, IntoElement as _, ParentElement as _, Rgba, Styled as _,
-    Window, canvas, div, prelude::FluentBuilder as _, px,
+    Task, Window, canvas, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::ElementExt as _;
-use tcode_protocol::terminal::TerminalFrame;
-use term::GridEmulator;
+use gpui_base::{ElementExt as _, v_flex};
+use tcode_protocol::{
+    STORED_OUTPUT_COLS,
+    terminal::{TerminalCell, TerminalFrame, TerminalRow, TerminalStyle},
+};
 
 use crate::highlight;
 use crate::store::terminal::TerminalModel;
 use crate::terminal_drawer::{
-    TERMINAL_CELL_HEIGHT, TERMINAL_CELL_WIDTH, TerminalPalette, layout_grid, paint_terminal_grid,
+    TERMINAL_CELL_HEIGHT, TERMINAL_CELL_WIDTH, TERMINAL_FONT_FAMILY, TERMINAL_FONT_SIZE,
+    TerminalPalette, layout_grid, paint_terminal_grid,
 };
 use crate::theme::{ActiveTheme as _, HighlightTheme};
 
-const DEFAULT_COLS: usize = 80;
-const MIN_COLS: usize = 20;
-const MAX_COLS: usize = 400;
+const DEFAULT_COLS: u16 = 80;
+/// Grid rows one panel shows, command line included.
 const MAX_ROWS: usize = 16;
 const MAX_COMMAND_ROWS: usize = 4;
-const OUTPUT_TAIL_BYTES: usize = 32 * 1024;
+/// Stored-output renders the host may be working on at once. Scrolling a long
+/// thread expands many panels; without a ceiling every one of them would ask.
+const MAX_IN_FLIGHT: usize = 4;
 
-pub(crate) type ColsChangeHandler = Box<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
+pub(crate) type ColsChangeHandler = Box<dyn Fn(&u16, &mut Window, &mut App) + 'static>;
+
+pub(crate) fn clamp_cols(cols: u16) -> u16 {
+    cols.clamp(*STORED_OUTPUT_COLS.start(), *STORED_OUTPUT_COLS.end())
+}
 
 pub(crate) struct CommandPanelCache {
-    entries: HashMap<String, CachedPanel>,
+    entries: HashMap<String, Panel>,
 }
 
 impl CommandPanelCache {
@@ -39,12 +53,6 @@ impl CommandPanelCache {
         self.entries.clear();
     }
 
-    pub(crate) fn resize(&mut self, id: &str, cols: usize) -> bool {
-        self.entries
-            .get_mut(id)
-            .is_some_and(|panel| panel.resize(cols))
-    }
-
     pub(crate) fn render(
         &mut self,
         id: &str,
@@ -53,12 +61,66 @@ impl CommandPanelCache {
         on_cols_change: Option<ColsChangeHandler>,
         cx: &App,
     ) -> AnyElement {
-        let panel = self
-            .entries
-            .entry(id.to_string())
-            .or_insert_with(|| CachedPanel::new(command, output));
+        let panel = self.entries.entry(id.to_string()).or_default();
         panel.update(command, output);
-        panel.render(on_cols_change, cx)
+        panel.render(output, on_cols_change, cx)
+    }
+
+    /// Note the width `id` was laid out at and claim a request slot.
+    ///
+    /// `Some(generation)` means the caller must ask the host and hand the
+    /// answer back to [`Self::adopt`] under that generation.
+    pub(crate) fn claim(&mut self, id: &str, cols: u16) -> Option<u64> {
+        let in_flight = self
+            .entries
+            .values()
+            .filter(|panel| panel.in_flight)
+            .count();
+        let panel = self.entries.get_mut(id)?;
+        if panel.cols != cols {
+            panel.cols = cols;
+            panel.generation += 1;
+            // The command line wraps at the same width as the output.
+            panel.command_model = None;
+        }
+        if panel.frames.contains_key(&cols) || panel.requested == Some(panel.generation) {
+            return None;
+        }
+        if in_flight >= MAX_IN_FLIGHT {
+            return None;
+        }
+        panel.requested = Some(panel.generation);
+        panel.in_flight = true;
+        Some(panel.generation)
+    }
+
+    /// Keep the debounce timer alive for as long as it is the current one.
+    pub(crate) fn hold(&mut self, id: &str, task: Task<()>) {
+        if let Some(panel) = self.entries.get_mut(id) {
+            panel.task = Some(task);
+        }
+    }
+
+    /// Take the host's answer. A frame for a width the panel has since left is
+    /// dropped: `generation` moved on without it.
+    pub(crate) fn adopt(
+        &mut self,
+        id: &str,
+        generation: u64,
+        frame: Option<TerminalFrame>,
+    ) -> bool {
+        let Some(panel) = self.entries.get_mut(id) else {
+            return false;
+        };
+        panel.in_flight = false;
+        if panel.generation != generation {
+            return false;
+        }
+        let Some(frame) = frame else {
+            return false;
+        };
+        panel.frames.insert(frame.cols, Rc::new(frame));
+        true
     }
 }
 
@@ -77,143 +139,105 @@ impl CommandTheme {
     }
 }
 
-struct CachedPanel {
+struct Panel {
     command: String,
-    command_model: TerminalModel,
+    /// Rendered lazily so the first paint already carries the theme colours.
+    command_model: Option<(TerminalModel, usize)>,
     command_rows: usize,
     command_theme: Option<CommandTheme>,
-    cols: usize,
-    output_emulator: GridEmulator,
-    output: Vec<u8>,
-    fed_start: usize,
-    last_fed_was_cr: bool,
-    output_model: TerminalModel,
-    output_rows: usize,
+    cols: u16,
+    /// `output.len()` the cached frames describe. A running command's output
+    /// grows, which retires them.
+    version: usize,
+    frames: HashMap<u16, Rc<TerminalFrame>>,
+    /// Bumped whenever the frames on hand stop describing what is on screen.
+    generation: u64,
+    /// The generation the host has already been asked about.
+    requested: Option<u64>,
+    in_flight: bool,
+    task: Option<Task<()>>,
 }
 
-impl CachedPanel {
-    fn new(command: &str, output: &str) -> Self {
-        Self::with_cols(command, output, DEFAULT_COLS)
-    }
-
-    fn with_cols(command: &str, output: &str, cols: usize) -> Self {
-        let (command_model, command_rows) = command_model(command, cols, None);
-        let output_emulator = GridEmulator::with_size(cols, MAX_ROWS - command_rows);
-        let mut panel = Self {
-            command: command.to_string(),
-            command_model,
-            command_rows,
+impl Default for Panel {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            command_model: None,
+            command_rows: 0,
             command_theme: None,
-            cols,
-            output_emulator,
-            output: Vec::new(),
-            fed_start: 0,
-            last_fed_was_cr: false,
-            output_model: TerminalModel::new(String::new()),
-            output_rows: 0,
-        };
-        panel.rebuild_output(output.as_bytes());
-        panel
+            cols: DEFAULT_COLS,
+            version: usize::MAX,
+            frames: HashMap::new(),
+            generation: 0,
+            requested: None,
+            in_flight: false,
+            task: None,
+        }
     }
+}
 
+impl Panel {
     fn update(&mut self, command: &str, output: &str) {
         if self.command != command {
             self.command = command.to_string();
-            (self.command_model, self.command_rows) =
-                command_model(command, self.cols, self.command_theme.as_ref());
-            self.rebuild_output(output.as_bytes());
-            return;
+            self.command_model = None;
         }
-
-        let bytes = output.as_bytes();
-        if bytes == self.output {
-            return;
-        }
-        let append_only = bytes.starts_with(&self.output);
-        if append_only && bytes.len().saturating_sub(self.fed_start) <= OUTPUT_TAIL_BYTES {
-            self.feed_output(&bytes[self.output.len()..]);
-            self.output = bytes.to_vec();
-            self.refresh_output_model();
-        } else {
-            self.rebuild_output(bytes);
+        if self.version != output.len() {
+            self.version = output.len();
+            self.frames.clear();
+            self.generation += 1;
         }
     }
 
-    fn resize(&mut self, cols: usize) -> bool {
-        let cols = cols.clamp(MIN_COLS, MAX_COLS);
-        if self.cols == cols {
-            return false;
-        }
-        self.cols = cols;
-        (self.command_model, self.command_rows) =
-            command_model(&self.command, cols, self.command_theme.as_ref());
-        let output = self.output.clone();
-        self.rebuild_output(&output);
-        true
+    /// Rows the output may use: the panel's budget, less the command line.
+    fn output_budget(&self) -> usize {
+        MAX_ROWS.saturating_sub(self.command_rows).max(1)
     }
 
-    fn rebuild_output(&mut self, bytes: &[u8]) {
-        self.output_emulator =
-            GridEmulator::with_size(self.cols, MAX_ROWS.saturating_sub(self.command_rows).max(1));
-        self.fed_start = bytes.len().saturating_sub(OUTPUT_TAIL_BYTES);
-        self.last_fed_was_cr = self.fed_start > 0 && bytes[self.fed_start - 1] == b'\r';
-        self.feed_output(&bytes[self.fed_start..]);
-        self.output = bytes.to_vec();
-        self.refresh_output_model();
-    }
-
-    fn feed_output(&mut self, bytes: &[u8]) {
-        let mut normalized = Vec::with_capacity(bytes.len());
-        for &byte in bytes {
-            if byte == b'\n' && !self.last_fed_was_cr {
-                normalized.push(b'\r');
-            }
-            normalized.push(byte);
-            self.last_fed_was_cr = byte == b'\r';
-        }
-        self.output_emulator.feed(&normalized);
-    }
-
-    fn refresh_output_model(&mut self) {
-        let snapshot = self.output_emulator.snapshot();
-        let rows = visible_rows(
-            &snapshot,
-            MAX_ROWS.saturating_sub(self.command_rows).max(1),
-            0,
-        );
-        self.output_model = project(&snapshot, rows);
-        self.output_rows = rows;
-    }
-
-    fn update_command_theme(&mut self, command_theme: CommandTheme) {
-        if self
-            .command_theme
-            .as_ref()
-            .is_some_and(|cached| cached.matches(&command_theme))
-        {
-            return;
-        }
-        (self.command_model, self.command_rows) =
-            command_model(&self.command, self.cols, Some(&command_theme));
-        self.command_theme = Some(command_theme);
-    }
-
-    fn render(&mut self, on_cols_change: Option<ColsChangeHandler>, cx: &App) -> AnyElement {
-        let command_theme = CommandTheme {
+    fn render(
+        &mut self,
+        output: &str,
+        on_cols_change: Option<ColsChangeHandler>,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = CommandTheme {
             foreground: cx.theme().foreground,
             background: cx.theme().background,
             highlight_theme: cx.theme().highlight_theme.clone(),
         };
-        self.update_command_theme(command_theme);
+        if !self
+            .command_theme
+            .as_ref()
+            .is_some_and(|cached| cached.matches(&theme))
+        {
+            self.command_model = None;
+            self.command_theme = Some(theme);
+        }
+        let cols = self.cols;
+        if self.command_model.is_none() {
+            let theme = self.command_theme.clone();
+            self.command_model = Some(command_model(&self.command, cols, theme.as_ref()));
+        }
+        let (command_model, command_rows) = self.command_model.as_ref().expect("command model");
+        self.command_rows = *command_rows;
+
         let palette = TerminalPalette {
             foreground: cx.theme().foreground,
             background: cx.theme().background,
             selection: cx.theme().primary.opacity(0.28),
         };
-        let command = grid_element(&self.command_model, self.command_rows, self.cols, palette);
-        let output = (self.output_rows > 0)
-            .then(|| grid_element(&self.output_model, self.output_rows, self.cols, palette));
-        let rendered_cols = self.cols;
+        let command = grid_element(command_model, *command_rows, cols, palette);
+        let budget = self.output_budget();
+        let output = match self.frames.get(&cols) {
+            Some(frame) => {
+                let (model, rows) = output_model(frame, budget);
+                (rows > 0).then(|| grid_element(&model, rows, cols, palette))
+            }
+            None => plain_output(output, budget),
+        };
+        // The host has not answered for this width yet, so keep asking even
+        // when the measured width itself did not move.
+        let awaiting = self.requested != Some(self.generation);
         div()
             .w_full()
             .overflow_hidden()
@@ -222,12 +246,13 @@ impl CachedPanel {
             .children(output)
             .when_some(on_cols_change, |panel, on_cols_change| {
                 panel.on_prepaint(move |bounds, window, cx| {
-                    let cols = (f32::from(bounds.size.width) / TERMINAL_CELL_WIDTH)
-                        .floor()
-                        .max(0.) as usize;
-                    let cols = cols.clamp(MIN_COLS, MAX_COLS);
-                    if cols != rendered_cols {
-                        on_cols_change(&cols, window, cx);
+                    let measured = clamp_cols(
+                        (f32::from(bounds.size.width) / TERMINAL_CELL_WIDTH)
+                            .floor()
+                            .clamp(0., f32::from(u16::MAX)) as u16,
+                    );
+                    if measured != cols || awaiting {
+                        on_cols_change(&measured, window, cx);
                     }
                 })
             })
@@ -235,10 +260,42 @@ impl CachedPanel {
     }
 }
 
+/// The host renders a full screen; the panel shows its last `budget` rows.
+fn output_model(frame: &TerminalFrame, budget: usize) -> (TerminalModel, usize) {
+    let mut frame = frame.clone();
+    let overflow = frame.visible.len().saturating_sub(budget);
+    frame.visible.drain(..overflow);
+    frame.rows = frame.visible.len().min(u16::MAX as usize) as u16;
+    let rows = frame.visible.len();
+    let mut model = TerminalModel::new(String::new());
+    model.apply_frame(frame);
+    (model, rows)
+}
+
+/// What the panel shows before the host answers, and on every client while a
+/// command is still producing output.
+fn plain_output(output: &str, budget: usize) -> Option<AnyElement> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let tail = &lines[lines.len().saturating_sub(budget)..];
+    (!tail.is_empty()).then(|| {
+        v_flex()
+            .w_full()
+            .overflow_hidden()
+            .font_family(TERMINAL_FONT_FAMILY)
+            .text_size(px(TERMINAL_FONT_SIZE))
+            .line_height(px(TERMINAL_CELL_HEIGHT))
+            .children(
+                tail.iter()
+                    .map(|line| div().child(line.to_string()).into_any_element()),
+            )
+            .into_any_element()
+    })
+}
+
 fn grid_element(
     model: &TerminalModel,
     rows: usize,
-    cols: usize,
+    cols: u16,
     palette: TerminalPalette,
 ) -> AnyElement {
     let paint_data = layout_grid(model, palette, false, None, false, false);
@@ -255,60 +312,92 @@ fn grid_element(
                     TERMINAL_CELL_WIDTH,
                     TERMINAL_CELL_HEIGHT,
                     false,
-                    |_origin, _scale_factor, _window| (),
                 );
             });
         },
     )
-    .w(px(cols as f32 * TERMINAL_CELL_WIDTH))
+    .w(px(f32::from(cols) * TERMINAL_CELL_WIDTH))
     .h(px(rows as f32 * TERMINAL_CELL_HEIGHT))
     .into_any_element()
 }
 
+/// Lay the command out into grid cells so it shares the output's metrics.
+///
+/// The command is the client's own text, not captured terminal output: it
+/// carries no escape sequences, and its colours come from this client's syntax
+/// theme, which the host has no business knowing.
 fn command_model(
     command: &str,
-    cols: usize,
+    cols: u16,
     command_theme: Option<&CommandTheme>,
 ) -> (TerminalModel, usize) {
-    let emulator = GridEmulator::with_size(cols, MAX_COMMAND_ROWS);
     let command = clamp_command(command, cols);
-    if let Some(command_theme) = command_theme {
-        emulator.feed(highlighted_command(&command, command_theme).as_bytes());
-    } else {
-        emulator.feed(command.as_bytes());
-    }
-    let snapshot = emulator.snapshot();
-    let rows = visible_rows(&snapshot, MAX_COMMAND_ROWS, 1);
-    (project(&snapshot, rows), rows)
-}
+    let highlights = command_theme
+        .map(|theme| highlight::highlight_source(&command, "bash", &theme.highlight_theme))
+        .unwrap_or_default();
 
-fn highlighted_command(command: &str, theme: &CommandTheme) -> String {
-    let highlights = highlight::highlight_source(command, "bash", &theme.highlight_theme);
-    let mut highlighted = String::new();
-    let mut cursor = 0;
-    for (range, style) in highlights {
-        if range.start > cursor {
-            push_command_color(&mut highlighted, theme.foreground, theme.background);
-            highlighted.push_str(&command[cursor..range.start]);
+    let mut styles = vec![TerminalStyle::default()];
+    let mut visible = vec![TerminalRow::default()];
+    let mut col = 0usize;
+    for (offset, ch) in command.char_indices() {
+        if ch == '\r' {
+            continue;
         }
-        push_command_color(
-            &mut highlighted,
-            style.color.unwrap_or(theme.foreground),
-            theme.background,
-        );
-        highlighted.push_str(&command[range.clone()]);
-        cursor = range.end;
+        if ch == '\n' {
+            visible.push(TerminalRow::default());
+            col = 0;
+            continue;
+        }
+        if col == usize::from(cols) {
+            visible.push(TerminalRow::default());
+            col = 0;
+        }
+        let style = command_theme.map_or_else(TerminalStyle::default, |theme| {
+            let color = highlights
+                .iter()
+                .find(|(range, _)| range.contains(&offset))
+                .and_then(|(_, style)| style.color)
+                .unwrap_or(theme.foreground);
+            faded_command_style(color, theme.background)
+        });
+        let style = match styles.iter().position(|existing| *existing == style) {
+            Some(index) => index as u16,
+            None => {
+                styles.push(style);
+                (styles.len() - 1) as u16
+            }
+        };
+        visible
+            .last_mut()
+            .expect("a row is always open")
+            .cells
+            .push(TerminalCell {
+                text: ch.to_string(),
+                style,
+                ..TerminalCell::default()
+            });
+        col += 1;
     }
-    if cursor < command.len() {
-        push_command_color(&mut highlighted, theme.foreground, theme.background);
-        highlighted.push_str(&command[cursor..]);
-    }
-    highlighted
+
+    let rows = visible.len().max(1);
+    let mut model = TerminalModel::new(String::new());
+    model.apply_frame(TerminalFrame {
+        cols,
+        rows: rows.min(u16::MAX as usize) as u16,
+        styles,
+        visible,
+        ..TerminalFrame::default()
+    });
+    (model, rows)
 }
 
-fn push_command_color(command: &mut String, foreground: Hsla, background: Hsla) {
+/// The command reads as context, not as output, so it sits at 70% contrast.
+fn faded_command_style(foreground: Hsla, background: Hsla) -> TerminalStyle {
     let (r, g, b) = faded_command_rgb(foreground, background);
-    let _ = write!(command, "\x1b[38;2;{r};{g};{b}m");
+    TerminalStyle {
+        fg: tcode_protocol::terminal::TerminalColor::Rgb { r, g, b },
+        ..TerminalStyle::default()
+    }
 }
 
 fn faded_command_rgb(foreground: Hsla, background: Hsla) -> (u8, u8, u8) {
@@ -320,7 +409,8 @@ fn faded_command_rgb(foreground: Hsla, background: Hsla) -> (u8, u8, u8) {
     )
 }
 
-fn clamp_command(command: &str, cols: usize) -> String {
+fn clamp_command(command: &str, cols: u16) -> String {
+    let cols = usize::from(cols);
     let mut result = String::new();
     let mut row = 0;
     let mut col = 0;
@@ -331,7 +421,7 @@ fn clamp_command(command: &str, cols: usize) -> String {
                 result.push('…');
                 break;
             }
-            result.push_str("\r\n");
+            result.push('\n');
             row += 1;
             col = 0;
             continue;
@@ -354,47 +444,12 @@ fn clamp_command(command: &str, cols: usize) -> String {
     result
 }
 
-/// Stored command output has no host terminal behind it, so it is rendered
-/// through the same replicated model the live drawer uses, projected from a
-/// throwaway local emulator.
-fn project(snapshot: &term::TermSnapshot, rows: usize) -> TerminalModel {
-    let mut projector = term::Projector::default();
-    let visible = (0..rows)
-        .map(|row| projector.visible_row(snapshot, row))
-        .collect();
-    let mut model = TerminalModel::new(String::new());
-    model.apply_frame(TerminalFrame {
-        cols: snapshot.cols.min(u16::MAX as usize) as u16,
-        rows: rows.min(u16::MAX as usize) as u16,
-        styles: projector.into_styles(),
-        visible,
-        cursor: None,
-        ..TerminalFrame::default()
-    });
-    model
-}
-
-/// Trailing blank rows are not rendered; a command block sizes to its content.
-fn visible_rows(snapshot: &term::TermSnapshot, max_rows: usize, minimum: usize) -> usize {
-    (0..max_rows.min(snapshot.screen_lines))
-        .rfind(|&row| {
-            (0..snapshot.cols).any(|col| {
-                snapshot
-                    .cell_text(row, col)
-                    .is_some_and(|text| text.chars().any(|ch| ch != ' ' && ch != '\0'))
-            })
-        })
-        .map_or(minimum, |row| row + 1)
-        .max(minimum)
-}
-
 #[cfg(test)]
 mod tests {
     use gpui::rgb;
     use tcode_protocol::terminal::TerminalColor;
 
     use super::*;
-    use crate::terminal_drawer::terminal_color;
 
     fn palette() -> TerminalPalette {
         TerminalPalette {
@@ -412,30 +467,93 @@ mod tests {
         }
     }
 
+    fn frame(cols: u16, lines: &[&str]) -> TerminalFrame {
+        TerminalFrame {
+            cols,
+            rows: lines.len() as u16,
+            visible: lines
+                .iter()
+                .map(|line| TerminalRow {
+                    cells: line
+                        .chars()
+                        .map(|ch| TerminalCell {
+                            text: ch.to_string(),
+                            ..TerminalCell::default()
+                        })
+                        .collect(),
+                    wrapped: false,
+                })
+                .collect(),
+            ..TerminalFrame::default()
+        }
+    }
+
+    /// The panel adopts the frame it is currently asking for, ignores one for a
+    /// width it has already left, and asks again after the width moves.
     #[test]
-    fn ansi_output_uses_terminal_green() {
-        let panel = CachedPanel::new("echo green", "\x1b[32mgreen\x1b[0m");
-        let paint = layout_grid(&panel.output_model, palette(), false, None, false, false);
-        let green = paint
-            .text_runs
-            .iter()
-            .find(|run| run.text.contains("green"))
-            .expect("green output run");
-        assert_eq!(
-            terminal_color(green.style.fg, palette()),
-            terminal_color(TerminalColor::Indexed(2), palette())
+    fn frames_are_adopted_for_the_current_width_only() {
+        let mut cache = CommandPanelCache::new();
+        cache.entries.insert("item".into(), Panel::default());
+
+        let first = cache.claim("item", 40).expect("first request");
+        assert_eq!(cache.claim("item", 40), None, "the width is already asked");
+
+        let second = cache.claim("item", 120).expect("the width moved");
+        assert_ne!(first, second);
+        assert!(!cache.adopt("item", first, Some(frame(40, &["stale"]))));
+        assert!(cache.adopt("item", second, Some(frame(120, &["fresh"]))));
+
+        let panel = &cache.entries["item"];
+        assert!(!panel.frames.contains_key(&40));
+        assert!(panel.frames.contains_key(&120));
+        // A width with a frame on hand is never re-requested.
+        assert_eq!(cache.claim("item", 120), None);
+    }
+
+    #[test]
+    fn concurrent_requests_are_bounded() {
+        let mut cache = CommandPanelCache::new();
+        for index in 0..MAX_IN_FLIGHT + 1 {
+            cache
+                .entries
+                .insert(format!("item-{index}"), Panel::default());
+        }
+        let claimed = (0..MAX_IN_FLIGHT + 1)
+            .filter(|index| cache.claim(&format!("item-{index}"), 40).is_some())
+            .count();
+        assert_eq!(claimed, MAX_IN_FLIGHT);
+
+        // An answer frees the slot the next panel was waiting for.
+        cache.adopt("item-0", 0, None);
+        assert!(cache.claim(&format!("item-{MAX_IN_FLIGHT}"), 40).is_some());
+    }
+
+    #[test]
+    fn growing_output_retires_the_cached_frames() {
+        let mut cache = CommandPanelCache::new();
+        cache.entries.insert("item".into(), Panel::default());
+        let generation = cache.claim("item", 40).expect("request");
+        assert!(cache.adopt("item", generation, Some(frame(40, &["one"]))));
+
+        cache
+            .entries
+            .get_mut("item")
+            .expect("panel")
+            .update("cmd", "one\ntwo\n");
+        assert!(
+            cache.claim("item", 40).is_some(),
+            "longer output must be re-rendered"
         );
     }
 
     #[test]
     fn command_is_clamped_to_four_rows() {
-        let mut panel = CachedPanel::new(&"x".repeat(DEFAULT_COLS * MAX_COMMAND_ROWS + 1), "");
-        panel.update_command_theme(dark_command_theme());
-        assert_eq!(panel.command_rows, MAX_COMMAND_ROWS);
+        let command = "x".repeat(usize::from(DEFAULT_COLS) * MAX_COMMAND_ROWS + 1);
+        let (model, rows) = command_model(&command, DEFAULT_COLS, Some(&dark_command_theme()));
+        assert_eq!(rows, MAX_COMMAND_ROWS);
         assert!(
-            panel
-                .command_model
-                .cell(MAX_COMMAND_ROWS - 1, DEFAULT_COLS - 1)
+            model
+                .cell(MAX_COMMAND_ROWS - 1, usize::from(DEFAULT_COLS) - 1)
                 .is_some_and(|cell| cell.text == "…")
         );
     }
@@ -457,60 +575,39 @@ mod tests {
                 .expect("bash keyword highlight color");
         let expected = faded_command_rgb(raw_keyword_color, command_theme.background);
 
-        let mut panel = CachedPanel::new(command, "");
-        panel.update_command_theme(command_theme);
-        let paint = layout_grid(&panel.command_model, palette(), false, None, false, false);
-        let command = paint
+        let (model, rows) = command_model(command, DEFAULT_COLS, Some(&command_theme));
+        let paint = layout_grid(&model, palette(), false, None, false, false);
+        assert_eq!(rows, 1);
+        let run = paint
             .text_runs
             .iter()
             .find(|run| run.text.contains("if"))
             .expect("highlighted command run");
-        let TerminalColor::Rgb { r, g, b } = command.style.fg else {
+        let TerminalColor::Rgb { r, g, b } = run.style.fg else {
             panic!("command keyword should use truecolor foreground");
         };
         assert_eq!((r, g, b), expected);
     }
 
     #[test]
-    fn trailing_blank_output_rows_are_trimmed() {
-        let panel = CachedPanel::new("printf one", "one\n\n");
-        assert_eq!(panel.output_rows, 1);
-    }
-
-    #[test]
-    fn bare_lf_returns_output_to_first_column() {
-        let panel = CachedPanel::new("cmd", "a\nb");
+    fn command_wraps_at_the_measured_width() {
+        let (model, rows) = command_model("abcdefghij", 5, None);
+        assert_eq!(rows, 2);
         assert_eq!(
-            panel.output_model.cell(1, 0).map(|cell| cell.text.clone()),
-            Some("b".into())
+            model.cell(1, 0).map(|cell| cell.text.clone()),
+            Some("f".into())
         );
     }
 
+    /// Long output keeps its tail: the panel is a window onto the end of a run.
     #[test]
-    fn split_crlf_is_not_double_converted() {
-        let mut panel = CachedPanel::new("cmd", "a\r");
-        panel.update("cmd", "a\r\nb");
+    fn output_shows_the_last_rows_that_fit() {
+        let lines = ["one", "two", "three", "four"];
+        let (model, rows) = output_model(&frame(40, &lines), 2);
+        assert_eq!(rows, 2);
         assert_eq!(
-            panel.output_model.cell(1, 0).map(|cell| cell.text.clone()),
-            Some("b".into())
+            model.cell(0, 0).map(|cell| cell.text.clone()),
+            Some("t".into())
         );
-        assert_eq!(panel.output_rows, 2);
-    }
-
-    #[test]
-    fn output_wraps_at_the_configured_column_count() {
-        let output = "abcdefghijklmnopqrstuvwxy";
-        let narrow = CachedPanel::with_cols("cmd", output, 20);
-        let wide = CachedPanel::with_cols("cmd", output, 40);
-        assert_eq!(
-            narrow.output_model.cell(1, 0).map(|cell| cell.text.clone()),
-            Some("u".into())
-        );
-        assert_eq!(narrow.output_rows, 2);
-        assert_eq!(
-            wide.output_model.cell(0, 20).map(|cell| cell.text.clone()),
-            Some("u".into())
-        );
-        assert_eq!(wide.output_rows, 1);
     }
 }

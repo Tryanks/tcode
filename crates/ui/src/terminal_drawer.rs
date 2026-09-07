@@ -5,7 +5,6 @@ use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
-    sync::Arc,
     time::Duration,
 };
 #[cfg(target_family = "wasm")]
@@ -19,15 +18,14 @@ use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
     FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, RenderImage, Role,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
     ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point,
     prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_base::{ElementExt as _, h_flex, h_resizable, resizable_panel, v_flex, v_resizable};
 use tcode_protocol::terminal::{
-    CellFlags, CellWidth, CursorShape, ImageColorType, TerminalColor, TerminalImage,
-    TerminalMode as Mode, TerminalOverlay,
+    CellFlags, CellWidth, CursorShape, TerminalColor, TerminalMode as Mode,
     mappings::{self, GridPoint, Modifiers as TermModifiers, MouseButton as TermMouseButton},
 };
 
@@ -44,11 +42,11 @@ pub(crate) const TERMINAL_FONT_SIZE: f32 = 13.;
 pub(crate) const TERMINAL_CELL_WIDTH: f32 = 7.83;
 pub(crate) const TERMINAL_CELL_HEIGHT: f32 = 17.;
 #[cfg(target_os = "macos")]
-const TERMINAL_FONT_FAMILY: &str = "Menlo";
+pub(crate) const TERMINAL_FONT_FAMILY: &str = "Menlo";
 #[cfg(target_os = "windows")]
-const TERMINAL_FONT_FAMILY: &str = "Consolas";
+pub(crate) const TERMINAL_FONT_FAMILY: &str = "Consolas";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const TERMINAL_FONT_FAMILY: &str = "Lilex";
+pub(crate) const TERMINAL_FONT_FAMILY: &str = "Lilex";
 const PANE_PADDING: f32 = 8.;
 const SELECTION_DRAG_THRESHOLD: f32 = 2.;
 
@@ -323,11 +321,6 @@ struct TerminalGridCache {
     rows: Vec<Option<CachedRowLayout>>,
 }
 
-#[derive(Clone)]
-struct GraphicImage {
-    image: Arc<RenderImage>,
-}
-
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
@@ -337,7 +330,6 @@ pub struct TerminalDrawer {
     /// their PTYs. Empty means "no drag yet": assume an even split.
     split_sizes: Rc<RefCell<Vec<f32>>>,
     row_layout_cache: RefCell<HashMap<u64, TerminalGridCache>>,
-    image_registry: RefCell<HashMap<u64, HashMap<u64, GraphicImage>>>,
     cell_width: f32,
     cell_height: f32,
     scroll_remainder: HashMap<u64, f32>,
@@ -430,7 +422,6 @@ impl TerminalDrawer {
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
             split_sizes: Rc::new(RefCell::new(Vec::new())),
             row_layout_cache: RefCell::new(HashMap::new()),
-            image_registry: RefCell::new(HashMap::new()),
             cell_width: TERMINAL_CELL_WIDTH,
             cell_height: TERMINAL_CELL_HEIGHT,
             scroll_remainder: HashMap::new(),
@@ -582,22 +573,6 @@ impl TerminalDrawer {
             }
         }
         window.invalidate_character_coordinates();
-    }
-
-    /// Decode any image the host has transported but this registry has not
-    /// seen, and drop the ones it withdrew. Pixel buffers cross the pipe once.
-    fn sync_graphics(&self, terminal_id: u64, model: &TerminalModel) {
-        let mut registries = self.image_registry.borrow_mut();
-        let images = registries.entry(terminal_id).or_default();
-        images.retain(|key, _| model.images().iter().any(|image| image.key == *key));
-        for image in model.images() {
-            if images.contains_key(&image.key) {
-                continue;
-            }
-            if let Some(decoded) = graphic_image(image) {
-                images.insert(image.key, decoded);
-            }
-        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -756,14 +731,6 @@ impl TerminalDrawer {
         let cell_height = self.cell_height;
         let cols = state.cols();
         let rows = state.rows();
-        let overlays = state.overlays().to_vec();
-        let overlay_row_offset = state.overlay_row_offset();
-        let graphic_images = self
-            .image_registry
-            .borrow()
-            .get(&terminal_id)
-            .cloned()
-            .unwrap_or_default();
         let focus_handle = self.focus_handle.clone();
         let drawer = cx.entity();
         let grid_bounds = self.grid_bounds.clone();
@@ -785,7 +752,7 @@ impl TerminalDrawer {
                         },
                     );
 
-                    let (cursor_bounds, graphic_overlays) = paint_terminal_grid(
+                    let cursor_bounds = paint_terminal_grid(
                         bounds,
                         window,
                         cx,
@@ -794,40 +761,6 @@ impl TerminalDrawer {
                         cell_width,
                         cell_height,
                         marked_text.is_none(),
-                        |origin, scale_factor, window| {
-                            // The host laid these out against a viewport
-                            // anchored at the oldest retained row, using the
-                            // physical cell size this client reported; only the
-                            // local scroll and this pane's origin remain.
-                            let (host_cell_width, host_cell_height) =
-                                physical_cell_size(cell_width, cell_height, scale_factor);
-                            let physical_origin_x = f32::from(origin.x) * scale_factor;
-                            let physical_origin_y = f32::from(origin.y) * scale_factor;
-                            let clip = (
-                                physical_origin_x,
-                                physical_origin_y,
-                                physical_origin_x + cols as f32 * host_cell_width,
-                                physical_origin_y + rows as f32 * host_cell_height,
-                            );
-                            let placed = overlays
-                                .iter()
-                                .filter_map(|overlay| {
-                                    let mut overlay = *overlay;
-                                    overlay.x += physical_origin_x;
-                                    overlay.y +=
-                                        physical_origin_y - overlay_row_offset * host_cell_height;
-                                    overlay.clipped(clip.0, clip.1, clip.2, clip.3)
-                                })
-                                .collect::<Vec<_>>();
-                            paint_graphic_overlays(
-                                window,
-                                &placed,
-                                &graphic_images,
-                                scale_factor,
-                                false,
-                            );
-                            placed
-                        },
                     );
 
                     if let Some(marked_text) = marked_text.as_ref().filter(|text| !text.is_empty())
@@ -866,14 +799,6 @@ impl TerminalDrawer {
                             cx,
                         );
                     }
-
-                    paint_graphic_overlays(
-                        window,
-                        &graphic_overlays,
-                        &graphic_images,
-                        scale_factor,
-                        true,
-                    );
 
                     if register_input {
                         window.handle_input(
@@ -1209,7 +1134,6 @@ impl TerminalDrawer {
             .unwrap_or(false);
 
         let model = terminal.model();
-        self.sync_graphics(terminal_id, &model);
         let label = model.title();
         let (exited, exit_code) = (model.exited(), model.exit_code());
         let has_selection = model.has_selection();
@@ -1741,7 +1665,7 @@ fn snapped_grid_origin(bounds: Bounds<Pixels>, scale_factor: f32) -> Point<Pixel
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_terminal_grid<T>(
+pub(crate) fn paint_terminal_grid(
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -1750,8 +1674,7 @@ pub(crate) fn paint_terminal_grid<T>(
     cell_width: f32,
     cell_height: f32,
     show_cursor: bool,
-    paint_underlay: impl FnOnce(Point<Pixels>, f32, &mut Window) -> T,
-) -> (Option<Bounds<Pixels>>, T) {
+) -> Option<Bounds<Pixels>> {
     let scale_factor = window.scale_factor();
     let snap_down = |value: Pixels| px((f32::from(value) * scale_factor).floor() / scale_factor);
     let snap_up = |value: Pixels| px((f32::from(value) * scale_factor).ceil() / scale_factor);
@@ -1769,7 +1692,6 @@ pub(crate) fn paint_terminal_grid<T>(
         window.paint_quad(fill(background_bounds, background.color));
     }
 
-    let underlay = paint_underlay(origin, scale_factor, window);
     let cursor_bounds = paint_data.cursor.map(|cursor| {
         Bounds::new(
             point(
@@ -1870,12 +1792,11 @@ pub(crate) fn paint_terminal_grid<T>(
         let _ = shaped.paint(position, px(cell_height), TextAlign::Left, None, window, cx);
     }
 
-    (cursor_bounds, underlay)
+    cursor_bounds
 }
 
 /// Lay out a whole grid with no row cache. The live drawer keeps a cache per
 /// terminal; this is for one-shot renders of stored command output.
-#[cfg(any(feature = "command-ansi", test))]
 pub(crate) fn layout_grid(
     state: &TerminalModel,
     palette: TerminalPalette,
@@ -2046,8 +1967,7 @@ fn layout_row(
         }
 
         // A wide spacer still participates in backgrounds and hit-testing,
-        // but never contributes a glyph to the shaped text. Kitty Unicode
-        // placeholders reach the client with no text for the same reason.
+        // but never contributes a glyph to the shaped text.
         if cell.width == CellWidth::Spacer {
             continue;
         }
@@ -2404,123 +2324,6 @@ fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32
     };
     let lines = (pixels.abs().powf(1.1) / cell_height).ceil() as i32;
     Some(lines.clamp(1, 3) * pixels.signum() as i32)
-}
-
-/// The physical cell size reported to the host, so image placements and text
-/// share one grid.
-fn physical_cell_size(cell_width: f32, cell_height: f32, scale_factor: f32) -> (f32, f32) {
-    (
-        (cell_width * scale_factor).round().max(1.),
-        (cell_height * scale_factor).round().max(1.),
-    )
-}
-
-/// Decode a transported pixel buffer once, on arrival.
-fn graphic_image(image: &TerminalImage) -> Option<GraphicImage> {
-    if image.width == 0 || image.height == 0 {
-        return None;
-    }
-    let pixel_count = (image.width as usize).checked_mul(image.height as usize)?;
-    let bgra = match image.color {
-        ImageColorType::Rgba => {
-            if image.pixels.len() != pixel_count.checked_mul(4)? {
-                return None;
-            }
-            let mut pixels = image.pixels.clone();
-            for pixel in pixels.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
-            pixels
-        }
-        ImageColorType::Rgb => {
-            if image.pixels.len() != pixel_count.checked_mul(3)? {
-                return None;
-            }
-            let mut pixels = Vec::with_capacity(pixel_count.checked_mul(4)?);
-            for pixel in image.pixels.as_chunks::<3>().0 {
-                pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], u8::MAX]);
-            }
-            pixels
-        }
-    };
-    // RenderImage's byte contract is BGRA even though image::RgbaImage is the
-    // storage carrier, so protocol RGB(A) is swizzled exactly once on arrival.
-    let buffer = image::RgbaImage::from_raw(image.width, image.height, bgra)?;
-    Some(GraphicImage {
-        image: Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
-    })
-}
-
-fn paint_graphic_overlays(
-    window: &mut Window,
-    overlays: &[TerminalOverlay],
-    images: &HashMap<u64, GraphicImage>,
-    scale_factor: f32,
-    above_text: bool,
-) {
-    if !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return;
-    }
-    for overlay in overlays {
-        if (overlay.z_index >= 0) != above_text {
-            continue;
-        }
-        let Some(image) = images.get(&overlay.image_key) else {
-            continue;
-        };
-        paint_graphic_overlay(window, overlay, image, scale_factor);
-    }
-}
-
-fn paint_graphic_overlay(
-    window: &mut Window,
-    overlay: &TerminalOverlay,
-    image: &GraphicImage,
-    scale_factor: f32,
-) {
-    let [u0, v0, u1, v1] = overlay.source_rect;
-    let source_width = u1 - u0;
-    let source_height = v1 - v0;
-    if !overlay.x.is_finite()
-        || !overlay.y.is_finite()
-        || !overlay.width.is_finite()
-        || !overlay.height.is_finite()
-        || !u0.is_finite()
-        || !v0.is_finite()
-        || !source_width.is_finite()
-        || !source_height.is_finite()
-        || overlay.width <= 0.0
-        || overlay.height <= 0.0
-        || source_width <= 0.0
-        || source_height <= 0.0
-    {
-        return;
-    }
-
-    let target_x = overlay.x / scale_factor;
-    let target_y = overlay.y / scale_factor;
-    let target_width = overlay.width / scale_factor;
-    let target_height = overlay.height / scale_factor;
-    let full_width = target_width / source_width;
-    let full_height = target_height / source_height;
-    let image_x = target_x - u0 * full_width;
-    let image_y = target_y - v0 * full_height;
-    let target_bounds = Bounds::new(
-        point(px(target_x), px(target_y)),
-        size(px(target_width), px(target_height)),
-    );
-    let image_bounds = Bounds::new(
-        point(px(image_x), px(image_y)),
-        size(px(full_width), px(full_height)),
-    );
-    let _ = window.paint_image(
-        target_bounds,
-        image_bounds,
-        Default::default(),
-        image.image.clone(),
-        0,
-        false,
-    );
 }
 
 pub(crate) fn terminal_font() -> gpui::Font {

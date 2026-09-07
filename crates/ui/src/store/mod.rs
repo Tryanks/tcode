@@ -27,7 +27,7 @@ use tcode_protocol::{
     CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
     GitDiffScope, GitStatusStatus, PathEntry, ProtocolError, ProviderVersionStatus,
     ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
-    Subscription, Topic,
+    Subscription, TerminalFrame, Topic,
 };
 pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
@@ -1878,6 +1878,32 @@ impl WorkspaceStore {
                     mime,
                 }),
                 Ok(other) => Err(format!("unexpected thread-export response: {other:?}")),
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+
+    /// Ask the host to re-render a stored command's output at `cols`. The
+    /// emulator is the host's; a client only ever asks for a width.
+    pub fn render_stored_output(
+        &self,
+        session_id: String,
+        item_id: String,
+        cols: u16,
+        cx: &mut App,
+    ) -> Task<Result<TerminalFrame, String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::RenderStoredOutput {
+                    session_id,
+                    item_id,
+                    cols,
+                })
+                .await
+            {
+                Ok(QueryResponse::TerminalFrame(frame)) => Ok(*frame),
+                Ok(other) => Err(format!("unexpected stored-output response: {other:?}")),
                 Err(error) => Err(error.message),
             }
         })

@@ -45,9 +45,6 @@ bitflags::bitflags! {
                          | Self::MOUSE_MOTION.bits()
                          | Self::MOUSE_DRAG.bits()
                          | Self::MOUSE_REPORT_X10.bits();
-        const SIXEL_DISPLAY             = 1 << 28;
-        const SIXEL_PRIV_PALETTE        = 1 << 29;
-        const SIXEL_CURSOR_TO_THE_RIGHT = 1 << 31;
     }
 }
 
@@ -251,73 +248,6 @@ pub struct TerminalExit {
     pub code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImageColorType {
-    Rgb,
-    Rgba,
-}
-
-/// An image transported once and retained by the client's image registry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TerminalImage {
-    pub key: u64,
-    pub width: u32,
-    pub height: u32,
-    pub color: ImageColorType,
-    #[serde(with = "crate::wire::base64_bytes")]
-    pub pixels: Vec<u8>,
-}
-
-/// One image placement, already laid out by the host in **cell units** against
-/// a viewport pinned to the bottom of the scrollback. A client multiplies by
-/// its own cell size and shifts by its own scroll offset.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct TerminalOverlay {
-    pub image_key: u64,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    pub z_index: i32,
-    /// Normalized `[u0, v0, u1, v1]` source rectangle within the image.
-    pub source_rect: [f32; 4],
-}
-
-impl TerminalOverlay {
-    /// Clip this quad to a pane rectangle, shrinking the source rect
-    /// proportionally so the visible slice shows exactly the covered part of
-    /// the image. `None` means nothing of the quad is inside.
-    ///
-    /// Image quads are painted globally with no per-pane scissor, so without
-    /// this an image taller than its pane bleeds across split dividers.
-    pub fn clipped(mut self, x0: f32, y0: f32, x1: f32, y1: f32) -> Option<Self> {
-        if !(self.width > 0. && self.height > 0.) {
-            return None;
-        }
-        let left = self.x.max(x0);
-        let top = self.y.max(y0);
-        let right = (self.x + self.width).min(x1);
-        let bottom = (self.y + self.height).min(y1);
-        if right <= left || bottom <= top {
-            return None;
-        }
-        let [u0, v0, u1, v1] = self.source_rect;
-        let fraction = |value: f32, origin: f32, size: f32| (value - origin) / size;
-        self.source_rect = [
-            u0 + (u1 - u0) * fraction(left, self.x, self.width),
-            v0 + (v1 - v0) * fraction(top, self.y, self.height),
-            u0 + (u1 - u0) * fraction(right, self.x, self.width),
-            v0 + (v1 - v0) * fraction(bottom, self.y, self.height),
-        ];
-        self.x = left;
-        self.y = top;
-        self.width = right - left;
-        self.height = bottom - top;
-        Some(self)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalClipboard {
     /// OSC 52 primary selection rather than the system clipboard.
@@ -326,8 +256,11 @@ pub struct TerminalClipboard {
     pub text: String,
 }
 
-/// The complete replicated grid, sent on subscribe.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The complete replicated grid.
+///
+/// Sent on subscribe for a live terminal, and returned whole by
+/// [`crate::Query::RenderStoredOutput`] for a stored command's output.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalFrame {
     pub cols: u16,
     pub rows: u16,
@@ -349,10 +282,6 @@ pub struct TerminalFrame {
     pub exited: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images: Vec<TerminalImage>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlays: Vec<TerminalOverlay>,
 }
 
 /// An incremental update to a [`TerminalFrame`].
@@ -360,7 +289,7 @@ pub struct TerminalFrame {
 /// Dimensions, cursor, modes and eviction count are unconditional: they are a
 /// few dozen bytes and they remove every "did this change?" flag from the
 /// contract. Everything else appears only when it changed.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalDelta {
     pub cols: u16,
     pub rows: u16,
@@ -381,13 +310,6 @@ pub struct TerminalDelta {
     pub working_directory: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<TerminalExit>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images_added: Vec<TerminalImage>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub images_removed: Vec<u64>,
-    /// Present when any placement changed; replaces the whole overlay list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overlays: Option<Vec<TerminalOverlay>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub bell: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,16 +360,6 @@ impl TerminalFrame {
         if let Some(exit) = delta.exit {
             self.exited = exit.exited;
             self.exit_code = exit.code;
-        }
-        for key in &delta.images_removed {
-            self.images.retain(|image| image.key != *key);
-        }
-        for image in &delta.images_added {
-            self.images.retain(|existing| existing.key != image.key);
-            self.images.push(image.clone());
-        }
-        if let Some(overlays) = &delta.overlays {
-            self.overlays = overlays.clone();
         }
     }
 

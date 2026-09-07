@@ -142,16 +142,6 @@ fn binary_payloads_use_base64_and_reject_corrupt_input() {
         },
         "/content/bytes",
     );
-    assert_binary_wire(
-        crate::terminal::TerminalImage {
-            key: 3,
-            width: 1,
-            height: 1,
-            color: crate::terminal::ImageColorType::Rgba,
-            pixels: bytes.clone(),
-        },
-        "/pixels",
-    );
     assert_binary_wire(QueryResponse::FileBytes(bytes), "/content");
 }
 
@@ -433,8 +423,6 @@ fn terminal_frame_wire_shape_omits_defaults() {
         working_directory: Some(PathBuf::from("/tmp/project")),
         exited: false,
         exit_code: None,
-        images: Vec::new(),
-        overlays: Vec::new(),
     };
     let event = ServerEvent::TerminalFrame {
         terminal_id: 3,
@@ -518,9 +506,6 @@ fn terminal_delta_wire_shape_carries_only_what_changed() {
         title: None,
         working_directory: None,
         exit: None,
-        images_added: Vec::new(),
-        images_removed: Vec::new(),
-        overlays: None,
         bell: true,
         clipboard: None,
     };
@@ -610,25 +595,94 @@ fn applying_a_delta_replaces_rows_and_trims_history_at_the_cap() {
     );
 }
 
-/// An image quad wider than its pane is cut to the pane, and its source rect
-/// shrinks with it so the visible slice is the covered part of the image.
+/// Stored output is re-rendered by the host, so its request and its answer are
+/// what an older or non-Rust client has to speak.
 #[test]
-fn clipping_an_overlay_shrinks_its_source_rect_proportionally() {
-    use crate::terminal::TerminalOverlay;
+fn stored_output_rendering_uses_its_documented_wire_shape() {
+    use crate::terminal::{TerminalCell, TerminalFrame, TerminalRow, TerminalStyle};
 
-    let overlay = TerminalOverlay {
-        image_key: 1,
-        x: 0.,
-        y: 0.,
-        width: 100.,
-        height: 40.,
-        z_index: -1,
-        source_rect: [0., 0., 1., 1.],
+    let request = ClientMessage {
+        id: 11,
+        payload: ClientPayload::Query(Query::RenderStoredOutput {
+            session_id: "session-1".into(),
+            item_id: "cmd-1".into(),
+            cols: 40,
+        }),
     };
-    let clipped = overlay.clipped(25., 0., 75., 40.).unwrap();
-    assert_eq!((clipped.x, clipped.width), (25., 50.));
-    assert_eq!(clipped.source_rect, [0.25, 0., 0.75, 1.]);
-    assert_eq!(overlay.clipped(200., 0., 300., 40.), None);
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        json!({
+            "id": 11,
+            "payload": {
+                "type": "query",
+                "content": {
+                    "type": "render_stored_output",
+                    "content": {"session_id": "session-1", "item_id": "cmd-1", "cols": 40},
+                },
+            },
+        })
+    );
+    assert_eq!(
+        decode_client_line(&encode_line(&request).unwrap()).unwrap(),
+        request
+    );
+
+    // A finished screen: no cursor, no scrollback, no session behind it.
+    let answer = HostMessage::QueryResult {
+        id: 11,
+        result: Ok(QueryResponse::TerminalFrame(Box::new(TerminalFrame {
+            cols: 40,
+            rows: 1,
+            styles: vec![
+                TerminalStyle::default(),
+                TerminalStyle {
+                    fg: crate::terminal::TerminalColor::Indexed(1),
+                    flags: 0b10,
+                    ..TerminalStyle::default()
+                },
+            ],
+            visible: vec![TerminalRow {
+                cells: vec![TerminalCell {
+                    text: "x".into(),
+                    style: 1,
+                    ..TerminalCell::default()
+                }],
+                wrapped: false,
+            }],
+            ..TerminalFrame::default()
+        }))),
+    };
+    assert_eq!(
+        serde_json::to_value(&answer).unwrap(),
+        json!({
+            "type": "query_result",
+            "content": {
+                "id": 11,
+                "result": {"Ok": {
+                    "type": "terminal_frame",
+                    "content": {
+                        "cols": 40,
+                        "rows": 1,
+                        "modes": {"mode": 0, "keyboard": 0},
+                        "styles": [
+                            {"fg": {"type": "foreground"}, "bg": {"type": "background"}},
+                            {
+                                "fg": {"type": "indexed", "content": 1},
+                                "bg": {"type": "background"},
+                                "flags": 2,
+                            },
+                        ],
+                        "visible": [{"cells": [{"text": "x", "style": 1}]}],
+                        "title": "",
+                    },
+                }},
+            },
+        })
+    );
+    assert_eq!(
+        decode_host_line(&encode_line(&answer).unwrap()).unwrap(),
+        answer
+    );
 }
 
 /// Rendering an export and registering a project both moved a decision to the

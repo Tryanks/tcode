@@ -23,7 +23,8 @@ pub use event::{
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, MAX_THREAD_EXPORT_BYTES, PathEntry,
-    Query, QueryResponse, RecentDir, SessionSearchHit, SourceTool,
+    Query, QueryResponse, RecentDir, STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS, SessionSearchHit,
+    SourceTool,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{

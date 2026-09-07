@@ -9,12 +9,11 @@ use std::{
     thread,
 };
 
-use rio_graphics::{atlas_image_key, kitty_image_key};
 // rio's synchronized-update deadlines use its own clock, which is `web_time`
 // on wasm; mixing in `std::time::Instant` would not compile there.
 use rio_vt::time::Instant;
 use rio_vt::{
-    ansi::{CursorShape as RioCursorShape, KeyboardModes, graphics::UpdateQueues},
+    ansi::{CursorShape as RioCursorShape, KeyboardModes},
     clipboard::ClipboardType,
     config::colors::{ColorRgb, NamedColor},
     crosswords::{
@@ -74,7 +73,6 @@ struct GridCore {
     fallback_title: Mutex<String>,
     lifecycle: Mutex<GridLifecycle>,
     size: Arc<AtomicGridSize>,
-    graphics_updates: Arc<Mutex<Option<UpdateQueues>>>,
 }
 
 struct GridState {
@@ -139,7 +137,6 @@ struct GridListener {
     notifications: async_channel::Sender<GridEvent>,
     osc_title: Arc<Mutex<Option<String>>>,
     size: Arc<AtomicGridSize>,
-    graphics_updates: Arc<Mutex<Option<UpdateQueues>>>,
 }
 
 impl EventListener for GridListener {
@@ -182,14 +179,6 @@ impl EventListener for GridListener {
             RioEvent::TextAreaSizeRequest(_, format) => {
                 let bytes = format(self.size.window_size()).into_bytes();
                 let _ = self.notifications.try_send(GridEvent::Input(bytes));
-            }
-            RioEvent::UpdateGraphics { queues, .. } => {
-                merge_graphics_updates(&mut self.graphics_updates.lock_recover(), queues);
-                let _ = self.notifications.try_send(GridEvent::Wakeup);
-            }
-            RioEvent::GlyphProtocolInstalled { .. } | RioEvent::GlyphProtocolQuery { .. } => {
-                // tcode does not install rio's feature-gated font machinery;
-                // image protocols are rendered independently by the drawer.
             }
             RioEvent::ClipboardStore(kind, text) => {
                 let _ = self
@@ -287,12 +276,10 @@ impl GridEmulator {
         let (notifications, events) = async_channel::unbounded();
         let osc_title = Arc::new(Mutex::new(None));
         let atomic_size = Arc::new(AtomicGridSize::new(size));
-        let graphics_updates = Arc::new(Mutex::new(None));
         let listener = GridListener {
             notifications: notifications.clone(),
             osc_title: osc_title.clone(),
             size: atomic_size.clone(),
-            graphics_updates: graphics_updates.clone(),
         };
         let term = Crosswords::new(
             size.crosswords_size(),
@@ -312,7 +299,6 @@ impl GridEmulator {
             fallback_title: Mutex::new(fallback_title),
             lifecycle: Mutex::new(GridLifecycle::default()),
             size: atomic_size,
-            graphics_updates,
         });
         Self { core, events }
     }
@@ -622,8 +608,8 @@ impl GridEmulator {
         self.read(scrolled_before, budget, true)
     }
 
-    /// Read the grid without consuming renderer damage or the take-once image
-    /// queues, so a diagnostic reader cannot starve the live projection.
+    /// Read the grid without consuming renderer damage, so a diagnostic reader
+    /// cannot starve the live projection.
     pub fn peek_snapshot(&self) -> TermSnapshot {
         self.read(0, crate::HISTORY_PEEK_LIMIT, false)
     }
@@ -648,54 +634,10 @@ impl GridEmulator {
             .selection
             .as_ref()
             .and_then(|selection| selection.to_range(&state.term));
-        let mut damage = state
+        let damage = state
             .term
             .peek_damage_event()
             .unwrap_or(TerminalDamage::Noop);
-        let mut graphics_updates = None;
-        if consume {
-            graphics_updates = self.core.graphics_updates.lock_recover().take();
-            if let Some(queues) = state.term.graphics_take_queues() {
-                merge_graphics_updates(&mut graphics_updates, queues);
-            }
-        }
-        let atlas_placements = state.term.graphics.atlas_placements.clone();
-        let mut kitty_placements = state
-            .term
-            .graphics
-            .kitty_placements
-            .values()
-            .filter(|placement| {
-                state
-                    .term
-                    .graphics
-                    .kitty_images
-                    .contains_key(&placement.image_id)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        kitty_placements.sort_by_key(|placement| {
-            (
-                placement.z_index,
-                placement.image_id,
-                placement.placement_id,
-            )
-        });
-        let kitty_virtual_placements = state
-            .term
-            .graphics
-            .kitty_virtual_placements
-            .iter()
-            .map(|(key, placement)| (*key, placement.clone()))
-            .collect();
-        let graphics_changed =
-            state.term.graphics.kitty_graphics_dirty || graphics_updates.is_some();
-        if consume {
-            state.term.graphics.kitty_graphics_dirty = false;
-        }
-        if graphics_changed && damage == TerminalDamage::Noop {
-            damage = TerminalDamage::Full;
-        }
         let mut row_damage = vec![false; screen_lines];
         match state.term.damage() {
             rio_vt::crosswords::TermDamage::Full => row_damage.fill(true),
@@ -772,10 +714,6 @@ impl GridEmulator {
             display_offset,
             history_size,
             lines_evicted,
-            graphics_updates,
-            atlas_placements,
-            kitty_placements,
-            kitty_virtual_placements,
             mode,
             keyboard_mode,
             selection,
@@ -822,46 +760,6 @@ impl GridEmulator {
         let mut lifecycle = self.core.lifecycle.lock_recover();
         lifecycle.exited = true;
         lifecycle.exit_code = exit_code;
-    }
-}
-
-fn merge_graphics_updates(target: &mut Option<UpdateQueues>, mut updates: UpdateQueues) {
-    let target = target.get_or_insert_with(|| UpdateQueues {
-        pending: Vec::new(),
-        pending_images: Vec::new(),
-        remove_queue: Vec::new(),
-    });
-
-    // A snapshot is the renderer's transaction boundary. Coalesce repeated
-    // events by final image key while retaining rio's per-event ordering
-    // (adds first, then removals), so remove→retransmit leaves the new image
-    // present and transmit→remove leaves it absent.
-    for graphic in updates.pending.drain(..) {
-        let key = atlas_image_key(graphic.id.get());
-        target
-            .pending
-            .retain(|previous| atlas_image_key(previous.id.get()) != key);
-        target.remove_queue.retain(|removed| *removed != key);
-        target.pending.push(graphic);
-    }
-    for (image_id, graphic) in updates.pending_images.drain(..) {
-        let key = kitty_image_key(image_id);
-        target
-            .pending_images
-            .retain(|(previous_id, _)| kitty_image_key(*previous_id) != key);
-        target.remove_queue.retain(|removed| *removed != key);
-        target.pending_images.push((image_id, graphic));
-    }
-    for key in updates.remove_queue.drain(..) {
-        target
-            .pending
-            .retain(|graphic| atlas_image_key(graphic.id.get()) != key);
-        target
-            .pending_images
-            .retain(|(image_id, _)| kitty_image_key(*image_id) != key);
-        if !target.remove_queue.contains(&key) {
-            target.remove_queue.push(key);
-        }
     }
 }
 
@@ -1078,81 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn sixel_image_crosses_snapshot_once_with_placement_and_damage() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-
-        emulator.feed(b"\x1bPq~\x1b\\");
-
-        let snapshot = emulator.snapshot();
-        let updates = snapshot.graphics_updates.expect("sixel add queue");
-        assert_eq!(updates.pending.len(), 1);
-        assert!(updates.pending_images.is_empty());
-        assert!(updates.remove_queue.is_empty());
-        assert_eq!(
-            (updates.pending[0].width, updates.pending[0].height),
-            (1, 6)
-        );
-        assert_eq!(snapshot.atlas_placements.len(), 1);
-        assert_ne!(snapshot.damage, TerminalDamage::Noop);
-        assert!(snapshot.row_damage.iter().any(|damaged| *damaged));
-
-        let idle = emulator.snapshot();
-        assert!(idle.graphics_updates.is_none());
-        assert_eq!(idle.damage, TerminalDamage::Noop);
-    }
-
-    #[test]
-    fn kitty_transmit_display_and_delete_all_cross_the_snapshot() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-        emulator.feed(b"\x1b_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\");
-
-        let displayed = emulator.snapshot();
-        let updates = displayed.graphics_updates.expect("kitty add queue");
-        assert!(updates.pending.is_empty());
-        assert_eq!(updates.pending_images.len(), 1);
-        assert_eq!(updates.pending_images[0].0, 7);
-        assert_eq!(
-            (
-                updates.pending_images[0].1.width,
-                updates.pending_images[0].1.height,
-            ),
-            (2, 2)
-        );
-        assert_eq!(displayed.kitty_placements.len(), 1);
-        assert_eq!(displayed.kitty_placements[0].image_id, 7);
-
-        emulator.feed(b"\x1b_Ga=d,d=A,q=2\x1b\\");
-        let deleted = emulator.snapshot();
-        assert!(deleted.kitty_placements.is_empty());
-        assert!(deleted.kitty_virtual_placements.is_empty());
-    }
-
-    #[test]
-    fn graphics_updates_preserve_the_latest_operation_before_a_snapshot() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-        let transmit = b"\x1b_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\x1b\\";
-
-        emulator.feed(transmit);
-        emulator.feed(b"\x1b_Ga=d,d=A,q=2\x1b\\");
-        emulator.feed(transmit);
-
-        let snapshot = emulator.snapshot();
-        let updates = snapshot.graphics_updates.expect("coalesced kitty queue");
-        assert_eq!(updates.pending_images.len(), 1);
-        assert_eq!(updates.pending_images[0].0, 7);
-        assert!(
-            !updates
-                .remove_queue
-                .contains(&rio_graphics::kitty_image_key(7))
-        );
-        assert_eq!(snapshot.kitty_placements.len(), 1);
-    }
-
-    #[test]
-    fn kitty_keyboard_mode_is_available_without_consuming_damage() {
+    fn keyboard_mode_is_available_without_consuming_damage() {
         let emulator = GridEmulator::new();
         emulator.snapshot();
         emulator.feed(b"\x1b[>1uwritten");

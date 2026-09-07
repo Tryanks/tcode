@@ -430,13 +430,22 @@ Unified rows use two 44px gutters and a 2px change-color rail; each split cell
 uses a 42px gutter without the rail. Both retain an 18px minimum row height.
 
 The terminal is host state, not a client's own emulator. The host owns the
-grid and publishes it — cells, cursor, modes, scrollback and image placements —
-so every attached client renders the same screen, and a client that attaches
-mid-session sees exactly what the host sees. Scrolling and selection are local
-to each viewer: two clients read different parts of the same terminal without
-disturbing each other, and only the keys and mouse reports a client sends reach
-the shell. Keyboard input is encoded from the replicated modes, so bracketed
-paste, application cursor keys and mouse reporting behave the same everywhere.
+grid and publishes it — cells, cursor, modes and scrollback — so every attached
+client renders the same screen, and a client that attaches mid-session sees
+exactly what the host sees. Scrolling and selection are local to each viewer:
+two clients read different parts of the same terminal without disturbing each
+other, and only the keys and mouse reports a client sends reach the shell.
+Keyboard input is encoded from the replicated modes, so bracketed paste,
+application cursor keys and mouse reporting behave the same everywhere. In-grid
+images are not supported: the terminal is a coding tool's terminal, and it
+renders text.
+
+A stored command's output in the chat timeline is the same grid, rendered on
+demand. The client measures the width it can show and asks the host for that
+item at that many columns; the host replays the captured bytes through its own
+emulator and answers with one finished screen. The panel shows the plain text
+until the answer arrives, keeps the answer per width, and asks again once a
+width change settles.
 
 The Preview tab exists on every client. Its URL field, open-in-system-browser
 and copy-URL work everywhere; the embedded browser, history, JS automation and

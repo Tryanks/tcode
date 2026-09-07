@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["remote", "command-ansi", "desktop"]
+default = ["remote", "desktop"]
 # Hosting this machine: listener, discovery beacon, minted pairing codes and
 # device revocation. Off for wasm targets, which cannot listen or advertise.
 # Client pairing (saved hosts, the pair form, certificate repair) is *not* here:
@@ -12,11 +12,6 @@ default = ["remote", "command-ansi", "desktop"]
 remote-hosting = ["dep:tcode-remote", "tcode-remote/server", "tcode-remote/client", "dep:qrcode"]
 # Transitional alias for the pre-split feature name.
 remote = ["remote-hosting"]
-# Replay stored command output through a local terminal emulator, so its SGR
-# colours and carriage returns render as they did in the shell. Off for Android:
-# bionic has no `shm_open`, which rio-vt's kitty graphics path calls. The live
-# terminal drawer renders the host's replicated grid and is always built.
-command-ansi = ["dep:term"]
 # Aggregate of the narrow native capabilities the desktop binary ships. It gates
 # no product view: every surface below compiles without any of these.
 desktop = [
@@ -57,7 +52,6 @@ tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false, optional = true }
-term = { path = "../term", default-features = false, optional = true }
 gpui = { package = "gpui-pre", version = "0.3.1" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" } # 0.6.0 on crates.io pulls an unused gpui-pre-platform that breaks iOS/Android; switch back once 0.6.1 ships
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }

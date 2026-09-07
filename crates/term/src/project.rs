@@ -16,18 +16,11 @@ use rio_vt::{
     },
 };
 use tcode_protocol::terminal::{
-    CellWidth, HISTORY_LIMIT, TerminalCell, TerminalColor, TerminalCursor, TerminalLink,
-    TerminalModes, TerminalOverlay, TerminalRow, TerminalStyle,
+    CellWidth, TerminalCell, TerminalColor, TerminalCursor, TerminalLink, TerminalModes,
+    TerminalRow, TerminalStyle,
 };
 
-use crate::{
-    TermSnapshot,
-    graphics::{
-        AtlasPlacement, IncompletePlacement, KittyPlacement, OverlayViewport, PLACEHOLDER,
-        PlaceholderRun, VirtualPlacement, atlas_overlay_geometry, compute_run_geometry,
-        kitty_image_key, kitty_overlay_geometry,
-    },
-};
+use crate::TermSnapshot;
 
 /// Interns cell styles into one table per wire message.
 #[derive(Debug)]
@@ -150,239 +143,6 @@ pub fn modes(snapshot: &TermSnapshot, modify_other_keys: Option<u8>) -> Terminal
     }
 }
 
-/// Lay out every image placement in the snapshot.
-///
-/// Geometry is computed once, on the host, against a viewport whose origin is
-/// the top-left of the **oldest retained scrollback row** and whose cell size
-/// is the client's own physical cell size. A client only has to translate by
-/// its grid origin and its local scroll offset, then clip.
-pub fn overlays(
-    snapshot: &TermSnapshot,
-    cell_width: f32,
-    cell_height: f32,
-    image_size: impl Fn(u64) -> Option<(usize, usize)>,
-) -> Vec<TerminalOverlay> {
-    let retained = snapshot.history_size.min(HISTORY_LIMIT) as i64;
-    let viewport = OverlayViewport {
-        cell_width,
-        cell_height,
-        origin_x: 0.,
-        origin_y: 0.,
-        history_size: (snapshot.lines_evicted.min(i64::MAX as u64) as i64)
-            .saturating_add(snapshot.history_size.min(i64::MAX as usize) as i64),
-        display_offset: retained,
-        screen_lines: snapshot.screen_lines as i64 + retained,
-    };
-
-    let mut overlays: Vec<(TerminalOverlay, u8, u32)> = Vec::new();
-    let mut push = |overlay: TerminalOverlay, protocol_order: u8, placement_order: u32| {
-        if overlay.width > 0. && overlay.height > 0. {
-            overlays.push((overlay, protocol_order, placement_order));
-        }
-    };
-
-    for placement in &snapshot.atlas_placements {
-        push_atlas(&mut push, placement, &viewport, &image_size);
-    }
-    for placement in &snapshot.kitty_placements {
-        push_kitty(&mut push, placement, &viewport, &image_size);
-    }
-    for paint in placeholder_runs(snapshot) {
-        push_virtual(
-            &mut push,
-            &paint,
-            &snapshot.kitty_virtual_placements,
-            &viewport,
-            retained,
-            &image_size,
-        );
-    }
-
-    overlays.sort_by_key(|(overlay, protocol_order, placement_order)| {
-        (
-            overlay.z_index,
-            *protocol_order,
-            overlay.image_key,
-            *placement_order,
-        )
-    });
-    overlays
-        .into_iter()
-        .map(|(overlay, _, _)| overlay)
-        .collect()
-}
-
-fn push_atlas(
-    push: &mut impl FnMut(TerminalOverlay, u8, u32),
-    placement: &AtlasPlacement,
-    viewport: &OverlayViewport,
-    image_size: &impl Fn(u64) -> Option<(usize, usize)>,
-) {
-    if image_size(placement.image_key).is_none() {
-        return;
-    }
-    let Some(geometry) = atlas_overlay_geometry(placement, viewport) else {
-        return;
-    };
-    push(
-        TerminalOverlay {
-            image_key: placement.image_key,
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width,
-            height: geometry.height,
-            z_index: -1,
-            source_rect: geometry.source_rect,
-        },
-        0,
-        0,
-    );
-}
-
-fn push_kitty(
-    push: &mut impl FnMut(TerminalOverlay, u8, u32),
-    placement: &KittyPlacement,
-    viewport: &OverlayViewport,
-    image_size: &impl Fn(u64) -> Option<(usize, usize)>,
-) {
-    let image_key = kitty_image_key(placement.image_id);
-    let Some((width, height)) = image_size(image_key) else {
-        return;
-    };
-    let Some(geometry) = kitty_overlay_geometry(placement, width, height, viewport) else {
-        return;
-    };
-    push(
-        TerminalOverlay {
-            image_key,
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width,
-            height: geometry.height,
-            z_index: placement.z_index,
-            source_rect: geometry.source_rect,
-        },
-        1,
-        placement.placement_id,
-    );
-}
-
-fn push_virtual(
-    push: &mut impl FnMut(TerminalOverlay, u8, u32),
-    paint: &PlaceholderPaint,
-    placements: &HashMap<(u32, u32), VirtualPlacement>,
-    viewport: &OverlayViewport,
-    retained: i64,
-    image_size: &impl Fn(u64) -> Option<(usize, usize)>,
-) {
-    let placement = placements
-        .get(&(paint.run.image_id, paint.run.placement_id))
-        .or_else(|| placements.get(&(paint.run.image_id, 0)));
-    let Some(placement) = placement else {
-        return;
-    };
-    let image_key = kitty_image_key(paint.run.image_id);
-    let Some((width, height)) = image_size(image_key) else {
-        return;
-    };
-    let (Ok(image_width), Ok(image_height)) = (u32::try_from(width), u32::try_from(height)) else {
-        return;
-    };
-    // The viewport origin is the oldest retained row, so a screen line sits
-    // `retained` rows below it.
-    let Ok(screen_line) = usize::try_from(paint.screen_line as i64 + retained) else {
-        return;
-    };
-    let Some(geometry) = compute_run_geometry(
-        &paint.run,
-        placement.columns,
-        placement.rows,
-        image_width,
-        image_height,
-        (placement.x, placement.y, placement.width, placement.height),
-        viewport.cell_width,
-        viewport.cell_height,
-        viewport.origin_x,
-        viewport.origin_y,
-        screen_line,
-        paint.start_screen_col,
-    ) else {
-        return;
-    };
-    push(
-        TerminalOverlay {
-            image_key,
-            x: geometry.x,
-            y: geometry.y,
-            width: geometry.width,
-            height: geometry.height,
-            // rio's own renderer puts virtual placements below glyphs.
-            z_index: -1,
-            source_rect: geometry.source_rect,
-        },
-        2,
-        placement.placement_id,
-    );
-}
-
-struct PlaceholderPaint {
-    run: PlaceholderRun,
-    screen_line: usize,
-    start_screen_col: usize,
-}
-
-fn placeholder_runs(snapshot: &TermSnapshot) -> Vec<PlaceholderPaint> {
-    let mut paints = Vec::new();
-    for (screen_line, row) in snapshot.visible_rows.iter().enumerate() {
-        if !row.kitty_virtual_placeholder {
-            continue;
-        }
-        let mut current: Option<(IncompletePlacement, usize)> = None;
-        for (col, square) in row.inner.iter().take(snapshot.cols).enumerate() {
-            if square.c() != PLACEHOLDER {
-                flush(&mut paints, &mut current, screen_line);
-                continue;
-            }
-            let style = style_of(square, &snapshot.styles);
-            let combining = square
-                .extras_id()
-                .and_then(|id| snapshot.zero_width.get(&id))
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let mut cell =
-                IncompletePlacement::from_cell(style.fg, style.underline_color, combining);
-            if let Some((placement, _)) = current.as_mut()
-                && placement.can_append(&cell)
-            {
-                placement.append();
-                continue;
-            }
-            flush(&mut paints, &mut current, screen_line);
-            // Missing coordinates on the first cell default to zero before
-            // continuation matching, as required by kitty's placeholder rules.
-            cell.row.get_or_insert(0);
-            cell.col.get_or_insert(0);
-            current = Some((cell, col));
-        }
-        flush(&mut paints, &mut current, screen_line);
-    }
-    paints
-}
-
-fn flush(
-    paints: &mut Vec<PlaceholderPaint>,
-    current: &mut Option<(IncompletePlacement, usize)>,
-    screen_line: usize,
-) {
-    if let Some((placement, start_screen_col)) = current.take() {
-        paints.push(PlaceholderPaint {
-            run: placement.complete(),
-            screen_line,
-            start_screen_col,
-        });
-    }
-}
-
 fn style_of(square: &Square, styles: &[Style]) -> Style {
     match square.content_tag() {
         ContentTag::Codepoint => styles
@@ -448,8 +208,7 @@ fn cell_text(square: &Square, zero_width: &HashMap<u16, Vec<char>>) -> String {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     // A blank cell carries no text; the renderer paints its background only.
-    // Kitty's Unicode placeholder is placement metadata, never a glyph.
-    if extras.is_empty() && matches!(base, '\0' | ' ' | PLACEHOLDER) {
+    if extras.is_empty() && matches!(base, '\0' | ' ') {
         return String::new();
     }
     let mut text = String::new();
@@ -522,12 +281,6 @@ mod tests {
             (Mode::MOUSE_REPORT_X10, TerminalMode::MOUSE_REPORT_X10),
             (Mode::GRAPHEME_CLUSTER, TerminalMode::GRAPHEME_CLUSTER),
             (Mode::MOUSE_MODE, TerminalMode::MOUSE_MODE),
-            (Mode::SIXEL_DISPLAY, TerminalMode::SIXEL_DISPLAY),
-            (Mode::SIXEL_PRIV_PALETTE, TerminalMode::SIXEL_PRIV_PALETTE),
-            (
-                Mode::SIXEL_CURSOR_TO_THE_RIGHT,
-                TerminalMode::SIXEL_CURSOR_TO_THE_RIGHT,
-            ),
         ] {
             assert_eq!(rio.bits(), wire.bits(), "{rio:?} moved");
         }

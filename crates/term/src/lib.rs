@@ -36,21 +36,6 @@ mod sync;
 pub use hyperlinks::HyperlinkMatch;
 pub use project::Projector;
 
-/// Renderer-facing graphics values and pure placement geometry from rio.
-pub mod graphics {
-    pub use rio_graphics::{
-        ColorType, GraphicData, GraphicId, GraphicOverlay, atlas_image_key, kitty_image_key,
-    };
-    pub use rio_vt::ansi::graphics::{
-        AtlasPlacement, KittyOverlayGeometry, KittyPlacement, OverlayViewport, UpdateQueues,
-        VirtualPlacement, atlas_overlay_geometry, clip_overlay_to_rect, kitty_overlay_geometry,
-        resolve_source_rect,
-    };
-    pub use rio_vt::ansi::kitty_virtual::{
-        IncompletePlacement, PLACEHOLDER, PlaceholderRun, RunGeometry, compute_run_geometry,
-    };
-}
-
 pub use grid_emulator::GridEmulator;
 pub use grid_emulator::GridEvent;
 #[cfg(feature = "pty")]
@@ -105,17 +90,6 @@ pub struct TermSnapshot {
     pub history_size: usize,
     /// Lines evicted from rio's scrollback ring before the retained history.
     pub lines_evicted: u64,
-    /// Image pixels added or removed since the preceding snapshot.
-    ///
-    /// Pixel buffers appear here once and are consumed by the renderer's image
-    /// registry; placement snapshots below intentionally contain metadata only.
-    pub graphics_updates: Option<graphics::UpdateQueues>,
-    /// Active-screen sixel and iTerm2 placement metadata; geometry filters it to the viewport.
-    pub atlas_placements: Vec<graphics::AtlasPlacement>,
-    /// Active-screen direct kitty placement metadata, sorted by z-index.
-    pub kitty_placements: Vec<graphics::KittyPlacement>,
-    /// Kitty Unicode-placeholder placement metadata keyed by image/placement id.
-    pub kitty_virtual_placements: HashMap<(u32, u32), graphics::VirtualPlacement>,
     pub mode: Mode,
     pub keyboard_mode: KeyboardModes,
     pub selection: Option<SelectionRange>,

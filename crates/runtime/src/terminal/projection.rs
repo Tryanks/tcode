@@ -8,11 +8,10 @@
 use std::time::{Duration, Instant};
 
 use tcode_protocol::terminal::{
-    HISTORY_LIMIT, ImageColorType, TerminalClipboard, TerminalDelta, TerminalExit, TerminalFrame,
-    TerminalHistoryUpdate, TerminalImage, TerminalOverlay, TerminalRow, TerminalRowUpdate,
-    TerminalStyle,
+    HISTORY_LIMIT, TerminalClipboard, TerminalDelta, TerminalExit, TerminalFrame,
+    TerminalHistoryUpdate, TerminalRow, TerminalRowUpdate, TerminalStyle,
 };
-use term::{Projector, TermSnapshot, graphics};
+use term::Projector;
 
 /// At most one delta per frame interval while a terminal is dirty.
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -43,9 +42,6 @@ pub(crate) struct TerminalProjection {
     /// A burst exceeded [`HISTORY_STREAM_BUDGET`]; the next calm delta
     /// republishes the whole retained scrollback.
     history_backlog: bool,
-    /// Physical cell size reported by the last client resize, used for image
-    /// placement geometry.
-    cell_size: (f32, f32),
     /// A projection is already scheduled; further wakeups coalesce into it.
     pub(crate) scheduled: bool,
     pub(crate) last_projected: Instant,
@@ -54,17 +50,12 @@ pub(crate) struct TerminalProjection {
     pub(crate) clipboard: Option<TerminalClipboard>,
 }
 
-/// `term`'s own default cell metrics, used until a client reports its real
-/// ones with the first resize.
-const DEFAULT_CELL_SIZE: (f32, f32) = (8., 17.);
-
 impl TerminalProjection {
     pub(crate) fn new() -> Self {
         Self {
             frame: TerminalFrame::default(),
             scrolled: 0,
             history_backlog: false,
-            cell_size: DEFAULT_CELL_SIZE,
             scheduled: false,
             // Far enough in the past that the first wakeup projects immediately.
             last_projected: Instant::now() - FRAME_INTERVAL,
@@ -74,14 +65,7 @@ impl TerminalProjection {
         }
     }
 
-    pub(crate) fn set_cell_size(&mut self, cell_width: u32, cell_height: u32) {
-        self.cell_size = (cell_width.max(1) as f32, cell_height.max(1) as f32);
-    }
-
     /// Rebuild the whole frame from the terminal's current state.
-    ///
-    /// Transported images are retained: rio hands each pixel buffer over
-    /// exactly once, so a rebuild that dropped them would blank live images.
     pub(crate) fn reset(&mut self, terminal: &term::Terminal) -> TerminalFrame {
         let snapshot = terminal.snapshot_since(0, HISTORY_LIMIT);
         let mut projector = Projector::default();
@@ -89,7 +73,6 @@ impl TerminalProjection {
             .map(|row| projector.visible_row(&snapshot, row))
             .collect();
         let history = projector.history(&snapshot);
-        let images = std::mem::take(&mut self.frame.images);
         self.frame = TerminalFrame {
             cols: snapshot.cols.min(u16::MAX as usize) as u16,
             rows: snapshot.screen_lines.min(u16::MAX as usize) as u16,
@@ -103,14 +86,10 @@ impl TerminalProjection {
             working_directory: Some(terminal.working_directory()),
             exited: snapshot.exited,
             exit_code: snapshot.exit_code,
-            images,
-            overlays: Vec::new(),
         };
         self.scrolled = snapshot.lines_evicted + snapshot.history_size as u64;
         self.history_backlog = false;
         self.last_cwd = Instant::now();
-        self.take_graphics(&snapshot);
-        self.frame.overlays = self.overlays(&snapshot);
         self.frame.clone()
     }
 
@@ -195,9 +174,6 @@ impl TerminalProjection {
                 code: snapshot.exit_code,
             });
         let working_directory = self.refresh_cwd(terminal);
-        let (images_added, images_removed) = self.take_graphics(&snapshot);
-        let overlays = self.overlays(&snapshot);
-        let overlays = (overlays != self.frame.overlays).then_some(overlays);
 
         let delta = TerminalDelta {
             cols,
@@ -211,9 +187,6 @@ impl TerminalProjection {
             title,
             working_directory,
             exit,
-            images_added,
-            images_removed,
-            overlays,
             bell: std::mem::take(&mut self.bell),
             clipboard: self.clipboard.take(),
         };
@@ -223,9 +196,6 @@ impl TerminalProjection {
             || delta.title.is_some()
             || delta.working_directory.is_some()
             || delta.exit.is_some()
-            || !delta.images_added.is_empty()
-            || !delta.images_removed.is_empty()
-            || delta.overlays.is_some()
             || delta.bell
             || delta.clipboard.is_some()
             || delta.cursor != self.frame.cursor
@@ -249,48 +219,6 @@ impl TerminalProjection {
         (Some(&cwd) != self.frame.working_directory.as_ref()).then_some(cwd)
     }
 
-    /// Move rio's take-once pixel buffers onto the wire and into the retained
-    /// frame, so a late subscriber receives the same images as a live one.
-    ///
-    /// The retained set updates first because placement geometry needs the
-    /// dimensions of an image transported in this same tick.
-    fn take_graphics(&mut self, snapshot: &TermSnapshot) -> (Vec<TerminalImage>, Vec<u64>) {
-        let Some(updates) = snapshot.graphics_updates.as_ref() else {
-            return (Vec::new(), Vec::new());
-        };
-        let mut added = Vec::new();
-        for graphic in &updates.pending {
-            added.push(wire_image(
-                graphics::atlas_image_key(graphic.id.get()),
-                graphic,
-            ));
-        }
-        for (image_id, graphic) in &updates.pending_images {
-            added.push(wire_image(graphics::kitty_image_key(*image_id), graphic));
-        }
-        let removed = updates.remove_queue.clone();
-        for key in &removed {
-            self.frame.images.retain(|image| image.key != *key);
-        }
-        for image in &added {
-            self.frame
-                .images
-                .retain(|existing| existing.key != image.key);
-            self.frame.images.push(image.clone());
-        }
-        (added, removed)
-    }
-
-    fn overlays(&self, snapshot: &TermSnapshot) -> Vec<TerminalOverlay> {
-        let images = &self.frame.images;
-        term::project::overlays(snapshot, self.cell_size.0, self.cell_size.1, |key| {
-            images
-                .iter()
-                .find(|image| image.key == key)
-                .map(|image| (image.width as usize, image.height as usize))
-        })
-    }
-
     /// Whether the interned style table has grown past what a `u16` cell id can
     /// address safely.
     pub(crate) fn styles_exhausted(&self) -> bool {
@@ -302,19 +230,6 @@ impl TerminalProjection {
     /// wakeup of its own.
     pub(crate) fn owes_history(&self) -> bool {
         self.history_backlog
-    }
-}
-
-fn wire_image(key: u64, graphic: &graphics::GraphicData) -> TerminalImage {
-    TerminalImage {
-        key,
-        width: graphic.width.min(u32::MAX as usize) as u32,
-        height: graphic.height.min(u32::MAX as usize) as u32,
-        color: match graphic.color_type {
-            graphics::ColorType::Rgb => ImageColorType::Rgb,
-            graphics::ColorType::Rgba => ImageColorType::Rgba,
-        },
-        pixels: graphic.pixels.clone(),
     }
 }
 

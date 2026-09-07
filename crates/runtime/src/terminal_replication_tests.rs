@@ -570,43 +570,6 @@ fn deltas_carry_only_changed_rows_and_stop_when_the_grid_is_quiet() {
     session.shutdown();
 }
 
-/// An image transported to a live subscriber reaches a late one identically:
-/// pixel buffers cross once, placements ride every frame.
-#[cfg(unix)]
-#[test]
-fn image_placements_reach_live_and_late_subscribers_identically() {
-    let session = terminal_session();
-    let mut live = Replica::attach(&session.link, session.events.clone(), session.terminal_id);
-    session.plain_shell();
-    live.settle(&session.terminal);
-
-    // A 2x2 kitty image placed without moving the cursor, then a sentinel
-    // proving the sequence was consumed.
-    session.send(
-        "printf '\\033_Gf=32,s=2,v=2,a=T,i=7,C=1,q=2;/wAA//8AAP//AAD//wAA/w==\\033\\134'; printf '\\113\\111\\124\\124\\131\\n'\r",
-    );
-    session.wait_for("KITTY");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while live.frame.images.is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "no image reached the live client"
-        );
-        live.pump();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!live.frame.overlays.is_empty(), "the image is placed");
-
-    let late = linked(&session.mux);
-    let late_events = late.events();
-    let late_replica = Replica::attach(&late, late_events, session.terminal_id);
-    live.pump();
-    assert_eq!(late_replica.frame.images, live.frame.images);
-    assert_eq!(late_replica.frame.overlays, live.frame.overlays);
-
-    session.shutdown();
-}
-
 /// A megabytes-per-second flood must cost the wire a fraction of the raw
 /// stream. Coalescing bounds the delta rate, row-level diffing keeps a scrolling
 /// screen cheap, and scrollback that outruns its budget is republished once when

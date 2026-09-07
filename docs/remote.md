@@ -396,6 +396,8 @@ connection until you resolve the identity change.
 - A client's terminal scrollback is the host's retained ring, capped at
   **1000 rows**. Older output is gone from the host too, so no client can
   scroll further back than that.
+- The terminal renders text. In-grid images (sixel, iTerm2, kitty graphics) are
+  not supported on any client, including the desktop host's own window.
 - Desktop preview needs LAN- or overlay-reachable dev servers. There is no TCP
   tunnel for preview pages. Preview rewriting uses the first saved host address,
   which may differ from an address chosen by transport reconnection.

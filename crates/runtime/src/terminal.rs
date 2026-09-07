@@ -10,7 +10,9 @@ pub use tcode_protocol::{
 };
 
 mod projection;
+mod stored_output;
 pub(crate) use projection::{FRAME_INTERVAL, TerminalProjection, TerminalUpdate};
+pub(crate) use stored_output::render as render_stored_output;
 
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.
 /// Globally unique tab ids prevent its geometry, selection, bell, and event

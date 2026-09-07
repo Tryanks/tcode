@@ -58,8 +58,8 @@ pub enum Command {
         terminal_id: u64,
         cols: u16,
         rows: u16,
-        /// Physical cell size, which the host needs to answer pixel-size
-        /// queries (CSI 14 t) and to lay out image placements.
+        /// Physical cell size, which the host needs to answer a program's
+        /// pixel-size queries (CSI 14 t).
         #[serde(default = "default_cell_width")]
         cell_width: u16,
         #[serde(default = "default_cell_height")]

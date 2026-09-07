@@ -75,6 +75,10 @@ const ASYNC_MARKDOWN_THRESHOLD_BYTES: usize = 4 * 1024;
 /// Target minimum time for the latest activity and its immediate predecessor.
 /// An activity with two newer successors folds immediately instead.
 const AUTO_ACTIVITY_MIN_VISIBILITY: Duration = Duration::from_millis(500);
+/// A window drag walks through every intermediate width. Rendering stored
+/// output is the host's work, so only the width the drag settles on is asked
+/// for.
+const COMMAND_PANEL_DEBOUNCE: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoActivityExpansion {
@@ -1521,16 +1525,13 @@ impl ChatView {
                     command, output, ..
                 }) => {
                     let panel_id = entry.id.clone();
-                    let on_cols_change = cx.listener(move |_this, cols: &usize, window, cx| {
+                    let on_cols_change = cx.listener(move |_this, cols: &u16, window, cx| {
                         // Fires from `on_prepaint`, i.e. while `List` holds its state
                         // borrowed; remeasuring inline would panic. Defer past the frame.
                         let cols = *cols;
                         let panel_id = panel_id.clone();
                         cx.defer_in(window, move |this, _window, cx| {
-                            if this.command_panels.borrow_mut().resize(&panel_id, cols) {
-                                this.list_state.remeasure_items(turn..turn + 1);
-                                cx.notify();
-                            }
+                            this.request_stored_output(panel_id, cols, turn, cx);
                         });
                     });
                     Some(self.command_panels.borrow_mut().render(
@@ -1558,6 +1559,49 @@ impl ChatView {
             }),
             cx,
         )
+    }
+
+    /// Ask the host to render one stored command's output at `cols`.
+    ///
+    /// The request waits out [`COMMAND_PANEL_DEBOUNCE`] first, and the task is
+    /// parked on the panel: a width that moves again replaces this task, which
+    /// drops both the timer and any query already in flight for the old width.
+    fn request_stored_output(
+        &mut self,
+        item_id: String,
+        cols: u16,
+        turn: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.session_key.clone() else {
+            return;
+        };
+        let Some(generation) = self.command_panels.borrow_mut().claim(&item_id, cols) else {
+            return;
+        };
+        let id = item_id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(COMMAND_PANEL_DEBOUNCE).await;
+            let Ok(query) = this.update(cx, |this, cx| {
+                this.workspace_store.update(cx, |store, cx| {
+                    store.render_stored_output(session_id, id.clone(), cols, cx)
+                })
+            }) else {
+                return;
+            };
+            let frame = query.await.ok();
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .command_panels
+                    .borrow_mut()
+                    .adopt(&id, generation, frame)
+                {
+                    this.list_state.remeasure_items(turn..turn + 1);
+                }
+                cx.notify();
+            });
+        });
+        self.command_panels.borrow_mut().hold(&item_id, task);
     }
 
     fn compose_subagent_row(&self, entry: &TimelineEntry, cx: &mut Context<Self>) -> AnyElement {
