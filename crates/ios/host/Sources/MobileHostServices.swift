@@ -291,7 +291,7 @@ private final class HostBrowse: NSObject, NetServiceBrowserDelegate, NetServiceD
             guard let bytes = txt[key], bytes.count <= 256 else { return nil }
             return String(data: bytes, encoding: .utf8)
         }
-        guard let id = field("host_id"), let name = field("name"), let fp = field("fp"),
+        guard let id = field("host_id"), let name = field("name"),
               let port = field("port"), Int(port) == sender.port, sender.port > 0 else { return }
         for data in sender.addresses ?? [] {
             let address: String? = data.withUnsafeBytes { raw in
@@ -303,7 +303,7 @@ private final class HostBrowse: NSObject, NetServiceBrowserDelegate, NetServiceD
                 return String(cString: host)
             }
             if let address, results.count < 128 {
-                results.append(["host_id": id, "name": name, "fp": fp, "port": sender.port, "addr": address])
+                results.append(["host_id": id, "name": name, "port": sender.port, "addr": address])
             }
         }
     }
