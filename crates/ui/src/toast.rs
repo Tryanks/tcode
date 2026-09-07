@@ -43,6 +43,7 @@ pub fn notification(
     let mut notification = Notification::new()
         .id1::<RuntimeToastNotification>(id as usize)
         .autohide(false);
+    notification = notification.compact_message(title.clone());
     if kind != ToastKind::Loading {
         notification = notification.message(title);
     }

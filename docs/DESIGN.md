@@ -240,6 +240,23 @@ canvas.
 Insets change without a timer: the platform schedules a frame when they move, so
 the layout follows the keyboard immediately.
 
+### Toasts
+
+Compact notifications are system-style pills centered horizontally in the safe
+content rectangle, 16pt above its effective bottom edge (including the keyboard).
+They fit their content up to the available width minus 32pt. One fully rounded,
+opaque T3 surface with a soft shadow contains 15pt text, normally one line and
+clamped to two, with 12pt vertical and 16pt horizontal padding and a 44pt minimum
+height. A status glyph and one trailing inline action are optional. There is no
+separate title, detail expander or close button; tapping the pill dismisses it.
+The surrounding layer does not intercept page input.
+
+A pill fades and slides up over 150ms, then dismisses after 3 seconds (5 with an
+action). New messages immediately replace old ones; there is no pending backlog.
+Errors use the existing dialog on compact so required recovery actions and
+technical details cannot disappear. Wide windows retain their corner cards,
+stack, details, close controls and existing timing.
+
 ### Touch and typography
 
 - Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.

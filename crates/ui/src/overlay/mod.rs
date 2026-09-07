@@ -7,8 +7,9 @@ pub use notification::{Notification, NotificationType};
 use std::rc::Rc;
 
 use gpui::{
-    AnyView, App, AppContext as _, Context, ElementId, Entity, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    AnyView, App, AppContext as _, Context, ElementId, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Window, div, prelude::FluentBuilder as _,
+    px,
 };
 
 use crate::theme::ActiveTheme as _;
@@ -99,6 +100,7 @@ impl Render for OverlayHost {
         // Dialogs and toasts share the shell's one safe content rectangle: a
         // dialog centred in the raw window would sit under a notch, and a toast
         // pinned to the corner would sit under the status bar.
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let seam = crate::window_seam::WindowSeam::current(cx).content_insets();
         div()
             .relative()
@@ -119,14 +121,36 @@ impl Render for OverlayHost {
             })
             .child(
                 div()
+                    .debug_selector(|| "notification-position".into())
                     .absolute()
-                    .top_0()
-                    .right_0()
-                    .mt(seam.top + px(16.))
-                    .mr(seam.right + px(16.))
+                    .when(compact, |el| {
+                        el.left(seam.left + px(16.))
+                            .right(seam.right + px(16.))
+                            .bottom(seam.bottom + px(16.))
+                            .flex()
+                            .justify_center()
+                    })
+                    .when(!compact, |el| {
+                        el.top_0()
+                            .right_0()
+                            .mt(seam.top + px(16.))
+                            .mr(seam.right + px(16.))
+                    })
                     .child(self.notifications.clone()),
             )
     }
+}
+
+fn open_notification_dialog(note: Entity<Notification>, window: &mut Window, cx: &mut App) {
+    let title = note.read(cx).dialog_title();
+    window.open_dialog(cx, move |dialog, _, _| {
+        let note = note.clone();
+        dialog
+            .when_some(title.clone(), |dialog, title| dialog.title(title))
+            .content(move |content, window, cx| {
+                content.child(note.update(cx, |note, cx| note.dialog_content(window, cx)))
+            })
+    });
 }
 
 /// Imperative overlay operations used by application views.
@@ -209,6 +233,11 @@ impl OverlayExt for Window {
 
     fn push_notification(&mut self, note: impl Into<Notification>, cx: &mut App) {
         let note = note.into();
+        if crate::window_seam::window_is_compact(self, cx) && note.requires_dialog() {
+            let note = cx.new(|_| note);
+            open_notification_dialog(note, self, cx);
+            return;
+        }
         OverlayHost::update(self, cx, |host, window, cx| {
             host.notifications
                 .update(cx, |list, cx| list.push(note, window, cx));
@@ -240,6 +269,125 @@ impl OverlayExt for Window {
         OverlayHost::update(self, cx, |host, window, cx| {
             host.notifications
                 .update(cx, |list, cx| list.clear(window, cx));
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, WindowInsets, size};
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| DetachedView);
+            OverlayHost::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            cx.set_global(crate::window_seam::WindowSeam::new(|| {
+                let mut insets = WindowInsets::default();
+                insets.safe_area.bottom = px(34.);
+                insets.ime.bottom = px(300.);
+                insets
+            }));
+            window.push_notification(Notification::success("Copied"), cx);
+        });
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        draw(cx);
+        let bounds = cx.debug_bounds("compact-toast").expect("compact pill");
+        assert!((bounds.center().x - px(196.5)).abs() < px(1.));
+        assert!(
+            (bounds.bottom() - px(536.)).abs() < px(1.),
+            "bounds: {bounds:?}"
+        );
+        assert!(bounds.size.width <= px(361.));
+        assert!(bounds.size.height >= px(44.));
+        cx.update(|window, cx| window.push_notification("Second", cx));
+        root.read_with(cx, |root, cx| {
+            root.notifications.read(cx).assert_messages(cx, &["Second"]);
+        });
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        cx.update(|window, cx| {
+            cx.set_global(crate::window_seam::WindowSeam::flush());
+            window.push_notification("Wide", cx);
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("compact-toast").is_none());
+        let wide = cx.debug_bounds("wide-toast").expect("wide corner card");
+        assert_eq!(wide.size.width, px(356.));
+        let position = cx.debug_bounds("notification-position").unwrap();
+        assert_eq!(position.top(), px(16.));
+        assert_eq!(position.right(), px(1184.));
+    }
+
+    #[gpui::test]
+    fn compact_timeout_and_error_recovery(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let body = cx.new(|_| DetachedView);
+            OverlayHost::new(body, window, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.push_notification("Copied", cx));
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        draw(cx);
+        assert!(cx.debug_bounds("compact-toast").is_none());
+        cx.update(|window, cx| {
+            window.push_notification(
+                Notification::info("Removed")
+                    .action(|_, _, _| crate::widgets::Button::new("undo").label("Undo")),
+                cx,
+            )
+        });
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        draw(cx);
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(3));
+        draw(cx);
+        assert!(cx.debug_bounds("compact-toast").is_some());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        draw(cx);
+        assert!(cx.debug_bounds("compact-toast").is_none());
+        cx.update(|window, cx| {
+            window.push_notification(Notification::error("Repair required").autohide(false), cx)
+        });
+        draw(cx);
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.dialogs.len(), 1);
+            root.notifications.read(cx).assert_messages(cx, &[]);
+        });
+        cx.update(|window, cx| window.close_dialog(cx));
+        cx.simulate_resize(size(px(1200.), px(800.)));
+        cx.update(|window, cx| {
+            window.push_notification(Notification::error("Wide recovery").autohide(false), cx)
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("wide-toast").is_some());
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.dialogs.len(), 1);
+            root.notifications.read(cx).assert_messages(cx, &[]);
         });
     }
 }
