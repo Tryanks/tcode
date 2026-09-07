@@ -83,7 +83,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         }
     }
     let host =
-        spawn_host(store, services).map_err(|error| format!("host startup failed: {error}"))?;
+        spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
     let server = serve(
         mux.clone(),
@@ -94,7 +94,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             static_bundle: STATIC_BUNDLE,
         },
     )
-    .map_err(|error| format!("remote listener failed: {error}"))?;
+    .map_err(|error| format!("could not listen for other devices: {error}"))?;
     let pairing = server.new_pairing_code();
     print_pairing(&pairing, server.local_addr())?;
     let beacon = start_beacon(
@@ -121,7 +121,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     shutdown_connection
         .to_host
         .send_blocking(shutdown_line)
-        .map_err(|error| format!("could not request host shutdown: {error}"))?;
+        .map_err(|error| format!("could not stop this machine: {error}"))?;
     while let Ok(line) = shutdown_connection.from_host.recv_blocking() {
         let Ok(message) = serde_json::from_str::<tcode_protocol::HostMessage>(line.trim_end())
         else {
@@ -170,8 +170,8 @@ fn print_pairing(pairing: &PairingCode, bound: SocketAddr) -> Result<(), String>
         fp: pairing.fp.clone(),
     });
     let qr = QrCode::new(url.as_bytes()).map_err(|error| error.to_string())?;
-    println!("Pairing code: {}", pairing.code);
-    println!("Fingerprint: {}", pairing.fp);
+    println!("Connection code: {}", pairing.code);
+    println!("Security ID: {}", pairing.fp);
     println!("Expires in: {} seconds", pairing.expires_in_secs);
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
@@ -240,7 +240,7 @@ fn default_host_name() -> String {
         .chain(std::fs::read_to_string("/etc/hostname").ok())
         .map(|name| name.trim().to_owned())
         .find(|name| !name.is_empty())
-        .unwrap_or_else(|| "tcode-host".into())
+        .unwrap_or_else(|| "tcode-machine".into())
 }
 
 #[cfg(unix)]

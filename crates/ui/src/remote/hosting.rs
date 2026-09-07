@@ -546,8 +546,8 @@ impl HostingPanel {
                                     .child(digits),
                             )
                             .child(div().text_size(px(11.)).child(crate::tr!(
-                                "remote.pair.fingerprint",
-                                fingerprint = tcode_client::pairing::display_fingerprint(&code.fp)
+                                "hosts.pair.security_id",
+                                security_id = tcode_client::pairing::display_fingerprint(&code.fp)
                             )))
                             .child(
                                 div()

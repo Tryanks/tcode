@@ -351,7 +351,7 @@ fn main() {
                 .find(|host| host.host_id == host_id)
             else {
                 eprintln!(
-                    "tcode: no paired host with id {host_id:?} in {}/hosts.json; pair it first (Settings → Remote, or tcode --pair <addr> <port> <code>)",
+                    "tcode: no added machine with id {host_id:?} in {}/hosts.json; add it first (the sidebar's Machines row, or tcode --pair <addr> <port> <code>)",
                     data_dir.display()
                 );
                 std::process::exit(1);

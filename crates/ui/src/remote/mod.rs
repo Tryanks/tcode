@@ -737,8 +737,8 @@ impl RemotePanel {
             })
             .when(!self.form.fingerprint.is_empty(), |column| {
                 column.child(div().text_size(px(13.)).min_w_0().child(crate::tr!(
-                    "hosts.pair.fingerprint",
-                    fingerprint =
+                    "hosts.pair.security_id",
+                    security_id =
                         tcode_client::pairing::display_fingerprint(&self.form.fingerprint)
                 )))
             })
@@ -790,7 +790,7 @@ impl RemotePanel {
                                 .text_size(px(13.))
                                 .min_w_0()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("hosts.pair.fingerprint_compare")),
+                                .child(crate::tr!("hosts.pair.security_id_compare")),
                         ),
                 ),
             );

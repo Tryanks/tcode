@@ -1244,7 +1244,7 @@ impl WorkspaceStore {
     pub fn deliver_artifact(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
         match &self.client_host {
             Some(host) => host.deliver_artifact(name, mime, bytes),
-            None => Err("this client cannot save files".into()),
+            None => Err("this device cannot save files".into()),
         }
     }
 

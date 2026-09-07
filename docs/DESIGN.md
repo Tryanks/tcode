@@ -136,25 +136,26 @@ positioned off-centre.
 
 Compact replaces the split with a navigation stack over one history:
 
-**Hosts → Threads → Thread → Panel**, plus **Pair** over Hosts and
+**Machines → Threads → Thread → Panel**, plus **Add a machine** over Machines and
 **Settings → Settings section** over wherever they were opened from, pushed and
 popped with a 200ms lateral transition.
 
-- **Hosts** — which host this window talks to, and nothing else: "This
-  computer" where the client has one, the paired hosts, one **Pair a host**
-  button and the hosts discovered nearby. It is the root of a window with no
+- **Machines** — which machine this window talks to, and nothing else: **This
+  machine** where the device has one, the added machines, one **Add a machine**
+  button and the machines found nearby. It is the root of a window with no
   attachment, and it can also be *visited* from an attached workspace through
-  the sidebar's feature area (see **Sidebar**) without leaving that host.
-  Hosting this computer is a setting of this computer and lives in
-  **Settings → Remote**, never here.
-- **Pair** — the pairing form, pushed by **Pair a host**, by a Nearby row that
-  prefilled an endpoint, or by a certificate-changed row's **Pair again**.
+  the sidebar's feature area (see **Sidebar**) without leaving that machine.
+  Letting other devices connect to this machine is a setting of this machine
+  and lives in **Settings → Other devices**, never here.
+- **Add a machine** — the connection form, pushed by **Add a machine**, by a
+  **Nearby machines** row that prefilled an endpoint, or by a
+  certificate-changed row's **Add again**.
   Labels sit above full-width fields, the primary action is pinned at the foot
-  of the page above the keyboard, and pairing ends on an explicit fingerprint
+  of the page above the keyboard, and adding ends on an explicit security ID
   comparison before anything connects.
-- **Threads** — the shared sidebar under a nav bar naming the attached host,
+- **Threads** — the shared sidebar under a nav bar naming the attached machine,
   with new-thread and settings actions. New thread starts a draft directly when
-  the host has one project and otherwise opens the command palette, which
+  the machine has one project and otherwise opens the command palette, which
   already owns "new thread in ‹project›" and can search.
 - **Thread** — the shared chat view. Its desktop header is replaced by the nav
   bar; the timeline, composer, approvals and user-input panels are the same
@@ -178,13 +179,13 @@ the software keyboard or composition, then the topmost dismissible overlay
 consumed" only at the root, where the platform closes the app. Non-dismissible
 dialogs, such as import progress and approval prompts, keep refusing dismissal.
 
-**Navigating never detaches.** Walking back from Threads to Hosts, or visiting
-Hosts from an open thread, keeps the link, the selected thread and every view
-over that workspace. Only two things detach: connecting to a *different* host,
-which clears the previous host's history and lands on the new host's threads,
-and an explicit **Disconnect** in a host row's own menu. **Forget** removes the
-saved credential and leaves a live attachment running. Resizing never detaches
-and keeps the page the window is on.
+**Navigating never detaches.** Walking back from Threads to Machines, or
+visiting Machines from an open thread, keeps the link, the selected thread and
+every view over that workspace. Only two things detach: connecting to a
+*different* machine, which clears the previous machine's history and lands on
+the new machine's threads, and an explicit **Disconnect** in a machine row's
+own menu. **Remove** removes the saved credential and leaves a live attachment
+running. Resizing never detaches and keeps the page the window is on.
 
 ### The window seam
 
@@ -226,7 +227,7 @@ the layout follows the keyboard immediately.
 | Connected | Index ready and the link healthy; no status banner |
 | Reconnecting | Content is kept; the banner names the retry attempt |
 | Offline | Shown after 30 seconds disconnected; transient failures keep retrying quietly |
-| Certificate changed | An explicit error and a re-pair entry point outrank every other status; native clients stop retrying that identity |
+| Certificate changed | An explicit error and an **Add again** entry point outrank every other status; native clients stop retrying that identity |
 
 Offline keeps the last received replica readable and disables writes; visited
 threads keep their events, and unvisited ones may have only their list summary.
@@ -261,9 +262,9 @@ in both states.
    filtering. Each entry is one sidebar-sized row — leading stroke icon, label,
    a muted trailing value and, where it has one, a status glyph — and it takes
    the selected surface while its destination is showing. Compact rows are 44pt
-   for touch. Today it holds one entry, **Hosts**, whose trailing value is the
-   attached host's name (or "Not connected") with the connection glyph; it
-   navigates to the Hosts destination without disturbing the attachment. Later
+   for touch. Today it holds one entry, **Machines**, whose trailing value is the
+   attached machine's name (or "Not connected") with the connection glyph; it
+   navigates to `Destination::Hosts` without disturbing the attachment. Later
    persistent features are rows here, not new controls elsewhere.
 4. Project/thread header: sort, grouped/flat layout and add-project controls.
    Sorting and layout choices are persisted.
@@ -531,7 +532,8 @@ supervised and auto-accept-edits sessions. Without it those stored modes take
 effect as Full access, while Read only uses pi's native tool filter. Trust
 project extensions adds `--approve` at launch. Pi has no MCP client; explicitly
 enabled orchestration or computer-use registrations produce an unavailable-tools
-warning. Remote setup is documented in [remote work mode](remote.md), and
+warning. Using tcode from other devices is documented in
+[Use tcode from other devices](remote.md), and
 permissions in [computer use](computer-use.md).
 
 Orchestrate uses one provider-neutral workflow, refreshed on each explicit
@@ -593,22 +595,23 @@ overrides the attached host's replicated setting; restoring that row reveals the
 host setting again. Changing hosts replaces the workspace store, shell and all
 descendant views in the same window. The local kernel and remote hosting controls
 remain alive independently, so connecting to a host and returning to **This
-computer** never relaunch the process and never interrupt other attached
+machine** never relaunch the process and never interrupt other attached
 clients.
 
-Settings → Remote is **hosting this computer** and nothing else: the listener,
-the discovery beacon, minted pairing codes and the devices that have paired with
-this machine. It needs a listener and a beacon, so the section only exists where
-the client can host — a phone or a browser has no such setting. Choosing which
-host to talk to is a product surface, not a setting: it lives in **Hosts**,
-reached from the sidebar's feature area at both widths. Pairing follows the same
-rules everywhere: a fingerprint pinned by an invite or a discovery result applies
+**Settings → Other devices** is **Let other devices connect to this machine**
+and nothing else: the listener, **Let nearby devices find this machine**,
+connection codes and **Connected devices**. It needs a listener and a beacon,
+so the section only exists where the client can host — a phone or a browser has
+no such setting. Choosing which machine to talk to is a product surface, not a
+setting: it lives in **Machines**, reached from the sidebar's feature area at
+both widths. Adding a machine follows the same rules everywhere: a security ID
+pinned by an invite or a discovery result applies
 only to the endpoint it came from and is dropped if either field is edited; an
 answer from a superseded attempt is discarded rather than applied; and a client
 that can only reach the origin that served it (a browser) fixes the address and
-port, hides discovery, and hides the camera scan unless it has one. A host whose
-certificate no longer matches the pinned one cannot be connected to — the row
-offers to pair again instead.
+port, hides discovery, and hides the camera scan unless it has one. A machine
+whose certificate no longer matches the pinned one cannot be connected to —
+the row offers **Add again** instead.
 
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 
