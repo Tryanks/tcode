@@ -966,6 +966,7 @@ hosts:
 mobile:
   cancel: "取消"
   threads: "对话"
+  thread: "对话"
   search_threads: "搜索对话"
   new_thread: "新建对话"
   projects_empty: "这台主机上还没有项目"

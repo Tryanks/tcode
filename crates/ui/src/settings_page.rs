@@ -35,12 +35,6 @@ use tcode_core::settings::{
     TitleGenerationSettings,
 };
 
-/// Left inset so branding clears the native macOS 26 traffic lights near x=72.
-#[cfg(target_os = "macos")]
-const TRAFFIC_LIGHT_INSET: f32 = 80.;
-#[cfg(not(target_os = "macos"))]
-const TRAFFIC_LIGHT_INSET: f32 = 8.;
-
 const NAV_WIDTH: f32 = 255.;
 /// Max width of the settings content column — matches the chat timeline column
 /// (`chat::CONTENT_MAX_WIDTH`) so the reading measure is identical across routes.
@@ -616,37 +610,6 @@ impl SettingsPage {
         .into_any_element()
     }
 
-    /// The wide rail's way out of Settings. Compact has no such row: there, the
-    /// shell's nav bar carries Back like it does on every other page.
-    fn back_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        crate::material::accessible_clickable(
-            gpui_base::h_flex(),
-            "settings-back",
-            Role::Button,
-            crate::tr!("settings.back"),
-            cx,
-        )
-        .h(px(40.))
-        .items_center()
-        .gap_2()
-        .px_3()
-        .cursor_pointer()
-        .hover(|s| s.bg(cx.theme().sidebar_accent))
-        .text_size(px(13.))
-        .text_color(cx.theme().sidebar_foreground)
-        .child(
-            Icon::new(IconName::ArrowLeft)
-                .size_4()
-                .text_color(cx.theme().muted_foreground),
-        )
-        .child(crate::tr!("settings.back"))
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.window_state
-                .update(cx, |state, cx| state.close_settings(cx));
-        }))
-        .into_any_element()
-    }
-
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = v_flex()
             .id("settings-nav-tabs")
@@ -664,23 +627,16 @@ impl SettingsPage {
             .w(px(NAV_WIDTH))
             .h_full()
             .bg(cx.theme().sidebar)
-            .child(
-                window_drag_area(
-                    "settings-nav-drag",
-                    gpui_base::h_flex()
-                        .h(px(52.))
-                        .flex_none()
-                        .items_center()
-                        .gap_2()
-                        .pl(px(TRAFFIC_LIGHT_INSET))
-                        .pr_2(),
-                    window,
-                    cx,
-                )
-                .child(crate::material::brand_wordmark(cx)),
-            )
+            // The window's wordmark and the platform's own controls belong to
+            // the workspace sidebar, which stays beside this rail; the rail
+            // only matches its height so the two top strips line up.
+            .child(window_drag_area(
+                "settings-nav-drag",
+                gpui_base::h_flex().h(px(52.)).flex_none().w_full(),
+                window,
+                cx,
+            ))
             .child(tabs)
-            .child(div().flex_none().child(self.back_row(cx)))
             .into_any_element()
     }
 
@@ -739,12 +695,10 @@ impl SettingsPage {
     }
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Windows: the settings route replaces the workspace, so this header is
-        // the window's top-right corner and hosts the caption buttons. The
-        // centered column must keep its position (it aligns with the content
-        // below), so the cluster is placed out of flow at the strip's right edge
-        // and the column reserves matching trailing room for it — its actions
-        // therefore end left of the buttons rather than under them.
+        // Windows: the settings content column is the window's rightmost, so
+        // this header owns the top-right corner and draws the caption buttons.
+        // They are placed out of flow at the strip's right edge, over the
+        // title's stretch, exactly as the Machines header places them.
         let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
@@ -752,40 +706,42 @@ impl SettingsPage {
             right_panel_open,
             right_tab,
         );
-        // Align the header title and actions with the centered content column.
+        // The same top strip the Hosts route draws: Back to whatever Settings
+        // was opened from, then the page title. Settings is a content column
+        // beside the workspace sidebar, not a window of its own, so it leaves
+        // the route the way every other route does.
+        let back = self.window_state.read(cx).parent().map(|parent| {
+            crate::shell::back_button("settings-back", parent.back_label(), cx)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.window_state
+                        .update(cx, |state, cx| state.close_settings(cx));
+                }))
+                .into_any_element()
+        });
         window_drag_area(
             "settings-header-drag",
             gpui_base::h_flex()
                 .flex_none()
                 .h(px(52.))
                 .w_full()
-                .px_6()
-                .justify_center()
+                .px_2()
+                .gap_2()
                 .items_center()
                 .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
-        .child(
-            gpui_base::h_flex()
-                .w(px(CONTENT_MAX_WIDTH))
-                .max_w_full()
-                .when(hosts_caption, |column| {
-                    column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
-                })
-                .items_center()
-                .gap_3()
-                // The strip carries no controls at all (restoring defaults now
-                // lives at the foot of the General page), so the whole title
-                // doubles as the window's native drag handle.
-                .child(window_caption::drag_region(
-                    div()
-                        .flex_1()
-                        .text_size(px(15.))
-                        .font_medium()
-                        .child(crate::tr!("settings.title")),
-                )),
-        )
+        .children(back)
+        // The strip carries no controls at all (restoring defaults now lives at
+        // the foot of the General page), so the whole title doubles as the
+        // window's native drag handle.
+        .child(window_caption::drag_region(
+            div()
+                .flex_1()
+                .text_size(px(15.))
+                .font_medium()
+                .child(crate::tr!("settings.title")),
+        ))
         // Painted last so the cluster stays on top of the strip.
         .children(hosts_caption.then(|| {
             div()

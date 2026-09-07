@@ -36,10 +36,6 @@ use crate::window_state::Route;
 pub(crate) const CAPTION_STRIP_HEIGHT: f32 = 52.;
 /// Width of one button — the width Windows uses for its own caption buttons.
 const CAPTION_BUTTON_WIDTH: f32 = 46.;
-/// Horizontal space the whole cluster occupies, for surfaces that must reserve
-/// room for it rather than simply place it last in a row.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
 
@@ -52,7 +48,8 @@ pub(crate) enum CaptionSurface {
     RightPanel,
     /// The Preview panel's chrome row.
     Preview,
-    /// The settings content header (the settings route replaces the workspace).
+    /// The settings content header (the settings route keeps the sidebar
+    /// beside it, so this header is still the rightmost top strip).
     Settings,
     /// The hosts content header (the hosts route keeps the sidebar beside it).
     Hosts,

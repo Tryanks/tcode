@@ -1,4 +1,4 @@
-use gpui::{Context, Entity, EventEmitter};
+use gpui::{Context, Entity, EventEmitter, SharedString};
 
 use crate::store::WorkspaceStore;
 
@@ -35,6 +35,23 @@ impl Destination {
             Self::Settings | Self::SettingsSection => Route::Settings,
             Self::Threads | Self::Thread | Self::Panel => Route::Chat,
         }
+    }
+
+    /// The short, fixed label a Back control carries when this destination is
+    /// the one it returns to. Deliberately not the page's own title: a Back
+    /// control names a kind of place, so it stays the same width whatever the
+    /// machine or thread underneath is called, and never truncates. Pair is
+    /// reached from Machines and answers with its caller's label.
+    pub fn back_label(self) -> SharedString {
+        crate::tr!(match self {
+            Self::Hosts | Self::Pair => "hosts.title",
+            Self::Threads => "mobile.threads",
+            Self::Thread => "mobile.thread",
+            Self::Panel => "chat.panels",
+            Self::Settings | Self::SettingsSection => "settings.title",
+        })
+        .into_owned()
+        .into()
     }
 }
 
@@ -198,8 +215,8 @@ impl WindowState {
     }
 }
 
-/// The top-level window surface: the chat workspace, the hosts list or the
-/// full-page settings. Derived from [`WindowState::destination`].
+/// The top-level window surface: the chat workspace, the hosts list or
+/// settings. Derived from [`WindowState::destination`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
     #[default]
@@ -244,6 +261,25 @@ mod tests {
             assert_eq!(state.destination(), Destination::Hosts);
             assert!(!state.back(cx), "the root belongs to the platform");
         });
+    }
+
+    /// A Back control names the kind of place it returns to, never the title of
+    /// the page there: the labels are short, fixed and identical for the whole
+    /// settings pair, so no Back control ever truncates.
+    #[test]
+    fn every_destination_has_a_short_fixed_back_label() {
+        let _locale = crate::settings::TestLocaleGuard::acquire();
+        for (destination, label) in [
+            (Destination::Hosts, "Machines"),
+            (Destination::Pair, "Machines"),
+            (Destination::Threads, "Threads"),
+            (Destination::Thread, "Thread"),
+            (Destination::Panel, "Panels"),
+            (Destination::Settings, "Settings"),
+            (Destination::SettingsSection, "Settings"),
+        ] {
+            assert_eq!(destination.back_label(), label, "{destination:?}");
+        }
     }
 
     /// Connecting somewhere else is the one thing that discards where the

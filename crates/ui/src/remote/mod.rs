@@ -16,8 +16,8 @@ use std::rc::Rc;
 
 use gpui::{
     Action, AnyElement, App, Context, Entity, Global, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -25,6 +25,9 @@ use tcode_client::host::ClientHost;
 use tcode_client::pairing::PairedHost;
 
 use crate::icon::{Icon, IconName};
+// Machines are a navigable content list, so their rows, captions and hairlines
+// are the shared plain-list vocabulary — the same the thread list uses.
+use crate::material::{list_caption, list_row, plain_list};
 use crate::pairing::PairForm;
 use crate::sizing::Sizable as _;
 use crate::store::WorkspaceStore;
@@ -130,28 +133,6 @@ pub(crate) fn open_in_editor(path: &std::path::Path, cx: &App) -> Option<Result<
         .open_in_editor(path)
 }
 
-pub(crate) fn section_caption(label: SharedString, cx: &App) -> AnyElement {
-    div()
-        .pl_3()
-        .pb(px(6.))
-        .text_size(px(11.))
-        .font_medium()
-        .text_color(cx.theme().muted_foreground)
-        .child(label)
-        .into_any_element()
-}
-
-pub(crate) fn note(text: SharedString, cx: &App) -> AnyElement {
-    div()
-        .w_full()
-        .px_3()
-        .py_3()
-        .text_size(px(13.))
-        .text_color(cx.theme().muted_foreground)
-        .child(text)
-        .into_any_element()
-}
-
 /// Page inset: the compact 16pt margin, a little more room when the same list
 /// runs inside the wide content column.
 const PAGE_PADDING: f32 = 16.;
@@ -159,21 +140,6 @@ const PAGE_PADDING: f32 = 16.;
 const CONTENT_MAX_WIDTH: f32 = 768.;
 
 type Row = gpui::Stateful<gpui::Div>;
-
-/// A touch-list row: one tap target, 56pt tall, with the page's own inset so
-/// the list reads as full-width rows rather than a card in a card.
-fn list_row(id: impl Into<gpui::ElementId>, label: SharedString, cx: &App) -> Row {
-    crate::material::accessible_clickable(h_flex(), id, Role::Button, label, cx)
-        .w_full()
-        .min_h(px(56.))
-        .px(px(PAGE_PADDING))
-        .py(px(8.))
-        .gap_3()
-        .items_center()
-        .cursor_pointer()
-        .hover(|style| style.bg(cx.theme().list_hover))
-        .active(|style| style.bg(cx.theme().list_active))
-}
 
 pub struct RemotePanel {
     /// The window's current attachment, when it has one. Hosts is also the
@@ -481,13 +447,13 @@ impl RemotePanel {
                 let switch = cx.global::<ClientAttachment>().switcher();
                 switch(AttachmentTarget::Remote(connect_host.clone()), window, cx);
             })
-        });
-        h_flex()
-            .w_full()
-            .items_center()
-            .child(row)
-            .child(self.host_menu(host, current))
-            .into_any_element()
+        })
+        // The menu lives *inside* the row rather than beside it, so the row's
+        // hover fill covers the whole row instead of stopping short of a seam
+        // next to the trigger. The trigger occludes, so it keeps its own hit
+        // region and opening it never also connects the row.
+        .child(self.host_menu(host, current));
+        row.into_any_element()
     }
 
     /// The row's own overflow menu. It carries its own hit region, so opening
@@ -497,7 +463,10 @@ impl RemotePanel {
         let label = crate::tr!("hosts.actions", name = host.name.clone()).into_owned();
         div()
             .flex_none()
-            .pr(px(PAGE_PADDING - 8.))
+            .size(px(crate::material::TOUCH_TARGET))
+            .flex()
+            .items_center()
+            .justify_center()
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -527,23 +496,27 @@ impl RemotePanel {
         if self.form.has_fixed_endpoint() {
             return None;
         }
-        let mut group = crate::material::group(cx);
+        let mut rows: Vec<AnyElement> = Vec::new();
         if self.form.discovered.is_empty() {
-            group = group.child(note(
-                if self.form.browsing {
-                    crate::tr!("hosts.nearby_searching")
-                } else {
-                    crate::tr!("hosts.nearby_empty")
-                }
-                .into_owned()
-                .into(),
-                cx,
-            ));
+            rows.push(
+                div()
+                    .w_full()
+                    .px(px(PAGE_PADDING))
+                    .py_3()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if self.form.browsing {
+                        crate::tr!("hosts.nearby_searching")
+                    } else {
+                        crate::tr!("hosts.nearby_empty")
+                    })
+                    .into_any_element(),
+            );
         }
         for beacon in &self.form.discovered {
             let (addr, port, fingerprint) = (beacon.addr.clone(), beacon.port, beacon.fp.clone());
             let name = SharedString::from(beacon.name.clone());
-            group = group.child(
+            rows.push(
                 list_row(
                     SharedString::from(format!("nearby-{}-{}", beacon.host_id, beacon.addr)),
                     name.clone(),
@@ -576,7 +549,8 @@ impl RemotePanel {
                         .form
                         .pin_discovered(addr.clone(), port, fingerprint.clone(), window, cx);
                     panel.open_pair(cx);
-                })),
+                }))
+                .into_any_element(),
             );
         }
         Some(
@@ -585,9 +559,10 @@ impl RemotePanel {
                 .child(
                     h_flex()
                         .w_full()
+                        .pr(px(PAGE_PADDING))
                         .items_center()
                         .justify_between()
-                        .child(section_caption(
+                        .child(list_caption(
                             crate::tr!("hosts.nearby").into_owned().into(),
                             cx,
                         ))
@@ -600,7 +575,7 @@ impl RemotePanel {
                                 .on_click(cx.listener(|panel, _, _, cx| panel.discover(cx))),
                         ),
                 )
-                .child(group)
+                .child(plain_list(rows, cx))
                 .into_any_element(),
         )
     }
@@ -622,9 +597,9 @@ impl RemotePanel {
             return self.render_pair(window, cx);
         }
         let current_id = self.attached_host_id(cx);
-        let mut column = v_flex().w_full().gap_5().pt(px(8.)).pb(px(24.));
+        let mut column = v_flex().w_full().gap_4().pt(px(8.)).pb(px(24.));
         if let Some(local) = self.local_row(cx) {
-            column = column.child(crate::material::group(cx).child(local));
+            column = column.child(plain_list(vec![local.into_any_element()], cx));
         }
         if hosts.is_empty() {
             column = column.child(
@@ -641,19 +616,21 @@ impl RemotePanel {
                     .child(self.pair_button(cx)),
             );
         } else {
-            let mut group = crate::material::group(cx);
-            for host in &hosts {
-                let current = current_id.as_deref() == Some(host.host_id.as_str());
-                group = group.child(self.host_row(host, current, cx));
-            }
+            let rows = hosts
+                .iter()
+                .map(|host| {
+                    let current = current_id.as_deref() == Some(host.host_id.as_str());
+                    self.host_row(host, current, cx)
+                })
+                .collect();
             column = column
                 .child(
                     v_flex()
-                        .child(section_caption(
+                        .child(list_caption(
                             crate::tr!("hosts.saved").into_owned().into(),
                             cx,
                         ))
-                        .child(group),
+                        .child(plain_list(rows, cx)),
                 )
                 .child(div().px(px(PAGE_PADDING)).child(self.pair_button(cx)));
         }

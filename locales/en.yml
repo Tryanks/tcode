@@ -972,6 +972,7 @@ hosts:
 mobile:
   cancel: "Cancel"
   threads: "Threads"
+  thread: "Thread"
   search_threads: "Search threads"
   new_thread: "New thread"
   projects_empty: "This machine has no projects yet"

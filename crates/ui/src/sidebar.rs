@@ -2177,6 +2177,9 @@ impl SessionsSidebar {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Settings replaces the content column beside this sidebar, so the row
+        // that leads there takes the selected surface while it is showing.
+        let active = self.window_state.read(cx).route() == Route::Settings;
         div().flex_none().child(
             crate::material::accessible_clickable(
                 h_flex(),
@@ -2190,7 +2193,10 @@ impl SessionsSidebar {
             .gap_2()
             .px_3()
             .cursor_pointer()
-            .hover(|s| s.bg(cx.theme().sidebar_accent))
+            .when(active, |row| row.bg(cx.theme().list_active))
+            .when(!active, |row| {
+                row.hover(|s| s.bg(cx.theme().sidebar_accent))
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
                     .update(cx, |state, cx| state.open_settings(cx));
@@ -2332,16 +2338,20 @@ impl SessionsSidebar {
             )
             .into_any_element()
         } else {
-            let mut list = v_flex().w_full().px(px(COMPACT_PAGE_PADDING)).pb(px(24.));
+            // Plain rows at the page inset, hairline-separated, under one
+            // caption per project: the same list style the Machines page uses.
+            let mut list = v_flex().w_full().pb(px(24.));
             for group in &groups {
                 let collapsed = collapsed_projects.contains(&group.project.id);
                 list = list.child(self.render_compact_group_header(group, collapsed, cx));
                 if collapsed {
                     continue;
                 }
-                for meta in visible_threads(&group.sessions, &self.collapsed_parents) {
-                    list = list.child(self.render_compact_thread(meta, &sessions, &flags, cx));
-                }
+                let rows = visible_threads(&group.sessions, &self.collapsed_parents)
+                    .into_iter()
+                    .map(|meta| self.render_compact_thread(meta, &sessions, &flags, cx))
+                    .collect();
+                list = list.child(crate::material::plain_list(rows, cx));
             }
             div()
                 .id("compact-thread-list")
@@ -2431,10 +2441,12 @@ impl SessionsSidebar {
             cx,
         )
         .aria_expanded(!collapsed)
+        // A project is a section of the thread list, so its header is the
+        // shared list caption — with the collapse affordance it also carries.
         .w_full()
-        .mt(px(20.))
-        .mb(px(6.))
-        .h(px(24.))
+        .px(px(COMPACT_PAGE_PADDING))
+        .pt(px(16.))
+        .pb(px(4.))
         .items_center()
         .gap(px(8.))
         .cursor_pointer()
@@ -2443,35 +2455,25 @@ impl SessionsSidebar {
                 store.toggle_project_collapsed(project_id.clone());
             });
         }))
-        .child(
-            Icon::new(IconName::Folder)
-                .size(px(16.))
-                .text_color(cx.theme().muted_foreground),
-        )
+        .text_size(px(13.))
+        .text_color(cx.theme().muted_foreground)
+        .child(Icon::new(IconName::Folder).size(px(14.)))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(14.))
-                .font_semibold()
+                .font_medium()
                 .child(group.project.name.clone()),
         )
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(count.to_string()),
-        )
+        .child(div().flex_none().child(count.to_string()))
         .child(
             Icon::new(if collapsed {
                 IconName::ChevronRight
             } else {
                 IconName::ChevronDown
             })
-            .size(px(16.))
-            .text_color(cx.theme().muted_foreground),
+            .size(px(14.)),
         )
     }
 
@@ -2491,22 +2493,15 @@ impl SessionsSidebar {
         let status = compact_status_line(&state, working, cx);
         let click_id = session_id.clone();
 
-        let row = crate::material::accessible_clickable(
-            h_flex(),
+        let row = crate::material::list_row(
             gpui::SharedString::from(format!("compact-thread-row-{session_id}")),
-            Role::Button,
-            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
+            crate::tr!("sidebar.thread", title = meta.title.clone())
+                .into_owned()
+                .into(),
             cx,
         )
-        .w_full()
-        .min_h(px(COMPACT_ROW_HEIGHT))
-        .items_center()
-        .gap(px(12.))
-        .py(px(8.))
-        .px(px(8.))
-        .rounded(crate::material::radius_card())
         // Rows needing the user carry a 6% semantic wash; everything else sits
-        // on the paper with only a pressed tint.
+        // on the paper with only hover and pressed tints.
         .when(state.waiting_for_approval, |row| {
             row.bg(cx.theme().warning.opacity(0.06))
         })
@@ -2514,8 +2509,6 @@ impl SessionsSidebar {
             state.waiting_for_input && !state.waiting_for_approval,
             |row| row.bg(cx.theme().primary.opacity(0.06)),
         )
-        .cursor_pointer()
-        .active(|s| s.bg(cx.theme().foreground.opacity(0.08)))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.store.update(cx, |store, _cx| {
                 store.select_session(click_id.clone());

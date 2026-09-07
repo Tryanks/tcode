@@ -153,8 +153,8 @@ popped with a 200ms lateral transition.
   Labels sit above full-width fields, the primary action is pinned at the foot
   of the page above the keyboard, and adding ends on an explicit security ID
   comparison before anything connects.
-- **Threads** — the shared sidebar under a nav bar naming the attached machine,
-  with new-thread and settings actions. New thread starts a draft directly when
+- **Threads** — the shared sidebar under a nav bar titled **Threads**, with the
+  attached machine's name as its subtitle and new-thread and settings actions. New thread starts a draft directly when
   the machine has one project and otherwise opens the command palette, which
   already owns "new thread in ‹project›" and can search.
 - **Thread** — the shared chat view. Its desktop header is replaced by the nav
@@ -174,10 +174,18 @@ popped with a 200ms lateral transition.
   detail (see **Settings** below).
 
 **One navigation bar.** Every compact page — Settings included — is composed as
-the same 52pt nav bar: Back at the top left labelled with the destination
-underneath it, a centered title that truncates rather than colliding with its
-controls, and at most two trailing actions. No page draws a header of its own,
-and nothing anywhere puts a Back control at the bottom of a list.
+the same 52pt nav bar: Back at the top left, a centered title that truncates
+rather than colliding with its controls, an optional muted subtitle under it,
+and at most two trailing actions. No page draws a header of its own, and
+nothing anywhere puts a Back control at the bottom of a list.
+
+**Back is labelled with a place, not a title.** Each destination owns one short
+fixed label — Machines, Threads, Thread, Panels, Settings — and a Back control
+carries the label of the destination it returns to (Add a machine answers with
+its caller's, Machines; a settings section returns to Settings). Dynamic titles
+never reach a Back control, so it never truncates and never changes width when
+a machine or thread is renamed. The nav bar reserves the same room on both
+sides at every page, so the centered title does not shift between pages.
 
 Back — the Android system gesture and every Back control — unwinds in one order:
 the software keyboard or composition, then the topmost dismissible overlay
@@ -255,6 +263,24 @@ Settings: on a compact page the control moves to its own full-width line under
 the text, so the description is never squeezed into a column a word wide. A
 fixed 44pt affordance — a switch — is the exception and stays beside its label.
 
+### One list style
+
+Two kinds of list, one rule for which is which:
+
+- **Navigable content lists** — threads, machines, nearby machines, projects —
+  are **plain rows**: no card, no border, no radius. Each row is at least 56pt
+  tall at the 16pt page inset, separated from the next by a hairline indented
+  to that inset, with a hover fill on a pointer and a pressed tint everywhere.
+  Sections carry a caption in one shared style; a project header is that
+  caption plus its collapse affordance. A row's own overflow trigger (the
+  machine row's "…") keeps its 44×44 hit region *inside* the row, so the row's
+  hover fill covers the whole row rather than stopping short of a seam.
+- **Settings-like forms** — the Settings sections, **Other devices**, **Add a
+  machine** — keep the grouped floating card with inset hairlines between rows.
+
+So Machines and Threads read as one family of pages, and neither reads as a
+settings page.
+
 ### Connection states
 
 | State | Presentation |
@@ -313,7 +339,8 @@ in both states.
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
    expansion so the list can be collapsed again).
-6. Footer: gear + "Settings" → settings route.
+6. Footer: gear + "Settings" → settings route. Like a feature-area entry, it
+   takes the selected surface while that route is showing.
 
 ### Chat header
 
@@ -534,7 +561,16 @@ nodes, their visibility is synchronized directly from app state: closing
 Preview, selecting Diff/Plan, switching conversations, opening the command
 palette, or leaving Chat hides every WebView that no longer owns the panel.
 
-### Settings (full-page route)
+### Settings (wide route)
+
+Settings replaces the **content column**, never the window: the workspace
+sidebar — and the persistent feature area in it — stays beside it, exactly as it
+does on the Machines route, and the sidebar's Settings entry takes the selected
+surface while the route is showing. The way out is a Back control at the left of
+the content header, labelled with the destination it returns to and consistent
+with the Machines route's header (caption buttons included, where the platform
+has them). The rail carries no back row of its own; nothing puts a Back control
+at the foot of a list.
 
 Settings uses a left navigation column and independently scrolling content.
 Groups share the composer's opaque floating-card treatment. Rows pair a title
@@ -543,7 +579,7 @@ hairlines. Restore defaults requires confirmation. Compact clients have no room
 for the rail beside the content: the same sections become a full-width list that
 pushes to one section at a time, and both pages wear the shell's one nav bar —
 Back to whatever Settings was opened from, then Back to the section list. The
-page itself draws no header and no back row.
+compact page draws no header of its own.
 
 **Compact rows stack.** Where a wide row puts its label left and its control
 right, a compact row puts the label and description above a full-width control:

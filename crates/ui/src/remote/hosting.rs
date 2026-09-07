@@ -24,7 +24,6 @@ use tcode_protocol::{Command, SettingsPatch};
 use tcode_remote::discovery::{BeaconHandle, start_beacon};
 use tcode_remote::{DeviceInfo, HostMux, PairingCode, RemoteConfig, RemoteServer, serve};
 
-use super::{note, section_caption};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::DEFAULT_REMOTE_PORT;
 use crate::sizing::Sizable as _;
@@ -32,6 +31,31 @@ use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
+
+/// A caption above one group of this settings-like page. Grouped cards, not
+/// the plain content-list rows Machines uses (`docs/DESIGN.md`, list style).
+fn section_caption(label: SharedString, cx: &App) -> AnyElement {
+    div()
+        .pl_3()
+        .pb(px(6.))
+        .text_size(px(11.))
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+        .into_any_element()
+}
+
+/// A line of explanation inside a group.
+fn note(text: SharedString, cx: &App) -> AnyElement {
+    div()
+        .w_full()
+        .px_3()
+        .py_3()
+        .text_size(px(13.))
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
+}
 
 pub struct RemoteController {
     mux: HostMux,

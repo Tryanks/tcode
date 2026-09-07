@@ -893,9 +893,11 @@ impl AppShell {
 /// lights, which a compact *desktop* window still draws over this strip.
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 
-/// Room a nav bar reserves on each side for its controls: a back button with a
-/// truncated parent label, or two 44pt icon buttons.
-const NAV_CONTROL_WIDTH: f32 = 100.;
+/// Room a nav bar reserves on each side for its controls, so the centered title
+/// keeps the same box on every page: enough for the widest fixed back label
+/// ([`Destination::back_label`]) — which never truncates — and for two 44pt
+/// icon buttons on the other side.
+const NAV_CONTROL_WIDTH: f32 = 104.;
 
 /// Navigation header with a centered title and at most two trailing actions.
 fn nav_bar(
@@ -966,8 +968,8 @@ fn nav_bar(
         .child(crate::material::faded_hairline(cx))
 }
 
-/// Back control labelled with the parent destination.
-fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
+/// Back control labelled with the parent destination's short fixed label.
+pub(crate) fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
     crate::material::accessible_clickable(h_flex(), id, Role::Button, parent.clone(), cx)
         .flex_none()
         .h(px(44.))
@@ -986,10 +988,9 @@ fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Statef
                 .flex_none(),
         )
         .child(
+            // A fixed label is short by construction: it is never truncated.
             div()
-                .max_w(px(NAV_CONTROL_WIDTH - 36.))
-                .min_w_0()
-                .truncate()
+                .flex_none()
                 .text_size(px(15.))
                 .line_height(px(20.))
                 .child(parent),
@@ -1023,50 +1024,38 @@ fn nav_icon_button(
         .child(Icon::new(icon).size(px(20.)))
 }
 
+/// The muted second line under a nav-bar title: the machine a thread list
+/// belongs to, the project a thread lives in.
+fn nav_subtitle(text: impl Into<SharedString>, cx: &App) -> AnyElement {
+    div()
+        .max_w_full()
+        .min_w_0()
+        .truncate()
+        .text_size(px(13.))
+        .line_height(px(18.))
+        .text_color(cx.theme().muted_foreground)
+        .child(text.into())
+        .into_any_element()
+}
+
 fn compact_label(key: &str) -> String {
     crate::tr!(format!("mobile.{key}")).into_owned()
 }
 
 impl AppShell {
-    /// The title a destination shows in its own nav bar — and, one level down,
-    /// the label its child's Back control carries.
-    fn destination_title(&self, destination: Destination, cx: &App) -> SharedString {
-        let store = self
-            .attachment
+    /// The machine this window is attached to, as the Threads page's subtitle.
+    fn attached_machine(&self, cx: &App) -> SharedString {
+        self.attachment
             .as_ref()
-            .map(|attachment| attachment.link.store.read(cx));
-        match destination {
-            Destination::Hosts => crate::tr!("hosts.title").into_owned().into(),
-            Destination::Pair => crate::tr!("hosts.pair.title").into_owned().into(),
-            Destination::Threads => store
-                .and_then(|store| store.remote_host_name().map(SharedString::from))
-                .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into()),
-            Destination::Thread => store
-                .and_then(|store| store.chat_active_session())
-                .map(|(title, _, draft)| {
-                    if draft {
-                        compact_label("new_thread")
-                    } else {
-                        title
-                    }
-                })
-                .unwrap_or_else(|| compact_label("new_thread"))
-                .into(),
-            Destination::Panel => crate::tr!("chat.panels").into_owned().into(),
-            Destination::Settings => crate::tr!("settings.title").into_owned().into(),
-            Destination::SettingsSection => self
-                .attachment
-                .as_ref()
-                .map(|attachment| attachment.settings_page.read(cx).section_title())
-                .unwrap_or_else(|| crate::tr!("settings.title").into_owned().into()),
-        }
+            .and_then(|attachment| attachment.link.store.read(cx).remote_host_name())
+            .map(SharedString::from)
+            .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into())
     }
 
-    /// Back to whatever is under this page, labelled with its title. `None` at
-    /// the root, where the platform owns Back.
+    /// Back to whatever is under this page, labelled with that destination's
+    /// short fixed label. `None` at the root, where the platform owns Back.
     fn back_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let parent = self.window_state.read(cx).parent()?;
-        let label = self.destination_title(parent, cx);
+        let label = self.window_state.read(cx).parent()?.back_label();
         Some(
             back_button("compact-back", label, cx)
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1154,7 +1143,10 @@ impl AppShell {
     }
 
     fn render_threads_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let title = self.destination_title(Destination::Threads, cx);
+        // The page is the thread list; which machine's list it is belongs in
+        // the subtitle, where every other page puts its context.
+        let title: SharedString = crate::tr!("mobile.threads").into_owned().into();
+        let machine = self.attached_machine(cx);
         let back = self.back_control(cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
@@ -1190,7 +1182,14 @@ impl AppShell {
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
-            .child(nav_bar(back, title, None, actions, window, cx))
+            .child(nav_bar(
+                back,
+                title,
+                Some(nav_subtitle(machine, cx)),
+                actions,
+                window,
+                cx,
+            ))
             .children(self.render_connection_banner(cx))
             .child(div().flex_1().min_h_0().child(sidebar))
             .into_any_element()
@@ -1247,17 +1246,7 @@ impl AppShell {
             .child(nav_bar(
                 back,
                 title.into(),
-                (!project.is_empty()).then(|| {
-                    div()
-                        .max_w_full()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(project)
-                        .into_any_element()
-                }),
+                (!project.is_empty()).then(|| nav_subtitle(project, cx)),
                 vec![
                     nav_icon_button(
                         "compact-panels",
@@ -1520,10 +1509,13 @@ impl AppShell {
             false,
             RightTab::Diff,
         );
-        let title = self.destination_title(self.destination(cx), cx);
+        let title: SharedString = if self.destination(cx) == Destination::Pair {
+            crate::tr!("hosts.pair.title").into_owned().into()
+        } else {
+            crate::tr!("hosts.title").into_owned().into()
+        };
         let back = self.window_state.read(cx).parent().map(|parent| {
-            let label = self.destination_title(parent, cx);
-            back_button("hosts-back", label, cx)
+            back_button("hosts-back", parent.back_label(), cx)
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.back(window, cx);
                 }))
@@ -1642,9 +1634,36 @@ impl AppShell {
             .preview
             .update(cx, |preview, cx| preview.sync_visibility(cx));
 
-        // Root owns the translucent canvas across both routes; Settings
-        // paints its own sidebar and content surfaces over it.
-        if route == Route::Settings {
+        // Neither Hosts nor Settings is a window of its own: each replaces the
+        // content column and leaves the sidebar — and the persistent feature
+        // area that leads to them — beside it. Root owns the translucent
+        // canvas across every route; the content column paints its own paper.
+        if route != Route::Chat {
+            let sidebar = attachment.sidebar.clone();
+            let sidebar_width = attachment.sidebar_width.get();
+            let settings_page = attachment.settings_page.clone();
+            let content: AnyElement = if route == Route::Settings {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .debug_selector(|| "settings-route".into())
+                    .child(settings_page)
+                    .into_any_element()
+            } else {
+                let body = self.hosts_body(window, cx);
+                let header = self.render_hosts_header(window, cx);
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .debug_selector(|| "hosts-route".into())
+                    .bg(crate::material::content_surface(cx))
+                    .shadow_sm()
+                    .child(header)
+                    .child(body)
+                    .into_any_element()
+            };
             return div()
                 .id("app-shell")
                 .size_full()
@@ -1659,34 +1678,6 @@ impl AppShell {
                 // controls and own selection only when the press propagates.
                 .child(gpui_base::TextSelectionLayer)
                 .child(
-                    div()
-                        .id("workspace")
-                        .flex_1()
-                        .size_full()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .child(attachment.settings_page.clone()),
-                )
-                .into_any_element();
-        }
-
-        // Hosts is a product surface, not a settings page: the sidebar stays,
-        // because the feature area that leads here is meant to be persistent.
-        if route == Route::Hosts {
-            let sidebar = attachment.sidebar.clone();
-            let sidebar_width = attachment.sidebar_width.get();
-            let body = self.hosts_body(window, cx);
-            let header = self.render_hosts_header(window, cx);
-            return div()
-                .id("app-shell")
-                .size_full()
-                .when(fullscreen, |this| {
-                    this.bg(crate::material::opaque_canvas(cx))
-                })
-                .text_color(cx.theme().foreground)
-                .on_action(cx.listener(Self::on_toggle_palette))
-                .child(gpui_base::TextSelectionLayer)
-                .child(
                     h_flex()
                         .id("workspace")
                         .size_full()
@@ -1695,17 +1686,7 @@ impl AppShell {
                         .when(!collapsed, |row| {
                             row.child(div().flex_none().w(sidebar_width).h_full().child(sidebar))
                         })
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .debug_selector(|| "hosts-route".into())
-                                .bg(crate::material::content_surface(cx))
-                                .shadow_sm()
-                                .child(header)
-                                .child(body),
-                        ),
+                        .child(content),
                 )
                 .into_any_element();
         }
@@ -2362,6 +2343,29 @@ mod tests {
         assert!(
             cx.debug_bounds("hosts-route").is_some(),
             "hosts fills the content column"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-feature-hosts").is_some(),
+            "and the sidebar it was opened from is still beside it"
+        );
+    }
+
+    /// Settings replaces the content column, not the window: the sidebar and
+    /// the feature area stay put, exactly as they do on the Hosts route.
+    #[gpui::test]
+    fn the_wide_settings_route_keeps_the_sidebar_and_its_feature_area(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.open_settings(cx));
+        draw(cx);
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).route(), Route::Settings);
+        });
+        assert!(
+            cx.debug_bounds("settings-route").is_some(),
+            "settings fills the content column"
         );
         assert!(
             cx.debug_bounds("sidebar-feature-hosts").is_some(),

@@ -150,6 +150,56 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
     group
 }
 
+/// One row of a navigable content list — a thread, a machine, a project. Plain
+/// rows on the page, not a card: 56pt of touch target at the page inset, with
+/// a hover fill on a pointer and a pressed tint everywhere.
+///
+/// Settings-like forms use [`grouped`] instead; see the list-style rule in
+/// `docs/DESIGN.md`.
+pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stateful<Div> {
+    accessible_clickable(gpui_base::h_flex(), id, Role::Button, label, cx)
+        .w_full()
+        .min_h(px(56.))
+        .px(px(COMPACT_PAGE_INSET))
+        .py(px(8.))
+        .gap_3()
+        .items_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().list_hover))
+        .active(|style| style.bg(cx.theme().list_active))
+}
+
+/// The caption above one section of a navigable content list.
+pub fn list_caption(label: SharedString, cx: &App) -> Div {
+    div()
+        .w_full()
+        .px(px(COMPACT_PAGE_INSET))
+        .pt(px(12.))
+        .pb(px(4.))
+        .text_size(px(13.))
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+}
+
+/// Stack [`list_row`]s with a hairline between them, indented to the text.
+pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
+    let mut list = v_flex().w_full();
+    let last = rows.len().saturating_sub(1);
+    for (index, row) in rows.into_iter().enumerate() {
+        list = list.child(row);
+        if index != last {
+            list = list.child(
+                div()
+                    .w_full()
+                    .pl(px(COMPACT_PAGE_INSET))
+                    .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
+            );
+        }
+    }
+    list
+}
+
 /// Shared wordmark and DEV channel badge.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     gpui_base::h_flex()
