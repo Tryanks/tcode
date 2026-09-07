@@ -216,8 +216,8 @@ public final class GpuiActivity extends NativeActivity {
     }
 
     public void gpuiConfigureInput(
-            boolean autocorrect, int autocapitalize, boolean suggestions, int inputAction) {
-        inputView.configure(autocorrect, autocapitalize, suggestions, inputAction);
+            boolean autocorrect, int autocapitalize, boolean suggestions, int inputAction, boolean multiLine) {
+        inputView.configure(autocorrect, autocapitalize, suggestions, inputAction, multiLine);
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).restartInput(inputView);
     }
 
@@ -308,8 +308,9 @@ public final class GpuiActivity extends NativeActivity {
             if (Build.VERSION.SDK_INT >= 33) setAutoHandwritingEnabled(false);
         }
 
-        void configure(boolean autocorrect, int autocapitalize, boolean suggestions, int action) {
+        void configure(boolean autocorrect, int autocapitalize, boolean suggestions, int action, boolean multiLine) {
             int type = InputType.TYPE_CLASS_TEXT;
+            if (multiLine) type |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
             if (autocorrect) type |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
             if (!suggestions) type |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             if (autocapitalize == 1) type |= InputType.TYPE_TEXT_FLAG_CAP_WORDS;
@@ -323,8 +324,9 @@ public final class GpuiActivity extends NativeActivity {
                 case 5: imeOptions = EditorInfo.IME_ACTION_PREVIOUS; break;
                 case 6: imeOptions = EditorInfo.IME_ACTION_SEARCH; break;
                 case 7: imeOptions = EditorInfo.IME_ACTION_SEND; break;
-                default: imeOptions = EditorInfo.IME_ACTION_NONE;
+                default: imeOptions = EditorInfo.IME_ACTION_DONE;
             }
+            if (multiLine) imeOptions = EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_ENTER_ACTION;
         }
 
         @Override public boolean onCheckIsTextEditor() { return true; }

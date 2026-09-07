@@ -46,8 +46,11 @@ pub(crate) fn delete_backward(handler: &mut gpui::PlatformInputHandler) {
     }
 }
 
-/// Character preference bypasses GPUI bindings, so control keys must not use it.
-pub(crate) fn ime_key_down(keystroke: Keystroke) -> KeyDownEvent {
+/// Plain multiline Enter is text; other control keys must still reach bindings.
+pub(crate) fn ime_key_down(mut keystroke: Keystroke, multi_line: bool) -> KeyDownEvent {
+    if multi_line && keystroke.key == "enter" && keystroke.modifiers == gpui::Modifiers::default() {
+        keystroke.key_char = Some("\n".into());
+    }
     let prefer_character_input = keystroke.key_char.is_some()
         && !keystroke.modifiers.control
         && !keystroke.modifiers.platform
@@ -62,6 +65,41 @@ pub(crate) fn ime_key_down(keystroke: Keystroke) -> KeyDownEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_ime_enter_inserts_newline_while_single_line_runs_action() {
+        let enter = Keystroke {
+            key: "enter".into(),
+            key_char: None,
+            modifiers: Default::default(),
+        };
+        let event = ime_key_down(enter.clone(), true);
+        assert_eq!(event.keystroke.key_char.as_deref(), Some("\n"));
+        assert!(event.prefer_character_input);
+        let event = ime_key_down(enter.clone(), false);
+        assert_eq!(event.keystroke.key_char, None);
+        assert!(!event.prefer_character_input);
+        for modifiers in [
+            gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+            gpui::Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        ] {
+            let event = ime_key_down(
+                Keystroke {
+                    modifiers,
+                    ..enter.clone()
+                },
+                true,
+            );
+            assert_eq!(event.keystroke.key_char, None);
+            assert!(!event.prefer_character_input);
+        }
+    }
 
     #[test]
     fn deleting_preedit_retains_its_suffix_and_relative_utf16_cursor() {
@@ -94,11 +132,14 @@ mod tests {
     #[test]
     fn ime_control_keys_reach_input_bindings() {
         for key in ["backspace", "delete", "enter", "left", "right"] {
-            let event = ime_key_down(Keystroke {
-                key: key.into(),
-                key_char: None,
-                modifiers: Default::default(),
-            });
+            let event = ime_key_down(
+                Keystroke {
+                    key: key.into(),
+                    key_char: None,
+                    modifiers: Default::default(),
+                },
+                false,
+            );
             assert!(!event.prefer_character_input, "{key} bypassed bindings");
         }
         let mut stroke = Keystroke {
@@ -106,8 +147,8 @@ mod tests {
             key_char: Some("a".into()),
             modifiers: Default::default(),
         };
-        assert!(ime_key_down(stroke.clone()).prefer_character_input);
+        assert!(ime_key_down(stroke.clone(), false).prefer_character_input);
         stroke.modifiers.control = true;
-        assert!(!ime_key_down(stroke).prefer_character_input);
+        assert!(!ime_key_down(stroke, false).prefer_character_input);
     }
 }

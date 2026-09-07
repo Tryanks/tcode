@@ -176,6 +176,20 @@ impl RemotePanel {
                             this.form.fill_invite(&value, window, cx);
                         }
                         cx.notify();
+                    } else if matches!(
+                        event,
+                        InputEvent::PressEnter {
+                            shift: false,
+                            secondary: false
+                        }
+                    ) {
+                        if *input == this.form.address {
+                            this.form
+                                .code
+                                .update(cx, |state, cx| state.focus(window, cx));
+                        } else {
+                            this.submit(window, cx);
+                        }
                     }
                 },
             ));
@@ -826,4 +840,49 @@ pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
         HostClosed => crate::tr!("remote.failure.host_closed"),
     }
     .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, Focusable as _, Render, TestAppContext};
+
+    struct PairingProbe(Entity<RemotePanel>);
+
+    impl Render for PairingProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn address_enter_moves_focus_to_connection_code(cx: &mut TestAppContext) {
+        let (probe, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|_| WindowState::new(false));
+            PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+        });
+        probe.update_in(cx, |probe, window, cx| {
+            let address = probe.0.read(cx).form.address.clone();
+            address.update(cx, |input, cx| {
+                input.focus(window, cx);
+                cx.emit(InputEvent::PressEnter {
+                    shift: false,
+                    secondary: false,
+                });
+            });
+        });
+        cx.run_until_parked();
+        probe.update_in(cx, |probe, window, cx| {
+            assert!(
+                probe
+                    .0
+                    .read(cx)
+                    .form
+                    .code
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+    }
 }

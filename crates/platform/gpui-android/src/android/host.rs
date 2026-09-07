@@ -98,14 +98,16 @@ pub(crate) fn hide_keyboard() {
 }
 
 pub(crate) fn configure_input(configuration: TextInputConfiguration) {
+    // GPUI has no separate multiline flag; Enter explicitly requests a line break.
     with_activity(
         "gpuiConfigureInput",
-        "(ZIZI)V",
+        "(ZIZIZ)V",
         vec![
             OwnedArgument::Bool(configuration.autocorrect),
             OwnedArgument::Int(configuration.autocapitalize as i32),
             OwnedArgument::Bool(configuration.suggestions),
             OwnedArgument::Int(configuration.input_action as i32),
+            OwnedArgument::Bool(configuration.input_action == gpui::TextInputAction::Enter),
         ],
     );
 }

@@ -79,7 +79,10 @@ Noto Sans SC, then Source Han Sans SC for missing UI glyphs; CJK fonts are not
 bundled. iOS retains its native system fallback (including PingFang).
 On Android, hiding the software keyboard preserves input focus; tapping inside
 that input opens the keyboard again. Backspace removes a whole grapheme or the
-selection, including while an IME composing region is active.
+selection, including while an IME composing region is active. Multiline fields
+request a newline key from Android IMEs; plain Enter inserts a line break in
+the composer. Single-line fields keep a Done action that invokes their existing
+submit or next-step behavior. Modified hardware Enter bindings are unchanged.
 The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.

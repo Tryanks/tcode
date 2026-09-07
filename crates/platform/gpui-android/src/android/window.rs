@@ -4,10 +4,10 @@ use android_activity::{
     input::{KeyAction, Keycode, MotionAction},
 };
 use gpui::{
-    Bounds, Capslock, DevicePixels, DispatchEventResult, Edges, GpuSpecs, KeyDownEvent, KeyUpEvent,
-    Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    Scene, Size, TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
+    Bounds, Capslock, DevicePixels, DispatchEventResult, Edges, GpuSpecs, KeyUpEvent, Keystroke,
+    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size,
+    TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowInsets, point, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
@@ -451,10 +451,6 @@ impl AndroidWindow {
             function: false,
         };
         let key_char = printable_key(event.key_code(), modifiers.shift);
-        let text_to_insert = key_char
-            .as_ref()
-            .filter(|_| !modifiers.control && !modifiers.alt && !modifiers.platform)
-            .cloned();
         let keystroke = Keystroke {
             modifiers,
             key,
@@ -462,11 +458,19 @@ impl AndroidWindow {
         };
         match event.action() {
             KeyAction::Down => {
-                let result = self.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
-                    keystroke,
-                    is_held: event.repeat_count() > 0,
-                    prefer_character_input: false,
-                }));
+                let multi_line = self.0.state.borrow().input_configuration.input_action
+                    == gpui::TextInputAction::Enter;
+                let mut input = crate::text_input::ime_key_down(keystroke, multi_line);
+                // Hardware printable keys still visit bindings; only plain
+                // multiline Enter uses the text replacement path.
+                input.prefer_character_input &= input.keystroke.key == "enter";
+                input.is_held = event.repeat_count() > 0;
+                let text_to_insert = input
+                    .keystroke
+                    .key_char
+                    .clone()
+                    .filter(|_| !modifiers.control && !modifiers.alt && !modifiers.platform);
+                let result = self.dispatch_input(PlatformInput::KeyDown(input));
                 if result.propagate
                     && let Some(text) = text_to_insert
                 {
@@ -516,9 +520,11 @@ impl AndroidWindow {
             key_char: key_char.clone(),
         };
         if down {
-            let result = self.dispatch_input(PlatformInput::KeyDown(
-                crate::text_input::ime_key_down(keystroke),
-            ));
+            let multi_line = self.0.state.borrow().input_configuration.input_action
+                == gpui::TextInputAction::Enter;
+            let event = crate::text_input::ime_key_down(keystroke, multi_line);
+            let key_char = event.keystroke.key_char.clone();
+            let result = self.dispatch_input(PlatformInput::KeyDown(event));
             if result.propagate
                 && let Some(text) = key_char.filter(|_| raw_meta & (0x2 | 0x1000 | 0x10000) == 0)
             {
