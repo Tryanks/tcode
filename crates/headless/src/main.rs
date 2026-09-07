@@ -268,6 +268,12 @@ fn wait_for_interrupt() {
     }
 }
 
+#[cfg(not(unix))]
+fn wait_for_interrupt() {
+    use std::io::Read as _;
+    let _ = std::io::stdin().read(&mut [0_u8]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,10 +303,4 @@ mod tests {
             "https://192.168.1.4:47420/#code=123456"
         );
     }
-}
-
-#[cfg(not(unix))]
-fn wait_for_interrupt() {
-    use std::io::Read as _;
-    let _ = std::io::stdin().read(&mut [0_u8]);
 }
