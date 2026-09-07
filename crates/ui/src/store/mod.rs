@@ -2521,7 +2521,7 @@ mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, _| store.select_session("parent".into()));
         wait_until(cx, &workspace, "parent selected", |cx| {
@@ -2588,7 +2588,7 @@ mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
@@ -2669,7 +2669,7 @@ mod tests {
                 patch: tcode_core::settings::SettingsPatch::LastProject(Some("remembered".into())),
             },
         );
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         wait_until(cx, &workspace, "remembered project draft", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
@@ -2682,7 +2682,7 @@ mod tests {
 
         let empty_root = scratch_root("no-projects");
         let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
-        let empty = cx.new(|cx| WorkspaceStore::new_local(&empty_host, cx));
+        let empty = cx.new(|cx| WorkspaceStore::new(empty_host.link(), cx));
         for _ in 0..5 {
             empty.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             cx.run_until_parked();
@@ -3610,7 +3610,7 @@ mod tests {
         disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
             .expect("persist session");
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, cx| {
             store.start_draft("doomed".into(), root.clone(), cx)
@@ -3662,7 +3662,7 @@ mod tests {
                 .expect("persist project");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, cx| {
             store.start_draft("doomed".into(), root.clone(), cx)
@@ -3700,7 +3700,7 @@ mod tests {
         disk.upsert_project(&project_at("p", &root))
             .expect("persist project");
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)
