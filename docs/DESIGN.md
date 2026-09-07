@@ -322,9 +322,12 @@ Orchestrate uses one provider-neutral workflow, refreshed on each explicit
 `/orchestrate` message. The main thread frames and decides, routes concrete work
 to execution models across the enabled provider fleet, and independently accepts
 or rejects the actual integrated result. Small tasks reduce coordination overhead,
-not execution ownership. Optional peer discussion remains separate from execution.
-A child report informs the main thread's judgment but is not itself acceptance;
-the main thread retains discretion over proportionate verification.
+not execution ownership. Work that can advance concurrently is routed according
+to task dependencies; the main thread integrates parallel deliverables, resolves
+conflicts, and retains final acceptance of the integrated result. Optional peer
+discussion remains separate from execution. A child report informs the main
+thread's judgment but is not itself acceptance; the main thread retains discretion
+over proportionate verification.
 
 Settings show two model lists: **Collaboration models**, bundled
 with GPT-6 Astra and Claude Fable 5.1, and **Execution models**, bundled with
