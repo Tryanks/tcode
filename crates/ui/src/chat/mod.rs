@@ -2556,7 +2556,17 @@ impl Render for ChatView {
                             .bg(cx.theme().list_active)
                     })
                     .when(index + 1 < item_count, |item| item.pb(px(TURN_GAP)))
-                    .child(div().w_full().max_w(px(CONTENT_MAX_WIDTH)).child(rendered))
+                    // `min_w_0`: a turn holds nowrap content (diff rows, command
+                    // output). Without it this flex item grows to that content
+                    // and the column runs past the page inset instead of
+                    // scrolling inside it.
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .max_w(px(CONTENT_MAX_WIDTH))
+                            .child(rendered),
+                    )
                     .into_any_element()
             }),
         )

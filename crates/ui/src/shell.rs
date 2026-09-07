@@ -2430,6 +2430,206 @@ mod tests {
         );
     }
 
+    /// A session the diff panel can address: the host replaces this value
+    /// wholesale, so the fields the panel does not read stay at their zero.
+    fn session_status(session: &str, cwd: &std::path::Path) -> tcode_protocol::SessionStatus {
+        tcode_protocol::SessionStatus {
+            session_id: session.into(),
+            title: "Compact panel".into(),
+            cwd: cwd.to_path_buf(),
+            attachments_dir: cwd.to_path_buf(),
+            provider: agent::ProviderKind::ClaudeCode,
+            requested_model: None,
+            requested_profile_id: None,
+            acp_agent_id: None,
+            project_id: None,
+            approval_mode: Default::default(),
+            interaction_mode: Default::default(),
+            queued_messages: Vec::new(),
+            review_comment_drafts: Vec::new(),
+            terminals: Vec::new(),
+            active_terminal_id: None,
+            terminal_splits: Vec::new(),
+            terminal_contexts: Vec::new(),
+            terminal_open: false,
+            terminal_height: 240.,
+            delivery_in_flight: None,
+            turn_running: false,
+            working: false,
+            pending_approval: false,
+            pending_user_input: false,
+            steering_supported: false,
+            provider_option_descriptors: Vec::new(),
+            provider_option_selections: Vec::new(),
+            provider_commands: Vec::new(),
+            git_branch: None,
+            branches: Vec::new(),
+            draft: false,
+            draft_workspace: Default::default(),
+            worktree: None,
+            preparing_worktree: false,
+            relay_confirmation: None,
+            native_rewind_pending: false,
+            native_rewind_prefill_available: false,
+            model_pending_restart: false,
+            options_pending_restart: false,
+            approval_pending_restart: false,
+            ultrathink_armed: false,
+        }
+    }
+
+    /// Give the shell one selected session whose only net change is a single
+    /// unbreakable 400-character line, so the diff panel has real content far
+    /// wider than a phone page.
+    fn seed_wide_diff(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTestContext) {
+        let session = "thread-1";
+        let cwd = std::path::Path::new("/tmp/tcode-compact-panel");
+        let path = "a/deeply/nested/module/tree/with/an/absurdly/long/file_name.rs";
+        let long = "x".repeat(400);
+        let diff = format!(
+            "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n\
+             @@ -1 +1 @@\n-fn old() {{}}\n+fn new_{long}() {{}}\n"
+        );
+        let events = [
+            (
+                Topic::SessionStatus {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionStatusReplaced(session_status(session, cwd)),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: session.into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    from: 0,
+                    records: vec![
+                        agent::AgentEvent::TurnStarted {
+                            turn_id: "turn-1".into(),
+                        }
+                        .into(),
+                        agent::AgentEvent::TurnChangesUpdated {
+                            turn_id: "turn-1".into(),
+                            changes: agent::file_changes_from_unified_diff(&diff)
+                                .expect("one file section"),
+                            completeness: agent::ChangeCompleteness::Exact,
+                        }
+                        .into(),
+                    ],
+                },
+            ),
+        ];
+        for (topic, event) in events {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let store = store_of(shell, cx);
+        store.update(cx, |store, _| store.select_session(session.into()));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+    }
+
+    /// The panel first asks the host for each changed file's current text, then
+    /// builds its rendered files off the render thread. This workspace has no
+    /// checkout, so refuse those reads — the panel then renders from the stored
+    /// patch alone — and draw until the body is actually laid out.
+    fn draw_until(
+        shell: &Entity<AppShell>,
+        cx: &mut VisualTestContext,
+        host: &MountedShell,
+        selector: &'static str,
+    ) {
+        for _ in 0..12 {
+            let store = store_of(shell, cx);
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            while let Ok(line) = host.outgoing.try_recv() {
+                let line = decode_client_line(&line).expect("client line");
+                if matches!(line.payload, ClientPayload::Query(_)) {
+                    host.incoming
+                        .try_send(
+                            encode_line(&HostMessage::QueryResult {
+                                id: line.id,
+                                result: Err(tcode_protocol::ProtocolError {
+                                    code: "not_found".into(),
+                                    message: "no checkout in this test".into(),
+                                }),
+                            })
+                            .unwrap(),
+                        )
+                        .unwrap();
+                }
+            }
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(100));
+            draw(cx);
+            if cx.debug_bounds(selector).is_some() {
+                return;
+            }
+        }
+        panic!("{selector} never laid out");
+    }
+
+    /// The compact Panel page owns the chrome: its segmented control is the only
+    /// selector, so the diff panel's own tab row and its right-panel window
+    /// controls are not built at all — and the page holds its 16pt inset even
+    /// when the diff line is far wider than the window.
+    #[gpui::test]
+    fn the_compact_panel_page_drops_the_right_panel_chrome_and_stays_inset(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, host, cx) = mount(cx);
+        seed_wide_diff(&shell, &host, cx);
+        resize(cx, 393.);
+        shell.update(cx, |shell, cx| shell.open_panels(cx));
+        draw_until(&shell, cx, &host, "diff-body");
+
+        assert!(
+            cx.debug_bounds("right-panel-tabs").is_none(),
+            "the Diff | Tasks tab row is the wide layout's selector"
+        );
+        assert!(
+            cx.debug_bounds("diff-close").is_none(),
+            "close is a right-panel affordance; Back leaves the compact page"
+        );
+
+        let body = cx
+            .debug_bounds("diff-body")
+            .expect("the diff body laid out");
+        assert_eq!(
+            body.left(),
+            px(crate::material::COMPACT_PAGE_INSET),
+            "the body starts at the page inset"
+        );
+        assert_eq!(
+            body.right(),
+            px(393. - crate::material::COMPACT_PAGE_INSET),
+            "and ends at it: a 400-character line scrolls inside the body \
+             instead of running off the page"
+        );
+    }
+
+    /// The wide right panel keeps every control the compact page hides.
+    #[gpui::test]
+    fn the_wide_diff_panel_keeps_its_tab_row_and_close(cx: &mut TestAppContext) {
+        let (shell, host, cx) = mount(cx);
+        seed_wide_diff(&shell, &host, cx);
+        resize(cx, 1024.);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body");
+
+        assert!(cx.debug_bounds("right-panel-tabs").is_some());
+        assert!(cx.debug_bounds("diff-close").is_some());
+    }
+
     #[test]
     fn hover_transitions_open_preserve_and_close_the_overlay() {
         for (current, transition, visible) in [

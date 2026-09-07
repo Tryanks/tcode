@@ -356,35 +356,31 @@ fn render_inline_diff(key: &str, row: &LiveEditRow, cx: &App) -> AnyElement {
         .map(|row| render_inline_diff_row(row, cx))
         .collect::<Vec<_>>();
 
-    div()
-        .w_full()
-        .ml_2()
-        .pl(px(14.))
-        .py_0p5()
-        .border_l_1()
-        .border_color(cx.theme().border)
-        .debug_selector(|| "file-edit-diff".into())
-        .child(
-            div()
-                .id(SharedString::from(format!("file-edit-diff-y-{key}")))
-                .w_full()
-                .max_h(px(240.))
-                .overflow_y_scroll()
-                .child(
-                    div()
-                        .id(SharedString::from(format!("file-edit-diff-x-{key}")))
-                        .w_full()
-                        .overflow_x_scroll()
-                        .child(
-                            v_flex()
-                                .min_w_full()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(11.5))
-                                .children(rows),
-                        ),
-                ),
-        )
-        .into_any_element()
+    crate::material::rail_detail(
+        div()
+            .id(SharedString::from(format!("file-edit-diff-y-{key}")))
+            .w_full()
+            .min_w_0()
+            .max_h(px(240.))
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .id(SharedString::from(format!("file-edit-diff-x-{key}")))
+                    .w_full()
+                    .min_w_0()
+                    .overflow_x_scroll()
+                    .child(
+                        v_flex()
+                            .min_w_full()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(px(11.5))
+                            .children(rows),
+                    ),
+            ),
+        cx,
+    )
+    .debug_selector(|| "file-edit-diff".into())
+    .into_any_element()
 }
 
 fn render_inline_diff_row(row: &RenderedRow, cx: &App) -> AnyElement {

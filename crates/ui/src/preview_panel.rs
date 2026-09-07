@@ -45,16 +45,19 @@
 //! route. Other overlapping GPUI popovers can still be covered by the native view.
 
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement as _,
-    Render, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 use tcode_protocol::PreviewResponse;
 
+use crate::material;
 use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::{Route, WindowState};
 use crate::{icon::IconName, sizing::Sizable as _};
@@ -134,6 +137,17 @@ fn unavailable_message(err: &str) -> String {
         "the preview browser is unavailable on this machine \
          (the system webview component could not be created: {err})"
     )
+}
+
+/// An action on the current preview URL. The compact toolbar reaches these
+/// through its overflow menu, which addresses items by action rather than by
+/// callback.
+#[derive(gpui::Action, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_preview, no_json)]
+enum PreviewAction {
+    CopyUrl,
+    OpenExternal,
+    ScanPorts,
 }
 
 /// Add a scheme to a bare host/port (so `localhost:5173` becomes a real URL).
@@ -311,11 +325,22 @@ impl PreviewPanel {
         // rather than offering the user a list of their own dev servers as if
         // they were the host's. A host URL typed into the field still works.
         let offer_ports = PREVIEW_BACKEND && !self.store.read(cx).is_remote();
+        // Compact: one toolbar row on the page inset, with 44pt touch targets.
+        // Close is a right-panel affordance — the Panel page's Back leaves it —
+        // so it is not drawn here at all.
+        let compact = self.window_state.read(cx).compact;
         h_flex()
             .flex_none()
             .w_full()
             .gap_1()
             .p_1()
+            .when(compact, |chrome| {
+                chrome
+                    .h(px(material::TOUCH_TARGET))
+                    .py_0()
+                    .px(px(material::COMPACT_PAGE_INSET))
+                    .gap_2()
+            })
             .when(hosts_caption, |chrome| {
                 chrome
                     .h(px(window_caption::CAPTION_STRIP_HEIGHT))
@@ -327,45 +352,91 @@ impl PreviewPanel {
             // absent rather than present-but-dead.
             .children(self.history_controls(cx))
             .child(div().flex_1().min_w_0().child(Input::new(&self.url_input)))
-            .when(offer_ports, |chrome| {
+            // Compact: the address field is the row. Everything that acts *on*
+            // the current URL goes into one overflow menu rather than squeezing
+            // the field down to a word.
+            .when(compact, |chrome| {
                 chrome.child(
-                    Button::new("preview-ports")
+                    material::toolbar_icon_button(
+                        "preview-overflow",
+                        IconName::Ellipsis,
+                        crate::tr!("mobile.more_actions"),
+                        true,
+                    )
+                    .dropdown_menu(move |menu, _, _| {
+                        menu.menu(
+                            crate::tr!("preview.copy_url").into_owned(),
+                            Box::new(PreviewAction::CopyUrl),
+                        )
+                        .menu(
+                            crate::tr!("preview.open_external").into_owned(),
+                            Box::new(PreviewAction::OpenExternal),
+                        )
+                        .menu_with_enable(
+                            crate::tr!("preview.scan_ports").into_owned(),
+                            Box::new(PreviewAction::ScanPorts),
+                            offer_ports,
+                        )
+                    }),
+                )
+            })
+            .when(!compact && offer_ports, |chrome| {
+                chrome.child(
+                    material::toolbar_icon_button(
+                        "preview-ports",
+                        IconName::Globe,
+                        crate::tr!("preview.scan_ports"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
+                )
+            })
+            .when(!compact, |chrome| {
+                chrome
+                    .child(
+                        material::toolbar_icon_button(
+                            "preview-copy-url",
+                            IconName::Copy,
+                            crate::tr!("preview.copy_url"),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_url(cx))),
+                    )
+                    .child(
+                        material::toolbar_icon_button(
+                            "preview-open-external",
+                            IconName::ExternalLink,
+                            crate::tr!("preview.open_external"),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
+                    )
+            })
+            .when(!compact, |chrome| {
+                chrome.child(
+                    Button::new("preview-close")
                         .ghost()
                         .small()
                         .compact()
-                        .icon(IconName::Globe)
-                        .tooltip(crate::tr!("preview.scan_ports"))
-                        .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
+                        .icon(IconName::Close)
+                        .tooltip(crate::tr!("preview.close"))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
                 )
             })
-            .child(
-                Button::new("preview-copy-url")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Copy)
-                    .tooltip(crate::tr!("preview.copy_url"))
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_url(cx))),
-            )
-            .child(
-                Button::new("preview-open-external")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::ExternalLink)
-                    .tooltip(crate::tr!("preview.open_external"))
-                    .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
-            )
-            .child(
-                Button::new("preview-close")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Close)
-                    .tooltip(crate::tr!("preview.close"))
-                    .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
-            )
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
+    }
+
+    fn on_preview_action(
+        &mut self,
+        action: &PreviewAction,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            PreviewAction::CopyUrl => self.copy_url(cx),
+            PreviewAction::OpenExternal => self.open_in_system_browser(cx),
+            PreviewAction::ScanPorts => self.rescan_ports(cx),
+        }
     }
 
     fn render_note(&self, title: String, detail: Option<String>, cx: &Context<Self>) -> AnyElement {
@@ -411,6 +482,7 @@ impl Render for PreviewPanel {
         let body = self.render_body(active.as_deref(), window, cx);
         v_flex()
             .size_full()
+            .on_action(cx.listener(Self::on_preview_action))
             .child(self.render_chrome(window, cx))
             .children(self.render_port_row(cx))
             .child(body)

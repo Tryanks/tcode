@@ -17,12 +17,14 @@ use crate::{
 };
 use agent::{FileChange, FileChangeKind};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, HighlightStyle, InteractiveElement as _,
-    IntoElement, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, StyledText,
-    Subscription, Window, div, list, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, AppContext as _, Context, Entity, HighlightStyle,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, Role,
+    StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, div, list,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
+use serde::Deserialize;
 
 use super::model::{
     DiffColors, ExpandDir, FileDiffInput, PairedRow, RenderedFile, VisibleItem, VisibleSplitItem,
@@ -31,6 +33,7 @@ use super::model::{
 use super::parse::RowKind;
 use crate::plan_panel::PlanPanel;
 use crate::store::WorkspaceStore;
+use crate::widgets::menu::DropdownMenu as _;
 use crate::window_caption;
 use crate::window_state::WindowState;
 use crate::workspace_walk::relativize_to_workspace;
@@ -40,6 +43,17 @@ use tcode_core::{
     ui::RightTab,
 };
 use tcode_protocol::{GitDiffResult, GitDiffScope, GitFileText};
+
+/// A diff view toggle. The compact toolbar reaches these through its overflow
+/// menu, which addresses items by action rather than by callback.
+#[derive(Action, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_diff, no_json)]
+enum DiffViewOption {
+    Split,
+    Wrap,
+    Whitespace,
+    Invisibles,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum DiffScope {
@@ -701,6 +715,7 @@ impl DiffPanel {
 
         h_flex()
             .id("right-panel-tabs")
+            .debug_selector(|| "right-panel-tabs".into())
             .role(Role::TabList)
             .aria_label(crate::tr!("diff.panel_tabs"))
             .flex_none()
@@ -785,6 +800,7 @@ impl DiffPanel {
             )
             .child(
                 Button::new("diff-close")
+                    .debug_selector(|| "diff-close".into())
                     .ghost()
                     .small()
                     .compact()
@@ -799,6 +815,42 @@ impl DiffPanel {
             // Last child: the panel's own actions keep their places to its left.
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
             .into_any_element()
+    }
+
+    /// Whether this panel is drawn as a compact page rather than the wide
+    /// layout's right column.
+    fn compact(&self, cx: &App) -> bool {
+        self.window_state.read(cx).compact
+    }
+
+    fn on_view_option(&mut self, option: &DiffViewOption, _: &mut Window, cx: &mut Context<Self>) {
+        self.apply_view_option(*option, cx);
+    }
+
+    fn apply_view_option(&mut self, option: DiffViewOption, cx: &mut Context<Self>) {
+        match option {
+            DiffViewOption::Split => {
+                let split = self.workspace_store.read(cx).diff_split();
+                self.workspace_store
+                    .update(cx, |store, cx| store.set_diff_split(!split, cx));
+                self.remeasure_lists();
+            }
+            DiffViewOption::Wrap => {
+                self.workspace_store
+                    .update(cx, |store, cx| store.toggle_diff_wrap(cx));
+                self.remeasure_lists();
+            }
+            DiffViewOption::Whitespace => {
+                self.ignore_ws = !self.ignore_ws;
+                self.git_preview = None;
+                self.cache = None;
+            }
+            DiffViewOption::Invisibles => {
+                self.show_invisibles = !self.show_invisibles;
+                self.cache = None;
+            }
+        }
+        cx.notify();
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -976,87 +1028,7 @@ impl DiffPanel {
             .shadow_xl()
             .rounded(material::radius_overlay());
 
-        let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
-        let ignore_ws = self.ignore_ws;
-        let show_invisibles = self.show_invisibles;
-        let split_on = self.workspace_store.read(cx).diff_split();
-        let panel_split = cx.entity();
-        let mut toolbar = h_flex()
-            .flex_none()
-            .h(px(40.))
-            .w_full()
-            .px_2()
-            .gap_1()
-            .items_center()
-            .child(selector)
-            .child(div().flex_1())
-            .child(
-                Button::new("diff-view-split")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::PanelLeft)
-                    .selected(split_on)
-                    .tooltip(if split_on {
-                        crate::tr!("diff.unified_view")
-                    } else {
-                        crate::tr!("diff.split_view")
-                    })
-                    .on_click(move |_, _, cx| {
-                        panel_split.update(cx, |this, cx| {
-                            this.workspace_store
-                                .update(cx, |store, cx| store.set_diff_split(!split_on, cx));
-                            this.remeasure_lists();
-                            cx.notify();
-                        });
-                    }),
-            )
-            .child(
-                Button::new("diff-wrap")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Menu)
-                    .selected(wrap_on)
-                    .tooltip(crate::tr!("diff.toggle_wrap"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, cx| store.toggle_diff_wrap(cx));
-                        this.remeasure_lists();
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("diff-whitespace")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Eye)
-                    .selected(ignore_ws)
-                    .tooltip(crate::tr!("diff.toggle_whitespace"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.ignore_ws = !this.ignore_ws;
-                        this.git_preview = None;
-                        this.cache = None;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("diff-invisibles")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::CaseSensitive)
-                    .selected(show_invisibles)
-                    .tooltip(crate::tr!("diff.toggle_invisibles"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_invisibles = !this.show_invisibles;
-                        this.cache = None;
-                        cx.notify();
-                    })),
-            );
-
-        if selected_scope == Some(DiffScope::Branch) {
+        let base_selector = (selected_scope == Some(DiffScope::Branch)).then(|| {
             let mut branches = self
                 .git_preview
                 .as_ref()
@@ -1086,69 +1058,155 @@ impl DiffPanel {
                 .compact()
                 .label(current.clone())
                 .icon(IconName::ChevronDown);
-            toolbar = toolbar.child(
-                Popover::new("diff-base-popover")
-                    .trigger(trigger)
-                    .content(move |_, _, cx| {
-                        let mut list = v_flex().w_full().p_1().gap_0p5();
-                        for (branch_index, branch) in branches.clone().into_iter().enumerate() {
-                            let panel = panel.clone();
-                            let session = session_base.clone();
-                            let chosen = branch.clone();
-                            let selected = branch == current;
-                            let accessible_label =
-                                crate::tr!("diff.base_branch", branch = branch.clone())
-                                    .into_owned();
-                            list = list.child(
-                                material::accessible_clickable(
-                                    h_flex(),
-                                    ("diff-base-item", branch_index),
-                                    Role::MenuItem,
-                                    accessible_label,
-                                    cx,
-                                )
-                                .aria_selected(selected)
-                                .flex_none()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded(px(6.))
-                                .cursor_pointer()
-                                .hover(|row| row.bg(cx.theme().list_hover))
-                                .when(selected, |row| row.bg(cx.theme().list_active))
-                                .child(div().flex_1().child(branch))
-                                .when(selected, |row| {
-                                    row.child(Icon::new(IconName::Check).xsmall())
-                                })
-                                .on_click({
-                                    let popover = cx.entity();
-                                    move |_, window, cx| {
-                                        panel.update(cx, |this, cx| {
-                                            this.bases.insert(session.clone(), chosen.clone());
-                                            this.cache = None;
-                                            this.git_preview = None;
-                                            cx.notify();
-                                        });
-                                        popover.update(cx, |state, cx| state.dismiss(window, cx));
-                                    }
-                                }),
-                            );
-                        }
-                        div()
-                            .id("diff-base-list")
-                            .role(Role::Menu)
-                            .aria_label(crate::tr!("diff.base_branches"))
-                            .min_w(px(180.))
-                            .max_h(px(280.))
-                            .overflow_y_scroll()
-                            .child(list)
-                    })
-                    .bg(cx.theme().popover)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .shadow_xl()
-                    .rounded(material::radius_overlay()),
+            Popover::new("diff-base-popover")
+                .trigger(trigger)
+                .content(move |_, _, cx| {
+                    let mut list = v_flex().w_full().p_1().gap_0p5();
+                    for (branch_index, branch) in branches.clone().into_iter().enumerate() {
+                        let panel = panel.clone();
+                        let session = session_base.clone();
+                        let chosen = branch.clone();
+                        let selected = branch == current;
+                        let accessible_label =
+                            crate::tr!("diff.base_branch", branch = branch.clone()).into_owned();
+                        list = list.child(
+                            material::accessible_clickable(
+                                h_flex(),
+                                ("diff-base-item", branch_index),
+                                Role::MenuItem,
+                                accessible_label,
+                                cx,
+                            )
+                            .aria_selected(selected)
+                            .flex_none()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|row| row.bg(cx.theme().list_hover))
+                            .when(selected, |row| row.bg(cx.theme().list_active))
+                            .child(div().flex_1().child(branch))
+                            .when(selected, |row| {
+                                row.child(Icon::new(IconName::Check).xsmall())
+                            })
+                            .on_click({
+                                let popover = cx.entity();
+                                move |_, window, cx| {
+                                    panel.update(cx, |this, cx| {
+                                        this.bases.insert(session.clone(), chosen.clone());
+                                        this.cache = None;
+                                        this.git_preview = None;
+                                        cx.notify();
+                                    });
+                                    popover.update(cx, |state, cx| state.dismiss(window, cx));
+                                }
+                            }),
+                        );
+                    }
+                    div()
+                        .id("diff-base-list")
+                        .role(Role::Menu)
+                        .aria_label(crate::tr!("diff.base_branches"))
+                        .min_w(px(180.))
+                        .max_h(px(280.))
+                        .overflow_y_scroll()
+                        .child(list)
+                })
+                .bg(cx.theme().popover)
+                .border_1()
+                .border_color(cx.theme().border)
+                .shadow_xl()
+                .rounded(material::radius_overlay())
+                .into_any_element()
+        });
+
+        let wrap_on = self.workspace_store.read(cx).diff_word_wrap();
+        let split_on = self.workspace_store.read(cx).diff_split();
+        let compact = self.compact(cx);
+        // One description of the view options, rendered as four dense toggles on
+        // the desktop and as one overflow menu on a page with no room for them.
+        let options = [
+            (
+                DiffViewOption::Split,
+                "diff-view-split",
+                IconName::PanelLeft,
+                split_on,
+                if split_on {
+                    crate::tr!("diff.unified_view")
+                } else {
+                    crate::tr!("diff.split_view")
+                }
+                .into_owned(),
+            ),
+            (
+                DiffViewOption::Wrap,
+                "diff-wrap",
+                IconName::Menu,
+                wrap_on,
+                crate::tr!("diff.toggle_wrap").into_owned(),
+            ),
+            (
+                DiffViewOption::Whitespace,
+                "diff-whitespace",
+                IconName::Eye,
+                self.ignore_ws,
+                crate::tr!("diff.toggle_whitespace").into_owned(),
+            ),
+            (
+                DiffViewOption::Invisibles,
+                "diff-invisibles",
+                IconName::CaseSensitive,
+                self.show_invisibles,
+                crate::tr!("diff.toggle_invisibles").into_owned(),
+            ),
+        ];
+        let mut toolbar = h_flex()
+            .flex_none()
+            .h(px(if compact { material::TOUCH_TARGET } else { 40. }))
+            .w_full()
+            .px(px(if compact {
+                material::COMPACT_PAGE_INSET
+            } else {
+                8.
+            }))
+            .gap_1()
+            .items_center()
+            .child(selector);
+        if compact {
+            // The scope and base pickers are the row; everything else is one
+            // overflow menu, so a 393pt page never has to choose what to clip.
+            toolbar = toolbar.children(base_selector).child(div().flex_1()).child(
+                material::toolbar_icon_button(
+                    "diff-view-options",
+                    IconName::Ellipsis,
+                    crate::tr!("mobile.more_actions"),
+                    true,
+                )
+                .dropdown_menu(move |mut menu, _, _| {
+                    for (option, _, _, on, label) in &options {
+                        menu = menu.menu_with_check(label.clone(), *on, Box::new(*option));
+                    }
+                    menu
+                }),
             );
+        } else {
+            toolbar = toolbar.child(div().flex_1());
+            for (option, id, icon, on, label) in options {
+                toolbar = toolbar.child(
+                    Button::new(id)
+                        .ghost()
+                        .small()
+                        .compact()
+                        .icon(icon)
+                        .selected(on)
+                        .tooltip(label)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.apply_view_option(option, cx)),
+                        ),
+                );
+            }
+            toolbar = toolbar.children(base_selector);
         }
         toolbar.into_any_element()
     }
@@ -1342,6 +1400,7 @@ impl DiffPanel {
 
         let mut viewport = div()
             .id("diff-body")
+            .debug_selector(|| "diff-body".into())
             .flex_1()
             .min_h_0()
             .overflow_x_scroll()
@@ -1351,7 +1410,16 @@ impl DiffPanel {
         // bubble to the List's vertical scroll handler; explicit horizontal
         // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
         viewport.style().restrict_scroll_to_axis = Some(true);
-        let mut content = v_flex().size_full().min_h_0().child(viewport);
+        // A compact page holds its content clear of the window edges; the code
+        // itself still scrolls sideways *inside* that inset rather than running
+        // off the page.
+        let mut content = v_flex()
+            .size_full()
+            .min_h_0()
+            .when(self.compact(cx), |body| {
+                body.px(px(material::COMPACT_PAGE_INSET))
+            })
+            .child(viewport);
 
         if let Some(preview) = self
             .git_preview
@@ -1591,17 +1659,26 @@ impl DiffPanel {
             .into_any_element()
     }
 
+    /// A git error or truncation notice is prose, not code: it wraps inside the
+    /// panel instead of running off the right edge with the sentence cut in half.
     fn render_notice(&self, message: String, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .min_w_full()
-            .px_3()
+            .px(px(material::CARD_INSET))
             .py_2()
+            .gap_1p5()
+            .items_start()
             .bg(cx.theme().warning.opacity(0.12))
+            .rounded(material::radius_card())
             .text_size(px(11.))
             .text_color(cx.theme().warning_foreground)
             .font_family(cx.theme().font_family.clone())
-            .child(Icon::new(IconName::TriangleAlert).xsmall())
-            .child(message)
+            .child(
+                div()
+                    .flex_none()
+                    .child(Icon::new(IconName::TriangleAlert).xsmall()),
+            )
+            .child(div().flex_1().min_w_0().child(message))
             .into_any_element()
     }
 
@@ -1859,11 +1936,19 @@ impl Render for DiffPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_cache(cx);
         let tab = self.workspace_store.read(cx).panel_state().right_tab;
+        // Compact: the Panel page's segmented control is the only selector, and
+        // Back is the only way off the page. This panel's own tab row and its
+        // expand / split / close cluster are wide-layout affordances, so the
+        // whole strip stays unbuilt rather than being drawn and ignored.
+        let compact = self.compact(cx);
         let mut root = v_flex()
             .size_full()
             .min_w_0()
             .text_color(cx.theme().foreground)
-            .child(self.render_tab_strip(window, cx));
+            .on_action(cx.listener(Self::on_view_option))
+            .when(!compact, |root| {
+                root.child(self.render_tab_strip(window, cx))
+            });
         root = match tab {
             // AppShell mounts Preview separately; this container handles Diff/Plan.
             RightTab::Diff | RightTab::Preview => root

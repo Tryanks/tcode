@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
@@ -226,8 +227,27 @@ fn qr_element(payload: &str) -> Option<AnyElement> {
     )
 }
 
-/// One hosting settings row: label and description left, control right.
-fn row() -> gpui::Div {
+/// One hosting settings row: label and description left, control right. A
+/// compact page has no room for two columns — the description would be squeezed
+/// to a word per line — so it puts the control full width underneath the text,
+/// which is the same rule `SettingsPage::row_frame` applies.
+fn row(compact: bool) -> gpui::Div {
+    if compact {
+        v_flex()
+            .w_full()
+            .min_h(px(44.))
+            .px_3()
+            .py_2p5()
+            .gap_2()
+            .items_start()
+    } else {
+        switch_row()
+    }
+}
+
+/// A row whose control is a fixed 44pt affordance (a switch): it never squeezes
+/// the label, so it stays beside it at both widths.
+fn switch_row() -> gpui::Div {
     h_flex()
         .w_full()
         .min_h(px(44.))
@@ -382,12 +402,12 @@ impl HostingPanel {
         }
     }
 
-    fn render_hosting(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_hosting(&mut self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         self.sync_ticker(cx);
         let hosting = cx
             .try_global::<RemoteController>()
             .is_some_and(RemoteController::is_hosting);
-        let toggle = row()
+        let toggle = switch_row()
             .child(labels(
                 crate::tr!("remote.host.title").into_owned().into(),
                 crate::tr!("remote.host.description").into_owned().into(),
@@ -401,7 +421,7 @@ impl HostingPanel {
                     })),
             )
             .into_any_element();
-        let port_row = row()
+        let port_row = row(compact)
             .child(labels(
                 crate::tr!("remote.port.title").into_owned().into(),
                 crate::tr!("remote.port.description").into_owned().into(),
@@ -410,12 +430,16 @@ impl HostingPanel {
             .child(
                 h_flex()
                     .gap_2()
+                    .when(compact, |controls| controls.w_full())
                     .child(
-                        div().w(px(110.)).child(
-                            Input::new(&self.port_input)
-                                .small()
-                                .rounded(crate::material::radius_input()),
-                        ),
+                        div()
+                            .when(compact, |field| field.flex_1().min_w_0())
+                            .when(!compact, |field| field.w(px(110.)))
+                            .child(
+                                Input::new(&self.port_input)
+                                    .small()
+                                    .rounded(crate::material::radius_input()),
+                            ),
                     )
                     .child(
                         Button::new("remote-apply-port")
@@ -429,7 +453,7 @@ impl HostingPanel {
                     ),
             )
             .into_any_element();
-        let name_row = row()
+        let name_row = row(compact)
             .child(labels(
                 crate::tr!("remote.host_name.title").into_owned().into(),
                 crate::tr!("remote.host_name.description")
@@ -438,11 +462,14 @@ impl HostingPanel {
                 cx,
             ))
             .child(
-                div().w(px(240.)).child(
-                    Input::new(&self.host_name_input)
-                        .small()
-                        .rounded(crate::material::radius_input()),
-                ),
+                div()
+                    .when(compact, |field| field.w_full())
+                    .when(!compact, |field| field.w(px(240.)))
+                    .child(
+                        Input::new(&self.host_name_input)
+                            .small()
+                            .rounded(crate::material::radius_input()),
+                    ),
             )
             .into_any_element();
 
@@ -460,13 +487,13 @@ impl HostingPanel {
                 ),
         );
         if hosting {
-            column = column.child(self.render_pairing_card(cx));
-            column = column.child(self.render_devices(cx));
+            column = column.child(self.render_pairing_card(compact, cx));
+            column = column.child(self.render_devices(compact, cx));
         }
         column.into_any_element()
     }
 
-    fn render_pairing_card(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_pairing_card(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(controller) = cx.try_global::<RemoteController>() else {
             return div().into_any_element();
         };
@@ -477,7 +504,7 @@ impl HostingPanel {
         let Some((code, remaining)) = controller.pairing() else {
             return crate::material::group(cx)
                 .child(
-                    row()
+                    row(compact)
                         .child(labels(
                             crate::tr!("remote.code.expired").into_owned().into(),
                             crate::tr!("remote.code.description").into_owned().into(),
@@ -520,7 +547,9 @@ impl HostingPanel {
         let qr = qr_element(&url);
         crate::material::group(cx)
             .child(
-                h_flex()
+                // Compact stacks the QR under the code rather than putting a
+                // fixed-size image beside text that then has nowhere to wrap.
+                if compact { v_flex() } else { h_flex() }
                     .w_full()
                     .px_3()
                     .py_3()
@@ -590,7 +619,7 @@ impl HostingPanel {
             .into_any_element()
     }
 
-    fn render_devices(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_devices(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let devices = cx
             .try_global::<RemoteController>()
             .map(RemoteController::devices)
@@ -605,7 +634,7 @@ impl HostingPanel {
         for device in devices {
             let id = device.id.clone();
             group = group.child(
-                row()
+                row(compact)
                     .child(labels(
                         device.name.clone().into(),
                         crate::tr!(
@@ -645,11 +674,13 @@ impl HostingPanel {
 }
 
 impl Render for HostingPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = crate::window_seam::window_is_compact(window, cx);
         div()
             .w_full()
+            .min_w_0()
             .debug_selector(|| "hosting-settings".into())
-            .child(self.render_hosting(cx))
+            .child(self.render_hosting(compact, cx))
     }
 }
 

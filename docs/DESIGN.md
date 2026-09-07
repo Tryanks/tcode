@@ -164,6 +164,12 @@ popped with a 200ms lateral transition.
   segmented control. They are the same entities the wide layout puts in the
   split: a compact window has less room, not less product. Export and the
   per-thread actions stay on the thread row's context menu.
+  The segmented control is the page's **only** selector, so a panel does not
+  also draw its own tab row, and it drops the right column's expand / split /
+  close controls — Back is how you leave the page. What remains is one toolbar
+  row on the page inset with 44pt touch targets: the diff's source and base
+  pickers, the terminal's tab strip and a new-terminal target, the preview's
+  address field. Everything else moves into that row's overflow menu.
 - **Settings** and **Settings section** — the section list, then one section's
   detail (see **Settings** below).
 
@@ -218,6 +224,29 @@ the layout follows the keyboard immediately.
 - Compact approval cards default to expanded, with deny and allow on one row and
   every other available action on its own; user questions keep their options,
   free text and editor prefill.
+
+### The compact inset rule
+
+One inset, applied once, at the page:
+
+- **Page inset 16pt** left and right. Every compact page's content — the diff,
+  plan/tasks and preview bodies included — starts and ends there. A view that
+  the wide layout draws in the right column does not get to keep the column's
+  denser padding when it becomes a page.
+- **Card inset 12pt.** A card, notice, chip or row *inside* that content pads a
+  further 12pt; it never re-applies the page inset.
+- **Terminal exception.** The terminal grid stays edge to edge horizontally —
+  it is measured in columns, and narrowing it drops columns — but it still sits
+  inside the window's safe rect and keeps 8pt of air below the segmented control.
+
+Prose inside the content (errors, notices, file headers) wraps against the page
+inset rather than running past it. Code and diff lines do not wrap: they scroll
+horizontally *inside* the body, so the page edge stays where it is.
+
+A row that pairs a label and description with a control follows the same rule as
+Settings: on a compact page the control moves to its own full-width line under
+the text, so the description is never squeezed into a column a word wide. A
+fixed 44pt affordance — a switch — is the exception and stays beside its label.
 
 ### Connection states
 

@@ -2,8 +2,10 @@
 //! Reading surfaces remain near-opaque over the translucent window canvas;
 //! semantic colors come from the active theme.
 
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::Popover;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -18,6 +20,13 @@ pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
 pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
 /// Minimum horizontal padding around the shared chat/composer content column.
 pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
+/// The compact layout's page inset: content is held this far clear of both
+/// window edges. Cards inside that content inset a further [`CARD_INSET`].
+pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;
+/// Padding inside a card, chip or notice that already sits within a page inset.
+pub(crate) const CARD_INSET: f32 = 12.;
+/// The smallest square a finger can reliably hit.
+pub(crate) const TOUCH_TARGET: f32 = 44.;
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -274,6 +283,54 @@ pub fn segment(
         })
         .when(!selected, |el| el.text_color(cx.theme().muted_foreground))
         .child(div().flex_none().child(label))
+}
+
+/// A panel toolbar's icon control. Compact toolbars owe a finger a
+/// [`TOUCH_TARGET`] square, so the icon is passed as a *child*: `Button` scales
+/// whatever `icon()` receives from its own size, which would blow a 44pt button
+/// up to a 33pt glyph. The desktop keeps its dense control.
+pub fn toolbar_icon_button(
+    id: impl Into<ElementId>,
+    icon: crate::icon::IconName,
+    tooltip: impl Into<SharedString>,
+    compact: bool,
+) -> Button {
+    let tooltip = tooltip.into();
+    if compact {
+        Button::new(id)
+            .ghost()
+            .aria_label(tooltip.clone())
+            .tooltip(tooltip)
+            .with_size(px(TOUCH_TARGET))
+            .size(px(TOUCH_TARGET))
+            .child(crate::icon::Icon::new(icon).size(px(20.)))
+    } else {
+        Button::new(id)
+            .ghost()
+            .small()
+            .compact()
+            .icon(icon)
+            .tooltip(tooltip)
+    }
+}
+
+/// The indented body under a work-log row, a plan or a file edit: a hairline
+/// rail 8pt in from the column, with its content another 14pt clear of it.
+///
+/// The 8pt is padding on a full-width wrapper, never a margin on the rail
+/// itself: a `w_full` box with `ml_2` is 8pt *wider* than the column it sits in,
+/// and on a compact page that is 8pt straight off the edge.
+pub fn rail_detail(content: impl IntoElement, cx: &App) -> Div {
+    div().w_full().min_w_0().pl_2().child(
+        div()
+            .w_full()
+            .min_w_0()
+            .pl(px(14.))
+            .py_0p5()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(content),
+    )
 }
 
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {

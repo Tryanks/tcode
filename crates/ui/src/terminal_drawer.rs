@@ -12,7 +12,7 @@ use web_time::Instant;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
-use crate::widgets::menu::ContextMenuExt as _;
+use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
 use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
@@ -199,6 +199,17 @@ struct TerminalClear(u64);
 #[derive(Action, Clone, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tcode_terminal, no_json)]
 struct TerminalAddContext(u64);
+
+/// A drawer action that does not fit the compact toolbar row and lives in its
+/// overflow menu, which addresses items by action rather than by callback.
+#[derive(Action, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_terminal, no_json)]
+enum TerminalOverflow {
+    SplitHorizontal,
+    SplitVertical,
+    Restart,
+    Close,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClipboardShortcut {
@@ -545,6 +556,24 @@ impl TerminalDrawer {
     ) {
         self.workspace_store
             .update(cx, |store, _cx| store.capture_terminal_selection(action.0));
+    }
+
+    fn on_overflow(
+        &mut self,
+        action: &TerminalOverflow,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace_store.update(cx, |store, cx| match action {
+            TerminalOverflow::SplitHorizontal => {
+                store.split_terminal(TerminalSplitDirection::Horizontal)
+            }
+            TerminalOverflow::SplitVertical => {
+                store.split_terminal(TerminalSplitDirection::Vertical)
+            }
+            TerminalOverflow::Restart => store.restart_terminal(),
+            TerminalOverflow::Close => store.close_terminal_panel(cx),
+        });
     }
 
     /// Apply the bell and OSC 52 notices carried by the latest grid deltas.
@@ -1425,83 +1454,140 @@ impl Render for TerminalDrawer {
         let active_exited = tabs
             .iter()
             .any(|(id, _, exited, _)| Some(*id) == active_id && *exited);
-        let header = h_flex()
+        // A compact page gives the drawer one toolbar row on the page inset:
+        // the tab strip, a new-terminal target, and everything else in an
+        // overflow menu rather than five dense controls fighting for 393pt.
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        let new_tooltip = if at_limit {
+            crate::tr!("terminal.max_reached", count = MAX_TERMINALS_PER_SESSION)
+        } else {
+            crate::tr!("terminal.new")
+        };
+        let mut header = h_flex()
             .flex_none()
-            .h(px(31.))
-            .px_2()
+            .h(px(if compact { material::TOUCH_TARGET } else { 31. }))
+            .px(px(if compact {
+                material::COMPACT_PAGE_INSET
+            } else {
+                8.
+            }))
             .gap_1()
             .items_center()
             .child(tab_strip)
-            .child(div().flex_1())
-            .when(active_exited, |this| {
-                this.child(
-                    Button::new("terminal-restart")
-                        .ghost()
-                        .small()
-                        .label(crate::tr!("terminal.restart"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.workspace_store
-                                .update(cx, |store, _cx| store.restart_terminal());
-                        })),
-                )
-            })
-            .child(
-                Button::new("terminal-split-horizontal")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .label("↔")
-                    .disabled(!can_split)
-                    .tooltip(crate::tr!("terminal.split_horizontal"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store.update(cx, |store, _cx| {
-                            store.split_terminal(TerminalSplitDirection::Horizontal)
-                        });
-                    })),
-            )
-            .child(
-                Button::new("terminal-split-vertical")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .label("↕")
-                    .disabled(!can_split)
-                    .tooltip(crate::tr!("terminal.split_vertical"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store.update(cx, |store, _cx| {
-                            store.split_terminal(TerminalSplitDirection::Vertical)
-                        });
-                    })),
-            )
-            .child(
-                Button::new("terminal-new")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .label("+")
+            .child(div().flex_1());
+        if compact {
+            header = header
+                .child(
+                    material::toolbar_icon_button(
+                        "terminal-new",
+                        IconName::Plus,
+                        new_tooltip,
+                        true,
+                    )
                     .disabled(at_limit)
-                    .tooltip(if at_limit {
-                        crate::tr!("terminal.max_reached", count = MAX_TERMINALS_PER_SESSION)
-                    } else {
-                        crate::tr!("terminal.new")
-                    })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.workspace_store
                             .update(cx, |store, _cx| store.new_terminal());
                     })),
-            )
-            .child(
-                Button::new("terminal-close-drawer")
-                    .ghost()
-                    .small()
-                    .compact()
-                    .icon(IconName::Close)
-                    .tooltip(crate::tr!("terminal.close"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.workspace_store
-                            .update(cx, |store, cx| store.close_terminal_panel(cx));
-                    })),
-            );
+                )
+                .child(
+                    material::toolbar_icon_button(
+                        "terminal-overflow",
+                        IconName::Ellipsis,
+                        crate::tr!("mobile.more_actions"),
+                        true,
+                    )
+                    .dropdown_menu(move |menu, _, _| {
+                        menu.menu_with_enable(
+                            crate::tr!("terminal.split_horizontal").into_owned(),
+                            Box::new(TerminalOverflow::SplitHorizontal),
+                            can_split,
+                        )
+                        .menu_with_enable(
+                            crate::tr!("terminal.split_vertical").into_owned(),
+                            Box::new(TerminalOverflow::SplitVertical),
+                            can_split,
+                        )
+                        .menu_with_enable(
+                            crate::tr!("terminal.restart").into_owned(),
+                            Box::new(TerminalOverflow::Restart),
+                            active_exited,
+                        )
+                        .separator()
+                        .menu(
+                            crate::tr!("terminal.close").into_owned(),
+                            Box::new(TerminalOverflow::Close),
+                        )
+                    }),
+                );
+        } else {
+            header = header
+                .when(active_exited, |this| {
+                    this.child(
+                        Button::new("terminal-restart")
+                            .ghost()
+                            .small()
+                            .label(crate::tr!("terminal.restart"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.workspace_store
+                                    .update(cx, |store, _cx| store.restart_terminal());
+                            })),
+                    )
+                })
+                .child(
+                    Button::new("terminal-split-horizontal")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .label("↔")
+                        .disabled(!can_split)
+                        .tooltip(crate::tr!("terminal.split_horizontal"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.split_terminal(TerminalSplitDirection::Horizontal)
+                            });
+                        })),
+                )
+                .child(
+                    Button::new("terminal-split-vertical")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .label("↕")
+                        .disabled(!can_split)
+                        .tooltip(crate::tr!("terminal.split_vertical"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_store.update(cx, |store, _cx| {
+                                store.split_terminal(TerminalSplitDirection::Vertical)
+                            });
+                        })),
+                )
+                .child(
+                    Button::new("terminal-new")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .label("+")
+                        .disabled(at_limit)
+                        .tooltip(new_tooltip)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_store
+                                .update(cx, |store, _cx| store.new_terminal());
+                        })),
+                )
+                .child(
+                    Button::new("terminal-close-drawer")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .icon(IconName::Close)
+                        .tooltip(crate::tr!("terminal.close"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_store
+                                .update(cx, |store, cx| store.close_terminal_panel(cx));
+                        })),
+                );
+        }
 
         if active_split.is_none() {
             self.split_sizes.borrow_mut().clear();
@@ -1565,6 +1651,7 @@ impl Render for TerminalDrawer {
             .on_action(cx.listener(Self::on_terminal_select_all))
             .on_action(cx.listener(Self::on_terminal_clear))
             .on_action(cx.listener(Self::on_terminal_add_context))
+            .on_action(cx.listener(Self::on_overflow))
             .child(header)
             .child(
                 crate::material::accessible_clickable(
