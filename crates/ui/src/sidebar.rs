@@ -2177,9 +2177,6 @@ impl SessionsSidebar {
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Settings replaces the content column beside this sidebar, so the row
-        // that leads there takes the selected surface while it is showing.
-        let active = self.window_state.read(cx).route() == Route::Settings;
         div().flex_none().child(
             crate::material::accessible_clickable(
                 h_flex(),
@@ -2193,10 +2190,7 @@ impl SessionsSidebar {
             .gap_2()
             .px_3()
             .cursor_pointer()
-            .when(active, |row| row.bg(cx.theme().list_active))
-            .when(!active, |row| {
-                row.hover(|s| s.bg(cx.theme().sidebar_accent))
-            })
+            .hover(|s| s.bg(cx.theme().sidebar_accent))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.window_state
                     .update(cx, |state, cx| state.open_settings(cx));
@@ -2340,10 +2334,17 @@ impl SessionsSidebar {
         } else {
             // Plain rows at the page inset, hairline-separated, under one
             // caption per project: the same list style the Machines page uses.
+            // A project header separates one project from the next, so with a
+            // single project there is nothing to separate: the caption names
+            // the only thing on the page and the collapse it carries would just
+            // hide the whole list.
+            let grouped = groups.len() > 1;
             let mut list = v_flex().w_full().pb(px(24.));
             for group in &groups {
-                let collapsed = collapsed_projects.contains(&group.project.id);
-                list = list.child(self.render_compact_group_header(group, collapsed, cx));
+                let collapsed = grouped && collapsed_projects.contains(&group.project.id);
+                if grouped {
+                    list = list.child(self.render_compact_group_header(group, collapsed, cx));
+                }
                 if collapsed {
                     continue;
                 }
@@ -2355,6 +2356,7 @@ impl SessionsSidebar {
             }
             div()
                 .id("compact-thread-list")
+                .debug_selector(|| "compact-thread-list".into())
                 .flex_1()
                 .min_h_0()
                 .overflow_y_scroll()
@@ -2441,6 +2443,7 @@ impl SessionsSidebar {
             cx,
         )
         .aria_expanded(!collapsed)
+        .debug_selector(|| "compact-group-header".into())
         // A project is a section of the thread list, so its header is the
         // shared list caption — with the collapse affordance it also carries.
         .w_full()
@@ -3025,6 +3028,77 @@ mod tests {
         assert_eq!(title, "Original title");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Renders the compact thread list over `projects` projects, one thread
+    /// each, and reports whether it drew any project header.
+    fn compact_list_has_project_headers(cx: &mut TestAppContext, projects: usize) -> bool {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-{projects}-project-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .expect("spawn sidebar test host");
+        let seeded: Vec<Project> = (0..projects)
+            .map(|index| Project::from_root(root.join(format!("project-{index}"))))
+            .collect();
+        let sessions = seeded
+            .iter()
+            .enumerate()
+            .map(|(index, project)| {
+                let mut meta = session(&format!("thread-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta
+            })
+            .collect::<Vec<_>>();
+        let projects_seed = seeded.clone();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = projects_seed;
+            state.sessions = sessions;
+        }))
+        .expect("seed projects");
+
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (sidebar, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(393.), px(852.)));
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.loading = false;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds("compact-thread-list").is_some(),
+            "the seeded threads are listed"
+        );
+        let headers = cx.debug_bounds("compact-group-header").is_some();
+
+        host.shutdown_blocking().expect("stop host");
+        let _ = std::fs::remove_dir_all(root);
+        headers
+    }
+
+    /// A project header separates one project from the next. With a single
+    /// project there is nothing to separate, so the compact list shows its
+    /// threads directly; a second project brings the headers back.
+    #[gpui::test]
+    fn the_compact_thread_list_shows_project_headers_only_with_more_than_one(
+        cx: &mut TestAppContext,
+    ) {
+        assert!(
+            !compact_list_has_project_headers(cx, 1),
+            "a single project needs no header to separate it from anything"
+        );
+        assert!(
+            compact_list_has_project_headers(cx, 2),
+            "two projects need their headers back"
+        );
     }
 
     #[test]

@@ -146,7 +146,10 @@ popped with a 200ms lateral transition.
   attachment, and it can also be *visited* from an attached workspace through
   the sidebar's feature area (see **Sidebar**) without leaving that machine.
   Letting other devices connect to this machine is a setting of this machine
-  and lives in **Settings → Other devices**, never here.
+  and lives in **Settings → Other devices**, never here. **This machine** is a
+  row like any other on the page: title over one muted subtitle, no leading
+  icon, and the connection dot in the same trailing slot a saved machine's
+  takes.
 - **Add a machine** — the connection form, pushed by **Add a machine**, by a
   **Nearby machines** row that prefilled an endpoint, or by a
   certificate-changed row's **Add again**.
@@ -154,9 +157,12 @@ popped with a 200ms lateral transition.
   of the page above the keyboard, and adding ends on an explicit security ID
   comparison before anything connects.
 - **Threads** — the shared sidebar under a nav bar titled **Threads**, with the
-  attached machine's name as its subtitle and new-thread and settings actions. New thread starts a draft directly when
-  the machine has one project and otherwise opens the command palette, which
-  already owns "new thread in ‹project›" and can search.
+  attached machine's name as its subtitle and new-thread and settings actions.
+  New thread starts a draft directly when the machine has one project and
+  otherwise opens the command palette, which already owns "new thread in
+  ‹project›" and can search. A project header separates one project from the
+  next, so it appears only from the second project onwards: with a single
+  project the threads are listed directly, under no caption.
 - **Thread** — the shared chat view. Its desktop header is replaced by the nav
   bar; the timeline, composer, approvals and user-input panels are the same
   entities the wide layout uses.
@@ -176,8 +182,8 @@ popped with a 200ms lateral transition.
 **One navigation bar.** Every compact page — Settings included — is composed as
 the same 52pt nav bar: Back at the top left, a centered title that truncates
 rather than colliding with its controls, an optional muted subtitle under it,
-and at most two trailing actions. No page draws a header of its own, and
-nothing anywhere puts a Back control at the bottom of a list.
+and at most two trailing actions. No compact page draws a header of its own or
+puts a Back control at the bottom of a list.
 
 **Back is labelled with a place, not a title.** Each destination owns one short
 fixed label — Machines, Threads, Thread, Panels, Settings — and a Back control
@@ -249,10 +255,13 @@ One inset, applied once, at the page:
   On iOS and Android, focusing the grid raises the software keyboard and adds one
   44pt special-key row at the bottom of that rect, directly above the keyboard.
   The row reserves its height before the grid is measured, so it never covers the
-  last terminal row. It contains Esc, Tab, sticky Ctrl and Alt, four arrows, then
-  a horizontally scrolling `- / | ~` tail; sticky modifiers highlight until the
-  next terminal key or committed character consumes them. Desktop and browser
-  terminals never draw the row.
+  last terminal row. It contains Esc, Tab, sticky Ctrl and Alt, four arrows, the
+  one-tap `^C` and `^D` combos, then a horizontally scrolling symbol tail ordered
+  by how often a shell line needs the character: `- / | ~ : . _`. Sticky
+  modifiers highlight until the next terminal key or committed character consumes
+  them; a combo carries its own Control, encodes through the same key mapping a
+  hardware Ctrl+C takes, and consumes any sticky modifier rather than doubling
+  it. Desktop and browser terminals never draw the row.
 
 Prose inside the content (errors, notices, file headers) wraps against the page
 inset rather than running past it. Code and diff lines do not wrap: they scroll
@@ -339,8 +348,7 @@ in both states.
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
    expansion so the list can be collapsed again).
-6. Footer: gear + "Settings" → settings route. Like a feature-area entry, it
-   takes the selected surface while that route is showing.
+6. Footer: gear + "Settings" → settings route.
 
 ### Chat header
 
@@ -563,14 +571,14 @@ palette, or leaving Chat hides every WebView that no longer owns the panel.
 
 ### Settings (wide route)
 
-Settings replaces the **content column**, never the window: the workspace
-sidebar — and the persistent feature area in it — stays beside it, exactly as it
-does on the Machines route, and the sidebar's Settings entry takes the selected
-surface while the route is showing. The way out is a Back control at the left of
-the content header, labelled with the destination it returns to and consistent
-with the Machines route's header (caption buttons included, where the platform
-has them). The rail carries no back row of its own; nothing puts a Back control
-at the foot of a list.
+Settings replaces the **whole window**: opening it switches the window to the
+settings page, and the left column is the settings rail — not the workspace
+sidebar, which is gone while the route is showing. This is the one route that
+does so; Machines instead replaces only the content column and keeps the sidebar
+beside it. The rail is therefore the window's left column: it carries the
+wordmark, clears the platform's window controls, groups its sections under
+**This device** and **‹machine› settings** captions, and ends in the row that
+leaves Settings.
 
 Settings uses a left navigation column and independently scrolling content.
 Groups share the composer's opaque floating-card treatment. Rows pair a title
@@ -596,6 +604,16 @@ a local attachment uses the machine name shown by the hosting panel, and a
 client with neither uses **Machine settings**. The captions use the same compact
 11px muted caption style as captions inside Settings pages; this grouping is
 ownership guidance, not a platform test.
+
+Computer Use and Browser configure a *screen* — the one the agent drives — so
+they sit at the end of the machine group under a collapsible **Advanced**
+disclosure. It is expanded by default wherever this client drives a screen of
+its own: the local desktop, and a desktop with computer-use capability attached
+to another machine. On a client attached elsewhere with no computer use of its
+own — a phone, a browser tab — it starts collapsed, so the machine's list leads
+with the sections that can do work there. Opening one of those sections from a
+deep link or the palette expands the disclosure rather than selecting a section
+the rail does not show.
 
 A section is listed only when at least one of its rows applies to the current
 device and attachment. Applicability comes from capabilities, never directly

@@ -19,6 +19,18 @@ use tcode_protocol::terminal::{
 
 const KEY_BAR_HEIGHT: f32 = 44.;
 
+/// The scrolling symbol tail, ordered by how often a shell line needs the
+/// character: what falls past the scroll edge is what is reached for least.
+const SYMBOL_KEYS: [(&str, char); 7] = [
+    ("terminal-key-dash", '-'),
+    ("terminal-key-slash", '/'),
+    ("terminal-key-pipe", '|'),
+    ("terminal-key-tilde", '~'),
+    ("terminal-key-colon", ':'),
+    ("terminal-key-period", '.'),
+    ("terminal-key-underscore", '_'),
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalKey {
     Escape,
@@ -28,6 +40,9 @@ pub(crate) enum TerminalKey {
     Down,
     Right,
     Symbol(char),
+    /// A one-tap Control combination: interrupt and end-of-file, the two the
+    /// sticky Ctrl modifier is reached for most.
+    Control(char),
 }
 
 impl TerminalKey {
@@ -39,7 +54,7 @@ impl TerminalKey {
             Self::Up => "up".to_owned(),
             Self::Down => "down".to_owned(),
             Self::Right => "right".to_owned(),
-            Self::Symbol(symbol) => symbol.to_string(),
+            Self::Symbol(symbol) | Self::Control(symbol) => symbol.to_string(),
         }
     }
 }
@@ -89,8 +104,13 @@ impl TerminalKeyEncoder {
         keyboard_mode: KeyboardModes,
         modify_other_keys: Option<u8>,
     ) -> Vec<u8> {
+        // A combo carries its own Control. It still clears whatever the user
+        // had made sticky, so Ctrl · Ctrl+C never encodes a double modifier
+        // and never leaves Ctrl armed for the next key.
+        let control = matches!(key, TerminalKey::Control(_));
         let key = key.mapping_name();
-        let modifiers = self.modifiers.take();
+        let mut modifiers = self.modifiers.take();
+        modifiers.control |= control;
         mappings::key_bytes(
             &key,
             modifiers,
@@ -174,11 +194,12 @@ impl TerminalKeyBar {
     fn key_button(
         &self,
         id: &'static str,
-        label: &'static str,
+        label: impl Into<gpui::SharedString>,
         accessibility_label: String,
         key: TerminalKey,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label = label.into();
         let focus = self.terminal_focus.clone();
         material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
             .flex_none()
@@ -307,16 +328,36 @@ impl Render for TerminalKeyBar {
             ));
         }
 
-        let mut symbols = h_flex().flex_none();
-        for (id, label, symbol) in [
-            ("terminal-key-dash", "-", '-'),
-            ("terminal-key-slash", "/", '/'),
-            ("terminal-key-pipe", "|", '|'),
-            ("terminal-key-tilde", "~", '~'),
+        // The two combos the sticky Ctrl modifier is otherwise used for, one
+        // tap each, right after the arrows they sit next to on a keyboard.
+        for (id, label, translation, key) in [
+            (
+                "terminal-key-ctrl-c",
+                "^C",
+                "terminal.key_ctrl_c",
+                TerminalKey::Control('c'),
+            ),
+            (
+                "terminal-key-ctrl-d",
+                "^D",
+                "terminal.key_ctrl_d",
+                TerminalKey::Control('d'),
+            ),
         ] {
-            symbols = symbols.child(self.key_button(
+            fixed = fixed.child(self.key_button(
                 id,
                 label,
+                crate::tr!(translation).into_owned(),
+                key,
+                cx,
+            ));
+        }
+
+        let mut symbols = h_flex().flex_none();
+        for (id, symbol) in SYMBOL_KEYS {
+            symbols = symbols.child(self.key_button(
+                id,
+                symbol.to_string(),
                 crate::tr!("terminal.key_symbol", symbol = symbol).into_owned(),
                 TerminalKey::Symbol(symbol),
                 cx,
@@ -397,6 +438,56 @@ mod tests {
                 None,
             ),
             b"\x1bOA"
+        );
+    }
+
+    /// A combo is one tap: it encodes through the same `key_bytes` path a
+    /// hardware Ctrl+C takes, and it consumes any sticky Ctrl rather than
+    /// doubling it or leaving it armed for the next key.
+    #[test]
+    fn control_combos_encode_once_and_clear_the_sticky_modifiers() {
+        let mut state = TerminalKeyEncoder {
+            modifiers: StickyModifiers::default(),
+        };
+        for (key, byte) in [
+            (TerminalKey::Control('c'), 0x03),
+            (TerminalKey::Control('d'), 0x04),
+        ] {
+            assert_eq!(
+                state.encode_key(key, TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+                vec![byte]
+            );
+        }
+
+        state.modifiers = StickyModifiers {
+            control: true,
+            alt: false,
+        };
+        assert_eq!(
+            state.encode_key(
+                TerminalKey::Control('c'),
+                TerminalMode::empty(),
+                KeyboardModes::NO_MODE,
+                None,
+            ),
+            vec![0x03],
+            "a sticky Ctrl on top of the combo is still one Control-C"
+        );
+        assert_eq!(state.modifiers, StickyModifiers::default());
+        assert_eq!(
+            state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+            b"c",
+            "the combo must not leave Ctrl armed for the next key"
+        );
+    }
+
+    /// The tail is ordered by how often a shell line needs the character, so
+    /// what scrolls off the edge is what is reached for least.
+    #[test]
+    fn the_symbol_tail_is_ordered_by_shell_frequency() {
+        assert_eq!(
+            SYMBOL_KEYS.map(|(_, symbol)| symbol),
+            ['-', '/', '|', '~', ':', '.', '_']
         );
     }
 

@@ -327,16 +327,13 @@ impl RemotePanel {
                     crate::tr!("hosts.this_computer").into_owned().into(),
                     cx,
                 )
-                .child(
-                    Icon::new(IconName::HardDrive)
-                        .size_4()
-                        .flex_none()
-                        .text_color(cx.theme().muted_foreground),
-                )
+                // Same anatomy as a saved machine's row: title over one muted
+                // subtitle, no leading icon, the status glyph in the same slot.
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
+                        .gap(px(2.))
                         .child(
                             div()
                                 .text_size(px(15.))

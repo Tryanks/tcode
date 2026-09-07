@@ -35,6 +35,12 @@ use tcode_core::settings::{
     TitleGenerationSettings,
 };
 
+/// Left inset so branding clears the native macOS 26 traffic lights near x=72.
+#[cfg(target_os = "macos")]
+const TRAFFIC_LIGHT_INSET: f32 = 80.;
+#[cfg(not(target_os = "macos"))]
+const TRAFFIC_LIGHT_INSET: f32 = 8.;
+
 const NAV_WIDTH: f32 = 255.;
 /// Max width of the settings content column — matches the chat timeline column
 /// (`chat::CONTENT_MAX_WIDTH`) so the reading measure is identical across routes.
@@ -108,6 +114,15 @@ impl SettingsCapabilities {
     fn can_manage_local_permissions(self) -> bool {
         self.local_permissions && !self.remote_attachment
     }
+
+    /// Whether the advanced subgroup starts collapsed. Computer Use and Browser
+    /// configure a *screen* — the one the agent drives. A client attached to
+    /// another machine, with no computer use of its own, has no screen in the
+    /// picture, so those sections fold out of the way instead of leading the
+    /// machine's list. The local desktop drives its own screen: expanded.
+    fn folds_advanced(self) -> bool {
+        self.remote_attachment && !self.local_permissions
+    }
 }
 
 impl Section {
@@ -123,6 +138,12 @@ impl Section {
             | Self::Orchestrate
             | Self::Archived => SectionGroup::Machine,
         }
+    }
+
+    /// Sections that configure the screen and browser the agent drives, and so
+    /// share the machine group's collapsible **Advanced** subgroup.
+    fn advanced(self) -> bool {
+        matches!(self, Self::ComputerUse | Self::Browser)
     }
 
     /// A section is navigable when at least one row can do real work for this
@@ -265,6 +286,9 @@ pub struct SettingsPage {
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
     capabilities: SettingsCapabilities,
+    /// Whether the machine group's **Advanced** subgroup is open, once the user
+    /// has said. `None` keeps the capability-derived default.
+    advanced_expanded: Option<bool>,
     /// Latches the one usage refresh fired when Usage becomes the active
     /// section; cleared as soon as the page shows anything else.
     usage_refresh_sent: bool,
@@ -458,6 +482,7 @@ impl SettingsPage {
             acp_cards: Vec::new(),
             section,
             capabilities,
+            advanced_expanded: None,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
             auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
@@ -667,6 +692,11 @@ impl SettingsPage {
             return;
         }
         self.section = section;
+        // Arriving from a deep link or the palette must not leave the selected
+        // section hidden inside a folded subgroup.
+        if section.advanced() {
+            self.advanced_expanded = Some(true);
+        }
         // Which section is open is this page's business; *that* a detail is
         // open is navigation, and belongs to the window's one history.
         self.window_state.update(cx, |state, cx| {
@@ -770,6 +800,82 @@ impl SettingsPage {
             .child(label)
             .into_any_element()
     }
+
+    fn advanced_expanded(&self) -> bool {
+        self.advanced_expanded
+            .unwrap_or(!self.capabilities.folds_advanced())
+    }
+
+    /// The **Advanced** subgroup's disclosure, shared by the rail and the
+    /// compact section list: the same caption style as a group's, plus the
+    /// chevron that opens it.
+    fn advanced_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let expanded = self.advanced_expanded();
+        crate::material::accessible_clickable(
+            gpui_base::h_flex(),
+            "settings-advanced-toggle",
+            Role::Button,
+            crate::tr!("settings.advanced"),
+            cx,
+        )
+        .aria_expanded(expanded)
+        .debug_selector(|| "settings-advanced-toggle".into())
+        .pl_3()
+        .pt_2()
+        .pb(px(6.))
+        .gap_1()
+        .items_center()
+        .cursor_pointer()
+        .text_size(px(11.))
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(
+            Icon::new(if expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(px(12.)),
+        )
+        .child(crate::tr!("settings.advanced"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.advanced_expanded = Some(!this.advanced_expanded());
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The wide rail's way out of Settings. Compact has no such row: there, the
+    /// shell's nav bar carries Back like it does on every other page.
+    fn back_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        crate::material::accessible_clickable(
+            gpui_base::h_flex(),
+            "settings-back",
+            Role::Button,
+            crate::tr!("settings.back"),
+            cx,
+        )
+        .h(px(40.))
+        .items_center()
+        .gap_2()
+        .px_3()
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().sidebar_accent))
+        .text_size(px(13.))
+        .text_color(cx.theme().sidebar_foreground)
+        .child(
+            Icon::new(IconName::ArrowLeft)
+                .size_4()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(crate::tr!("settings.back"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.window_state
+                .update(cx, |state, cx| state.close_settings(cx));
+        }))
+        .into_any_element()
+    }
+
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = v_flex()
             .id("settings-nav-tabs")
@@ -780,6 +886,8 @@ impl SettingsPage {
             .px_2()
             .gap(px(2.));
         let mut group = None;
+        let mut advanced_open = false;
+        let advanced_expanded = self.advanced_expanded();
         for section in SECTIONS
             .into_iter()
             .filter(|section| section.applies(&self.capabilities))
@@ -791,6 +899,15 @@ impl SettingsPage {
                     .child(self.group_caption(next, cx));
                 group = Some(next);
             }
+            if section.advanced() {
+                if !advanced_open {
+                    advanced_open = true;
+                    tabs = tabs.child(self.advanced_toggle(cx));
+                }
+                if !advanced_expanded {
+                    continue;
+                }
+            }
             tabs = tabs.child(self.nav_item(section, cx));
         }
         v_flex()
@@ -798,16 +915,26 @@ impl SettingsPage {
             .w(px(NAV_WIDTH))
             .h_full()
             .bg(cx.theme().sidebar)
-            // The window's wordmark and the platform's own controls belong to
-            // the workspace sidebar, which stays beside this rail; the rail
-            // only matches its height so the two top strips line up.
-            .child(window_drag_area(
-                "settings-nav-drag",
-                gpui_base::h_flex().h(px(52.)).flex_none().w_full(),
-                window,
-                cx,
-            ))
+            // Settings replaces the whole window, so this rail is the window's
+            // left column: it carries the wordmark and clears the platform's
+            // own window controls, exactly as the workspace sidebar does.
+            .child(
+                window_drag_area(
+                    "settings-nav-drag",
+                    gpui_base::h_flex()
+                        .h(px(52.))
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .pl(px(TRAFFIC_LIGHT_INSET))
+                        .pr_2(),
+                    window,
+                    cx,
+                )
+                .child(crate::material::brand_wordmark(cx)),
+            )
             .child(tabs)
+            .child(div().flex_none().child(self.back_row(cx)))
             .into_any_element()
     }
 
@@ -816,69 +943,87 @@ impl SettingsPage {
     /// The page draws no header and no back row: in compact every page wears
     /// the shell's one nav bar (`crate::shell`).
     pub(crate) fn render_compact_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let group = |group| {
-            let rows: Vec<AnyElement> = SECTIONS
-                .into_iter()
-                .filter(|section| section.group() == group && section.applies(&self.capabilities))
-                .map(|section| {
-                    let label = section.label();
-                    crate::material::accessible_clickable(
-                        gpui_base::h_flex(),
-                        section.id(),
-                        Role::Button,
-                        label.clone(),
-                        cx,
-                    )
-                    .debug_selector(move || section.id().into())
-                    .w_full()
-                    .min_h(px(48.))
-                    .px_3()
-                    .gap_3()
-                    .items_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(cx.theme().list_hover))
-                    .child(
-                        Icon::new(section.icon())
-                            .size_4()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .child(div().flex_1().text_size(px(15.)).child(label))
-                    .child(
-                        Icon::new(IconName::ChevronRight)
-                            .xsmall()
-                            .text_color(cx.theme().muted_foreground),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
-                    .into_any_element()
-                })
-                .collect();
-            (!rows.is_empty()).then(|| {
-                v_flex()
-                    .w_full()
-                    .child(self.group_caption(group, cx))
-                    .child(crate::material::grouped(rows, cx))
-            })
-        };
+        let advanced_expanded = self.advanced_expanded();
+        let mut column = v_flex().w_full().p_3().gap_4();
+        for group in [SectionGroup::Device, SectionGroup::Machine] {
+            let rows = |advanced: bool, cx: &mut Context<Self>| {
+                SECTIONS
+                    .into_iter()
+                    .filter(|section| {
+                        section.group() == group
+                            && section.advanced() == advanced
+                            && section.applies(&self.capabilities)
+                    })
+                    .map(|section| self.compact_section_row(section, cx))
+                    .collect::<Vec<_>>()
+            };
+            let plain = rows(false, cx);
+            let advanced = rows(true, cx);
+            if plain.is_empty() && advanced.is_empty() {
+                continue;
+            }
+            let mut card = v_flex().w_full().child(self.group_caption(group, cx));
+            if !plain.is_empty() {
+                card = card.child(crate::material::grouped(plain, cx));
+            }
+            if !advanced.is_empty() {
+                card = card
+                    .child(self.advanced_toggle(cx))
+                    .when(advanced_expanded, |card| {
+                        card.child(crate::material::grouped(advanced, cx))
+                    });
+            }
+            column = column.child(card);
+        }
         div()
             .id("settings-section-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .child(
-                v_flex().w_full().p_3().gap_4().children(
-                    [group(SectionGroup::Device), group(SectionGroup::Machine)]
-                        .into_iter()
-                        .flatten(),
-                ),
-            )
+            .child(column)
             .into_any_element()
     }
 
+    /// One tappable section row of the compact list.
+    fn compact_section_row(&self, section: Section, cx: &mut Context<Self>) -> AnyElement {
+        let label = section.label();
+        crate::material::accessible_clickable(
+            gpui_base::h_flex(),
+            section.id(),
+            Role::Button,
+            label.clone(),
+            cx,
+        )
+        .debug_selector(move || section.id().into())
+        .w_full()
+        .min_h(px(48.))
+        .px_3()
+        .gap_3()
+        .items_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(cx.theme().list_hover))
+        .child(
+            Icon::new(section.icon())
+                .size_4()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .child(div().flex_1().text_size(px(15.)).child(label))
+        .child(
+            Icon::new(IconName::ChevronRight)
+                .xsmall()
+                .text_color(cx.theme().muted_foreground),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
+        .into_any_element()
+    }
+
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Windows: the settings content column is the window's rightmost, so
-        // this header owns the top-right corner and draws the caption buttons.
-        // They are placed out of flow at the strip's right edge, over the
-        // title's stretch, exactly as the Machines header places them.
+        // Windows: the settings route replaces the workspace, so this header is
+        // the window's top-right corner and hosts the caption buttons. The
+        // centered column must keep its position (it aligns with the content
+        // below), so the cluster is placed out of flow at the strip's right edge
+        // and the column reserves matching trailing room for it — its actions
+        // therefore end left of the buttons rather than under them.
         let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
@@ -886,42 +1031,40 @@ impl SettingsPage {
             right_panel_open,
             right_tab,
         );
-        // The same top strip the Hosts route draws: Back to whatever Settings
-        // was opened from, then the page title. Settings is a content column
-        // beside the workspace sidebar, not a window of its own, so it leaves
-        // the route the way every other route does.
-        let back = self.window_state.read(cx).parent().map(|parent| {
-            crate::shell::back_button("settings-back", parent.back_label(), cx)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.window_state
-                        .update(cx, |state, cx| state.close_settings(cx));
-                }))
-                .into_any_element()
-        });
+        // Align the header title and actions with the centered content column.
         window_drag_area(
             "settings-header-drag",
             gpui_base::h_flex()
                 .flex_none()
                 .h(px(52.))
                 .w_full()
-                .px_2()
-                .gap_2()
+                .px_6()
+                .justify_center()
                 .items_center()
                 .when(hosts_caption, |strip| strip.relative()),
             window,
             cx,
         )
-        .children(back)
-        // The strip carries no controls at all (restoring defaults now lives at
-        // the foot of the General page), so the whole title doubles as the
-        // window's native drag handle.
-        .child(window_caption::drag_region(
-            div()
-                .flex_1()
-                .text_size(px(15.))
-                .font_medium()
-                .child(crate::tr!("settings.title")),
-        ))
+        .child(
+            gpui_base::h_flex()
+                .w(px(CONTENT_MAX_WIDTH))
+                .max_w_full()
+                .when(hosts_caption, |column| {
+                    column.pr(px(window_caption::CAPTION_CLUSTER_WIDTH))
+                })
+                .items_center()
+                .gap_3()
+                // The strip carries no controls at all (restoring defaults now
+                // lives at the foot of the General page), so the whole title
+                // doubles as the window's native drag handle.
+                .child(window_caption::drag_region(
+                    div()
+                        .flex_1()
+                        .text_size(px(15.))
+                        .font_medium()
+                        .child(crate::tr!("settings.title")),
+                )),
+        )
         // Painted last so the cluster stays on top of the strip.
         .children(hosts_caption.then(|| {
             div()
@@ -2651,10 +2794,17 @@ mod tests {
             (Section::Archived, true),
         ];
 
+        // Computer Use and Browser configure a screen. A client that drives one
+        // — its own, or another machine's from a desktop that has the
+        // capability — keeps them open; one that drives none folds them away.
+        assert!(Section::ComputerUse.advanced() && Section::Browser.advanced());
+        assert!(!Section::General.advanced());
+
         let local_desktop = capabilities(true, true, true, false);
         assert_section_applicability(local_desktop, &common);
         assert!(Section::Browser.applies(&local_desktop));
         assert!(local_desktop.can_manage_local_permissions());
+        assert!(!local_desktop.folds_advanced());
         #[cfg(feature = "remote-hosting")]
         assert!(Section::Remote.applies(&local_desktop));
 
@@ -2662,6 +2812,7 @@ mod tests {
         assert_section_applicability(remote_desktop, &common);
         assert!(Section::Browser.applies(&remote_desktop));
         assert!(!remote_desktop.can_manage_local_permissions());
+        assert!(!remote_desktop.folds_advanced());
         #[cfg(feature = "remote-hosting")]
         assert!(Section::Remote.applies(&remote_desktop));
 
@@ -2669,6 +2820,7 @@ mod tests {
         assert_section_applicability(remote_phone, &common);
         assert!(!Section::Browser.applies(&remote_phone));
         assert!(!remote_phone.can_manage_local_permissions());
+        assert!(remote_phone.folds_advanced());
         #[cfg(feature = "remote-hosting")]
         assert!(!Section::Remote.applies(&remote_phone));
     }
@@ -2685,7 +2837,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_list_groups_sections_and_omits_inapplicable_ones(cx: &mut TestAppContext) {
+    fn compact_list_groups_sections_omits_inapplicable_and_folds_advanced(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-settings-sections-{}",
@@ -2700,7 +2852,7 @@ mod tests {
             WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, false, cx)
         });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
-        let (_probe, cx) = cx.add_window_view(|window, cx| {
+        let (probe, cx) = cx.add_window_view(|window, cx| {
             let page = cx.new(|cx| {
                 let mut page = SettingsPage::new(store.clone(), window_state.clone(), window, cx);
                 page.capabilities = capabilities(false, false, false, true);
@@ -2718,10 +2870,25 @@ mod tests {
         assert!(cx.debug_bounds("settings-device-caption").is_some());
         assert!(cx.debug_bounds("settings-machine-caption").is_some());
         assert!(cx.debug_bounds("settings-nav-general").is_some());
-        assert!(cx.debug_bounds("settings-nav-computer-use").is_some());
         assert!(cx.debug_bounds("settings-nav-browser").is_none());
         #[cfg(feature = "remote-hosting")]
         assert!(cx.debug_bounds("settings-nav-remote").is_none());
+
+        // This client drives no screen of its own and is attached elsewhere, so
+        // Computer Use is applicable but folded away until the user asks.
+        assert!(cx.debug_bounds("settings-advanced-toggle").is_some());
+        assert!(cx.debug_bounds("settings-nav-computer-use").is_none());
+        probe.update(cx, |probe, cx| {
+            probe.page.update(cx, |page, cx| {
+                page.advanced_expanded = Some(true);
+                cx.notify();
+            });
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("settings-nav-computer-use").is_some());
 
         // A stale palette/deep-link target is rejected by the same predicate
         // and returns a compact detail route to the root list.

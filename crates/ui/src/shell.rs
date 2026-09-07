@@ -969,7 +969,7 @@ fn nav_bar(
 }
 
 /// Back control labelled with the parent destination's short fixed label.
-pub(crate) fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
+fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
     crate::material::accessible_clickable(h_flex(), id, Role::Button, parent.clone(), cx)
         .flex_none()
         .h(px(44.))
@@ -1634,36 +1634,11 @@ impl AppShell {
             .preview
             .update(cx, |preview, cx| preview.sync_visibility(cx));
 
-        // Neither Hosts nor Settings is a window of its own: each replaces the
-        // content column and leaves the sidebar — and the persistent feature
-        // area that leads to them — beside it. Root owns the translucent
-        // canvas across every route; the content column paints its own paper.
-        if route != Route::Chat {
-            let sidebar = attachment.sidebar.clone();
-            let sidebar_width = attachment.sidebar_width.get();
-            let settings_page = attachment.settings_page.clone();
-            let content: AnyElement = if route == Route::Settings {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .debug_selector(|| "settings-route".into())
-                    .child(settings_page)
-                    .into_any_element()
-            } else {
-                let body = self.hosts_body(window, cx);
-                let header = self.render_hosts_header(window, cx);
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .debug_selector(|| "hosts-route".into())
-                    .bg(crate::material::content_surface(cx))
-                    .shadow_sm()
-                    .child(header)
-                    .child(body)
-                    .into_any_element()
-            };
+        // Settings is a window of its own: opening it switches the whole
+        // window, so the settings rail — not the workspace sidebar — is the
+        // left column. Root owns the translucent canvas across both routes;
+        // Settings paints its own rail and content surfaces over it.
+        if route == Route::Settings {
             return div()
                 .id("app-shell")
                 .size_full()
@@ -1678,6 +1653,35 @@ impl AppShell {
                 // controls and own selection only when the press propagates.
                 .child(gpui_base::TextSelectionLayer)
                 .child(
+                    div()
+                        .id("workspace")
+                        .flex_1()
+                        .size_full()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .debug_selector(|| "settings-route".into())
+                        .child(attachment.settings_page.clone()),
+                )
+                .into_any_element();
+        }
+
+        // Hosts is a product surface, not a settings page: the sidebar stays,
+        // because the feature area that leads here is meant to be persistent.
+        if route == Route::Hosts {
+            let sidebar = attachment.sidebar.clone();
+            let sidebar_width = attachment.sidebar_width.get();
+            let body = self.hosts_body(window, cx);
+            let header = self.render_hosts_header(window, cx);
+            return div()
+                .id("app-shell")
+                .size_full()
+                .when(fullscreen, |this| {
+                    this.bg(crate::material::opaque_canvas(cx))
+                })
+                .text_color(cx.theme().foreground)
+                .on_action(cx.listener(Self::on_toggle_palette))
+                .child(gpui_base::TextSelectionLayer)
+                .child(
                     h_flex()
                         .id("workspace")
                         .size_full()
@@ -1686,7 +1690,17 @@ impl AppShell {
                         .when(!collapsed, |row| {
                             row.child(div().flex_none().w(sidebar_width).h_full().child(sidebar))
                         })
-                        .child(content),
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .debug_selector(|| "hosts-route".into())
+                                .bg(crate::material::content_surface(cx))
+                                .shadow_sm()
+                                .child(header)
+                                .child(body),
+                        ),
                 )
                 .into_any_element();
         }
@@ -2350,10 +2364,11 @@ mod tests {
         );
     }
 
-    /// Settings replaces the content column, not the window: the sidebar and
-    /// the feature area stay put, exactly as they do on the Hosts route.
+    /// Settings replaces the whole window, unlike the Hosts route: the left
+    /// column is the settings rail, so the workspace sidebar — and the feature
+    /// area in it — is gone while the route is showing.
     #[gpui::test]
-    fn the_wide_settings_route_keeps_the_sidebar_and_its_feature_area(cx: &mut TestAppContext) {
+    fn the_wide_settings_route_replaces_the_sidebar_with_its_own_rail(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -2365,11 +2380,15 @@ mod tests {
         });
         assert!(
             cx.debug_bounds("settings-route").is_some(),
-            "settings fills the content column"
+            "settings fills the window"
         );
         assert!(
-            cx.debug_bounds("sidebar-feature-hosts").is_some(),
-            "and the sidebar it was opened from is still beside it"
+            cx.debug_bounds("sidebar-feature-hosts").is_none(),
+            "and the workspace sidebar is not beside it"
+        );
+        assert!(
+            cx.debug_bounds("settings-device-caption").is_some(),
+            "the rail carries the settings group captions instead"
         );
     }
 
