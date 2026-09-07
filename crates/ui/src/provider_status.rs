@@ -29,8 +29,7 @@ pub struct StatusSummary {
 /// Placeholder the headline uses where a revealable email goes.
 pub const EMAIL_SLOT: &str = "{email}";
 
-/// Localized status copy adapted from T3 Code's `providerStatus.ts`.
-/// The core status summary supplies the semantic state.
+/// Localized status copy for the semantic state supplied by the core summary.
 pub fn summarize(
     provider: ProviderKind,
     snapshot: Option<&ProviderSnapshot>,

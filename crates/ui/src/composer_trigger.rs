@@ -1,6 +1,5 @@
 //! Composer inline-trigger detection and mention serialization.
 //!
-//! Adapted from T3 Code's `packages/shared/src/composerTrigger.ts`.
 //! Detects `@file`, `$skill` and `/command` at a UTF-8 cursor offset, and
 //! serializes selected paths as Markdown links.
 
@@ -194,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn serialize_matches_t3() {
+    fn serialize_escapes_markdown_link_destination() {
         assert_eq!(
             serialize_composer_file_link("src/main.rs"),
             "[main.rs](src/main.rs)"

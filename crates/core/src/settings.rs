@@ -64,7 +64,7 @@ pub fn provider_key(provider: ProviderKind) -> &'static str {
     }
 }
 
-/// The provider's short, T3-style display name (the card title / picker label).
+/// The provider's short display name used for card titles and picker labels.
 pub fn provider_label(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Codex => "Codex",

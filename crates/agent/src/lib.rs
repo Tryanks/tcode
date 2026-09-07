@@ -435,7 +435,7 @@ pub fn claude_mcp_config_json<'a>(
     serde_json::json!({ "mcpServers": servers }).to_string()
 }
 
-/// One model a provider offers, with its selectable options (T3-style descriptors).
+/// One model a provider offers, with its selectable options.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
     pub id: String, // provider-native id sent on the wire
@@ -672,7 +672,7 @@ pub enum ProviderCommandKind {
     Skill,
 }
 
-/// Interaction mode (T3: Build/Plan).
+/// Whether the agent should execute work or propose a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionMode {

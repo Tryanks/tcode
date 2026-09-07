@@ -1,20 +1,20 @@
-//! Codex `collaborationMode.settings.developer_instructions` texts, ported
-//! verbatim from T3 Code's `CodexDeveloperInstructions.ts` (plan + default
-//! variants, each with the shared `<collaboration_mode>` wrapper and the
-//! T3 Code collaborative-browser tool instructions appended before the closing
-//! tag). Do not paraphrase — these are wire-exact so plan-mode behavior matches.
+//! Codex `collaborationMode.settings.developer_instructions` texts for plan and
+//! default modes, each with a shared `<collaboration_mode>` wrapper and preview
+//! browser instructions. The `<proposed_plan>` block shape and the
+//! `request_user_input` / `update_plan` rules are consumed by tcode's Codex
+//! adapter and plan UI; edit those contracts together.
 
 macro_rules! mode_instructions {
     ($body:literal) => {
         concat!($body, "\n", "
 
-## T3 Code collaborative browser
+## tcode preview browser
 
-You are running inside T3 Code. The `t3-code` MCP server is the product-native collaborative browser shared with the user. When it exposes `preview_*` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
+You are running inside tcode. The `tcode_preview` MCP server is the embedded preview browser shared with the user. When it exposes `preview_*` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
 For browser work, first call `preview_status`. If no automation-capable preview is attached, call `preview_open` before concluding that the browser is unavailable. Then use `preview_navigate`, `preview_snapshot`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
 
-Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or `preview_open` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
+Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the tcode preview tools are absent, the user explicitly requests another browser, or `preview_open` returns an explicit unsupported/unavailable error. A failed tcode preview tool call should be inspected and retried with corrected arguments when the error is actionable.
 ", "\n</collaboration_mode>")
     };
 }

@@ -67,9 +67,9 @@ impl QueuedMessage {
     }
 }
 
-/// Providers require non-empty turn text: an image-only message goes on the
-/// wire with T3's synthetic placeholder while the transcript records the
-/// user's (empty) text plus the attachments.
+/// Providers require non-empty turn text: an image-only message uses a
+/// synthetic placeholder on the wire while the transcript records the user's
+/// empty text plus the attachments.
 pub(super) fn wire_text_with_placeholder(text: String, attachments: &[Attachment]) -> String {
     if text.trim().is_empty() && !attachments.is_empty() {
         tcode_core::attachments::IMAGE_ONLY_MESSAGE.to_string()

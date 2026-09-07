@@ -22,8 +22,8 @@ pub struct ClaudeAuthStatus {
 
 /// Map `claude auth status --json` onto the card's auth line.
 ///
-/// Labels follow T3: `Claude API Key`, or `Claude <plan> Subscription` with the
-/// plan normalized to Max / Max 5x / Max 20x / Pro / Team / Enterprise / Free.
+/// Labels are `Claude API Key` or `Claude <plan> Subscription`, with the plan
+/// normalized to Max / Max 5x / Max 20x / Pro / Team / Enterprise / Free.
 pub fn parse_claude_auth(json: &str) -> Option<ProviderAuth> {
     let status: ClaudeAuthStatus = serde_json::from_str(json).ok()?;
     if !status.logged_in {
@@ -135,7 +135,7 @@ pub fn parse_codex_auth(json: &str) -> Option<ProviderAuth> {
     })
 }
 
-/// Normalize `chatgpt_plan_type` to its T3 display plan name.
+/// Normalize `chatgpt_plan_type` to its display plan name.
 fn normalize_chatgpt_plan(raw: &str) -> Option<&'static str> {
     match raw
         .trim()

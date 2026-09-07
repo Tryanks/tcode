@@ -4560,7 +4560,7 @@ fn ultrathink_rides_with_the_queued_message() {
 }
 
 /// An image-only send keeps its empty text in the transcript (the bubble
-/// renders just the thumbnails) while the wire carries T3's placeholder.
+/// renders just the thumbnails) while the wire carries a placeholder.
 #[test]
 fn image_only_message_gets_placeholder_on_the_wire_only() {
     let (commands, receiver) = smol::channel::unbounded();
@@ -5507,8 +5507,8 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
             cx,
         );
 
-        // Stop. The provider reports an error + an interrupted turn — the
-        // truncated-error moment in the T3 repro.
+        // Stop. The provider reports an error and an interrupted turn while
+        // preserving the complete multi-line error for later presentation.
         state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx);
         assert!(matches!(
             commands_a.try_recv(),
@@ -5829,11 +5829,10 @@ fn turn_running_for_is_independent_of_active_or_parked_location() {
     });
 }
 
-/// The T3 Code session-reaper failure class, our variant: switching to
-/// another thread must NOT kill a session whose turn is still running. The
-/// session parks in the background — process and queue alive, events still
-/// recorded, sidebar still "Working" — and selecting it again re-adopts it
-/// with the streamed-while-parked content visible.
+/// Switching to another thread must not kill a session whose turn is still
+/// running. The session parks in the background — process and queue alive,
+/// events still recorded, sidebar still "Working" — and selecting it again
+/// re-adopts it with the streamed-while-parked content visible.
 #[test]
 fn switching_threads_parks_a_working_session_instead_of_killing_it() {
     let cx = &mut TestAppContext::default();

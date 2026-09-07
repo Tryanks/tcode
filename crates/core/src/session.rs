@@ -100,7 +100,7 @@ fn review_fence(contents: &str) -> String {
     format!("{fence}diff\n{}\n{fence}", contents.trim_end())
 }
 
-/// Serialize review notes using T3's exact `<review_comment ...>` wire format.
+/// Serialize review notes as `<review_comment ...>` blocks in the agent prompt.
 pub fn append_review_comments_to_prompt(prompt: &str, comments: &[ReviewComment]) -> String {
     if comments.is_empty() {
         return prompt.to_string();
@@ -1238,9 +1238,9 @@ pub fn plan_title(markdown: &str) -> Option<String> {
     None
 }
 
-/// The exact implementation prompt sent when a proposed plan is accepted
-/// (`Implement` / `Implement in a new thread`): the T3 verbatim prefix plus the
-/// trimmed plan markdown.
+/// Build the implementation prompt sent when a proposed plan is accepted
+/// (`Implement` / `Implement in a new thread`). The runtime's plan-accept flow
+/// and tests expect this prefix, followed by the trimmed plan markdown.
 pub fn implement_prompt(markdown: &str) -> String {
     format!("PLEASE IMPLEMENT THIS PLAN:\n{}", markdown.trim())
 }
@@ -2357,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn implement_prompt_uses_verbatim_prefix() {
+    fn implement_prompt_uses_plan_accept_prefix() {
         assert_eq!(
             implement_prompt("  # Plan\nDo the thing\n  "),
             "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nDo the thing"
@@ -2733,7 +2733,7 @@ mod tests {
     }
 
     #[test]
-    fn review_comment_serialization_matches_t3_format() {
+    fn review_comment_serialization_matches_prompt_format() {
         let comment = ReviewComment::new(
             "src/lib.rs".into(),
             7,

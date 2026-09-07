@@ -44,7 +44,7 @@ use crate::{
     TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
-/// T3's exact message denied to `ExitPlanMode` once the plan is captured.
+/// Denial returned to `ExitPlanMode` after the client captures the plan.
 const EXIT_PLAN_DENY_MESSAGE: &str = "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.";
 
 /// First Claude Code build whose headless control protocol is verified to
@@ -403,8 +403,8 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 struct ClaudeLaunchOptions {
     /// Model id with a `[1m]` suffix appended for the 1M context window.
     model_id: Option<String>,
-    /// `--effort` value after T3's compatibility transforms (`None` when the
-    /// selection is `ultrathink`, which is a prompt-prefix mode).
+    /// Normalized `--effort` value (`None` when the selection is `ultrathink`,
+    /// which is a prompt-prefix mode).
     effort: Option<String>,
     /// `--settings` JSON string (fastMode / ultracode / alwaysThinkingEnabled).
     settings_json: Option<String>,
@@ -831,7 +831,7 @@ async fn handle_command(
         }
         SessionCommand::SetInteractionMode(mode) => {
             // Stored now; the `set_permission_mode` switch is issued before the
-            // next `SendTurn` (matching T3's per-message application).
+            // next `SendTurn`, so the mode changes between messages.
             mapper.interaction_mode = mode;
             ControlFlow::Continue(())
         }
@@ -2982,9 +2982,8 @@ fn has_boolean_option(spec: &ModelSpec, id: &str) -> bool {
 }
 
 /// Resolve the effort selection against the model's `reasoningEffort`
-/// descriptor: an accepted listed value wins, else the descriptor default
-/// (T3's `resolveClaudeEffort` / `getProviderOptionDescriptors`). `None` when
-/// the model has no reasoning selector (e.g. Haiku).
+/// descriptor: an accepted listed value wins, else the descriptor default.
+/// Returns `None` when the model has no reasoning selector (e.g. Haiku).
 fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<String> {
     let spec = spec?;
     let (options, default_value) = spec.options.iter().find_map(|o| match o {
@@ -3004,9 +3003,10 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
     default_value.clone()
 }
 
-/// T3's `normalizeClaudeCliEffort`: `ultrathink` → no flag (prompt prefix);
-/// `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5.x / Opus 5 /
-/// Opus 4.8 / Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise passthrough.
+/// Normalize special effort modes for the Claude CLI: `ultrathink` → no flag
+/// (prompt prefix); `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5.x /
+/// Opus 5 / Opus 4.8 / Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise
+/// passthrough.
 fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Option<String> {
     let effort = effort?;
     if effort == "ultrathink" {
@@ -3094,8 +3094,7 @@ fn model(id: &str, display_name: &str, options: Vec<OptionDescriptor>) -> ModelS
     }
 }
 
-/// The full static Claude catalog (unfiltered by version). Mirrors T3's
-/// `BUILT_IN_MODELS`.
+/// The full static Claude catalog, unfiltered by installed CLI version.
 fn built_in_models() -> Vec<ModelSpec> {
     vec![
         model(
@@ -4551,7 +4550,7 @@ mod tests {
 
     #[test]
     fn deny_cancel_and_session_approval_wire_strings() {
-        // Deny → T3's exact "declined" message.
+        // Denials use the user-facing message expected by the approval flow.
         let mut m = Mapper::new();
         feed(
             &mut m,
@@ -4617,7 +4616,7 @@ mod tests {
     }
 
     #[test]
-    fn classification_matrix_covers_t3_substring_quirks() {
+    fn classification_matrix_covers_substring_priority() {
         use ClaudeRequestType::*;
         let cases = [
             ("Read", FileRead),       // exact lowercase "read"

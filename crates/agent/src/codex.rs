@@ -26,7 +26,7 @@ mod developer_instructions;
 use developer_instructions::{DEFAULT_MODE_INSTRUCTIONS, PLAN_MODE_INSTRUCTIONS};
 
 /// Fallback model slug for `collaborationMode.settings.model` when the session
-/// has no resolved model yet (mirrors T3's `DEFAULT_MODEL`).
+/// has no resolved model yet.
 const DEFAULT_MODEL: &str = "gpt-5-codex";
 const ELICITATION_URL_ACK_LABEL: &str = "I've opened the link";
 const ELICITATION_URL_CANCEL_LABEL: &str = "Cancel";
@@ -65,9 +65,8 @@ pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
     .await
 }
 
-/// Spawn `codex app-server`, page through `model/list`, and tear the process
-/// down. Mirrors T3's `requestAllCodexModels` (initial `{}`, then `{cursor}`
-/// until `nextCursor` is empty).
+/// Spawn `codex app-server`, page through `model/list` (initial `{}`, then
+/// `{cursor}` until `nextCursor` is empty), and tear the process down.
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
@@ -262,7 +261,7 @@ fn map_model(model: &Value) -> Option<ModelSpec> {
 }
 
 /// Derive service-tier options from `serviceTiers` (preferred) or, absent that,
-/// `additionalSpeedTiers` (`fast` → `Fast`), matching T3's mapping.
+/// `additionalSpeedTiers`, displaying the `fast` value as `Fast`.
 fn service_tiers(model: &Value) -> Vec<SelectOption> {
     if let Some(tiers) = model.get("serviceTiers").and_then(Value::as_array)
         && !tiers.is_empty()
@@ -310,7 +309,8 @@ fn service_tiers(model: &Value) -> Vec<SelectOption> {
     Vec::new()
 }
 
-/// `gpt…` → `GPT…`, and capitalize the letter after each hyphen (T3 transform).
+/// Format model ids for display: `gpt…` → `GPT…`, capitalizing the letter
+/// after each hyphen.
 fn codex_display_name(raw: &str) -> String {
     let base = if raw.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("gpt")) {
         format!("GPT{}", &raw[3..])
@@ -1151,8 +1151,7 @@ impl Actor {
     }
 
     /// Build `turn/start` params, applying per-turn overrides on top of the
-    /// session's persisted effort / service tier / interaction mode. Mirrors
-    /// T3's `buildTurnStartParams` + `buildCodexCollaborationMode`.
+    /// session's persisted effort, service tier, and interaction mode.
     fn build_turn_params(
         &self,
         text: &str,
@@ -2404,8 +2403,8 @@ fn tool_output(item: &Value) -> Option<String> {
         .map(Value::to_string)
 }
 
-/// Map one `turn/plan/updated` step (status fallback `pending`, step text
-/// fallback `"step"`), mirroring T3's CodexAdapter plan mapping.
+/// Map one `turn/plan/updated` step, falling back to `pending` status and
+/// `"step"` text when those fields are absent or unusable.
 fn map_plan_step(step: &Value) -> PlanStep {
     let text = step
         .get("step")
@@ -3746,7 +3745,7 @@ mod tests {
                     assert_eq!(questions[0].options.len(), 1, "empty-label option dropped");
                     assert_eq!(questions[0].options[0].label, "macOS");
                     assert!(!questions[0].multi_select);
-                    // Free-text-only question kept with empty options (T3 bug fix).
+                    // Free-text-only questions remain valid with empty options.
                     assert_eq!(questions[1].id, "free");
                     assert!(questions[1].options.is_empty());
                 }
