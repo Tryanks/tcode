@@ -118,7 +118,7 @@ impl PreviewPanel {
         let window_state = self.window_state.read(cx);
         let visible = visible_preview_key(
             active.as_deref(),
-            window_state.route,
+            window_state.route(),
             window_state.palette_open,
             self.store.read(cx).preview_panel_showing(),
         )
@@ -748,7 +748,7 @@ impl PreviewPanel {
             }
             visible_preview_key(
                 Some(key),
-                window_state.route,
+                window_state.route(),
                 window_state.palette_open,
                 self.store.read(cx).preview_panel_showing(),
             ) == Some(key)

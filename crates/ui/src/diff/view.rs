@@ -657,7 +657,7 @@ impl DiffPanel {
         // and a taller strip keeps the tabs aligned with the chat header.
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::RightPanel,
-            self.window_state.read(cx).route,
+            self.window_state.read(cx).route(),
             panel_open,
             active,
         );

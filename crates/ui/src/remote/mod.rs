@@ -1,22 +1,26 @@
-//! Settings → Remote.
+//! Hosts: which host this window talks to.
 //!
-//! Two independent halves that used to be one feature:
+//! This is a product surface, not a settings page. It answers one question —
+//! *which host am I talking to* — with saved hosts, discovery, pairing and
+//! certificate repair, and it is reached from the sidebar's feature area at
+//! every width. It needs `tcode_client` and the attachment owner's switch
+//! action, and nothing else: it compiles on every client, including
+//! `--no-default-features`.
 //!
-//! - **Connecting** — saved hosts, discovery, the pair form, certificate repair
-//!   and switching this window's attachment. It needs `tcode_client` and the
-//!   attachment owner's switch action, and nothing else: it compiles on every
-//!   client, including `--no-default-features`.
-//! - **Hosting** — the listener, discovery beacon, minted codes and paired
-//!   devices, behind `remote-hosting`. A browser cannot listen or advertise, so
-//!   that half simply does not exist there.
+//! **Hosting** — the listener, discovery beacon, minted codes and paired
+//! devices — is a genuine setting of *this machine* and lives in
+//! [`hosting`], behind `remote-hosting`, inside Settings → Remote. A browser
+//! cannot listen or advertise, so that half simply does not exist there.
 
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Context, Entity, Global, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, Context, Entity, Global, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Role, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
+use serde::Deserialize;
 use tcode_client::host::ClientHost;
 use tcode_client::pairing::PairedHost;
 
@@ -27,12 +31,14 @@ use crate::store::WorkspaceStore;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::menu::DropdownMenu as _;
+use crate::window_state::{Destination, WindowState};
 
 #[cfg(feature = "remote-hosting")]
 mod hosting;
 
 #[cfg(feature = "remote-hosting")]
-pub use hosting::{RemoteController, machine_name};
+pub use hosting::{HostingPanel, RemoteController, machine_name};
 
 pub use crate::pairing::DEFAULT_REMOTE_PORT;
 
@@ -44,6 +50,17 @@ pub enum AttachmentTarget {
 }
 
 pub type SwitchAttachment = Rc<dyn Fn(AttachmentTarget, &mut Window, &mut App)>;
+
+/// Leave the host this row names, keeping the saved record.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_hosts, no_json)]
+struct DisconnectHost;
+
+/// Forget the saved record. A live attachment to it keeps running: the record
+/// is a credential, not the connection.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_hosts, no_json)]
+struct ForgetHost(String);
 
 /// The client's own identity and the action that re-points this window at a
 /// different host.
@@ -124,30 +141,6 @@ pub(crate) fn section_caption(label: SharedString, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn row() -> gpui::Div {
-    h_flex()
-        .w_full()
-        .min_h(px(44.))
-        .px_3()
-        .py_2p5()
-        .gap_3()
-        .items_center()
-}
-
-pub(crate) fn labels(title: SharedString, description: SharedString, cx: &App) -> gpui::Div {
-    v_flex()
-        .flex_1()
-        .min_w_0()
-        .gap_0p5()
-        .child(div().text_size(px(15.)).font_medium().child(title))
-        .child(
-            div()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(description),
-        )
-}
-
 pub(crate) fn note(text: SharedString, cx: &App) -> AnyElement {
     div()
         .w_full()
@@ -159,27 +152,44 @@ pub(crate) fn note(text: SharedString, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn field(state: &Entity<InputState>, width: f32) -> impl IntoElement {
-    div().w(px(width)).child(
-        Input::new(state)
-            .small()
-            .rounded(crate::material::radius_input()),
-    )
+/// Page inset: the compact 16pt margin, a little more room when the same list
+/// runs inside the wide content column.
+const PAGE_PADDING: f32 = 16.;
+/// The Hosts content column, matching the settings and chat reading measure.
+const CONTENT_MAX_WIDTH: f32 = 768.;
+
+type Row = gpui::Stateful<gpui::Div>;
+
+/// A touch-list row: one tap target, 56pt tall, with the page's own inset so
+/// the list reads as full-width rows rather than a card in a card.
+fn list_row(id: impl Into<gpui::ElementId>, label: SharedString, cx: &App) -> Row {
+    crate::material::accessible_clickable(h_flex(), id, Role::Button, label, cx)
+        .w_full()
+        .min_h(px(56.))
+        .px(px(PAGE_PADDING))
+        .py(px(8.))
+        .gap_3()
+        .items_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().list_hover))
+        .active(|style| style.bg(cx.theme().list_active))
 }
 
 pub struct RemotePanel {
-    /// The window's current attachment, when it has one. The panel is also the
-    /// hosts destination of an unattached window, which has none.
+    /// The window's current attachment, when it has one. Hosts is also the
+    /// root of a window that has none.
     store: Option<Entity<WorkspaceStore>>,
+    /// Navigation: "Pair a host" pushes [`Destination::Pair`], which Back pops
+    /// back to whatever asked for it.
+    window_state: Entity<WindowState>,
     form: PairForm,
-    #[cfg(feature = "remote-hosting")]
-    hosting: hosting::HostingSection,
     _subscriptions: Vec<Subscription>,
 }
 
 impl RemotePanel {
     pub fn new(
         store: Option<Entity<WorkspaceStore>>,
+        window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -207,9 +217,8 @@ impl RemotePanel {
         }
         Self {
             store,
+            window_state,
             form,
-            #[cfg(feature = "remote-hosting")]
-            hosting: hosting::HostingSection::new(window, cx),
             _subscriptions: subscriptions,
         }
     }
@@ -246,6 +255,30 @@ impl RemotePanel {
         .detach();
     }
 
+    /// Read an invite off the camera. The scanned link goes through the same
+    /// parser a pasted one does, pin included.
+    fn scan(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.client(cx) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let scanned = host.scan_qr().await;
+            let _ = this.update_in(cx, |panel, window, cx| {
+                match scanned {
+                    Ok(value) => {
+                        if !panel.form.fill_invite(&value, window, cx) {
+                            panel.form.error =
+                                Some(crate::tr!("hosts.pair.bad_invite").into_owned());
+                        }
+                    }
+                    Err(error) => panel.form.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(host) = self.form.take_paired() {
             let switch = cx.global::<ClientAttachment>().switcher();
@@ -275,295 +308,436 @@ impl RemotePanel {
         .detach();
     }
 
-    fn render_connect(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let attached = self.store.as_ref().map(|store| store.read(cx));
-        let current_id = attached
+    /// Start a fresh pairing attempt on the Pair page.
+    fn open_pair(&mut self, cx: &mut Context<Self>) {
+        self.form.error = None;
+        self.window_state
+            .update(cx, |state, cx| state.go(Destination::Pair, cx));
+        cx.notify();
+    }
+
+    fn attached_host_id(&self, cx: &App) -> Option<String> {
+        self.store
+            .as_ref()?
+            .read(cx)
+            .remote_host_id()
+            .map(str::to_owned)
+    }
+
+    fn attached_locally(&self, cx: &App) -> bool {
+        self.store
             .as_ref()
-            .and_then(|store| store.remote_host_id().map(str::to_owned));
-        let attached_locally = attached.is_some() && current_id.is_none();
-        let mut column = v_flex().w_full().gap_3().child(section_caption(
-            crate::tr!("remote.connect.section").into_owned().into(),
-            cx,
-        ));
-        // "This computer" is one target among the saved hosts, offered only
-        // where bootstrap actually gave this window a local host to attach to.
-        let can_attach_local = cx
-            .try_global::<ClientAttachment>()
-            .is_some_and(ClientAttachment::can_attach_local);
-        if can_attach_local {
-            column = column.child(
-                crate::material::group(cx).child(
-                    row()
-                        .child(labels(
-                            crate::tr!("remote.connect.local").into_owned().into(),
-                            crate::tr!("remote.connect.local_description")
-                                .into_owned()
-                                .into(),
-                            cx,
-                        ))
-                        .child(
-                            Button::new("remote-back-to-local")
-                                .primary()
-                                .compact()
-                                .disabled(attached_locally)
-                                .label(if attached_locally {
-                                    crate::tr!("remote.hosts.current")
-                                } else {
-                                    crate::tr!("remote.connect.back_to_local")
-                                })
-                                .on_click(|_, window, cx| {
-                                    let switch = cx.global::<ClientAttachment>().switcher();
-                                    switch(AttachmentTarget::Local, window, cx);
-                                }),
-                        ),
-                ),
-            );
-        }
-        column
-            .child(self.render_paired_hosts(current_id.as_deref(), cx))
-            .children(self.render_discovery(cx))
-            .child(self.render_pair_form(cx))
+            .is_some_and(|store| store.read(cx).remote_host_id().is_none())
+    }
+
+    /// The dot that says how this window's link to the attached host is doing.
+    fn status_glyph(&self, cx: &App) -> AnyElement {
+        let color = match self
+            .store
+            .as_ref()
+            .map(|store| store.read(cx).connection_state())
+        {
+            Some(tcode_client::ConnectionState::Connected) | None => cx.theme().success,
+            Some(tcode_client::ConnectionState::Reconnecting { .. }) => cx.theme().warning,
+            Some(tcode_client::ConnectionState::Offline) => cx.theme().danger,
+        };
+        div()
+            .flex_none()
+            .size(px(8.))
+            .rounded_full()
+            .bg(color)
             .into_any_element()
     }
 
-    /// Saved hosts, plus the repair path when a host's certificate no longer
-    /// matches the one that was pinned: the row refuses to connect and offers to
-    /// pair again instead, which is the only way to accept a new certificate.
-    fn render_paired_hosts(&self, current_id: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
-        let client = self.client(cx);
-        let hosts = client
-            .as_ref()
-            .map(|host| host.load_hosts())
-            .unwrap_or_default();
-        let mut group = crate::material::group(cx);
-        if hosts.is_empty() {
-            group = group.child(note(
-                crate::tr!("remote.hosts.empty").into_owned().into(),
-                cx,
-            ));
-        }
-        for host in hosts {
-            let current = current_id == Some(host.host_id.as_str());
-            let changed = client
-                .as_ref()
-                .is_some_and(|client| client.certificate_changed(&host.host_id));
-            let connect_host = host.clone();
-            let repair_host = host.clone();
-            let remove_id = host.host_id.clone();
-            let address = host
-                .addrs
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "?".to_owned());
-            let description = if changed {
-                crate::tr!("remote.hosts.certificate_changed").into_owned()
-            } else {
-                format!(
-                    "{address}:{} · {}",
-                    host.port,
-                    crate::tr!(
-                        "remote.pair.fingerprint",
-                        fingerprint = tcode_client::pairing::display_fingerprint(&host.fingerprint)
-                    )
+    /// "This computer": one target among the saved hosts, offered only where
+    /// bootstrap actually gave this window a local host to attach to.
+    fn local_row(&self, cx: &mut Context<Self>) -> Option<Row> {
+        cx.try_global::<ClientAttachment>()
+            .is_some_and(ClientAttachment::can_attach_local)
+            .then(|| {
+                let current = self.attached_locally(cx);
+                list_row(
+                    "hosts-local",
+                    crate::tr!("hosts.this_computer").into_owned().into(),
+                    cx,
                 )
-            };
-            group = group.child(
-                row()
-                    .child(labels(host.name.clone().into(), description.into(), cx))
-                    .when(changed, |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!("repair-{}", host.host_id)))
-                                .primary()
-                                .compact()
-                                .label(crate::tr!("remote.hosts.pair_again"))
-                                .on_click(cx.listener(move |panel, _, window, cx| {
-                                    panel.form.restart();
-                                    panel.form.browsing = false;
-                                    panel.form.pin_discovered(
-                                        repair_host.addrs.first().cloned().unwrap_or_default(),
-                                        repair_host.port,
-                                        String::new(),
-                                        window,
-                                        cx,
-                                    );
-                                    cx.notify();
-                                })),
+                .child(
+                    Icon::new(IconName::HardDrive)
+                        .size_4()
+                        .flex_none()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(15.))
+                                .font_medium()
+                                .truncate()
+                                .child(crate::tr!("hosts.this_computer")),
                         )
-                    })
-                    .when(!changed, |row| {
-                        row.child(
-                            Button::new(SharedString::from(format!("connect-{}", host.host_id)))
-                                .ghost()
-                                .outline()
-                                .compact()
-                                .disabled(current)
-                                .label(if current {
-                                    crate::tr!("remote.hosts.current")
-                                } else {
-                                    crate::tr!("remote.hosts.connect")
-                                })
-                                .on_click(move |_, window, cx| {
-                                    let switch = cx.global::<ClientAttachment>().switcher();
-                                    switch(
-                                        AttachmentTarget::Remote(connect_host.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                        )
-                    })
-                    .child(
-                        Button::new(SharedString::from(format!("remove-{}", host.host_id)))
-                            .ghost()
-                            .compact()
-                            .label(crate::tr!("remote.hosts.remove"))
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                let id = remove_id.clone();
-                                cx.global::<ClientAttachment>().remove_host(&id);
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
-        v_flex()
-            .child(section_caption(
-                crate::tr!("remote.hosts.section").into_owned().into(),
-                cx,
-            ))
-            .child(group)
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(crate::tr!("hosts.this_computer_description")),
+                        ),
+                )
+                .when(current, |row| row.child(self.status_glyph(cx)))
+                .on_click(|_, window, cx| {
+                    let switch = cx.global::<ClientAttachment>().switcher();
+                    switch(AttachmentTarget::Local, window, cx);
+                })
+            })
+    }
+
+    /// One saved host. Tapping it connects — or, when this window is already
+    /// on it, goes back to its workspace. A host whose certificate no longer
+    /// matches the pinned one refuses to connect and offers repair instead:
+    /// pairing again is the only way to accept a new certificate.
+    fn host_row(&self, host: &PairedHost, current: bool, cx: &mut Context<Self>) -> AnyElement {
+        let changed = self
+            .client(cx)
+            .is_some_and(|client| client.certificate_changed(&host.host_id));
+        let address = host
+            .addrs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "?".to_owned());
+        let subtitle = format!(
+            "{address}:{} · {}",
+            host.port,
+            match host.last_connected_unix {
+                Some(unix) => crate::tr!(
+                    "hosts.last_connected",
+                    ago = crate::time::humanize_ago(crate::time::now_secs().saturating_sub(unix))
+                )
+                .into_owned(),
+                None => crate::tr!("hosts.never_connected").into_owned(),
+            }
+        );
+        let name = SharedString::from(host.name.clone());
+        let connect_host = host.clone();
+        let repair_host = host.clone();
+        let row = list_row(
+            SharedString::from(format!("host-{}", host.host_id)),
+            name.clone(),
+            cx,
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_medium()
+                        .truncate()
+                        .child(name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .truncate()
+                        .child(subtitle),
+                )
+                .when(changed, |column| {
+                    column.child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().danger_foreground)
+                            .child(crate::tr!("hosts.certificate_changed")),
+                    )
+                }),
+        )
+        .when(current && !changed, |row| row.child(self.status_glyph(cx)))
+        .when(changed, |row| {
+            row.child(
+                Button::new(SharedString::from(format!("repair-{}", host.host_id)))
+                    .primary()
+                    .compact()
+                    .label(crate::tr!("hosts.pair_again"))
+                    .on_click(cx.listener(move |panel, _, window, cx| {
+                        panel.form.restart();
+                        panel.form.browsing = false;
+                        panel.form.pin_discovered(
+                            repair_host.addrs.first().cloned().unwrap_or_default(),
+                            repair_host.port,
+                            String::new(),
+                            window,
+                            cx,
+                        );
+                        panel.open_pair(cx);
+                    })),
+            )
+        })
+        .when(!changed, |row| {
+            row.on_click(move |_, window, cx| {
+                let switch = cx.global::<ClientAttachment>().switcher();
+                switch(AttachmentTarget::Remote(connect_host.clone()), window, cx);
+            })
+        });
+        h_flex()
+            .w_full()
+            .items_center()
+            .child(row)
+            .child(self.host_menu(host, current))
             .into_any_element()
     }
 
-    /// Local-network discovery. A fixed-origin client (a browser) can only pair
-    /// with the origin that served it, so the whole section is absent there.
-    fn render_discovery(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The row's own overflow menu. It carries its own hit region, so opening
+    /// it can never also connect the row underneath.
+    fn host_menu(&self, host: &PairedHost, current: bool) -> AnyElement {
+        let host_id = host.host_id.clone();
+        let label = crate::tr!("hosts.actions", name = host.name.clone()).into_owned();
+        div()
+            .flex_none()
+            .pr(px(PAGE_PADDING - 8.))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new(SharedString::from(format!("host-menu-{host_id}")))
+                    .ghost()
+                    .icon(IconName::Ellipsis)
+                    .aria_label(label)
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let menu = menu.when(current, |menu| {
+                            menu.menu(
+                                crate::tr!("hosts.disconnect").into_owned(),
+                                Box::new(DisconnectHost),
+                            )
+                        });
+                        menu.menu(
+                            crate::tr!("hosts.forget").into_owned(),
+                            Box::new(ForgetHost(host_id.clone())),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// Hosts advertised on this network. A fixed-origin client (a browser) can
+    /// only pair with the origin that served it, so the section is absent there.
+    fn nearby(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.form.has_fixed_endpoint() {
             return None;
         }
-        let mut group = crate::material::group(cx).child(
-            row()
-                .child(labels(
-                    crate::tr!("remote.discover.title").into_owned().into(),
-                    crate::tr!("remote.discover.description")
-                        .into_owned()
-                        .into(),
-                    cx,
-                ))
-                .child(
-                    Button::new("remote-discover")
-                        .ghost()
-                        .outline()
-                        .compact()
-                        .loading(self.form.browsing)
-                        .label(crate::tr!("remote.discover.search"))
-                        .on_click(cx.listener(|this, _, _, cx| this.discover(cx))),
-                ),
-        );
-        if !self.form.browsing && self.form.discovered.is_empty() {
+        let mut group = crate::material::group(cx);
+        if self.form.discovered.is_empty() {
             group = group.child(note(
-                crate::tr!("remote.discover.none").into_owned().into(),
+                if self.form.browsing {
+                    crate::tr!("hosts.nearby_searching")
+                } else {
+                    crate::tr!("hosts.nearby_empty")
+                }
+                .into_owned()
+                .into(),
                 cx,
             ));
         }
         for beacon in &self.form.discovered {
             let (addr, port, fingerprint) = (beacon.addr.clone(), beacon.port, beacon.fp.clone());
+            let name = SharedString::from(beacon.name.clone());
             group = group.child(
-                row()
-                    .child(labels(
-                        beacon.name.clone().into(),
-                        format!("{}:{}", beacon.addr, beacon.port).into(),
-                        cx,
-                    ))
-                    .child(
-                        Button::new(SharedString::from(format!(
-                            "pair-found-{}-{}",
-                            beacon.host_id, beacon.addr
-                        )))
-                        .ghost()
-                        .outline()
-                        .compact()
-                        .label(crate::tr!("remote.discover.pair"))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                // Discovery carries no code: prefill the endpoint and
-                                // pin its fingerprint so the user only types digits.
-                                this.form.pin_discovered(
-                                    addr.clone(),
-                                    port,
-                                    fingerprint.clone(),
-                                    window,
-                                    cx,
-                                );
-                                cx.notify();
-                            },
-                        )),
-                    ),
+                list_row(
+                    SharedString::from(format!("nearby-{}-{}", beacon.host_id, beacon.addr)),
+                    name.clone(),
+                    cx,
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(div().text_size(px(15.)).truncate().child(name))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(format!("{}:{}", beacon.addr, beacon.port)),
+                        ),
+                )
+                .child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .flex_none()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                // Discovery carries no code: prefill the endpoint and pin its
+                // fingerprint so the user only types digits.
+                .on_click(cx.listener(move |panel, _, window, cx| {
+                    panel
+                        .form
+                        .pin_discovered(addr.clone(), port, fingerprint.clone(), window, cx);
+                    panel.open_pair(cx);
+                })),
             );
         }
         Some(
             v_flex()
-                .child(section_caption(
-                    crate::tr!("remote.discover.section").into_owned().into(),
-                    cx,
-                ))
+                .w_full()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(section_caption(
+                            crate::tr!("hosts.nearby").into_owned().into(),
+                            cx,
+                        ))
+                        .child(
+                            Button::new("hosts-refresh")
+                                .ghost()
+                                .compact()
+                                .loading(self.form.browsing)
+                                .label(crate::tr!("hosts.refresh"))
+                                .on_click(cx.listener(|panel, _, _, cx| panel.discover(cx))),
+                        ),
+                )
                 .child(group)
                 .into_any_element(),
         )
     }
 
-    fn render_pair_form(&self, cx: &mut Context<Self>) -> AnyElement {
-        if let Some(paired) = &self.form.paired {
-            return self.render_pair_confirm(&paired.name.clone(), cx);
+    /// The whole Hosts surface: this computer, the saved hosts, one way to add
+    /// another, and whatever is on the network.
+    pub(crate) fn render_hosts(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // A browser that has not paired with its own origin has exactly one
+        // thing to do here, so it is the page rather than a hop away from it.
+        let hosts = self
+            .client(cx)
+            .map(|client| client.load_hosts())
+            .unwrap_or_default();
+        if self.form.has_fixed_endpoint() && hosts.is_empty() {
+            return self.render_pair(window, cx);
         }
+        let current_id = self.attached_host_id(cx);
+        let mut column = v_flex().w_full().gap_5().pt(px(8.)).pb(px(24.));
+        if let Some(local) = self.local_row(cx) {
+            column = column.child(crate::material::group(cx).child(local));
+        }
+        if hosts.is_empty() {
+            column = column.child(
+                v_flex()
+                    .w_full()
+                    .px(px(PAGE_PADDING))
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::tr!("hosts.empty")),
+                    )
+                    .child(self.pair_button(cx)),
+            );
+        } else {
+            let mut group = crate::material::group(cx);
+            for host in &hosts {
+                let current = current_id.as_deref() == Some(host.host_id.as_str());
+                group = group.child(self.host_row(host, current, cx));
+            }
+            column = column
+                .child(
+                    v_flex()
+                        .child(section_caption(
+                            crate::tr!("hosts.saved").into_owned().into(),
+                            cx,
+                        ))
+                        .child(group),
+                )
+                .child(div().px(px(PAGE_PADDING)).child(self.pair_button(cx)));
+        }
+        column = column.children(self.nearby(cx));
+        self.page(column.into_any_element(), cx)
+    }
+
+    fn pair_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("hosts-pair")
+            .primary()
+            .w_full()
+            .label(crate::tr!("hosts.pair.title"))
+            .on_click(cx.listener(|panel, _, _, cx| panel.open_pair(cx)))
+            .into_any_element()
+    }
+
+    /// The pairing form: labels above full-width fields, errors under them, and
+    /// the primary action pinned to the foot of the page — above the software
+    /// keyboard, which the window seam already accounts for.
+    pub(crate) fn render_pair(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some(paired) = self.form.paired.clone() {
+            return self.render_pair_confirm(&paired.name, cx);
+        }
+        let fixed = self.form.has_fixed_endpoint();
         let busy = self.form.busy;
         let ready = !busy && self.form.request(cx).is_some();
-        let fixed = self.form.has_fixed_endpoint();
+        let scannable = self.client(cx).is_some_and(|client| client.supports_qr()) && !fixed;
         let body = v_flex()
             .w_full()
-            .gap_2()
-            .px_3()
-            .py_3()
+            .px(px(PAGE_PADDING))
+            .py(px(16.))
+            .gap_4()
             .child(
                 div()
-                    .text_size(px(13.))
+                    .text_size(px(15.))
+                    .line_height(px(20.))
+                    .min_w_0()
                     .text_color(cx.theme().muted_foreground)
                     .child(if fixed {
-                        crate::tr!("remote.pair.fixed_origin_description")
+                        crate::tr!("hosts.pair.fixed_description")
                     } else {
-                        crate::tr!("remote.pair.description")
+                        crate::tr!("hosts.pair.description")
                     }),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .items_center()
-                    .when(!fixed, |row| {
-                        row.child(field(&self.form.address, 200.))
-                            .child(field(&self.form.port, 84.))
-                    })
-                    .child(field(&self.form.code, 110.))
-                    .child(
-                        Button::new("remote-pair")
-                            .primary()
-                            .compact()
-                            .loading(busy)
-                            .disabled(!ready)
-                            .label(crate::tr!("remote.pair.action"))
-                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx))),
-                    ),
-            )
+            .when(!fixed, |column| {
+                column
+                    .child(self.field(
+                        crate::tr!("hosts.pair.address").into_owned().into(),
+                        &self.form.address,
+                    ))
+                    .child(self.field(
+                        crate::tr!("hosts.pair.port").into_owned().into(),
+                        &self.form.port,
+                    ))
+            })
+            .child(self.field(
+                crate::tr!("hosts.pair.code").into_owned().into(),
+                &self.form.code,
+            ))
+            .when(scannable, |column| {
+                column.child(
+                    Button::new("hosts-scan")
+                        .ghost()
+                        .outline()
+                        .w_full()
+                        .label(crate::tr!("hosts.pair.scan"))
+                        .on_click(cx.listener(|panel, _, _, cx| panel.scan(cx))),
+                )
+            })
             .when(self.form.filled, |column| {
                 column.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("remote.pair.filled")),
+                        .child(crate::tr!("hosts.pair.filled")),
                 )
             })
             .when(!self.form.fingerprint.is_empty(), |column| {
-                column.child(div().text_size(px(12.)).child(crate::tr!(
-                    "remote.pair.fingerprint",
+                column.child(div().text_size(px(13.)).min_w_0().child(crate::tr!(
+                    "hosts.pair.fingerprint",
                     fingerprint =
                         tcode_client::pairing::display_fingerprint(&self.form.fingerprint)
                 )))
@@ -571,28 +745,30 @@ impl RemotePanel {
             .when_some(self.form.error.clone(), |column, error| {
                 column.child(
                     div()
-                        .text_size(px(12.))
+                        .text_size(px(13.))
+                        .min_w_0()
                         .text_color(cx.theme().danger_foreground)
                         .child(error),
                 )
             });
-        v_flex()
-            .child(section_caption(
-                crate::tr!("remote.pair.section").into_owned().into(),
-                cx,
-            ))
-            .child(crate::material::group(cx).child(body))
-            .into_any_element()
+        let action = Button::new("hosts-pair-submit")
+            .primary()
+            .w_full()
+            .loading(busy)
+            .disabled(!ready)
+            .label(crate::tr!("hosts.pair.action"))
+            .on_click(cx.listener(|panel, _, window, cx| panel.submit(window, cx)));
+        self.page_with_footer(body.into_any_element(), action.into_any_element(), cx)
     }
 
     /// Paired, not yet connected: show the pinned fingerprint next to the one
     /// the host displays, so a swapped certificate is caught before any traffic.
     fn render_pair_confirm(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
-        v_flex()
-            .child(section_caption(
-                crate::tr!("remote.pair.section").into_owned().into(),
-                cx,
-            ))
+        let body = v_flex()
+            .w_full()
+            .px(px(PAGE_PADDING))
+            .py(px(16.))
+            .gap_3()
             .child(
                 crate::material::group(cx).child(
                     v_flex()
@@ -604,6 +780,7 @@ impl RemotePanel {
                             div()
                                 .font_family(cx.theme().mono_font_family.clone())
                                 .text_size(px(14.))
+                                .min_w_0()
                                 .child(tcode_client::pairing::display_fingerprint(
                                     &self.form.fingerprint,
                                 )),
@@ -611,50 +788,97 @@ impl RemotePanel {
                         .child(
                             div()
                                 .text_size(px(13.))
+                                .min_w_0()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("remote.pair.fingerprint_compare")),
-                        )
-                        .child(
-                            h_flex().child(
-                                Button::new("remote-pair-connect")
-                                    .primary()
-                                    .compact()
-                                    .label(
-                                        crate::tr!("remote.pair.connect_host", name = name)
-                                            .into_owned(),
-                                    )
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                    ),
-                            ),
+                                .child(crate::tr!("hosts.pair.fingerprint_compare")),
                         ),
+                ),
+            );
+        let action = Button::new("hosts-pair-connect")
+            .primary()
+            .w_full()
+            .label(crate::tr!("hosts.pair.connect_host", name = name).into_owned())
+            .on_click(cx.listener(|panel, _, window, cx| panel.submit(window, cx)));
+        self.page_with_footer(body.into_any_element(), action.into_any_element(), cx)
+    }
+
+    /// One labelled field: the label above a full-width control, never a
+    /// fixed-width label column beside it.
+    fn field(&self, label: SharedString, state: &Entity<InputState>) -> impl IntoElement {
+        v_flex()
+            .w_full()
+            .gap_1p5()
+            .child(div().text_size(px(13.)).font_medium().child(label))
+            .child(
+                Input::new(state)
+                    .large()
+                    .rounded(crate::material::radius_input()),
+            )
+    }
+
+    /// The scrolling page body, centered in the wide content column and
+    /// full-bleed in compact.
+    fn page(&self, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
+        div()
+            .id("hosts-scroll")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_y_scroll()
+            .on_action(cx.listener(Self::on_disconnect))
+            .on_action(cx.listener(Self::on_forget))
+            .child(
+                h_flex().w_full().justify_center().child(
+                    div()
+                        .w_full()
+                        .when(!compact, |column| column.max_w(px(CONTENT_MAX_WIDTH)))
+                        .child(body),
                 ),
             )
             .into_any_element()
     }
-}
 
-impl Render for RemotePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let column = v_flex().w_full().gap_6().child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(Icon::new(IconName::Info).xsmall())
-                .child(
+    fn page_with_footer(
+        &self,
+        body: AnyElement,
+        action: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .size_full()
+            .child(self.page(body, cx))
+            .child(
+                h_flex().flex_none().w_full().justify_center().child(
                     div()
-                        .text_size(px(13.))
-                        .child(if cfg!(feature = "remote-hosting") {
-                            crate::tr!("remote.intro")
-                        } else {
-                            // A client that cannot listen has nothing to host with.
-                            crate::tr!("remote.intro_client")
-                        }),
+                        .w_full()
+                        .max_w(px(CONTENT_MAX_WIDTH))
+                        .px(px(PAGE_PADDING))
+                        .pb(px(PAGE_PADDING))
+                        .pt(px(8.))
+                        .child(action),
                 ),
-        );
-        #[cfg(feature = "remote-hosting")]
-        let column = column.child(self.render_hosting(cx));
-        column.child(self.render_connect(cx))
+            )
+            .into_any_element()
+    }
+
+    fn on_disconnect(&mut self, _: &DisconnectHost, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving a host is an explicit act; the saved record stays. A client
+        // with a host of its own falls back to it rather than to nothing.
+        if cx
+            .try_global::<ClientAttachment>()
+            .is_some_and(ClientAttachment::can_attach_local)
+        {
+            let switch = cx.global::<ClientAttachment>().switcher();
+            switch(AttachmentTarget::Local, window, cx);
+        } else {
+            crate::shell::detach_current(cx);
+        }
+        cx.notify();
+    }
+
+    fn on_forget(&mut self, action: &ForgetHost, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.global::<ClientAttachment>().remove_host(&action.0);
+        cx.notify();
     }
 }

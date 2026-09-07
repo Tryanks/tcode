@@ -11,8 +11,9 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global, IntoElement,
-    ParentElement as _, SharedString, Styled as _, Task, Window, div, px,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, Global,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Task, Window, div, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_client::HostLink;
@@ -22,7 +23,7 @@ use tcode_protocol::{Command, SettingsPatch};
 use tcode_remote::discovery::{BeaconHandle, start_beacon};
 use tcode_remote::{DeviceInfo, HostMux, PairingCode, RemoteConfig, RemoteServer, serve};
 
-use super::{RemotePanel, labels, note, row, section_caption};
+use super::{note, section_caption};
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::pairing::DEFAULT_REMOTE_PORT;
 use crate::sizing::Sizable as _;
@@ -225,21 +226,47 @@ fn qr_element(payload: &str) -> Option<AnyElement> {
     )
 }
 
+/// One hosting settings row: label and description left, control right.
+fn row() -> gpui::Div {
+    h_flex()
+        .w_full()
+        .min_h(px(44.))
+        .px_3()
+        .py_2p5()
+        .gap_3()
+        .items_center()
+}
+
+fn labels(title: SharedString, description: SharedString, cx: &App) -> gpui::Div {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_0p5()
+        .child(div().text_size(px(15.)).font_medium().child(title))
+        .child(
+            div()
+                .text_size(px(13.))
+                .text_color(cx.theme().muted_foreground)
+                .child(description),
+        )
+}
+
 fn countdown(seconds: u64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// The editable hosting controls. Their live state lives in the process-wide
-/// [`RemoteController`]; only the in-progress edits belong here.
-pub(super) struct HostingSection {
+/// Settings → Remote: the editable hosting controls for *this machine*. Their
+/// live state lives in the process-wide [`RemoteController`]; only the
+/// in-progress edits belong here.
+pub struct HostingPanel {
     port_input: Entity<InputState>,
     host_name_input: Entity<InputState>,
     /// One-second repaint while a pairing code is counting down.
     ticker: Option<Task<()>>,
 }
 
-impl HostingSection {
-    pub(super) fn new(window: &mut Window, cx: &mut Context<RemotePanel>) -> Self {
+impl HostingPanel {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = cx
             .try_global::<RemoteController>()
             .map(RemoteController::local_settings)
@@ -266,15 +293,15 @@ impl HostingSection {
     }
 }
 
-impl RemotePanel {
+impl HostingPanel {
     /// Run a 1 Hz repaint exactly while a code is counting down.
     fn sync_ticker(&mut self, cx: &mut Context<Self>) {
         let counting = cx
             .try_global::<RemoteController>()
             .is_some_and(|controller| controller.pairing().is_some());
-        match (counting, self.hosting.ticker.is_some()) {
+        match (counting, self.ticker.is_some()) {
             (true, false) => {
-                self.hosting.ticker = Some(cx.spawn(async move |this, cx| {
+                self.ticker = Some(cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor().timer(Duration::from_secs(1)).await;
                         if this.update(cx, |_, cx| cx.notify()).is_err() {
@@ -283,14 +310,13 @@ impl RemotePanel {
                     }
                 }));
             }
-            (false, true) => self.hosting.ticker = None,
+            (false, true) => self.ticker = None,
             _ => {}
         }
     }
 
     fn port(&self, cx: &App) -> u16 {
-        self.hosting
-            .port_input
+        self.port_input
             .read(cx)
             .value()
             .trim()
@@ -299,12 +325,7 @@ impl RemotePanel {
     }
 
     fn typed_host_name(&self, cx: &App) -> String {
-        self.hosting
-            .host_name_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_owned()
+        self.host_name_input.read(cx).value().trim().to_owned()
     }
 
     fn set_hosting(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -361,7 +382,7 @@ impl RemotePanel {
         }
     }
 
-    pub(super) fn render_hosting(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_hosting(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.sync_ticker(cx);
         let hosting = cx
             .try_global::<RemoteController>()
@@ -391,7 +412,7 @@ impl RemotePanel {
                     .gap_2()
                     .child(
                         div().w(px(110.)).child(
-                            Input::new(&self.hosting.port_input)
+                            Input::new(&self.port_input)
                                 .small()
                                 .rounded(crate::material::radius_input()),
                         ),
@@ -418,7 +439,7 @@ impl RemotePanel {
             ))
             .child(
                 div().w(px(240.)).child(
-                    Input::new(&self.hosting.host_name_input)
+                    Input::new(&self.host_name_input)
                         .small()
                         .rounded(crate::material::radius_input()),
                 ),
@@ -620,6 +641,15 @@ impl RemotePanel {
             ))
             .child(group)
             .into_any_element()
+    }
+}
+
+impl Render for HostingPanel {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w_full()
+            .debug_selector(|| "hosting-settings".into())
+            .child(self.render_hosting(cx))
     }
 }
 

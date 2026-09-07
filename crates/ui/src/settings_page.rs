@@ -54,11 +54,16 @@ enum Section {
     Browser,
     ComputerUse,
     Orchestrate,
+    #[cfg(feature = "remote-hosting")]
     Remote,
     Archived,
 }
 
 /// Navigation order, shared by the desktop rail and the compact section list.
+/// Remote is *hosting this machine* and nothing else: a client that cannot
+/// listen or advertise has no such setting, and choosing which host to talk to
+/// is a product surface (`crate::remote`), not a setting.
+#[cfg(feature = "remote-hosting")]
 const SECTIONS: [Section; 8] = [
     Section::General,
     Section::Providers,
@@ -67,6 +72,16 @@ const SECTIONS: [Section; 8] = [
     Section::ComputerUse,
     Section::Orchestrate,
     Section::Remote,
+    Section::Archived,
+];
+#[cfg(not(feature = "remote-hosting"))]
+const SECTIONS: [Section; 7] = [
+    Section::General,
+    Section::Providers,
+    Section::Usage,
+    Section::Browser,
+    Section::ComputerUse,
+    Section::Orchestrate,
     Section::Archived,
 ];
 
@@ -79,6 +94,7 @@ impl Section {
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
             Self::Orchestrate => "settings-nav-orchestrate",
+            #[cfg(feature = "remote-hosting")]
             Self::Remote => "settings-nav-remote",
             Self::Archived => "settings-nav-archived",
         }
@@ -92,6 +108,7 @@ impl Section {
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
             Self::Orchestrate => IconName::Map,
+            #[cfg(feature = "remote-hosting")]
             Self::Remote => IconName::HardDrive,
             Self::Archived => IconName::Inbox,
         }
@@ -105,6 +122,7 @@ impl Section {
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
             Self::Orchestrate => crate::tr!("settings.orchestrate"),
+            #[cfg(feature = "remote-hosting")]
             Self::Remote => crate::tr!("settings.remote"),
             Self::Archived => crate::tr!("settings.archived"),
         }
@@ -159,14 +177,6 @@ struct SelectRowOption<T> {
     selected: bool,
 }
 
-/// A compact *desktop* window still draws the native macOS traffic lights over
-/// its top strip, so the strip's leading content is inset past them.
-const COMPACT_TRAFFIC_LIGHT_INSET: f32 = 80.;
-
-fn compact_clears_traffic_lights(window: &Window) -> bool {
-    cfg!(target_os = "macos") && !window.is_fullscreen()
-}
-
 /// Apply a settings theme mode to the live window (shared with the palette's
 /// "Toggle theme" action).
 pub(crate) fn apply_theme(mode: ThemeMode, window: &mut Window, cx: &mut App) {
@@ -186,8 +196,9 @@ pub struct SettingsPage {
     acp_panel: Entity<AcpPanel>,
     /// Editable main-model identities and child-model routing matrix.
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
-    /// Saved hosts, pairing and (where the client can host) hosting controls.
-    remote_panel: Entity<crate::remote::RemotePanel>,
+    /// Hosting this machine. Absent where the client cannot listen at all.
+    #[cfg(feature = "remote-hosting")]
+    hosting_panel: Entity<crate::remote::HostingPanel>,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
     /// Shared provider/model picker configured for fallback reviews.
@@ -206,8 +217,6 @@ pub struct SettingsPage {
     /// A portable client renders before its first snapshot arrives, and the
     /// local defaults it starts with must never be shown as the host's answer.
     hydrated: bool,
-    /// Compact layout only: whether a section detail is open over the list.
-    compact_detail: bool,
     /// The native permission group. `Some` only where this build can read TCC
     /// *and* the workspace is this machine's.
     #[cfg(all(feature = "local-permissions", target_os = "macos"))]
@@ -232,6 +241,7 @@ impl SettingsPage {
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
+                #[cfg(feature = "remote-hosting")]
                 "remote" => Section::Remote,
                 "archived" => Section::Archived,
                 _ => Section::General,
@@ -296,8 +306,7 @@ impl SettingsPage {
             cx.observe(&window_state, |this, _, cx| {
                 let window_state = this.window_state.clone();
                 if let Some(section) = Self::take_requested_section(&window_state, cx) {
-                    this.section = section;
-                    this.compact_detail = true;
+                    this.select_section(section, cx);
                 }
                 cx.notify();
             }),
@@ -334,8 +343,8 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        let remote_panel =
-            cx.new(|cx| crate::remote::RemotePanel::new(Some(store.clone()), window, cx));
+        #[cfg(feature = "remote-hosting")]
+        let hosting_panel = cx.new(|cx| crate::remote::HostingPanel::new(window, cx));
         // Editable fields start empty and are seeded by `hydrate_inputs` once
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
@@ -355,7 +364,8 @@ impl SettingsPage {
             provider_cards: Vec::new(),
             acp_panel,
             orchestrate_panel,
-            remote_panel,
+            #[cfg(feature = "remote-hosting")]
+            hosting_panel,
             title_model_picker,
             fallback_review_model_picker,
             acp_cards: Vec::new(),
@@ -365,7 +375,6 @@ impl SettingsPage {
             auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
             auto_archive_keep_input: SettingsInput::new(auto_archive_keep_input.clone()),
             hydrated: false,
-            compact_detail: false,
             #[cfg(all(feature = "local-permissions", target_os = "macos"))]
             local_permissions,
             toggle_focus: HashMap::new(),
@@ -543,8 +552,27 @@ impl SettingsPage {
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
-        self.compact_detail = true;
+        // Which section is open is this page's business; *that* a detail is
+        // open is navigation, and belongs to the window's one history.
+        self.window_state.update(cx, |state, cx| {
+            if state.compact {
+                state.go(crate::window_state::Destination::SettingsSection, cx);
+            }
+        });
         cx.notify();
+    }
+
+    /// Open a section the way a tap on its row does, for tests that exercise
+    /// the navigation this page hands to the window.
+    #[cfg(test)]
+    pub(crate) fn select_section_for_test(&mut self, cx: &mut Context<Self>) {
+        self.select_section(Section::General, cx);
+    }
+
+    /// The open section's name, which is also this page's compact nav-bar
+    /// title and the label its child's Back control carries.
+    pub(crate) fn section_title(&self) -> SharedString {
+        self.section.label()
     }
 
     fn nav_item(&self, section: Section, cx: &mut Context<Self>) -> AnyElement {
@@ -588,6 +616,8 @@ impl SettingsPage {
         .into_any_element()
     }
 
+    /// The wide rail's way out of Settings. Compact has no such row: there, the
+    /// shell's nav bar carries Back like it does on every other page.
     fn back_row(&self, cx: &mut Context<Self>) -> AnyElement {
         crate::material::accessible_clickable(
             gpui_base::h_flex(),
@@ -655,8 +685,10 @@ impl SettingsPage {
     }
 
     /// Compact clients have no room for a 255px rail beside the content, so the
-    /// same sections become a full-width list that pushes to a detail view.
-    fn render_section_list(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// same sections become a full-width list that pushes to a detail page.
+    /// The page draws no header and no back row: in compact every page wears
+    /// the shell's one nav bar (`crate::shell`).
+    pub(crate) fn render_compact_list(&self, cx: &mut Context<Self>) -> AnyElement {
         let rows: Vec<AnyElement> = SECTIONS
             .iter()
             .map(|section| {
@@ -701,62 +733,8 @@ impl SettingsPage {
                     .w_full()
                     .p_3()
                     .gap_3()
-                    .child(crate::material::grouped(rows, cx))
-                    .child(crate::material::group(cx).child(self.back_row(cx))),
+                    .child(crate::material::grouped(rows, cx)),
             )
-            .into_any_element()
-    }
-
-    /// The compact list header: just the page title, since the list itself is
-    /// the navigation.
-    fn render_compact_header_root(&self, window: &Window, _cx: &mut Context<Self>) -> AnyElement {
-        gpui_base::h_flex()
-            .flex_none()
-            .h(px(52.))
-            .w_full()
-            .px_4()
-            .when(compact_clears_traffic_lights(window), |row| {
-                row.pl(px(COMPACT_TRAFFIC_LIGHT_INSET))
-            })
-            .items_center()
-            .child(
-                div()
-                    .text_size(px(17.))
-                    .font_medium()
-                    .child(crate::tr!("settings.title")),
-            )
-            .into_any_element()
-    }
-
-    /// The compact detail header: one back control plus the section's name.
-    fn render_compact_header(
-        &self,
-        title: SharedString,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        gpui_base::h_flex()
-            .flex_none()
-            .h(px(52.))
-            .w_full()
-            .px_2()
-            .when(compact_clears_traffic_lights(window), |row| {
-                row.pl(px(COMPACT_TRAFFIC_LIGHT_INSET))
-            })
-            .gap_2()
-            .items_center()
-            .child(
-                Button::new("settings-compact-back")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ArrowLeft)
-                    .aria_label(crate::tr!("settings.sections"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.compact_detail = false;
-                        cx.notify();
-                    })),
-            )
-            .child(div().flex_1().text_size(px(15.)).font_medium().child(title))
             .into_any_element()
     }
 
@@ -770,7 +748,7 @@ impl SettingsPage {
         let (right_panel_open, right_tab) = self.store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Settings,
-            self.window_state.read(cx).route,
+            self.window_state.read(cx).route(),
             right_panel_open,
             right_tab,
         );
@@ -896,7 +874,8 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
-            Section::Remote => v_flex().child(self.remote_panel.clone()),
+            #[cfg(feature = "remote-hosting")]
+            Section::Remote => v_flex().child(self.hosting_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
         div()
@@ -2110,9 +2089,27 @@ impl SettingsPage {
         )
     }
 
-    /// A single group row: transparent, ~44px min height, label left / control
-    /// right. The group container owns the fill and border.
-    fn row_frame(&self, _cx: &Context<Self>) -> gpui::Div {
+    /// A single group row. Wide puts the label left and the control right; a
+    /// compact window has no room for a label column beside a control, so the
+    /// label and its description sit above a full-width control and the prose
+    /// wraps instead of overflowing. The group container owns fill and border.
+    fn row_frame(&self, cx: &Context<Self>) -> gpui::Div {
+        if self.window_state.read(cx).compact {
+            v_flex()
+                .w_full()
+                .min_h(px(44.))
+                .px_3()
+                .py_2p5()
+                .gap_2()
+                .items_start()
+        } else {
+            self.control_frame()
+        }
+    }
+
+    /// A row whose control is a fixed 44pt affordance (a switch): it never
+    /// squeezes the label, so it stays beside it at both widths.
+    fn control_frame(&self) -> gpui::Div {
         gpui_base::h_flex()
             .w_full()
             .min_h(px(44.))
@@ -2145,7 +2142,7 @@ impl SettingsPage {
             .clone();
         let row_focus = focus.clone();
         crate::material::accessible_clickable(
-            self.row_frame(cx),
+            self.control_frame(),
             SharedString::from(format!("{id}-row")),
             Role::Switch,
             title.clone(),
@@ -2401,28 +2398,19 @@ impl SettingsPage {
     }
 }
 
+impl SettingsPage {
+    /// One section's content, as the compact detail page's body.
+    pub(crate) fn render_compact_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_content(window, cx)
+    }
+}
+
 impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Compact: the 255px rail has nowhere to go beside the content, so the
-        // sections become a list that pushes to one section at a time.
-        if self.window_state.read(cx).compact {
-            let column = v_flex()
-                .size_full()
-                .text_color(cx.theme().foreground)
-                .bg(crate::material::content_surface(cx));
-            return if self.compact_detail {
-                let title = self.section.label();
-                column
-                    .child(self.render_compact_header(title, window, cx))
-                    .child(self.render_content(window, cx))
-                    .into_any_element()
-            } else {
-                column
-                    .child(self.render_compact_header_root(window, cx))
-                    .child(self.render_section_list(cx))
-                    .into_any_element()
-            };
-        }
         // No opaque full-page fill: the nav must sit on the same translucent
         // glass canvas the chat sidebar does (its `sidebar` token shows the
         // T0 blur through its own translucency), so navigating chat↔settings

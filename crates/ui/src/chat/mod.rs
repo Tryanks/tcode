@@ -1719,7 +1719,7 @@ impl ChatView {
         let (right_panel_open, right_tab) = self.workspace_store.read(cx).window_caption_state();
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Chat,
-            self.window_state.read(cx).route,
+            self.window_state.read(cx).route(),
             right_panel_open,
             right_tab,
         );

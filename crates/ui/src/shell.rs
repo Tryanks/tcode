@@ -54,7 +54,7 @@ use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
 use crate::window_seam::WindowSeam;
-use crate::window_state::{OpenThread, Route, WindowState};
+use crate::window_state::{Destination, OpenThread, Route, WindowState};
 
 actions!(tcode, [Quit, TogglePalette]);
 
@@ -126,32 +126,11 @@ pub(crate) fn window_drag_area(
     }))
 }
 
-/// Where a compact window currently is. A wide window shows the whole
-/// hierarchy at once and only uses this to remember where a narrowing window
-/// should land.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Destination {
-    Hosts,
-    Threads,
-    Thread,
-    /// The thread's terminal, diff/plan or preview, full width.
-    Panel,
-}
-
-impl Destination {
-    fn depth(self) -> usize {
-        match self {
-            Destination::Hosts => 1,
-            Destination::Threads => 2,
-            Destination::Thread => 3,
-            Destination::Panel => 4,
-        }
-    }
-}
-
-/// One level of the compact [`NavStack`]. It owns nothing: it renders whichever
-/// shell destination it stands for, so all four stay mounted while a push or
-/// pop animates.
+/// One entry of the compact [`NavStack`], standing for one entry of the
+/// window's navigation history. It owns nothing: it renders whichever shell
+/// destination it stands for, so every page stays mounted while a push or pop
+/// animates. One view per *entry*, not per destination — the same destination
+/// can appear twice (Hosts visited from an open thread).
 struct DestinationView {
     shell: WeakEntity<AppShell>,
     destination: Destination,
@@ -165,9 +144,12 @@ impl Render for DestinationView {
             .map(|shell| {
                 shell.update(cx, |shell, cx| match destination {
                     Destination::Hosts => shell.render_hosts_page(window, cx),
+                    Destination::Pair => shell.render_pair_page(window, cx),
                     Destination::Threads => shell.render_threads_page(window, cx),
                     Destination::Thread => shell.render_thread_page(window, cx),
                     Destination::Panel => shell.render_panel_page(window, cx),
+                    Destination::Settings => shell.render_settings_page(false, window, cx),
+                    Destination::SettingsSection => shell.render_settings_page(true, window, cx),
                 })
             })
             .unwrap_or_else(|| div().into_any_element())
@@ -209,6 +191,9 @@ struct ShellAttachment {
     sidebar_overlay_visible: bool,
     /// Whether this attachment's host settings have been adopted once.
     adopted: bool,
+    /// Whether this attachment's saved record has been stamped with the time
+    /// this window reached it.
+    stamped: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -240,8 +225,10 @@ pub struct AppShell {
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
     nav: Entity<NavStackState>,
-    pages: Vec<AnyView>,
-    destination: Destination,
+    /// The navigation history as the compact stack currently has it mounted.
+    /// [`AppShell::sync_nav`] reconciles it with `window_state`'s history, which
+    /// is the only authority for where the window is.
+    mounted: Vec<Destination>,
     /// Which surface the compact panel destination is showing.
     panel_shows_terminal: bool,
     operation_toasts: HashMap<RuntimeOperationId, ToastId>,
@@ -307,7 +294,13 @@ impl AppShell {
             state.set_compact(compact, cx);
         });
         let subscriptions = vec![
-            cx.observe(&window_state, |_, _, cx| cx.notify()),
+            // The one place navigation reaches the stack: whoever moved the
+            // history — a nav bar, the sidebar, the palette, Android Back —
+            // gets the same push or pop out of it.
+            cx.observe(&window_state, |this, _, cx| {
+                this.sync_nav(NavMotion::Animated, cx);
+                cx.notify();
+            }),
             cx.subscribe_in(&window_state, window, |this, _, _: &OpenThread, w, cx| {
                 this.open_thread(w, cx);
             }),
@@ -318,7 +311,7 @@ impl AppShell {
             }),
         ];
         let hosts = cx.new(|cx| {
-            let mut panel = RemotePanel::new(None, window, cx);
+            let mut panel = RemotePanel::new(None, window_state.clone(), window, cx);
             panel.set_pairing_error(setup.initial_pairing_error.clone());
             panel
         });
@@ -327,8 +320,7 @@ impl AppShell {
             attachment: None,
             hosts,
             nav: cx.new(|_| NavStackState::new()),
-            pages: Vec::new(),
-            destination: Destination::Hosts,
+            mounted: Vec::new(),
             panel_shows_terminal: false,
             operation_toasts: HashMap::new(),
             next_toast_id: 1,
@@ -384,11 +376,14 @@ impl AppShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Already there: go to that host's workspace instead of tearing its
+        // link down and building the same one again.
         if self
             .attachment
             .as_ref()
             .is_some_and(|current| same_target(&current.link.target, &target))
         {
+            self.go(Destination::Threads, cx);
             return;
         }
         // Never drop a working attachment for one this client cannot open.
@@ -411,8 +406,8 @@ impl AppShell {
         };
         attachment.link.close(cx).close();
         self.hosts.update(cx, |hosts, cx| hosts.set_store(None, cx));
-        self.destination = Destination::Hosts;
-        self.sync_nav(NavMotion::Animated, cx);
+        self.window_state
+            .update(cx, |state, cx| state.leave_workspace(cx));
         cx.notify();
     }
 
@@ -428,8 +423,8 @@ impl AppShell {
             cx,
         ) else {
             log::error!("this client cannot reach the requested host");
-            self.destination = Destination::Hosts;
-            self.sync_nav(NavMotion::Immediate, cx);
+            self.window_state
+                .update(cx, |state, cx| state.leave_workspace(cx));
             cx.notify();
             return;
         };
@@ -453,8 +448,9 @@ impl AppShell {
             sidebar
         });
         let subscriptions = vec![
-            cx.observe_in(&store, window, move |_, store, window, cx| {
+            cx.observe_in(&store, window, move |this, store, window, cx| {
                 window.set_window_title(&store.read(cx).shell_window_title());
+                this.stamp_connected(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &RuntimeEvent, w, cx| {
@@ -536,6 +532,7 @@ impl AppShell {
             sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
             adopted: false,
+            stamped: false,
             link,
             _tasks: vec![preview_pump],
             _subscriptions: subscriptions,
@@ -543,9 +540,36 @@ impl AppShell {
         self.hosts
             .update(cx, |hosts, cx| hosts.set_store(Some(store), cx));
         self.adopt_host_settings(window, cx);
-        self.destination = Destination::Threads;
-        self.sync_nav(NavMotion::Animated, cx);
+        // The previous host's pages are not this host's: land on its threads.
+        self.window_state
+            .update(cx, |state, cx| state.enter_workspace(cx));
         cx.notify();
+    }
+
+    /// Record on the saved record when this window actually reached the host,
+    /// so its row in Hosts can say how recently it worked. Only a live
+    /// connection counts; an attempt that never came up is not one.
+    fn stamp_connected(&mut self, cx: &mut Context<Self>) {
+        let Some(attachment) = &mut self.attachment else {
+            return;
+        };
+        let AttachmentTarget::Remote(host) = &attachment.link.target else {
+            return;
+        };
+        if attachment.stamped
+            || !matches!(
+                attachment.link.store.read(cx).connection_state(),
+                tcode_client::ConnectionState::Connected
+            )
+        {
+            return;
+        }
+        attachment.stamped = true;
+        let mut host = host.clone();
+        host.last_connected_unix = Some(crate::time::now_secs());
+        if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
+            client.save_host(host);
+        }
     }
 
     /// Take the attached host's language, theme and sidebar state once its
@@ -589,73 +613,62 @@ impl AppShell {
             .window_state
             .update(cx, |state, cx| state.set_compact(compact, cx));
         if flipped {
-            self.destination = self.logical_destination(cx);
+            // The visit survives the resize; only a thread selected in the wide
+            // split — which is not a page there — has to become one here.
+            if compact
+                && self.destination(cx) == Destination::Threads
+                && self
+                    .attachment
+                    .as_ref()
+                    .is_some_and(|a| a.link.store.read(cx).active_session_id().is_some())
+            {
+                self.window_state
+                    .update(cx, |state, cx| state.go(Destination::Thread, cx));
+            }
             self.sync_nav(NavMotion::Immediate, cx);
             cx.notify();
         }
     }
 
-    /// Where a compact window belongs given the state it is actually in.
-    fn logical_destination(&self, cx: &App) -> Destination {
-        let Some(attachment) = &self.attachment else {
-            return Destination::Hosts;
-        };
-        // Selection, not the host's answer about it: picking a thread navigates
-        // straight away rather than after a round trip.
-        let has_thread = attachment.link.store.read(cx).active_session_id().is_some();
-        match self.destination {
-            Destination::Hosts => Destination::Hosts,
-            Destination::Panel if has_thread => Destination::Panel,
-            _ if has_thread => Destination::Thread,
-            _ => Destination::Threads,
-        }
+    fn destination(&self, cx: &App) -> Destination {
+        self.window_state.read(cx).destination()
     }
 
-    fn ensure_pages(&mut self, cx: &mut Context<Self>) {
-        if !self.pages.is_empty() {
-            return;
-        }
-        let shell = cx.entity().downgrade();
-        self.pages = [
-            Destination::Hosts,
-            Destination::Threads,
-            Destination::Thread,
-            Destination::Panel,
-        ]
-        .map(|destination| {
-            AnyView::from(cx.new(|_| DestinationView {
-                shell: shell.clone(),
-                destination,
-            }))
-        })
-        .to_vec();
-    }
-
-    /// Drive the stack to `self.destination` by the difference in depth, so a
-    /// step in either direction animates and a reconciliation does not.
+    /// Mirror the window's navigation history into the compact stack: pop back
+    /// to what the two still share, then push the rest. One view per history
+    /// entry, so the same destination visited twice is two independent pages.
     fn sync_nav(&mut self, motion: NavMotion, cx: &mut Context<Self>) {
-        self.ensure_pages(cx);
-        let target = self.destination.depth();
-        let pages = self.pages.clone();
+        let history = self.window_state.read(cx).history().to_vec();
+        let common = self
+            .mounted
+            .iter()
+            .zip(&history)
+            .take_while(|(mounted, target)| mounted == target)
+            .count();
+        let shell = cx.entity().downgrade();
+        let mut pushed = Vec::new();
         self.nav.update(cx, |nav, cx| {
-            while nav.depth() > target {
+            while nav.depth() > common {
                 if nav.pop(motion, cx).is_none() {
                     break;
                 }
             }
-            while nav.depth() < target {
-                nav.push(pages[nav.depth()].clone(), motion, cx);
+            for destination in &history[common.min(history.len())..] {
+                let page = AnyView::from(cx.new(|_| DestinationView {
+                    shell: shell.clone(),
+                    destination: *destination,
+                }));
+                nav.push(page, motion, cx);
+                pushed.push(*destination);
             }
         });
+        self.mounted.truncate(common);
+        self.mounted.extend(pushed);
     }
 
     fn go(&mut self, destination: Destination, cx: &mut Context<Self>) {
-        if self.destination == destination {
-            return;
-        }
-        self.destination = destination;
-        self.sync_nav(NavMotion::Animated, cx);
-        cx.notify();
+        self.window_state
+            .update(cx, |state, cx| state.go(destination, cx));
     }
 
     /// "Show me this thread." A wide window already does; a compact one pushes.
@@ -688,31 +701,10 @@ impl AppShell {
                 .update(cx, |state, cx| state.close_palette(cx));
             return true;
         }
-        if self.window_state.read(cx).route == Route::Settings {
-            self.window_state
-                .update(cx, |state, cx| state.close_settings(cx));
-            return true;
-        }
-        if !self.compact(cx) {
-            return false;
-        }
-        match self.destination {
-            Destination::Panel => {
-                self.go(Destination::Thread, cx);
-                true
-            }
-            // Leaving a thread keeps the connection: only the hosts list is a
-            // decision about which host this window is attached to.
-            Destination::Thread => {
-                self.go(Destination::Threads, cx);
-                true
-            }
-            Destination::Threads => {
-                self.detach(cx);
-                true
-            }
-            Destination::Hosts => false,
-        }
+        // Everything below is one history: settings detail, settings root, a
+        // Hosts visit, Pair, and the workspace pages all pop the same way.
+        // Leaving a page never touches the attachment.
+        self.window_state.update(cx, |state, cx| state.back(cx))
     }
 }
 
@@ -731,6 +723,28 @@ pub(crate) fn set_back_target(window: AnyWindowHandle, shell: &Entity<AppShell>,
         window,
         shell: shell.downgrade(),
     });
+}
+
+/// This window's shell, for the surfaces inside it that act on the window
+/// rather than on themselves (the Hosts rows and their menu).
+fn current_shell(cx: &App) -> Option<Entity<AppShell>> {
+    cx.try_global::<ShellBackTarget>()?.shell.upgrade()
+}
+
+/// Point this window at another host.
+pub(crate) fn switch_current(target: AttachmentTarget, window: &mut Window, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    shell.update(cx, |shell, cx| shell.switch_to(target, window, cx));
+}
+
+/// Leave the attached host without opening another one.
+pub(crate) fn detach_current(cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    shell.update(cx, |shell, cx| shell.detach(cx));
 }
 
 /// Route a platform Back gesture into the shell that owns the window.
@@ -879,6 +893,10 @@ impl AppShell {
 /// lights, which a compact *desktop* window still draws over this strip.
 const TRAFFIC_LIGHT_INSET: f32 = 80.;
 
+/// Room a nav bar reserves on each side for its controls: a back button with a
+/// truncated parent label, or two 44pt icon buttons.
+const NAV_CONTROL_WIDTH: f32 = 100.;
+
 /// Navigation header with a centered title and at most two trailing actions.
 fn nav_bar(
     back: Option<AnyElement>,
@@ -916,12 +934,19 @@ fn nav_bar(
                 .w_full()
                 .h(px(52.))
                 .child(
-                    // Centered on the bar itself, not between the buttons, so
-                    // the title does not drift with the back button's width.
+                    // Centered in the room the controls leave it: the back
+                    // label and the trailing actions each reserve their own
+                    // width, so a long title truncates instead of colliding
+                    // with them.
                     v_flex()
                         .absolute()
                         .inset_0()
-                        .px(px(96.))
+                        .pl(px(if clears_traffic_lights {
+                            TRAFFIC_LIGHT_INSET + NAV_CONTROL_WIDTH
+                        } else {
+                            NAV_CONTROL_WIDTH
+                        }))
+                        .pr(px(NAV_CONTROL_WIDTH))
                         .items_center()
                         .justify_center()
                         .child(
@@ -962,7 +987,7 @@ fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Statef
         )
         .child(
             div()
-                .max_w(px(96.))
+                .max_w(px(NAV_CONTROL_WIDTH - 36.))
                 .min_w_0()
                 .truncate()
                 .text_size(px(15.))
@@ -1003,38 +1028,138 @@ fn compact_label(key: &str) -> String {
 }
 
 impl AppShell {
+    /// The title a destination shows in its own nav bar — and, one level down,
+    /// the label its child's Back control carries.
+    fn destination_title(&self, destination: Destination, cx: &App) -> SharedString {
+        let store = self
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.link.store.read(cx));
+        match destination {
+            Destination::Hosts => crate::tr!("hosts.title").into_owned().into(),
+            Destination::Pair => crate::tr!("hosts.pair.title").into_owned().into(),
+            Destination::Threads => store
+                .and_then(|store| store.remote_host_name().map(SharedString::from))
+                .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into()),
+            Destination::Thread => store
+                .and_then(|store| store.chat_active_session())
+                .map(|(title, _, draft)| {
+                    if draft {
+                        compact_label("new_thread")
+                    } else {
+                        title
+                    }
+                })
+                .unwrap_or_else(|| compact_label("new_thread"))
+                .into(),
+            Destination::Panel => crate::tr!("chat.panels").into_owned().into(),
+            Destination::Settings => crate::tr!("settings.title").into_owned().into(),
+            Destination::SettingsSection => self
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.settings_page.read(cx).section_title())
+                .unwrap_or_else(|| crate::tr!("settings.title").into_owned().into()),
+        }
+    }
+
+    /// Back to whatever is under this page, labelled with its title. `None` at
+    /// the root, where the platform owns Back.
+    fn back_control(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let parent = self.window_state.read(cx).parent()?;
+        let label = self.destination_title(parent, cx);
+        Some(
+            back_button("compact-back", label, cx)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.back(window, cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_hosts_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let back = self.back_control(cx);
+        let hosts = self.hosts.clone();
+        let body = hosts.update(cx, |panel, cx| panel.render_hosts(window, cx));
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
+            .debug_selector(|| "hosts-page".into())
             .child(nav_bar(
-                None,
-                compact_label("hosts").into(),
+                back,
+                crate::tr!("hosts.title").into_owned().into(),
                 None,
                 vec![],
                 window,
                 cx,
             ))
-            .child(
-                div()
-                    .id("compact-hosts")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(div().p(px(16.)).child(self.hosts.clone())),
-            )
+            .child(body)
+            .into_any_element()
+    }
+
+    /// The pairing form as its own page, so Back returns to whatever pushed it
+    /// — the Hosts list, or the Nearby row that prefilled the endpoint.
+    fn render_pair_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let back = self.back_control(cx);
+        let hosts = self.hosts.clone();
+        let body = hosts.update(cx, |panel, cx| panel.render_pair(window, cx));
+        v_flex()
+            .size_full()
+            .bg(crate::material::content_surface(cx))
+            .child(nav_bar(
+                back,
+                crate::tr!("hosts.pair.title").into_owned().into(),
+                None,
+                vec![],
+                window,
+                cx,
+            ))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// Settings, as two pages of the same stack: the section list, then one
+    /// section's detail. Both wear the same nav bar as every other page.
+    fn render_settings_page(
+        &mut self,
+        detail: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let back = self.back_control(cx);
+        let Some(settings) = self
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.settings_page.clone())
+        else {
+            return div().into_any_element();
+        };
+        let title = if detail {
+            settings.read(cx).section_title()
+        } else {
+            crate::tr!("settings.title").into_owned().into()
+        };
+        let body = settings.update(cx, |page, cx| {
+            if detail {
+                page.render_compact_section(window, cx)
+            } else {
+                page.render_compact_list(cx)
+            }
+        });
+        v_flex()
+            .size_full()
+            .bg(crate::material::content_surface(cx))
+            .child(nav_bar(back, title, None, vec![], window, cx))
+            .child(body)
             .into_any_element()
     }
 
     fn render_threads_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let title = self.destination_title(Destination::Threads, cx);
+        let back = self.back_control(cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
         let store = attachment.link.store.read(cx);
-        let title = store
-            .remote_host_name()
-            .map(SharedString::from)
-            .unwrap_or_else(|| crate::tr!("remote.connect.local").into_owned().into());
         let projects = store.projects();
         let sidebar = attachment.sidebar.clone();
         let actions = vec![
@@ -1065,20 +1190,7 @@ impl AppShell {
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
-            .child(nav_bar(
-                Some(
-                    back_button("compact-back-hosts", compact_label("hosts").into(), cx)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.back(window, cx);
-                        }))
-                        .into_any_element(),
-                ),
-                title,
-                None,
-                actions,
-                window,
-                cx,
-            ))
+            .child(nav_bar(back, title, None, actions, window, cx))
             .children(self.render_connection_banner(cx))
             .child(div().flex_1().min_h_0().child(sidebar))
             .into_any_element()
@@ -1103,6 +1215,7 @@ impl AppShell {
     }
 
     fn render_thread_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let back = self.back_control(cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
@@ -1132,13 +1245,7 @@ impl AppShell {
             .size_full()
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
-                Some(
-                    back_button("compact-back-threads", compact_label("threads").into(), cx)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.back(window, cx);
-                        }))
-                        .into_any_element(),
-                ),
+                back,
                 title.into(),
                 (!project.is_empty()).then(|| {
                     div()
@@ -1176,21 +1283,12 @@ impl AppShell {
     /// entities the wide layout puts in the split — a compact window has no
     /// room beside the timeline, not less of a product.
     fn render_panel_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let back = self.back_control(cx);
         let Some(attachment) = &self.attachment else {
             return div().into_any_element();
         };
         let store = attachment.link.store.read(cx);
         let panel = store.panel_state();
-        let parent = store
-            .chat_active_session()
-            .map(|(title, _, draft)| {
-                if draft {
-                    compact_label("new_thread")
-                } else {
-                    title
-                }
-            })
-            .unwrap_or_else(|| compact_label("threads"));
         let terminal = self.panel_shows_terminal;
         let mut segments = crate::material::segmented_track("compact-panel-track", cx);
         for (id, label, selected) in [
@@ -1251,13 +1349,7 @@ impl AppShell {
             .size_full()
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
-                Some(
-                    back_button("compact-back-thread", parent.into(), cx)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.back(window, cx);
-                        }))
-                        .into_any_element(),
-                ),
+                back,
                 crate::tr!("chat.panels").into_owned().into(),
                 None,
                 vec![],
@@ -1324,7 +1416,6 @@ impl AppShell {
     }
 
     fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.ensure_pages(cx);
         if self.nav.read(cx).is_empty() {
             self.sync_nav(NavMotion::Immediate, cx);
         }
@@ -1355,15 +1446,6 @@ impl AppShell {
                     .opacity(opacity)
                     .into_any_element()
             });
-        // Settings is a full-window route at every width; compact renders it as
-        // its own section list (see SettingsPage).
-        let settings = (self.window_state.read(cx).route == Route::Settings)
-            .then(|| {
-                self.attachment
-                    .as_ref()
-                    .map(|attachment| attachment.settings_page.clone())
-            })
-            .flatten();
         v_flex()
             .id("app-shell")
             .relative()
@@ -1375,10 +1457,9 @@ impl AppShell {
             .line_height(px(22.))
             .on_action(cx.listener(Self::on_toggle_palette))
             .child(gpui_base::TextSelectionLayer)
-            .child(match settings {
-                Some(page) => div().size_full().child(page).into_any_element(),
-                None => stack.into_any_element(),
-            })
+            // Every compact page, settings included, is one entry of the same
+            // stack: one nav bar, one Back, one transition.
+            .child(stack)
             .when(palette_open, |el| {
                 el.children(
                     self.attachment
@@ -1415,6 +1496,67 @@ impl AppShell {
 // ---------------------------------------------------------------------------
 
 impl AppShell {
+    /// The hosts surface itself, without chrome: the same rows and the same
+    /// pairing form at both widths. Compact pushes Pair onto the navigation
+    /// stack; wide shows it in place, inside the Hosts route.
+    fn hosts_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let pairing = self.destination(cx) == Destination::Pair;
+        let hosts = self.hosts.clone();
+        hosts.update(cx, |panel, cx| {
+            if pairing {
+                panel.render_pair(window, cx)
+            } else {
+                panel.render_hosts(window, cx)
+            }
+        })
+    }
+
+    /// The wide Hosts route's top strip: Back to the workspace, the page title,
+    /// and (on Windows) the caption cluster this route's content column owns.
+    fn render_hosts_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let hosts_caption = window_caption::hosts_caption_for_state(
+            window_caption::CaptionSurface::Hosts,
+            self.window_state.read(cx).route(),
+            false,
+            RightTab::Diff,
+        );
+        let title = self.destination_title(self.destination(cx), cx);
+        let back = self.window_state.read(cx).parent().map(|parent| {
+            let label = self.destination_title(parent, cx);
+            back_button("hosts-back", label, cx)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.back(window, cx);
+                }))
+                .into_any_element()
+        });
+        window_drag_area(
+            "hosts-header-drag",
+            h_flex()
+                .flex_none()
+                .h(px(52.))
+                .w_full()
+                .px_2()
+                .gap_2()
+                .items_center()
+                .when(hosts_caption, |strip| strip.relative()),
+            window,
+            cx,
+        )
+        .children(back)
+        .child(window_caption::drag_region(
+            div().flex_1().text_size(px(15.)).font_medium().child(title),
+        ))
+        .children(hosts_caption.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .h_full()
+                .child(window_caption::caption_controls(window, cx))
+        }))
+        .into_any_element()
+    }
+
     /// A slim status bar above the chat column, shown only over a remote link
     /// that is not currently connected.
     fn render_connection_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1461,25 +1603,23 @@ impl AppShell {
     }
 
     fn render_wide(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let route = self.window_state.read(cx).route;
+        let route = self.window_state.read(cx).route();
         let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
-        let Some(attachment) = &mut self.attachment else {
+        if self.attachment.is_none() {
             // No host: the hosts list is the whole window.
+            let body = self.hosts_body(window, cx);
             return div()
                 .id("app-shell")
                 .size_full()
                 .bg(crate::material::opaque_canvas(cx))
                 .text_color(cx.theme().foreground)
                 .child(gpui_base::TextSelectionLayer)
-                .child(
-                    div()
-                        .id("hosts")
-                        .size_full()
-                        .overflow_y_scroll()
-                        .child(div().p_6().child(self.hosts.clone())),
-                )
+                .child(v_flex().id("hosts").size_full().child(body))
                 .into_any_element();
+        }
+        let Some(attachment) = &mut self.attachment else {
+            unreachable!("checked above");
         };
         let collapsed = self.window_state.read(cx).sidebar_collapsed;
         // The overlay is workspace-only transient state. Clear it synchronously
@@ -1526,6 +1666,46 @@ impl AppShell {
                         .min_h_0()
                         .overflow_hidden()
                         .child(attachment.settings_page.clone()),
+                )
+                .into_any_element();
+        }
+
+        // Hosts is a product surface, not a settings page: the sidebar stays,
+        // because the feature area that leads here is meant to be persistent.
+        if route == Route::Hosts {
+            let sidebar = attachment.sidebar.clone();
+            let sidebar_width = attachment.sidebar_width.get();
+            let body = self.hosts_body(window, cx);
+            let header = self.render_hosts_header(window, cx);
+            return div()
+                .id("app-shell")
+                .size_full()
+                .when(fullscreen, |this| {
+                    this.bg(crate::material::opaque_canvas(cx))
+                })
+                .text_color(cx.theme().foreground)
+                .on_action(cx.listener(Self::on_toggle_palette))
+                .child(gpui_base::TextSelectionLayer)
+                .child(
+                    h_flex()
+                        .id("workspace")
+                        .size_full()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .when(!collapsed, |row| {
+                            row.child(div().flex_none().w(sidebar_width).h_full().child(sidebar))
+                        })
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .debug_selector(|| "hosts-route".into())
+                                .bg(crate::material::content_surface(cx))
+                                .shadow_sm()
+                                .child(header)
+                                .child(body),
+                        ),
                 )
                 .into_any_element();
         }
@@ -1778,7 +1958,7 @@ impl AppShell {
     ) {
         let (collapsed, route) = {
             let state = self.window_state.read(cx);
-            (state.sidebar_collapsed, state.route)
+            (state.sidebar_collapsed, state.route())
         };
         let popover_open = gpui_base::GlobalState::is_in_deferred_context(cx);
         let Some(attachment) = &mut self.attachment else {
@@ -1952,7 +2132,7 @@ mod tests {
         shell.read_with(cx, |shell, cx| {
             assert!(shell.compact(cx), "899px is compact");
             assert_eq!(
-                shell.destination,
+                shell.destination(cx),
                 Destination::Thread,
                 "a selected thread is the compact destination"
             );
@@ -2026,10 +2206,11 @@ mod tests {
         });
     }
 
-    /// The back chain: overlays first, then the navigation stack, and `false`
-    /// only at the root — where the platform closes the app.
+    /// The one Back chain: overlays first, then one step of the window's
+    /// history, and `false` only at the root — where the platform closes the
+    /// app. Leaving a page never touches the attachment.
     #[gpui::test]
-    fn back_unwinds_overlays_then_navigation_and_stops_at_the_root(cx: &mut TestAppContext) {
+    fn back_unwinds_overlays_then_the_history_and_stops_at_the_root(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
@@ -2042,8 +2223,8 @@ mod tests {
             consumed
         };
 
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.destination, Destination::Thread)
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Thread)
         });
 
         // An open overlay outranks navigation.
@@ -2052,24 +2233,201 @@ mod tests {
         assert!(back(cx), "back closes the overlay");
         shell.read_with(cx, |shell, cx| {
             assert!(!shell.window_state.read(cx).palette_open);
-            assert_eq!(shell.destination, Destination::Thread, "and nothing else");
+            assert_eq!(
+                shell.destination(cx),
+                Destination::Thread,
+                "and nothing else"
+            );
         });
 
-        // Thread → Threads keeps the connection.
+        // Thread → Threads → Hosts. Neither step detaches: only connecting
+        // somewhere else, or an explicit Disconnect, does that.
         assert!(back(cx));
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.destination, Destination::Threads);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Threads);
             assert!(shell.attachment.is_some(), "still attached");
         });
-
-        // Threads → Hosts is an explicit detach.
         assert!(back(cx));
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.destination, Destination::Hosts);
-            assert!(shell.attachment.is_none(), "leaving the list detaches");
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Hosts);
+            assert!(
+                shell.attachment.is_some(),
+                "walking back to the hosts list is not a decision to leave the host"
+            );
         });
 
         assert!(!back(cx), "the root belongs to the platform");
+    }
+
+    /// Settings is two pages of that same history, not a route with a back row
+    /// of its own: detail → root → whatever Settings was opened from.
+    #[gpui::test]
+    fn back_leaves_a_settings_section_then_settings_then_the_page_below(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 393.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        let settings = shell.read_with(cx, |shell, _| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .settings_page
+                .clone()
+        });
+
+        window_state.update(cx, |state, cx| state.open_settings(cx));
+        draw(cx);
+        settings.update(cx, |page, cx| page.select_section_for_test(cx));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::SettingsSection)
+        });
+
+        let back = |cx: &mut VisualTestContext| {
+            let consumed =
+                cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
+            draw(cx);
+            consumed
+        };
+        assert!(back(cx));
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Settings)
+        });
+        assert!(back(cx));
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.destination(cx),
+                Destination::Threads,
+                "settings returns to the page it was opened from"
+            );
+        });
+    }
+
+    /// Pair is pushed from Hosts and comes back to it.
+    #[gpui::test]
+    fn back_leaves_the_pair_page_for_the_hosts_page_that_pushed_it(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 393.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| {
+            state.go(Destination::Hosts, cx);
+            state.go(Destination::Pair, cx);
+        });
+        draw(cx);
+        let consumed = cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
+        draw(cx);
+        assert!(consumed);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Hosts)
+        });
+    }
+
+    /// Hosts answers "which host am I talking to" and nothing else. Hosting
+    /// this machine is a setting of this machine, and stays in Settings even
+    /// where the build can actually host.
+    #[gpui::test]
+    fn the_hosts_page_never_shows_hosting_settings(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 393.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        draw(cx);
+        assert!(
+            cx.debug_bounds("hosts-page").is_some(),
+            "the hosts page is what is on screen"
+        );
+        assert!(
+            cx.debug_bounds("hosting-settings").is_none(),
+            "hosting controls belong to Settings → Remote, at every width \
+             (this build has remote-hosting: {})",
+            cfg!(feature = "remote-hosting")
+        );
+    }
+
+    /// Wide keeps the workspace sidebar beside the Hosts route: the feature
+    /// area that leads there is meant to be persistent, so Hosts is a page in
+    /// the content column, not a window of its own.
+    #[gpui::test]
+    fn the_wide_hosts_route_keeps_the_sidebar_and_its_feature_area(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).route(), Route::Hosts);
+        });
+        assert!(
+            cx.debug_bounds("hosts-route").is_some(),
+            "hosts fills the content column"
+        );
+        assert!(
+            cx.debug_bounds("sidebar-feature-hosts").is_some(),
+            "and the sidebar it was opened from is still beside it"
+        );
+    }
+
+    /// Visiting Hosts from an open thread is navigation, not a reconnection:
+    /// the link, the selected thread and the views over it all stay put, and
+    /// Back returns to exactly where the visit started.
+    #[gpui::test]
+    fn a_hosts_visit_keeps_the_link_and_returns_to_the_thread(cx: &mut TestAppContext) {
+        let (shell, host, cx) = mount(cx);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, _| store.select_session("thread-1".into()));
+        resize(cx, 393.);
+        let chat = shell.read_with(cx, |shell, _| {
+            shell
+                .attachment
+                .as_ref()
+                .expect("attached")
+                .chat
+                .entity_id()
+        });
+        let _ = sent(&host);
+
+        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
+        window_state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Hosts);
+            assert!(shell.attachment.is_some(), "the visit keeps the attachment");
+        });
+        for payload in sent(&host) {
+            assert!(
+                !matches!(
+                    payload,
+                    ClientPayload::Command(Command::ShutdownAllAndFlush)
+                        | ClientPayload::Subscribe(tcode_protocol::Subscription {
+                            topic: Topic::Index,
+                            ..
+                        })
+                ),
+                "visiting hosts must not detach or reconnect: {payload:?}"
+            );
+        }
+
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.destination(cx), Destination::Thread);
+            assert_eq!(
+                shell
+                    .attachment
+                    .as_ref()
+                    .expect("attached")
+                    .chat
+                    .entity_id(),
+                chat,
+                "the views over the workspace were never rebuilt"
+            );
+        });
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            Some("thread-1".into())
+        );
     }
 
     #[test]

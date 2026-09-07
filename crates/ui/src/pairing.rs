@@ -59,7 +59,7 @@ impl PairForm {
             paired: None,
             address: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder(crate::tr!("remote.pair.address_placeholder").into_owned())
+                    .placeholder(crate::tr!("hosts.pair.address_placeholder").into_owned())
                     .default_value(
                         fixed
                             .as_ref()
@@ -78,7 +78,7 @@ impl PairForm {
             }),
             code: cx.new(|cx| {
                 InputState::new(window, cx)
-                    .placeholder(crate::tr!("remote.pair.code_placeholder").into_owned())
+                    .placeholder(crate::tr!("hosts.pair.code_placeholder").into_owned())
             }),
             busy: false,
             error: None,
@@ -254,14 +254,14 @@ pub fn pair_error(error: &str, address: &str) -> String {
         || lower.contains("expired")
         || lower.contains("invalid code")
     {
-        crate::tr!("remote.pair.bad_code").into_owned()
+        crate::tr!("hosts.pair.bad_code").into_owned()
     } else if ["timeout", "timed out", "refused", "connect", "dns"]
         .iter()
         .any(|needle| lower.contains(needle))
     {
-        crate::tr!("remote.pair.network_error", address = address).into_owned()
+        crate::tr!("hosts.pair.network_error", address = address).into_owned()
     } else {
-        crate::tr!("remote.pair.failed", reason = error).into_owned()
+        crate::tr!("hosts.pair.failed", reason = error).into_owned()
     }
 }
 
@@ -356,7 +356,7 @@ mod tests {
             assert!(holder.0.finish_pair(current, Err("HTTP 403".into()), "a:1"));
             assert_eq!(
                 holder.0.error.as_deref(),
-                Some(crate::tr!("remote.pair.bad_code").into_owned().as_str()),
+                Some(crate::tr!("hosts.pair.bad_code").into_owned().as_str()),
                 "a rejected code must read as a code problem, not a network one"
             );
         });

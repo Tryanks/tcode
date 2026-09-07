@@ -17,9 +17,9 @@ use crate::{
 };
 use gpui::{
     Action, AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SpringAnimation,
-    SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
+    SpringAnimation, SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -34,7 +34,7 @@ use crate::shortcut::format_secondary_shortcut;
 use crate::store::{ForkAvailability, TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
-use crate::window_state::WindowState;
+use crate::window_state::{Destination, Route, WindowState};
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
@@ -1107,6 +1107,85 @@ impl SessionsSidebar {
                     .child(format_secondary_shortcut("k")),
             ),
         )
+    }
+
+    /// The feature area: the window's persistent entries, directly under the
+    /// search field at both widths. Today it holds one — Hosts — and the next
+    /// one is a row in this list, not another one-off control.
+    fn render_feature_rows(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.window_state.read(cx).compact;
+        let active = self.window_state.read(cx).route() == Route::Hosts;
+        let store = self.store.read(cx);
+        let host = store
+            .remote_host_name()
+            .map(SharedString::from)
+            .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into());
+        let connected = matches!(
+            store.connection_state(),
+            tcode_client::ConnectionState::Connected
+        );
+        div()
+            .flex_none()
+            .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
+            .pb_1()
+            .child(
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "sidebar-hosts",
+                    Role::Button,
+                    crate::tr!("hosts.title"),
+                    cx,
+                )
+                .h(px(if compact { 44. } else { 32. }))
+                .debug_selector(|| "sidebar-feature-hosts".into())
+                .items_center()
+                .gap_2()
+                .px_2()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .when(active, |row| row.bg(cx.theme().list_active))
+                .when(!active, |row| {
+                    row.hover(|s| s.bg(cx.theme().sidebar_accent))
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.window_state
+                        .update(cx, |state, cx| state.go(Destination::Hosts, cx));
+                }))
+                .child(
+                    Icon::new(IconName::Network)
+                        .small()
+                        .flex_none()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(if compact { 15. } else { 13. }))
+                        .text_color(cx.theme().sidebar_foreground)
+                        .child(crate::tr!("hosts.title")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(if compact { 13. } else { 12. }))
+                        .text_align(gpui::TextAlign::Right)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(host),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(if connected {
+                            cx.theme().success
+                        } else {
+                            cx.theme().muted_foreground.opacity(0.5)
+                        }),
+                ),
+            )
     }
 
     fn render_layout_toggle(&self, layout: SidebarLayout, cx: &mut Context<Self>) -> Button {
@@ -2288,6 +2367,7 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
             .child(self.render_compact_search(cx))
+            .child(self.render_feature_rows(cx))
             .child(body)
             .into_any_element()
     }
@@ -2750,6 +2830,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_start_draft_for_project))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
+            .child(self.render_feature_rows(cx))
             .child(header)
             .child(thread_list)
             .child(self.render_footer(cx))

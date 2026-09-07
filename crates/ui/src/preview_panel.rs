@@ -301,7 +301,7 @@ impl PreviewPanel {
             let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
             window_caption::hosts_caption_for_state(
                 window_caption::CaptionSurface::Preview,
-                self.window_state.read(cx).route,
+                self.window_state.read(cx).route(),
                 diff_open,
                 right_tab,
             )

@@ -103,15 +103,14 @@ pub fn run_shell(
     // Who this client is, and how it re-points at another host. Installed
     // *before* the window, because the views the window builds — the pair form
     // most of all — ask this global what kind of client they are on.
-    let switch_to = mounted.clone();
+    // Switching resolves the window's shell when it is actually asked to, not
+    // when this global is installed: the shell does not exist yet here, and the
+    // cell below is emptied as soon as the window hands it over.
     cx.set_global(ClientAttachment::new(
         host,
         has_local,
-        move |target, window, cx| {
-            let Some(shell) = switch_to.borrow().clone() else {
-                return;
-            };
-            shell.update(cx, |shell, cx| shell.switch_to(target, window, cx));
+        |target, window, cx| {
+            crate::shell::switch_current(target, window, cx);
         },
     ));
     let captured = mounted.clone();
