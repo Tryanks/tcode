@@ -908,4 +908,5 @@ mod p4b_tests;
 
 #[cfg(test)]
 #[path = "terminal_replication_tests.rs"]
+#[cfg(unix)]
 mod terminal_replication_tests;

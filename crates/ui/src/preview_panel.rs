@@ -111,7 +111,10 @@ fn preview_key_for_session(
 /// What an automation tool answers when the platform webview cannot be created
 /// (Windows without the WebView2 runtime): say so plainly, with the underlying
 /// error, rather than leaving the agent to guess why nothing happened.
-#[cfg_attr(not(feature = "native-preview"), allow(dead_code))]
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows")
+))]
 fn unavailable_message(err: &str) -> String {
     format!(
         "the preview browser is unavailable on this machine \
