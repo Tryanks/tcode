@@ -1052,6 +1052,10 @@ mod tests {
         assert_eq!(peer.model, "gpt-6-astra");
         assert_eq!(executor.model, "gpt-6-astra");
         assert_ne!(peer.description, executor.description);
-        assert!(executor.description.contains("Default to low effort"));
+        assert!(
+            executor
+                .description
+                .contains("Always dispatch it at low effort")
+        );
     }
 }
