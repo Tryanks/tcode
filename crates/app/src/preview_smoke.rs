@@ -240,7 +240,7 @@ pub async fn run(
     shell.update(cx, |shell, cx| {
         shell.preview_lifecycle(cx).update(cx, |lifecycle, cx| {
             lifecycle.set_visible(Some(KEYS[1]), cx);
-            lifecycle.drop_view(KEYS[0]);
+            lifecycle.drop_view(KEYS[0], cx);
         });
     });
     yield_for(cx, STEP_DELAY).await;
@@ -271,7 +271,7 @@ pub async fn run(
     shell.update(cx, |shell, cx| {
         shell.preview_lifecycle(cx).update(cx, |lifecycle, cx| {
             lifecycle.set_visible(Some(KEYS[1]), cx);
-            lifecycle.drop_view(DROP_DURING_CREATE_KEY);
+            lifecycle.drop_view(DROP_DURING_CREATE_KEY, cx);
         });
     });
     yield_for(cx, STEP_DELAY).await;
@@ -290,8 +290,8 @@ pub async fn run(
     )
     .await;
     shell.update(cx, |shell, cx| {
-        shell.preview_lifecycle(cx).update(cx, |lifecycle, _| {
-            lifecycle.drop_view(DROP_DURING_CREATE_KEY)
+        shell.preview_lifecycle(cx).update(cx, |lifecycle, cx| {
+            lifecycle.drop_view(DROP_DURING_CREATE_KEY, cx)
         });
     });
     watchdog.finish_phase("recreate-after-inflight-drop");
