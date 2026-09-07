@@ -192,7 +192,9 @@ impl ComputerUseTools {
     }
 
     #[tool(
-        description = "Find and rank desktop window roots, returning state-scoped @rN references."
+        description = "Find and rank desktop window roots, returning @rN references; call this before observe_ui when the target is not the frontmost window. \
+                       This server exposes desktop windows only, so use the tcode_preview tools for web pages. \
+                       On macOS, grant Accessibility for all tools and Screen Recording for screenshots in tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
     )]
     async fn find_roots(&self, Parameters(params): Parameters<RootFilters>) -> CallToolResult {
         let permissions = permissions();
@@ -225,7 +227,11 @@ impl ComputerUseTools {
     }
 
     #[tool(
-        description = "Observe a desktop root and return a folded outline, state_id, and screenshot when requested by the observation mode."
+        description = "Observe a desktop root and return a folded outline, state_id, @e element refs, and a screenshot when requested by the observation mode. \
+                       Use find_roots → observe_ui, query that cached state with search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again; those cached queries do not touch the live UI. \
+                       Every @e ref belongs to its producing state_id; observations are immutable and kept in a bounded LRU (default 8), so an evicted or stale state or a ref from another state requires a fresh observe_ui. \
+                       This server exposes desktop windows only, so use the tcode_preview tools for web pages. \
+                       On macOS, grant Accessibility for all tools and Screen Recording for screenshots in tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
     )]
     async fn observe_ui(&self, Parameters(params): Parameters<ObserveUiParams>) -> CallToolResult {
         let permissions = permissions();
@@ -262,7 +268,9 @@ impl ComputerUseTools {
     }
 
     #[tool(
-        description = "Search and rank elements in a cached UI state by text and accessibility role."
+        description = "Search and rank elements by text and accessibility role in an immutable cached state, without touching the live UI. \
+                       The ref and state_id must come from the same observe_ui result; an evicted state needs a fresh observe_ui. \
+                       Oversized results return a preview and continuation ref for read_text."
     )]
     async fn search_ui(&self, Parameters(params): Parameters<SearchUiParams>) -> CallToolResult {
         let permissions = permissions();
@@ -294,7 +302,11 @@ impl ComputerUseTools {
         bounded_success(Some(&observation.state_id), lines.join("\n"), Vec::new())
     }
 
-    #[tool(description = "Expand local outline context around a state-scoped element reference.")]
+    #[tool(
+        description = "Expand local outline context around an @e element in an immutable cached state, without touching the live UI. \
+                       The ref and state_id must come from the same observe_ui result; an evicted state needs a fresh observe_ui. \
+                       Oversized results return a preview and continuation ref for read_text."
+    )]
     async fn expand_ui(&self, Parameters(params): Parameters<ExpandUiParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
@@ -317,7 +329,9 @@ impl ComputerUseTools {
     }
 
     #[tool(
-        description = "Inspect an element's full accessibility attributes, frame, and supported actions."
+        description = "Inspect an @e element's full accessibility attributes, frame, and supported actions in an immutable cached state, without touching the live UI. \
+                       The ref and state_id must come from the same observe_ui result; an evicted state needs a fresh observe_ui. \
+                       Oversized results return a preview and continuation ref for read_text."
     )]
     async fn inspect_ui(&self, Parameters(params): Parameters<InspectUiParams>) -> CallToolResult {
         let permissions = permissions();
@@ -349,7 +363,10 @@ impl ComputerUseTools {
     }
 
     #[tool(
-        description = "Execute a transaction of desktop input actions against a cached UI state, optionally verifying a postcondition."
+        description = "Execute a transaction of desktop input actions against an observed state, optionally using expect to verify semantic success. \
+                       Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui, while a successful call returns a successor state_id that must replace the old one. \
+                       Results report worked/didnt/unknown per step, stop at the first failure with stopped_at, and use expect as a postcondition rather than treating event delivery as success. \
+                       Input is refused when observe-only mode is enabled (allow_input=false) in Settings → Computer Use, and oversized output returns a preview plus a continuation ref for read_text."
     )]
     async fn act_ui(&self, Parameters(params): Parameters<ActUiParams>) -> CallToolResult {
         let permissions = permissions();
@@ -472,7 +489,11 @@ impl ComputerUseTools {
         bounded_success(Some(&successor.state_id), text, Vec::new())
     }
 
-    #[tool(description = "Read a bounded page of long text owned by a state-scoped reference.")]
+    #[tool(
+        description = "Read a bounded page of long text from an @e element or from an @o continuation returned with an oversized result. \
+                       An @e ref requires the state_id that produced it; an @o ref retains its owning state, and a mismatched owner or evicted ref errors. \
+                       Continue with the returned ref and next offset until eof."
+    )]
     async fn read_text(&self, Parameters(params): Parameters<ReadTextParams>) -> CallToolResult {
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
@@ -531,7 +552,10 @@ impl ComputerUseTools {
     }
 
     #[tool(
-        description = "Wait for a text, role, value, or referenced UI element to become present or absent."
+        description = "After observe_ui, wait against that state for a text, role, value, or referenced UI element to become present or absent. \
+                       Every @e ref must belong to the supplied state_id; an evicted or stale state or a ref from another state errors and requires a fresh observe_ui. \
+                       The call touches the live UI and returns a successor state_id; reuse that instead of the old state, then observe again after later UI changes. \
+                       Oversized output returns a preview plus a continuation ref for read_text."
     )]
     async fn wait_for(&self, Parameters(params): Parameters<WaitForParams>) -> CallToolResult {
         let permissions = permissions();
@@ -609,7 +633,11 @@ impl ServerHandler for ComputerUseTools {
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Observe and control desktop applications through state-scoped accessibility references."
+                "Use find_roots → observe_ui, query the immutable cached state with \
+                 search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again. \
+                 Every @e ref belongs to the state_id that produced it, so use each returned \
+                 successor state instead of an older state. This server handles desktop windows \
+                 only; use the tcode_preview tools for web pages.",
             )
     }
 }
