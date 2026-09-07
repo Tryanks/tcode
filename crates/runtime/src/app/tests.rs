@@ -1062,7 +1062,7 @@ fn orchestrate_guidance_and_current_configuration_are_composed() {
     );
     assert!(first.contains("### Execution models — `dispatch`"));
     assert!(first.contains(
-        "#### `codex` / `gpt-5.6-sol` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
+        "#### `codex` / `gpt-6-astra` — available `effort`: `low`, `medium`, `high`, `xhigh`, `max`"
     ));
     assert!(first.ends_with("\n\nShip it"));
     settings.decision_models[0].enabled = false;
@@ -1114,8 +1114,8 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
     let catalogs = HashMap::from([(
         ProviderKind::Codex,
         vec![ModelSpec {
-            id: "gpt-5.6-sol".into(),
-            display_name: "Sol".into(),
+            id: "gpt-6-astra".into(),
+            display_name: "GPT-6 Astra".into(),
             is_default: false,
             options: vec![OptionDescriptor::Select {
                 id: "reasoningEffort".into(),
@@ -1145,7 +1145,52 @@ fn dispatch_validates_against_live_efforts_instead_of_bundled_fallback() {
             .contains("unsupported effort max")
     );
     let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
-    assert!(configuration.contains("`gpt-5.6-sol` — available `effort`: `medium`, `high`, `deep`"));
+    assert!(configuration.contains("`gpt-6-astra` — available `effort`: `medium`, `high`, `deep`"));
+}
+
+#[test]
+fn loaded_catalog_marks_missing_orchestrate_model_unavailable() {
+    let settings = OrchestrateSettings::default();
+    let catalogs = HashMap::from([(
+        ProviderKind::Codex,
+        vec![ModelSpec {
+            id: "gpt-5.6-terra".into(),
+            display_name: "Terra".into(),
+            is_default: false,
+            options: Vec::new(),
+        }],
+    )]);
+    let expected = "model `gpt-6-astra` is unavailable for provider `codex`: not present in the loaded catalog";
+
+    assert_eq!(
+        resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-6-astra"),
+            Some("low"),
+            None,
+            &catalogs
+        )
+        .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        resolve_orchestrate_collaboration(
+            &settings,
+            "codex",
+            Some("gpt-6-astra"),
+            Some("medium"),
+            None,
+            &catalogs
+        )
+        .unwrap_err(),
+        expected
+    );
+    let configuration = render_orchestrate_configuration(&settings, None, &catalogs);
+    assert!(configuration.contains("#### `codex` / `gpt-6-astra` — unavailable"));
+    assert!(configuration.contains(
+        "Unavailable: model `gpt-6-astra` is not present in the loaded `codex` catalog."
+    ));
 }
 
 #[test]
@@ -1167,23 +1212,26 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_collaboration(
             &settings,
             "codex",
-            Some("gpt-5.6-sol"),
-            None,
+            Some("gpt-6-astra"),
+            Some("high"),
             None,
             &HashMap::new()
         )
-        .is_err()
+        .is_ok()
     );
-    assert!(
+    assert_eq!(
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
             Some("gpt-6-astra"),
-            None,
+            Some("low"),
             None,
             &HashMap::new()
         )
-        .is_err()
+        .unwrap()
+        .2
+        .as_deref(),
+        Some("low")
     );
     assert!(
         resolve_orchestrate_dispatch(
@@ -1201,7 +1249,31 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
             .is_err()
     );
+    // Disabling one role leaves the other role's row untouched.
+    assert_eq!(
+        resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-6-astra"),
+            Some("low"),
+            None,
+            &HashMap::new()
+        )
+        .unwrap()
+        .1,
+        "gpt-6-astra"
+    );
     settings.decision_models[0].enabled = true;
+    settings.child_models[0].enabled = false;
+    assert!(
+        resolve_orchestrate_dispatch(&settings, "codex", None, None, None, &HashMap::new())
+            .is_err()
+    );
+    assert!(
+        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
+            .is_ok()
+    );
+    settings.child_models[0].enabled = true;
     settings.decision_models[0].profile_id = Some("custom".into());
     assert!(
         resolve_orchestrate_collaboration(
@@ -1531,12 +1603,19 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
 fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let mut settings = OrchestrateSettings::default();
     assert_eq!(
-        resolve_orchestrate_dispatch(&settings, "codex", None, None, None, &HashMap::new())
-            .unwrap(),
+        resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-6-astra"),
+            Some("low"),
+            None,
+            &HashMap::new()
+        )
+        .unwrap(),
         (
             ProviderKind::Codex,
-            "gpt-5.6-sol".into(),
-            Some("medium".into()),
+            "gpt-6-astra".into(),
+            Some("low".into()),
             false,
             None
         )
@@ -1546,7 +1625,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         resolve_orchestrate_dispatch(
             &settings,
             "codex",
-            Some("gpt-5.6-sol"),
+            Some("gpt-6-astra"),
             Some("medium"),
             Some("KIMI"),
             &HashMap::new()
@@ -1554,7 +1633,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
         .unwrap(),
         (
             ProviderKind::Codex,
-            "gpt-5.6-sol".into(),
+            "gpt-6-astra".into(),
             Some("medium".into()),
             false,
             Some("kimi".into()),
@@ -1563,7 +1642,7 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let unknown_profile = resolve_orchestrate_dispatch(
         &settings,
         "codex",
-        Some("gpt-5.6-sol"),
+        Some("gpt-6-astra"),
         Some("medium"),
         Some("missing"),
         &HashMap::new(),
@@ -1589,12 +1668,12 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
             None
         )
     );
-    for effort in ["medium", "high", "xhigh", "max"] {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
         assert_eq!(
             resolve_orchestrate_dispatch(
                 &settings,
                 "codex",
-                Some("gpt-5.6-sol"),
+                Some("gpt-6-astra"),
                 Some(effort),
                 None,
                 &HashMap::new()
@@ -1608,14 +1687,14 @@ fn orchestrate_dispatch_enforces_child_allow_list_and_defaults() {
     let wrong_effort = resolve_orchestrate_dispatch(
         &settings,
         "codex",
-        Some("gpt-5.6-sol"),
+        Some("gpt-6-astra"),
         Some("imaginary"),
         None,
         &HashMap::new(),
     )
     .unwrap_err();
     assert!(wrong_effort.contains("unsupported effort imaginary"));
-    assert!(wrong_effort.contains("medium, high, xhigh, max"));
+    assert!(wrong_effort.contains("low, medium, high, xhigh, max"));
     let denied = resolve_orchestrate_dispatch(
         &settings,
         "claude",
@@ -2587,6 +2666,39 @@ fn session_options_gates_computer_use_registration_on_global_setting() {
         enabled.mcp_servers[0].name,
         agent::McpRegistration::SERVER_NAME_COMPUTER_USE
     );
+}
+
+#[test]
+fn collaboration_child_receives_enabled_computer_use_registration() {
+    let mut settings = Settings::default();
+    settings.computer_use.enabled = true;
+    let mut meta = SessionMeta::new(
+        ProviderKind::Codex,
+        PathBuf::from("/x"),
+        Some("gpt-6-astra".into()),
+    );
+    meta.parent_session_id = Some("lead".into());
+    meta.approval_mode = ApprovalMode::ReadOnly;
+    let computer_use = agent::McpRegistration {
+        name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
+        url: "http://127.0.0.1:9/mcp".into(),
+        bearer_token: "computer-token".into(),
+    };
+
+    let options = session_options(
+        &meta,
+        &settings,
+        LaunchEnv::default(),
+        None,
+        None,
+        None,
+        Some(computer_use),
+    );
+
+    assert!(options.mcp_servers.iter().any(|registration| {
+        registration.name == agent::McpRegistration::SERVER_NAME_COMPUTER_USE
+    }));
+    assert_eq!(options.approval_mode, ApprovalMode::ReadOnly);
 }
 
 #[test]
@@ -6136,7 +6248,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
             .orchestrate
             .child_models
             .iter_mut()
-            .find(|child| child.model == "gpt-5.6-sol")
+            .find(|child| child.model == "gpt-6-astra")
             .unwrap();
         max.fast = true;
     });
@@ -6148,7 +6260,7 @@ fn orchestrate_dispatch_fast_override_beats_profile_setting() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id: parent_id.clone(),
                 provider: "codex".into(),
-                model: Some("gpt-5.6-sol".into()),
+                model: Some("gpt-6-astra".into()),
                 effort: Some(effort.into()),
                 profile: None,
                 access: None,
@@ -6203,7 +6315,7 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
-                model: Some("gpt-5.6-sol".into()),
+                model: Some("gpt-6-astra".into()),
                 effort: None,
                 profile: None,
                 access: None,
@@ -6263,7 +6375,7 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
                 purpose: orchestrate_mcp::ThreadPurpose::Execution,
                 parent_id,
                 provider: "codex".into(),
-                model: Some("gpt-5.6-sol".into()),
+                model: Some("gpt-6-astra".into()),
                 effort: None,
                 profile: None,
                 access: None,
