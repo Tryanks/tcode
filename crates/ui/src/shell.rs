@@ -755,7 +755,11 @@ pub(crate) fn switch_current(target: AttachmentTarget, window: &mut Window, cx: 
     let Some(shell) = current_shell(cx) else {
         return;
     };
-    shell.update(cx, |shell, cx| shell.switch_to(target, window, cx));
+    // A child (notably the pairing confirmation) can call this from its
+    // entity listener. Attachment setup updates those children in turn.
+    window.defer(cx, move |window, cx| {
+        shell.update(cx, |shell, cx| shell.switch_to(target, window, cx));
+    });
 }
 
 /// Leave the attached host without opening another one.
@@ -2050,7 +2054,123 @@ mod tests {
         incoming: async_channel::Sender<String>,
     }
 
+    struct ReturningClient {
+        saved: tcode_client::pairing::PairedHost,
+        transport: RefCell<Option<Transport>>,
+    }
+
+    impl ClientHost for ReturningClient {
+        fn device_name(&self) -> String {
+            "returning phone".into()
+        }
+
+        fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
+            vec![self.saved.clone()]
+        }
+
+        fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
+
+        fn last_host_id(&self) -> Option<String> {
+            Some(self.saved.host_id.clone())
+        }
+
+        fn set_last_host_id(&self, host_id: Option<&str>) {
+            assert_eq!(host_id, Some(self.saved.host_id.as_str()));
+        }
+
+        fn pair(
+            &self,
+            _: tcode_client::host::PairRequest,
+        ) -> tcode_client::host::HostFuture<'_, Result<tcode_client::pairing::PairedHost, String>>
+        {
+            panic!("a cold start must reuse the saved pairing")
+        }
+
+        fn connect(&self, host: &tcode_client::pairing::PairedHost) -> Transport {
+            assert_eq!(host, &self.saved);
+            self.transport.borrow_mut().take().expect("one connection")
+        }
+    }
+
+    #[gpui::test]
+    fn a_cold_start_with_the_last_host_has_only_hosts_then_threads(cx: &mut TestAppContext) {
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let (_, state) = async_channel::unbounded();
+        let client = Rc::new(ReturningClient {
+            saved: tcode_client::pairing::PairedHost {
+                host_id: "last-host".into(),
+                name: "Last machine".into(),
+                origin: "http://127.0.0.1:47503".into(),
+                token: "test-token".into(),
+                last_connected_unix: Some(1),
+            },
+            transport: RefCell::new(Some(Transport {
+                to_host,
+                from_host,
+                state,
+            })),
+        });
+        let (shell, cx) = cx.add_window_view(move |window, cx| {
+            let state = cx.new(|_| WindowState::new(false));
+            AppShell::new(
+                state,
+                ShellSetup {
+                    initial: crate::last_host_target(client.as_ref()),
+                    client_host: Some(client),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+        });
+        resize(cx, 393.);
+        // Hydration and a selected conversation can arrive after the initial
+        // frame. Neither is an intent to navigate to Thread or Panel.
+        incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSnapshot(IndexSnapshot {
+                        activity: Default::default(),
+                        sessions: Vec::new(),
+                        projects: Vec::new(),
+                    }),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            store.drain_host_events_for_test(cx);
+            store.select_session("already-open-thread".into());
+        });
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Hosts, Destination::Threads]
+            );
+            assert_eq!(shell.mounted, [Destination::Hosts, Destination::Threads]);
+        });
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
+            assert!(shell.store().is_some(), "Back preserves the attachment");
+        });
+        assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+    }
+
     fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+        mount_initial(cx, Some(AttachmentTarget::Local))
+    }
+
+    fn mount_initial(
+        cx: &mut TestAppContext,
+        initial: Option<AttachmentTarget>,
+    ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (_, state) = async_channel::unbounded();
@@ -2067,7 +2187,7 @@ mod tests {
                     local: Some(Rc::new(move || {
                         transport.borrow_mut().take().expect("one attachment")
                     })),
-                    initial: Some(AttachmentTarget::Local),
+                    initial,
                     ..Default::default()
                 },
                 window,
@@ -2075,6 +2195,31 @@ mod tests {
             )
         });
         (shell, MountedShell { outgoing, incoming }, cx)
+    }
+
+    #[gpui::test]
+    fn connecting_from_the_hosts_panel_releases_its_entity_before_attachment(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, _host, cx) = mount_initial(cx, None);
+        resize(cx, 393.);
+        let hosts = shell.read_with(cx, |shell, _| shell.hosts.clone());
+        cx.update(|window, cx| {
+            set_back_target(window.window_handle(), &shell, cx);
+            // Connect runs inside RemotePanel's click listener. Attaching
+            // updates that same panel to point at the new workspace store.
+            hosts.update(cx, |_, cx| {
+                switch_current(AttachmentTarget::Local, window, cx);
+            });
+        });
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.store().is_some());
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Hosts, Destination::Threads]
+            );
+        });
     }
 
     fn draw(cx: &mut VisualTestContext) {

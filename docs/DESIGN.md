@@ -169,6 +169,10 @@ Compact replaces the split with a navigation stack over one history:
 **Settings → Settings section** over wherever they were opened from, pushed and
 popped with a 200ms lateral transition.
 
+A cold launch reconnects to the last saved machine and starts with exactly
+**Machines → Threads**. Loading the host's state does not restore Thread or
+Panel pages; Back returns to Machines while keeping the connection.
+
 - **Machines** — which machine this window talks to, and nothing else: **This
   machine** where the device has one, the added machines, one **Add a machine**
   button and the machines found nearby. It is the root of a window with no

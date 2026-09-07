@@ -18,7 +18,10 @@ pub fn android_main(app: android_activity::AndroidApp) {
             .with_max_level(log::LevelFilter::Info)
             .with_tag("Tcode-GPUI"),
     );
-    std::panic::set_hook(Box::new(|panic| log::error!("GPUI Android panic: {panic}")));
+    std::panic::set_hook(Box::new(|panic| {
+        log::error!("GPUI Android panic: {panic}");
+        log::error!("{}", std::backtrace::Backtrace::force_capture());
+    }));
     gpui_android::init_platform(&app);
     gpui::Application::with_platform(gpui_android::platform())
         .with_assets(tcode_ui::assets::Assets)

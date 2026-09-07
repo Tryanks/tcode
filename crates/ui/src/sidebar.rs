@@ -3163,6 +3163,39 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let headers = cx.debug_bounds("compact-group-header").is_some();
+        if projects > 1 {
+            for collapsed in [true, false] {
+                let header = cx.debug_bounds("compact-group-header").unwrap();
+                cx.simulate_click(header.center(), gpui::Modifiers::default());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                    draw(cx);
+                    let any_collapsed = store.read_with(cx, |store, _| {
+                        seeded
+                            .iter()
+                            .any(|project| store.is_project_collapsed(&project.id))
+                    });
+                    if any_collapsed == collapsed {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "project toggle reaches the replica"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let visible = ["compact-row-thread-0", "compact-row-thread-1"]
+                    .into_iter()
+                    .filter(|selector| cx.debug_bounds(selector).is_some())
+                    .count();
+                assert_eq!(
+                    visible,
+                    if collapsed { 1 } else { 2 },
+                    "the folder action hides and restores its threads"
+                );
+            }
+        }
 
         host.shutdown_blocking().expect("stop host");
         let persisted = tcode_services::settings::SettingsStore::new(root.clone()).load();
