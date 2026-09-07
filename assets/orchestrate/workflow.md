@@ -20,7 +20,8 @@ preference; choose the least costly adequate profile.
   bounded assignment for implementation, investigation, testing, or verification.
   Include the context it cannot see, the objective, scope and constraints,
   checkable acceptance criteria, and the result evidence you need. Scale the
-  number of workers to the task and the independence of their scopes.
+  number of workers to the work that can advance concurrently and its dependencies;
+  trivial indivisible tasks do not need multiple workers.
 - **Decision collaboration — `collaborate`.** Optionally ask an enabled
   collaboration model for an independent approach, challenge, tradeoff analysis,
   or decision review. This is separate from execution dispatch and does not
@@ -28,8 +29,8 @@ preference; choose the least costly adequate profile.
   advisory and you own the decision.
 
 Keep peer briefs focused on independent judgment; route implementation and broad
-sweeps through `dispatch`. Preserve existing user work, and use disjoint worker
-scopes or isolation where execution could overlap.
+sweeps through `dispatch`. Proactively dispatch work that can advance concurrently.
+Preserve existing user work and task outcomes.
 
 Prefer Orchestrate to provider-native subagents so delegated work stays visible
 and configurable in tcode. Use native subagents only when Orchestrate genuinely
@@ -42,7 +43,9 @@ abandonment after one failed call.
 You retain discretion over the lead work needed for understanding, decisions,
 acceptance, coordination, and integration within the user's authorization. Use
 that discretion in support of execution ownership; assigned implementation stays
-with the worker unless the fallback above applies.
+with the worker unless the fallback above applies. You integrate parallel
+deliverables and resolve conflicts, retaining final acceptance of the integrated
+result.
 
 ## Accept the result
 
