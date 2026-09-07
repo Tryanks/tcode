@@ -49,6 +49,14 @@ cargo build --workspace --locked
 cargo test --workspace --locked
 ```
 
+The CI workflow always starts so its required check names are reported, but it
+plans the affected scope before allocating build runners. Documentation-only
+changes and wording-only edits to bundled Orchestrate prompts skip heavyweight
+checks; Rust changes run the Cargo checks for affected packages and their
+dependents. Cargo, build, workflow and unclassified input changes fall back to
+the full workspace. When reporting local evidence, run the full commands above
+unless you are reproducing the narrower scope printed by the CI planning job.
+
 CI also runs `cargo machete` to catch unused dependencies, and checks iOS, Android
 and Web with `RUSTFLAGS='-D warnings'`. Use the commands and tool version in
 [the workflow](.github/workflows/ci.yml) to reproduce those checks. Fix warnings
