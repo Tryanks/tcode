@@ -106,6 +106,7 @@ pub(crate) struct AndroidWindowInner {
     callbacks: RefCell<Callbacks>,
     frame_requested: Cell<bool>,
     forced_frame_requested: Cell<bool>,
+    keyboard_tap: Cell<Option<Point<Pixels>>>,
 }
 
 #[derive(Clone)]
@@ -160,6 +161,7 @@ impl AndroidWindow {
             callbacks: RefCell::new(Callbacks::default()),
             frame_requested: Cell::new(true),
             forced_frame_requested: Cell::new(true),
+            keyboard_tap: Cell::new(None),
         })))
     }
 
@@ -338,17 +340,7 @@ impl AndroidWindow {
                 self.with_input_handler(PlatformInputHandler::unmark_text);
             }
             host::HostEvent::DeleteBackward => {
-                self.with_input_handler(|handler| {
-                    let Some(selection) = handler.selected_text_range(true) else {
-                        return;
-                    };
-                    let range = if selection.range.is_empty() && selection.range.start > 0 {
-                        selection.range.start - 1..selection.range.start
-                    } else {
-                        selection.range
-                    };
-                    handler.replace_text_in_range(Some(range), "");
-                });
+                self.with_input_handler(crate::text_input::delete_backward);
             }
             host::HostEvent::Key {
                 key_code,
@@ -419,6 +411,13 @@ impl AndroidWindow {
             let position = point(px(pointer.x() / scale), px(pointer.y() / scale));
             self.0.state.borrow_mut().mouse_position = position;
 
+            if phase == TouchPhase::Started {
+                // Resolve against the handler installed by this tap's frame,
+                // so switching between two inputs works as well as retapping one.
+                self.0.keyboard_tap.set(Some(position));
+                self.schedule_frame();
+            }
+
             // Android pointer ids are stable only within one gesture. Pairing
             // each id with ACTION_DOWN's monotonic timestamp gives GPUI the
             // same never-reused touch identity that the UIKit bridge assigns.
@@ -486,6 +485,12 @@ impl AndroidWindow {
 
     fn handle_host_key(&self, key_code: i32, down: bool, unicode_code_point: i32, meta_state: i32) {
         let key_code = Keycode::from(key_code as u32);
+        if key_code == Keycode::Del && meta_state & (0x2 | 0x1000 | 0x10000) == 0 {
+            if down {
+                self.with_input_handler(crate::text_input::delete_backward);
+            }
+            return;
+        }
         if key_code == Keycode::Back && !down {
             self.handle_back();
             return;
@@ -511,11 +516,9 @@ impl AndroidWindow {
             key_char: key_char.clone(),
         };
         if down {
-            let result = self.dispatch_input(PlatformInput::KeyDown(KeyDownEvent {
-                keystroke,
-                is_held: false,
-                prefer_character_input: true,
-            }));
+            let result = self.dispatch_input(PlatformInput::KeyDown(
+                crate::text_input::ime_key_down(keystroke),
+            ));
             if result.propagate
                 && let Some(text) = key_char.filter(|_| raw_meta & (0x2 | 0x1000 | 0x10000) == 0)
             {
@@ -541,6 +544,18 @@ impl AndroidWindow {
                 force_render: force,
             });
             self.0.callbacks.borrow_mut().request_frame = Some(callback);
+        }
+        if let Some(position) = self.0.keyboard_tap.take() {
+            self.with_input_handler(|handler| {
+                if handler
+                    .element_bounds()
+                    .is_some_and(|bounds| bounds.contains(&position))
+                {
+                    // IME dismissal preserves GPUI focus, so FocusGained alone
+                    // cannot reopen it when the user resumes editing.
+                    host::show_keyboard();
+                }
+            });
         }
     }
 
@@ -884,7 +899,10 @@ impl PlatformWindow for AndroidWindow {
     fn text_input_state_changed(&self, change: TextInputStateChange) {
         match change {
             TextInputStateChange::FocusGained => host::show_keyboard(),
-            TextInputStateChange::FocusLost => host::hide_keyboard(),
+            TextInputStateChange::FocusLost => {
+                self.0.state.borrow_mut().input_handler = None;
+                host::hide_keyboard();
+            }
             TextInputStateChange::SelectionChanged | TextInputStateChange::ContentChanged => {}
         }
     }

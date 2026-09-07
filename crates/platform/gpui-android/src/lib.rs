@@ -5,6 +5,9 @@
 
 use std::rc::Rc;
 
+#[cfg(any(target_os = "android", test))]
+mod text_input;
+
 #[cfg(target_os = "android")]
 mod android;
 

@@ -3189,6 +3189,7 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "smallvec",
+ "unicode-segmentation",
  "uuid",
 ]
 

@@ -37,6 +37,8 @@ public final class GpuiActivity extends NativeActivity {
     private static final int HOST_ERROR = 2;
 
     private GpuiInputView inputView;
+    private boolean keyboardVisible;
+    private boolean keyboardShowPending;
     private long cameraRequest;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
@@ -151,6 +153,14 @@ public final class GpuiActivity extends NativeActivity {
 
     @SuppressWarnings("deprecation")
     private void publishInsets(WindowInsets insets) {
+        boolean visible = Build.VERSION.SDK_INT >= 30
+                ? insets.isVisible(WindowInsets.Type.ime())
+                : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom();
+        if (keyboardVisible && !visible) {
+            keyboardShowPending = false;
+            releaseInputFocus();
+        }
+        keyboardVisible = visible;
         if (Build.VERSION.SDK_INT >= 30) {
             android.graphics.Insets safe = insets.getInsets(
                     WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
@@ -168,17 +178,36 @@ public final class GpuiActivity extends NativeActivity {
     public void onBackPressed() { nativeOnBack(true); }
 
     public void gpuiShowKeyboard() {
+        keyboardShowPending = true;
         inputView.setFocusable(true);
         inputView.setFocusableInTouchMode(true);
         inputView.requestFocus();
-        inputView.post(() -> ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
-                .showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT));
+        inputView.post(this::showKeyboardIfReady);
+    }
+
+    private void showKeyboardIfReady() {
+        if (!keyboardShowPending || !hasWindowFocus()) return;
+        keyboardShowPending = !((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
+                .showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && inputView != null && keyboardShowPending) {
+            inputView.post(this::showKeyboardIfReady);
+        }
     }
 
     public void gpuiHideKeyboard() {
+        keyboardShowPending = false;
         InputMethodManager manager =
                 (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         manager.hideSoftInputFromWindow(inputView.getWindowToken(), 0);
+        releaseInputFocus();
+    }
+
+    private void releaseInputFocus() {
         inputView.clearFocus();
         inputView.setFocusable(false);
         inputView.setFocusableInTouchMode(false);
@@ -320,6 +349,10 @@ public final class GpuiActivity extends NativeActivity {
                 @Override public boolean deleteSurroundingText(int before, int after) {
                     if (before > 0) nativeDeleteBackward();
                     return super.deleteSurroundingText(before, after);
+                }
+                @Override public boolean deleteSurroundingTextInCodePoints(int before, int after) {
+                    if (before > 0) nativeDeleteBackward();
+                    return super.deleteSurroundingTextInCodePoints(before, after);
                 }
                 @Override public boolean sendKeyEvent(KeyEvent event) {
                     forwardKeyEvent(event); return true;

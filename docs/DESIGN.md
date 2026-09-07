@@ -61,6 +61,12 @@ client. Desktop monospace text uses the configured system family; iOS and
 Android register the bundled Lilex in its place, and Android adds the packaged
 Noto Color Emoji fallback. Native debug builds embed fonts and SVGs in the
 package rather than reading a development machine's asset path.
+Android loads the device's system fonts and explicitly prefers Noto Sans CJK SC,
+Noto Sans SC, then Source Han Sans SC for missing UI glyphs; CJK fonts are not
+bundled. iOS retains its native system fallback (including PingFang).
+On Android, hiding the software keyboard preserves input focus; tapping inside
+that input opens the keyboard again. Backspace removes a whole grapheme or the
+selection, including while an IME composing region is active.
 The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.

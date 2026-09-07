@@ -1461,6 +1461,16 @@ impl AppShell {
             .bg(crate::material::content_surface(cx))
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
+            .when(cfg!(target_os = "android"), |mut element| {
+                // Android's cosmic-text fallback has no script preferences. These
+                // system sans families keep Han text out of arbitrary serif faces.
+                element.text_style().font_fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
+                    "Noto Sans CJK SC".into(),
+                    "Noto Sans SC".into(),
+                    "Source Han Sans SC".into(),
+                ]));
+                element
+            })
             .text_size(px(16.))
             .line_height(px(22.))
             .on_action(cx.listener(Self::on_toggle_palette))
