@@ -49,6 +49,19 @@ and offers what it can (open externally, copy, type the value) instead of a
 control that would do nothing. A client never infers the host's state from its
 own operating system, and never reports a success it did not perform.
 
+| Preview operation | macOS | Windows | Android | iOS / Web / Linux |
+| --- | --- | --- | --- | --- |
+| URL, external browser, copy | Yes | Yes | Yes | Yes |
+| Embedded page, history, JS automation, navigation errors | Yes | Yes | Yes | Unavailable |
+| Visible page PNG | Yes | Unavailable | Yes | Unavailable |
+| Local port discovery | Local workspace | Local workspace | Hidden | Hidden |
+
+Native preview capabilities require the `native-preview` build feature. Android
+uses normal WebView TLS validation and blocks insecure mixed content in HTTPS
+pages. Downloads, file uploads and new-window popups have no Android preview
+integration yet. Native child overlays can cover overlapping GPUI popovers;
+the command palette and navigation away hide the child explicitly.
+
 ## Design tokens
 
 The embedded [theme](../themes/tcode.json) owns colors and font choices;
@@ -647,12 +660,15 @@ width change settles.
 
 The Preview tab exists on every client. Its URL field, open-in-system-browser
 and copy-URL work everywhere; the embedded browser, history, JS automation and
-screenshots need a system webview, which only macOS and Windows desktop builds
-have. Without one the tab explains that and offers the portable actions rather
+screenshots need a system webview. macOS, Windows and Android builds have
+an embedded browser (screenshots are supported on macOS and Android). Android
+uses an activity-owned WebView above the GPUI surface, follows the panel bounds
+through rotation and keyboard insets, and hides it when leaving the compact
+Preview destination. Page inputs use the WebView’s native keyboard focus. Without one the tab explains that and offers the portable actions rather
 than dead back/reload/screenshot controls, agent automation requests are
 answered with an explicit "unsupported" instead of timing out, and such a client
 does not subscribe as an owner of the session's preview at all. Localhost port
-discovery scans the client, so it is offered only for a local workspace; a host
+discovery scans the client, so it is offered only for a local desktop workspace; a host
 URL typed into the field still works.
 
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected

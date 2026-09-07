@@ -296,7 +296,7 @@ Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
 access.
 
-For desktop preview, tcode rewrites `localhost`, `127.0.0.1` and `0.0.0.0` in
+For desktop and Android preview, tcode rewrites `localhost`, `127.0.0.1` and `0.0.0.0` in
 HTTP(S) preview URLs to the hostname in the added machine's origin, preserving the
 port, path, query and fragment. For example, `http://localhost:5173/app` becomes
 `http://192.168.1.10:5173/app` for that machine. Configure the dev server to
@@ -417,9 +417,13 @@ reported as unreachable.
   scroll further back than that.
 - The terminal renders text. In-grid images (sixel, iTerm2, kitty graphics) are
   not supported on any device, including the machine's own desktop window.
-- Desktop preview needs LAN- or overlay-reachable dev servers. There is no TCP
+- Desktop and Android preview need LAN- or overlay-reachable dev servers. There is no TCP
   tunnel for preview pages. Preview rewriting uses the first saved machine
   address, which may differ from an address chosen by transport reconnection.
+- Android has an embedded WebView preview with history, JavaScript automation,
+  navigation errors and visible-page PNG capture. iOS and the browser client
+  retain URL/open/copy actions without an embedded preview backend. Android
+  does not scan local development ports; enter a reachable host URL.
 - Phones, tablets and browsers do not run providers, terminals or project files
   locally; the machine does. Every product view is present on them — threads,
   chat, approvals, the terminal, diff, plan, preview, search, import and export —
