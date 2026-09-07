@@ -227,7 +227,7 @@ pub struct ResolvedProfile {
     pub settings: ProviderSettings,
 }
 
-/// One configured model, unique by provider and model ID across both fleets.
+/// One configured model, unique by provider and model ID within its role.
 /// Reasoning effort is selected per tool call from the provider's capabilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrchestrateChildModel {
@@ -257,8 +257,10 @@ const LEGACY_OPUS_CHILD_DEFINITION: &str = "Ratings (1–10, higher is better): 
 const LEGACY_ASTRA_DECISION_DEFINITION: &str = "Decision collaboration: develop independent approaches, challenge assumptions, and review architecture and acceptance evidence. Consult alongside Fable for another provider's perspective; route implementation and evidence gathering to execution models.";
 const LEGACY_FABLE_DECISION_DEFINITION: &str = "Decision collaboration: examine framing, architecture, user-facing design, and ambiguous tradeoffs. Consult alongside Astra for another provider's perspective; route implementation and evidence gathering to execution models.";
 
-const DEFAULT_SOL_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
-const DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
+const OLD_DEFAULT_SOL_DEFINITION: &str = "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.";
+const OLD_DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
+const DEFAULT_GPT_6_EXECUTION_DEFINITION: &str = "Baseline execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Default to low effort for a clear brief; raise effort only when a specific piece demonstrably needs more depth. Keep unrelated improvements out of scope, match verification to the changed behavior, and report the concrete result and relevant checks concisely.";
+const DEFAULT_OPUS_DEFINITION: &str = "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely.";
 const DEFAULT_ASTRA_DEFINITION: &str = include_str!("../../../assets/orchestrate/astra.md");
 const DEFAULT_FABLE_DEFINITION: &str = include_str!("../../../assets/orchestrate/fable-5-1.md");
 
@@ -358,7 +360,11 @@ impl Default for OrchestrateSettings {
                 ),
             ],
             child_models: vec![
-                builtin_model(ProviderKind::Codex, "gpt-5.6-sol", DEFAULT_SOL_DEFINITION),
+                builtin_model(
+                    ProviderKind::Codex,
+                    "gpt-6-astra",
+                    DEFAULT_GPT_6_EXECUTION_DEFINITION,
+                ),
                 builtin_model(
                     ProviderKind::ClaudeCode,
                     "claude-opus-5",
@@ -392,7 +398,42 @@ struct LegacyOrchestrateModel {
 }
 
 impl LegacyOrchestrateModel {
-    fn migrate(mut self) -> Option<OrchestrateChildModel> {
+    fn migrate(
+        mut self,
+        collaboration: bool,
+        replace_untouched_sol: bool,
+    ) -> Option<OrchestrateChildModel> {
+        if !collaboration
+            && self.effort.is_none()
+            && self.entry.provider == ProviderKind::Codex
+            && self.entry.model == "gpt-5.6-sol"
+            && self.entry.profile_id.is_none()
+            && self.entry.description == OLD_DEFAULT_SOL_DEFINITION
+            && self.entry.enabled
+            && !self.entry.fast
+        {
+            return replace_untouched_sol.then(|| {
+                builtin_model(
+                    ProviderKind::Codex,
+                    "gpt-6-astra",
+                    DEFAULT_GPT_6_EXECUTION_DEFINITION,
+                )
+            });
+        }
+        if !collaboration
+            && self.effort.is_some()
+            && self.entry.provider == ProviderKind::Codex
+            && self.entry.model == "gpt-5.6-sol"
+        {
+            return Some(self.entry);
+        }
+        if !collaboration
+            && self.entry.provider == ProviderKind::ClaudeCode
+            && self.entry.model == "claude-opus-5"
+            && self.entry.description == OLD_DEFAULT_OPUS_DEFINITION
+        {
+            self.entry.description = DEFAULT_OPUS_DEFINITION.into();
+        }
         let entry = &mut self.entry;
         let legacy = self.effort.is_some();
         if legacy {
@@ -421,9 +462,15 @@ impl LegacyOrchestrateModel {
                         "The default profile for everything dispatched:",
                     )
             {
-                if let Some(description) =
-                    OrchestrateSettings::builtin_child_definition(entry.provider, &entry.model)
-                {
+                if let Some(description) = match (entry.provider, entry.model.as_str()) {
+                    (ProviderKind::Codex, "gpt-5.6-sol") => Some(OLD_DEFAULT_SOL_DEFINITION),
+                    (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_ASTRA_DEFINITION),
+                    (ProviderKind::ClaudeCode, "claude-opus-5") => Some(DEFAULT_OPUS_DEFINITION),
+                    (ProviderKind::ClaudeCode, "claude-fable-5-1") => {
+                        Some(DEFAULT_FABLE_DEFINITION)
+                    }
+                    _ => None,
+                } {
                     entry.description = description.into();
                 }
             } else if !entry.description.trim().is_empty() {
@@ -464,42 +511,57 @@ impl Default for OrchestrateSettingsData {
 
 impl From<OrchestrateSettingsData> for OrchestrateSettings {
     fn from(data: OrchestrateSettingsData) -> Self {
-        let mut children: Vec<_> = data
-            .child_models
-            .into_iter()
-            .filter_map(LegacyOrchestrateModel::migrate)
-            .collect();
-        let decisions =
-            data.decision_models
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .filter_map(LegacyOrchestrateModel::migrate)
-                        .collect()
-                })
-                .unwrap_or_else(|| {
-                    let mut decisions = Self::default().decision_models;
-                    let mut migrated = Vec::new();
-                    children.retain(|child| {
-                        if decisions.iter().any(|entry| {
-                            entry.provider == child.provider && entry.model == child.model
-                        }) {
-                            migrated.push(child.clone());
-                            false
-                        } else {
-                            true
-                        }
-                    });
-                    for builtin in &mut decisions {
-                        if let Some(index) = migrated.iter().position(|entry| {
-                            entry.provider == builtin.provider && entry.model == builtin.model
-                        }) {
-                            *builtin = migrated.remove(index);
-                        }
-                    }
-                    decisions.extend(migrated);
-                    decisions
-                });
+        let (decisions, children) = if let Some(decisions) = data.decision_models {
+            let has_execution_astra = data.child_models.iter().any(|entry| {
+                entry.entry.provider == ProviderKind::Codex && entry.entry.model == "gpt-6-astra"
+            });
+            (
+                decisions
+                    .into_iter()
+                    .filter_map(|entry| entry.migrate(true, false))
+                    .collect(),
+                data.child_models
+                    .into_iter()
+                    .filter_map(|entry| entry.migrate(false, !has_execution_astra))
+                    .collect(),
+            )
+        } else {
+            let mut decisions = Self::default().decision_models;
+            let mut legacy_decisions = Vec::new();
+            let mut legacy_children = Vec::new();
+            for entry in data.child_models {
+                let legacy_decision = matches!(
+                    (entry.entry.provider, entry.entry.model.as_str()),
+                    (ProviderKind::Codex, "gpt-6-astra")
+                        | (
+                            ProviderKind::ClaudeCode,
+                            "claude-fable-5" | "claude-fable-5-1"
+                        )
+                );
+                if legacy_decision {
+                    legacy_decisions.push(entry);
+                } else {
+                    legacy_children.push(entry);
+                }
+            }
+            let mut migrated: Vec<_> = legacy_decisions
+                .into_iter()
+                .filter_map(|entry| entry.migrate(true, false))
+                .collect();
+            for builtin in &mut decisions {
+                if let Some(index) = migrated.iter().position(|entry| {
+                    builtin.provider == entry.provider && builtin.model == entry.model
+                }) {
+                    *builtin = migrated.remove(index);
+                }
+            }
+            decisions.extend(migrated);
+            let children = legacy_children
+                .into_iter()
+                .filter_map(|entry| entry.migrate(false, true))
+                .collect();
+            (decisions, children)
+        };
         let mut settings = Self {
             decision_models: decisions,
             child_models: children,
@@ -517,22 +579,30 @@ impl OrchestrateSettings {
         self == &Self::default()
     }
 
-    pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
+    pub fn builtin_decision_definition(
+        provider: ProviderKind,
+        model: &str,
+    ) -> Option<&'static str> {
         match (provider, model) {
-            (ProviderKind::Codex, "gpt-5.6-sol") => Some(DEFAULT_SOL_DEFINITION),
-            (ProviderKind::ClaudeCode, "claude-opus-5") => Some(DEFAULT_OPUS_DEFINITION),
             (ProviderKind::ClaudeCode, "claude-fable-5-1") => Some(DEFAULT_FABLE_DEFINITION),
             (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_ASTRA_DEFINITION),
             _ => None,
         }
     }
 
-    /// A model has one endpoint and one role. Migration combines distinct notes;
-    /// new patches keep the first row without allowing duplicates to mutate it.
+    pub fn builtin_child_definition(provider: ProviderKind, model: &str) -> Option<&'static str> {
+        match (provider, model) {
+            (ProviderKind::Codex, "gpt-6-astra") => Some(DEFAULT_GPT_6_EXECUTION_DEFINITION),
+            (ProviderKind::ClaudeCode, "claude-opus-5") => Some(DEFAULT_OPUS_DEFINITION),
+            _ => None,
+        }
+    }
+
+    /// A model occurs once per role. Migration combines distinct notes within
+    /// each list; new patches keep the first row without mutating it.
     pub fn deduplicate_models(&mut self, merge_notes: bool) {
-        let mut unique: Vec<OrchestrateChildModel> = Vec::new();
         for models in [&mut self.decision_models, &mut self.child_models] {
-            let start = unique.len();
+            let mut unique: Vec<OrchestrateChildModel> = Vec::new();
             for mut entry in std::mem::take(models) {
                 entry.model = entry.model.trim().to_string();
                 if let Some(existing) = unique.iter_mut().find(|existing| {
@@ -551,12 +621,8 @@ impl OrchestrateSettings {
                     unique.push(entry);
                 }
             }
-            *models = unique[start..].to_vec();
+            *models = unique;
         }
-        // Cross-role merged notes belong to the first (decision) record.
-        let decision_count = self.decision_models.len();
-        self.decision_models
-            .clone_from_slice(&unique[..decision_count]);
     }
 }
 
@@ -985,21 +1051,11 @@ impl Settings {
             SettingsPatch::AutoArchiveNoticeShown(value) => {
                 self.auto_archive_notice_shown = value;
             }
-            SettingsPatch::OrchestrateDecisionModels(mut value) => {
-                value.retain(|entry| {
-                    !self.orchestrate.child_models.iter().any(|existing| {
-                        existing.provider == entry.provider && existing.model == entry.model.trim()
-                    })
-                });
+            SettingsPatch::OrchestrateDecisionModels(value) => {
                 self.orchestrate.decision_models = value;
                 self.orchestrate.deduplicate_models(false);
             }
-            SettingsPatch::OrchestrateChildModels(mut value) => {
-                value.retain(|entry| {
-                    !self.orchestrate.decision_models.iter().any(|existing| {
-                        existing.provider == entry.provider && existing.model == entry.model.trim()
-                    })
-                });
+            SettingsPatch::OrchestrateChildModels(value) => {
                 self.orchestrate.child_models = value;
                 self.orchestrate.deduplicate_models(false);
             }
@@ -1294,12 +1350,41 @@ mod tests {
             ["gpt-6-astra", "claude-fable-5-1"]
         );
         assert_eq!(defaults.child_models.len(), 2);
+        assert_eq!(defaults.child_models[0].model, "gpt-6-astra");
+        assert_eq!(defaults.child_models[0].provider, ProviderKind::Codex);
+        assert!(!defaults.child_models[0].fast);
+        assert!(
+            defaults.child_models[0]
+                .description
+                .contains("Default to low effort")
+        );
+        assert_ne!(
+            defaults.child_models[0].description,
+            defaults.decision_models[0].description
+        );
+        assert_eq!(
+            serde_json::from_str::<OrchestrateSettings>(&serde_json::to_string(&defaults).unwrap())
+                .unwrap(),
+            defaults,
+            "role-specific Astra definitions survive legacy deduplication"
+        );
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert_eq!(legacy.orchestrate, defaults);
         let mut old = serde_json::to_value(&defaults).unwrap();
         old.as_object_mut().unwrap().remove("decision_models");
+        old["child_models"][0] = serde_json::json!({
+            "provider": "codex",
+            "model": "gpt-5.6-sol",
+            "enabled": true,
+            "fast": false,
+            "description": OLD_DEFAULT_SOL_DEFINITION,
+        });
         old["generic_identity"] = "old self-concept".into();
         old["model_identities"] = serde_json::json!([{"provider":"codex","model":"gpt-5.6-sol","identity":"old identity"}]);
+        old["child_models"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::to_value(&defaults.decision_models[0]).unwrap());
         let mut fable = defaults.decision_models[1].clone();
         fable.enabled = false;
 
@@ -1332,6 +1417,115 @@ mod tests {
                 .unwrap(),
             empty
         );
+    }
+
+    #[test]
+    fn orchestrate_migrates_untouched_sol_and_opus_defaults() {
+        let old_json = r#"{
+            "decision_models": [],
+            "child_models": [
+                {
+                    "provider": "codex",
+                    "model": "gpt-5.6-sol",
+                    "enabled": true,
+                    "fast": false,
+                    "description": "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely."
+                },
+                {
+                    "provider": "claude_code",
+                    "model": "claude-opus-5",
+                    "enabled": true,
+                    "fast": false,
+                    "description": "Execution model for agentic coding, cross-file implementation, refactoring, debugging, and review. Consider it alongside Sol across providers, including user-facing behavior and API or UI details. Use medium for clear bounded work, high for substantial implementation, and xhigh or max when difficult reasoning justifies the extra work; low can suit small mechanical tasks. Match verification to the changed behavior and avoid repetitive self-checking. Report evidence and unresolved limitations concisely."
+                }
+            ]
+        }"#;
+        let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
+
+        assert_eq!(
+            migrated.child_models,
+            OrchestrateSettings::default().child_models
+        );
+    }
+
+    #[test]
+    fn orchestrate_preserves_every_customized_sol_shape() {
+        let customized = [
+            r#"{"description":"custom","enabled":true,"fast":false}"#,
+            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","profile_id":"custom","enabled":true,"fast":false}"#,
+            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":false,"fast":false}"#,
+            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":true,"fast":true}"#,
+            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":true,"fast":false,"effort":"low"}"#,
+        ];
+        for row in customized {
+            let expected: serde_json::Value = serde_json::from_str(row).unwrap();
+            let old_json = format!(
+                r#"{{"decision_models":[],"child_models":[{{"provider":"codex","model":"gpt-5.6-sol",{}}}]}}"#,
+                &row[1..row.len() - 1]
+            );
+            let migrated: OrchestrateSettings = serde_json::from_str(&old_json).unwrap();
+            assert_eq!(migrated.child_models.len(), 1, "input: {row}");
+            let actual = &migrated.child_models[0];
+            assert_eq!(actual.model, "gpt-5.6-sol", "input: {row}");
+            assert_eq!(
+                actual.description,
+                expected["description"].as_str().unwrap(),
+                "input: {row}"
+            );
+            assert_eq!(
+                actual.enabled,
+                expected["enabled"].as_bool().unwrap(),
+                "input: {row}"
+            );
+            assert_eq!(
+                actual.fast,
+                expected["fast"].as_bool().unwrap(),
+                "input: {row}"
+            );
+            assert_eq!(
+                actual.profile_id.as_deref(),
+                expected["profile_id"].as_str(),
+                "input: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn orchestrate_migration_does_not_duplicate_existing_execution_astra() {
+        let old_json = r#"{
+            "decision_models": [],
+            "child_models": [
+                {
+                    "provider": "codex",
+                    "model": "gpt-5.6-sol",
+                    "enabled": true,
+                    "fast": false,
+                    "description": "Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely."
+                },
+                {
+                    "provider": "codex",
+                    "model": "gpt-6-astra",
+                    "profile_id": "custom-codex",
+                    "enabled": false,
+                    "fast": true,
+                    "description": "User execution guidance"
+                }
+            ]
+        }"#;
+        let migrated: OrchestrateSettings = serde_json::from_str(old_json).unwrap();
+
+        assert_eq!(migrated.child_models.len(), 1);
+        assert_eq!(migrated.child_models[0].model, "gpt-6-astra");
+        assert_eq!(
+            migrated.child_models[0].profile_id.as_deref(),
+            Some("custom-codex")
+        );
+        assert_eq!(
+            migrated.child_models[0].description,
+            "User execution guidance"
+        );
+        assert!(!migrated.child_models[0].enabled);
+        assert!(migrated.child_models[0].fast);
     }
 
     #[test]
@@ -1457,8 +1651,8 @@ mod tests {
         })).unwrap();
         assert_eq!(settings.child_models.len(), 2);
         let sol = &settings.child_models[0];
-        assert!(sol.description.contains("medium effort: Routine work"));
-        assert!(sol.description.contains("max effort: Difficult bugs"));
+        assert!(sol.description.contains("Routine work"));
+        assert!(sol.description.contains("Difficult bugs"));
         assert!(!sol.enabled);
         assert!(sol.fast);
         assert_eq!(sol.profile_id.as_deref(), Some("custom"));
@@ -1518,22 +1712,32 @@ mod tests {
     }
 
     #[test]
-    fn orchestrate_settings_patches_reject_duplicate_models_across_roles_and_endpoints() {
+    fn orchestrate_settings_patches_deduplicate_within_each_role() {
         let mut settings = Settings::default();
-        let sol = settings.orchestrate.child_models[0].clone();
-        let mut duplicate = sol.clone();
+        let executor = settings.orchestrate.child_models[0].clone();
+        let peer = settings.orchestrate.decision_models[0].clone();
+        assert_eq!(executor.provider, peer.provider);
+        assert_eq!(executor.model, peer.model);
+        assert_ne!(executor.description, peer.description);
+
+        let mut duplicate = executor.clone();
         duplicate.profile_id = Some("another-endpoint".into());
         duplicate.description = "must not overwrite".into();
         let mut children = settings.orchestrate.child_models.clone();
-        children.push(duplicate.clone());
+        children.push(duplicate);
         settings.apply(SettingsPatch::OrchestrateChildModels(children));
         assert_eq!(settings.orchestrate.child_models.len(), 2);
-        assert_eq!(settings.orchestrate.child_models[0], sol);
+        assert_eq!(settings.orchestrate.child_models[0], executor);
+
+        let mut duplicate = peer.clone();
+        duplicate.profile_id = Some("another-endpoint".into());
+        duplicate.description = "must not overwrite".into();
         let mut decisions = settings.orchestrate.decision_models.clone();
         decisions.push(duplicate);
         settings.apply(SettingsPatch::OrchestrateDecisionModels(decisions));
         assert_eq!(settings.orchestrate.decision_models.len(), 2);
-        assert_eq!(settings.orchestrate.child_models[0], sol);
+        assert_eq!(settings.orchestrate.decision_models[0], peer);
+        assert_eq!(settings.orchestrate.child_models[0], executor);
     }
 
     #[test]

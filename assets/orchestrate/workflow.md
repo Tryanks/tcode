@@ -12,7 +12,9 @@ If Orchestrate tool schemas are deferred, discover and load them before starting
 delegated execution. Read the current fleet, compare enabled execution profiles
 across all providers, and select a task-fit model, endpoint profile, and per-call
 effort using the configured strengths and caveats. Provider family gives no
-preference; choose the least costly adequate profile.
+preference. The bundled GPT-6 executor at low effort is the baseline; raise its
+effort only when a specific piece demonstrably needs more depth, or choose
+another profile when its description better fits the task.
 
 ## Route the work
 
@@ -26,11 +28,17 @@ preference; choose the least costly adequate profile.
   collaboration model for an independent approach, challenge, tradeoff analysis,
   or decision review. This is separate from execution dispatch and does not
   replace it. Continue a useful discussion with `send`; its advice remains
-  advisory and you own the decision.
+  advisory and you own the decision. A collaborator may gather focused UI
+  evidence for its judgment with Computer Use when enabled. Astra should inspect
+  through `find_roots` → `observe_ui` → `search_ui` / `inspect_ui` / `read_text`
+  and report what was visible, the state ids or text read, and discrepancies.
+  It may use `act_ui` / `wait_for` only when the lead's brief explicitly requests
+  UI operation and the thread's access mode permits it.
 
 Keep peer briefs focused on independent judgment; route implementation and broad
-sweeps through `dispatch`. Proactively dispatch work that can advance concurrently.
-Preserve existing user work and task outcomes.
+sweeps through `dispatch`. Focused UI observation by a collaborator is evidence
+gathering for a decision, not implementation or acceptance. Proactively dispatch
+work that can advance concurrently. Preserve existing user work and task outcomes.
 
 Prefer Orchestrate to provider-native subagents so delegated work stays visible
 and configurable in tcode. Use native subagents only when Orchestrate genuinely
