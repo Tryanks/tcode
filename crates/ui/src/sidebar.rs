@@ -639,6 +639,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         self.project_filter = (!action.0.is_empty()).then(|| action.0.clone());
+        self.window_state
+            .update(cx, |state, cx| state.leave_route_for_chat(cx));
         cx.notify();
     }
 

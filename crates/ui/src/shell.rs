@@ -189,6 +189,10 @@ struct ShellAttachment {
     /// Collapsed-only overlay visibility. Purely transient and never persisted;
     /// expanded/non-workspace renders clear it synchronously.
     sidebar_overlay_visible: bool,
+    /// Last store selection seen by the shell, so selections made outside the
+    /// sidebar's `OpenThread` event (notably an async draft) still switch the
+    /// wide content column back from Hosts.
+    observed_session_id: Option<String>,
     /// Whether this attachment's host settings have been adopted once.
     adopted: bool,
     /// Whether this attachment's saved record has been stamped with the time
@@ -451,6 +455,16 @@ impl AppShell {
             cx.observe_in(&store, window, move |this, store, window, cx| {
                 window.set_window_title(&store.read(cx).shell_window_title());
                 this.stamp_connected(cx);
+                let selected = store.read(cx).active_session_id();
+                if let Some(attachment) = &mut this.attachment
+                    && attachment.observed_session_id != selected
+                {
+                    attachment.observed_session_id = selected.clone();
+                    if selected.is_some() {
+                        this.window_state
+                            .update(cx, |state, cx| state.leave_route_for_chat(cx));
+                    }
+                }
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &RuntimeEvent, w, cx| {
@@ -515,6 +529,7 @@ impl AppShell {
             })
         };
 
+        let observed_session_id = store.read(cx).active_session_id();
         self.attachment = Some(ShellAttachment {
             chat: cx.new(|cx| ChatView::new(store.clone(), self.window_state.clone(), window, cx)),
             diff: cx.new(|cx| DiffPanel::new(store.clone(), self.window_state.clone(), cx)),
@@ -531,6 +546,7 @@ impl AppShell {
             sidebar_width: Rc::new(Cell::new(px(SIDEBAR_WIDTH))),
             sidebar_restore_pending: false,
             sidebar_overlay_visible: false,
+            observed_session_id,
             adopted: false,
             stamped: false,
             link,
@@ -671,10 +687,13 @@ impl AppShell {
             .update(cx, |state, cx| state.go(destination, cx));
     }
 
-    /// "Show me this thread." A wide window already does; a compact one pushes.
+    /// "Show me this thread." Compact pushes; wide switches the content route.
     fn open_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compact(cx) {
             self.go(Destination::Thread, cx);
+        } else {
+            self.window_state
+                .update(cx, |state, cx| state.leave_route_for_chat(cx));
         }
         if let Some(attachment) = &self.attachment {
             attachment
@@ -1500,8 +1519,9 @@ impl AppShell {
         })
     }
 
-    /// The wide Hosts route's top strip: Back to the workspace, the page title,
-    /// and (on Windows) the caption cluster this route's content column owns.
+    /// The wide Hosts route's top strip: the page title and (on Windows) the
+    /// caption cluster this route's content column owns. The sidebar switches
+    /// wide routes, so this strip deliberately has no Back control.
     fn render_hosts_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let hosts_caption = window_caption::hosts_caption_for_state(
             window_caption::CaptionSurface::Hosts,
@@ -1514,13 +1534,6 @@ impl AppShell {
         } else {
             crate::tr!("hosts.title").into_owned().into()
         };
-        let back = self.window_state.read(cx).parent().map(|parent| {
-            back_button("hosts-back", parent.back_label(), cx)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.back(window, cx);
-                }))
-                .into_any_element()
-        });
         window_drag_area(
             "hosts-header-drag",
             h_flex()
@@ -1534,7 +1547,6 @@ impl AppShell {
             window,
             cx,
         )
-        .children(back)
         .child(window_caption::drag_region(
             div().flex_1().text_size(px(15.)).font_medium().child(title),
         ))
@@ -2362,6 +2374,76 @@ mod tests {
             cx.debug_bounds("sidebar-feature-hosts").is_some(),
             "and the sidebar it was opened from is still beside it"
         );
+    }
+
+    /// A store selection can come from the sidebar or palette. In wide layout
+    /// it switches the content column away from Hosts without requiring Back.
+    #[gpui::test]
+    fn a_wide_store_thread_selection_leaves_the_hosts_route(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        draw(cx);
+        let feature = cx
+            .debug_bounds("sidebar-feature-hosts")
+            .expect("the Machines feature row is visible");
+        cx.simulate_mouse_down(
+            feature.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            feature.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        draw(cx);
+        assert!(cx.debug_bounds("hosts-route").is_some());
+
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            store.select_session("thread-1".into());
+            cx.notify();
+        });
+        draw(cx);
+
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
+        });
+        assert!(
+            cx.debug_bounds("hosts-route").is_none(),
+            "the chat content replaces Machines as soon as the store selection changes"
+        );
+    }
+
+    /// The selected Machines row is idempotent: clicking it again does not
+    /// turn the active wide route into a page-stack entry or leave the route.
+    #[gpui::test]
+    fn a_second_wide_hosts_feature_click_stays_on_hosts(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 1024.);
+        draw(cx);
+
+        for _ in 0..2 {
+            let feature = cx
+                .debug_bounds("sidebar-feature-hosts")
+                .expect("the Machines feature row stays visible");
+            cx.simulate_mouse_down(
+                feature.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                feature.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            draw(cx);
+        }
+
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.window_state.read(cx).route(), Route::Hosts);
+        });
+        assert!(cx.debug_bounds("hosts-route").is_some());
     }
 
     /// Settings replaces the whole window, unlike the Hosts route: the left

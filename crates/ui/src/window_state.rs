@@ -173,6 +173,23 @@ impl WindowState {
         cx.emit(OpenThread);
     }
 
+    /// Sidebar-driven conversation navigation replaces the wide Hosts visit
+    /// with Chat. Compact keeps the visit on its stack so Back still returns
+    /// through every page exactly as it did before.
+    pub fn leave_route_for_chat(&mut self, cx: &mut Context<Self>) {
+        if self.compact || self.route() != Route::Hosts {
+            return;
+        }
+        while self.history.len() > 1 && self.route() == Route::Hosts {
+            self.history.pop();
+        }
+        if self.route() != Route::Chat {
+            return;
+        }
+        *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
+        cx.notify();
+    }
+
     pub fn toggle_sidebar_collapsed(
         &mut self,
         store: &Entity<WorkspaceStore>,
@@ -304,18 +321,40 @@ mod tests {
         });
     }
 
-    /// Wide has no page stack: Back leaves the settings route in one step and
-    /// reports "not consumed" once the workspace is showing.
+    /// Wide has no page stack: the shared close-route action leaves Hosts or
+    /// Settings in one step and reports "not consumed" in the workspace.
     #[gpui::test]
     fn wide_back_leaves_a_route_rather_than_a_page(cx: &mut TestAppContext) {
         let state = cx.new(|_| WindowState::new(false));
         state.update(cx, |state, cx| {
             state.enter_workspace(cx);
+            state.go(Destination::Hosts, cx);
+            assert!(state.back(cx));
+            assert_eq!(state.route(), Route::Chat);
+
             state.open_settings(cx);
             state.go(Destination::SettingsSection, cx);
             assert!(state.back(cx));
             assert_eq!(state.route(), Route::Chat);
             assert!(!state.back(cx));
+        });
+    }
+
+    /// Repeated wide visits are route switches, not pages added to a stack.
+    #[gpui::test]
+    fn wide_sidebar_navigation_replaces_a_hosts_visit_without_growing_history(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|_| WindowState::new(false));
+        state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.go(Destination::Hosts, cx);
+            state.leave_route_for_chat(cx);
+            assert_eq!(state.history(), [Destination::Hosts, Destination::Thread]);
+
+            state.go(Destination::Hosts, cx);
+            state.leave_route_for_chat(cx);
+            assert_eq!(state.history(), [Destination::Hosts, Destination::Thread]);
         });
     }
 }

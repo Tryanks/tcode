@@ -350,6 +350,12 @@ in both states.
    expansion so the list can be collapsed again).
 6. Footer: gear + "Settings" → settings route.
 
+In wide layout, the sidebar switches the content route directly: Machines
+replaces Chat in the content column, and selecting a thread, starting a draft,
+or choosing its project switches that column back to Chat. Wide routes do not
+put Back in the Machines header or accumulate a page history. Compact keeps the
+single navigation stack and its Back semantics described above.
+
 ### Chat header
 
 52px. The first control is the **sidebar toggle**, immediately left of the
