@@ -22,17 +22,23 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 unsafe extern "C" {
     fn tcode_ios_host_device_name(destination: *mut u8, capacity: usize) -> usize;
+    fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
     fn tcode_ios_host_browse(request_id: u64);
 }
 
-pub(crate) fn native_host() -> NativeClientHost {
+pub(crate) fn native_host() -> (NativeClientHost, Option<String>) {
     let device_name = read_native_string(|destination, capacity| {
         // SAFETY: Swift writes no more than `capacity` bytes during the call.
         unsafe { tcode_ios_host_device_name(destination, capacity) }
     })
     .filter(|name| !name.trim().is_empty())
     .unwrap_or_else(|| "iPhone".into());
+    let system_locale = read_native_string(|destination, capacity| {
+        // SAFETY: Swift writes no more than `capacity` bytes during the call.
+        unsafe { tcode_ios_host_system_locale(destination, capacity) }
+    })
+    .filter(|locale| !locale.trim().is_empty());
 
     let host = NativeClientHost::from_env_with_device_name(device_name)
         .with_browser(|| -> HostFuture<'static, Vec<DiscoveredHost>> {
@@ -72,7 +78,7 @@ pub(crate) fn native_host() -> NativeClientHost {
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
         });
-    host
+    (host, system_locale)
 }
 
 /// Completes a one-shot AVFoundation QR scan from Swift.

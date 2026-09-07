@@ -27,6 +27,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
+import java.util.Locale;
 
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
@@ -192,6 +193,20 @@ public final class GpuiActivity extends NativeActivity {
 
     public String gpuiDeviceModel() {
         return Build.MODEL == null || Build.MODEL.isEmpty() ? "Android" : Build.MODEL;
+    }
+
+    /** Snapshot used by the Rust shell at startup; restart after changing the OS language. */
+    @SuppressWarnings("deprecation")
+    public String gpuiSystemLocale() {
+        Configuration configuration = getResources().getConfiguration();
+        Locale locale = null;
+        if (Build.VERSION.SDK_INT >= 24 && !configuration.getLocales().isEmpty()) {
+            locale = configuration.getLocales().get(0);
+        } else {
+            locale = configuration.locale;
+        }
+        if (locale == null) locale = Locale.getDefault();
+        return locale.toLanguageTag();
     }
 
     public void gpuiStartCameraScan(long requestId) {

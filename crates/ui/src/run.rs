@@ -53,6 +53,9 @@ pub struct ShellOptions {
     pub theme_json: Cow<'static, str>,
     /// Whether this client should bring itself to the front on launch.
     pub activate: bool,
+    /// The user's first OS-configured language when the platform has a more
+    /// authoritative API than `sys_locale`. Desktop leaves this as `None`.
+    pub system_locale: Option<String>,
     pub setup: ShellSetup,
 }
 
@@ -64,6 +67,7 @@ impl Default for ShellOptions {
             fonts: vec![Cow::Borrowed(crate::assets::DM_SANS)],
             theme_json: Cow::Borrowed(THEME_JSON),
             activate: false,
+            system_locale: None,
             setup: ShellSetup::default(),
         }
     }
@@ -95,6 +99,12 @@ pub fn run_shell(
     seam: WindowSeam,
     options: ShellOptions,
 ) -> (WindowHandle<OverlayHost>, Entity<AppShell>) {
+    crate::i18n::set_platform_system_locale(options.system_locale.as_deref());
+    let language = host.load_preferences().language;
+    crate::i18n::apply_locale(match language.as_deref() {
+        Some("system") | None => None,
+        override_locale => override_locale,
+    });
     cx.set_global(seam);
     cx.text_system()
         .add_fonts(options.fonts)

@@ -118,7 +118,10 @@ impl JavaBridge {
     }
 }
 
-pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeClientHost, String> {
+pub(crate) fn native_host(
+    app: AndroidApp,
+    cx: &mut App,
+) -> Result<(NativeClientHost, Option<String>), String> {
     let bridge = JavaBridge::new(app)?;
     let data_dir = bridge
         .object
@@ -130,6 +133,10 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeClientH
         .call_string("gpuiDeviceModel")?
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "Android".into());
+    let system_locale = bridge
+        .object
+        .call_string("gpuiSystemLocale")?
+        .filter(|locale| !locale.trim().is_empty());
 
     let callbacks = Rc::new(RefCell::new(HashMap::<
         u64,
@@ -192,7 +199,7 @@ pub(crate) fn native_host(app: AndroidApp, cx: &mut App) -> Result<NativeClientH
                     .unwrap_or_else(|error| Err(error.to_string()))
             })
         });
-    Ok(host)
+    Ok((host, system_locale))
 }
 
 pub(crate) fn deliver_result(request_id: u64, status: i32, value: Option<String>) {

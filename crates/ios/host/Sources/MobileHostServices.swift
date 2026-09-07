@@ -44,6 +44,15 @@ public func tcodeIosHostDeviceName(
     copyUTF8(UIDevice.current.name, to: destination, capacity: capacity)
 }
 
+@_cdecl("tcode_ios_host_system_locale")
+public func tcodeIosHostSystemLocale(
+    _ destination: UnsafeMutablePointer<UInt8>?,
+    _ capacity: Int
+) -> Int {
+    let locale = Locale.preferredLanguages.first ?? Locale.current.identifier
+    return copyUTF8(locale, to: destination, capacity: capacity)
+}
+
 @_cdecl("tcode_ios_host_start_camera_scan")
 public func tcodeIosHostStartCameraScan(_ requestId: UInt64) {
     func begin() {

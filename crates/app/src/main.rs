@@ -493,6 +493,7 @@ fn main() {
                     fonts: application_fonts,
                     theme_json,
                     activate: true,
+                    system_locale: None,
                     setup: ShellSetup {
                         client_host: Some(native_client.clone()),
                         local: Some(Rc::new(move || local_kernel.transport())),

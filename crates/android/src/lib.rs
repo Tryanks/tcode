@@ -44,10 +44,9 @@ pub fn android_main(app: android_activity::AndroidApp) {
                 log::error!("bundled Noto Color Emoji font is missing");
             }
 
-            let host: Rc<dyn ClientHost> = Rc::new(
-                host::native_host(app.clone(), cx)
-                    .expect("failed to initialize Android host services"),
-            );
+            let (native_host, system_locale) = host::native_host(app.clone(), cx)
+                .expect("failed to initialize Android host services");
+            let host: Rc<dyn ClientHost> = Rc::new(native_host);
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
@@ -64,6 +63,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
                     },
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
+                    system_locale,
                     setup: ShellSetup {
                         initial: tcode_ui::last_host_target(host.as_ref()),
                         initial_pairing_error: None,
