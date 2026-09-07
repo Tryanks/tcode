@@ -47,10 +47,14 @@ impl WindowSeam {
     ) -> Option<async_channel::Receiver<tcode_client::recovery::Wake>> {
         let platform = self.lifecycle.as_ref()?;
         let (sender, receiver) = async_channel::unbounded();
-        let started = std::time::Instant::now();
         let mut lifecycle = tcode_client::recovery::Lifecycle::default();
         platform.on_app_lifecycle(Box::new(move |phase| {
-            let now = started.elapsed().as_millis() as u64;
+            // Wall time includes device sleep. A backward clock correction
+            // saturates to a short absence and still gets a bounded probe.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
             if let Some(wake) = lifecycle_wake(&mut lifecycle, phase, now) {
                 let _ = sender.try_send(wake);
             }

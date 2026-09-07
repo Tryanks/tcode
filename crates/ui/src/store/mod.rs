@@ -578,11 +578,22 @@ impl WorkspaceStore {
     fn apply_connection_state(&mut self, state: ConnectionState) {
         if matches!(
             state,
-            ConnectionState::Reconnecting { .. } | ConnectionState::Offline { .. }
+            ConnectionState::Syncing
+                | ConnectionState::Reconnecting { .. }
+                | ConnectionState::Offline { .. }
         ) {
             self.baseline_topics.clear();
         }
         self.connection_state = state;
+        if self.connection_state == ConnectionState::Syncing {
+            // State and domain events arrive on separate queues. Request a fresh
+            // baseline after invalidation, so a late event from the old socket
+            // cannot satisfy readiness for the new one. HostLink correlates the
+            // replies against these new request IDs and retains applied cursors.
+            for subscription in self.host.subscriptions() {
+                let _ = self.host.subscribe(subscription);
+            }
+        }
     }
 
     pub fn queued_outgoing(&self) -> usize {
@@ -2667,6 +2678,18 @@ mod tests {
                 attempt: 2,
                 reason: None,
             });
+            // Old socket events can already be queued when loss is published.
+            for (topic, event) in &snapshots {
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic: topic.clone(),
+                        event: event.clone(),
+                    },
+                    cx,
+                );
+            }
+            assert!(store.baseline_ready());
             store.apply_connection_state(ConnectionState::Syncing);
             assert!(!store.threads_loading(), "cached list remains visible");
             assert!(!store.chat_loading(), "cached thread remains visible");

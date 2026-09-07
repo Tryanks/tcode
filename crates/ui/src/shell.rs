@@ -568,10 +568,17 @@ impl AppShell {
             return;
         }
         attachment.stamped = true;
-        let mut host = host.clone();
-        host.last_connected_unix = Some(crate::time::now_secs());
         if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
-            client.save_host(host);
+            // Discovery may have refreshed the origin while startup retried.
+            // Stamp the saved record, preserving its current origin and token.
+            if let Some(mut saved) = client
+                .hosts()
+                .into_iter()
+                .find(|saved| saved.host_id == host.host_id)
+            {
+                saved.last_connected_unix = Some(crate::time::now_secs());
+                client.save_host(saved);
+            }
         }
     }
 
