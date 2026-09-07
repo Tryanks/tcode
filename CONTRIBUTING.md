@@ -81,9 +81,10 @@ cargo run -p agent --example probe -- claude \
 and installed ACP agents) — useful for demos, screenshots and trying a change
 without touching your real threads.
 
-**Launch flags** for driving surfaces that need a running app: `--open-latest`,
-`--open-diff`, `--open-settings`, `--open-palette`, and
-`--open-draft <project>`.
+**Launch flags**: `--open-latest` reopens the most recent thread,
+`--connect <host_id>` starts attached to a paired host, `--pair <addr> <port> <code>`
+pairs from the command line, and `--preview-smoke` / `--cu-smoke` run the
+preview and computer-use smoke phases.
 
 ## Code layout
 
