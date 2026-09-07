@@ -134,14 +134,24 @@ positioned off-centre.
 
 ### Destinations
 
-Compact replaces the split with a navigation stack:
+Compact replaces the split with a navigation stack over one history:
 
-**Hosts → Threads → Thread → Panel**, pushed and popped with a 200ms lateral
-transition.
+**Hosts → Threads → Thread → Panel**, plus **Pair** over Hosts and
+**Settings → Settings section** over wherever they were opened from, pushed and
+popped with a 200ms lateral transition.
 
-- **Hosts** — the same **Settings → Remote** panel: saved hosts, discovery, the
-  pair form, certificate repair and removal. A window with no attachment shows
-  only this, at any width.
+- **Hosts** — which host this window talks to, and nothing else: "This
+  computer" where the client has one, the paired hosts, one **Pair a host**
+  button and the hosts discovered nearby. It is the root of a window with no
+  attachment, and it can also be *visited* from an attached workspace through
+  the sidebar's feature area (see **Sidebar**) without leaving that host.
+  Hosting this computer is a setting of this computer and lives in
+  **Settings → Remote**, never here.
+- **Pair** — the pairing form, pushed by **Pair a host**, by a Nearby row that
+  prefilled an endpoint, or by a certificate-changed row's **Pair again**.
+  Labels sit above full-width fields, the primary action is pinned at the foot
+  of the page above the keyboard, and pairing ends on an explicit fingerprint
+  comparison before anything connects.
 - **Threads** — the shared sidebar under a nav bar naming the attached host,
   with new-thread and settings actions. New thread starts a draft directly when
   the host has one project and otherwise opens the command palette, which
@@ -153,18 +163,28 @@ transition.
   segmented control. They are the same entities the wide layout puts in the
   split: a compact window has less room, not less product. Export and the
   per-thread actions stay on the thread row's context menu.
+- **Settings** and **Settings section** — the section list, then one section's
+  detail (see **Settings** below).
 
-Settings is a full-window route at every width (see **Settings** below).
+**One navigation bar.** Every compact page — Settings included — is composed as
+the same 52pt nav bar: Back at the top left labelled with the destination
+underneath it, a centered title that truncates rather than colliding with its
+controls, and at most two trailing actions. No page draws a header of its own,
+and nothing anywhere puts a Back control at the bottom of a list.
 
-Back — the Android system gesture, and every Back control — unwinds in one
-order: the software keyboard or composition, then the topmost dismissible
-overlay (dialog, menu, palette), then the settings route, then the panel
-destination, then the navigation stack. It reports "not consumed" only at the
-root, where the platform closes the app. Non-dismissible dialogs, such as import
-progress and approval prompts, keep refusing dismissal.
+Back — the Android system gesture and every Back control — unwinds in one order:
+the software keyboard or composition, then the topmost dismissible overlay
+(dialog, menu, palette), then one entry of the window's history. It reports "not
+consumed" only at the root, where the platform closes the app. Non-dismissible
+dialogs, such as import progress and approval prompts, keep refusing dismissal.
 
-**Thread → Threads keeps the connection.** Only **Threads → Hosts** detaches,
-and it does so explicitly. Resizing never detaches.
+**Navigating never detaches.** Walking back from Threads to Hosts, or visiting
+Hosts from an open thread, keeps the link, the selected thread and every view
+over that workspace. Only two things detach: connecting to a *different* host,
+which clears the previous host's history and lands on the new host's threads,
+and an explicit **Disconnect** in a host row's own menu. **Forget** removes the
+saved credential and leaves a live attachment running. Resizing never detaches
+and keeps the page the window is on.
 
 ### The window seam
 
@@ -236,9 +256,18 @@ in both states.
    host it.
 2. Search row: magnifier + "Search" muted + ⌘K (macOS) / Ctrl+K
    (Windows/Linux) kbd chip → opens the palette.
-3. Project/thread header: sort, grouped/flat layout and add-project controls.
+3. Feature area: the window's persistent entries, directly under the search
+   field at both widths, `flex_none` and outside the thread list's scrolling and
+   filtering. Each entry is one sidebar-sized row — leading stroke icon, label,
+   a muted trailing value and, where it has one, a status glyph — and it takes
+   the selected surface while its destination is showing. Compact rows are 44pt
+   for touch. Today it holds one entry, **Hosts**, whose trailing value is the
+   attached host's name (or "Not connected") with the connection glyph; it
+   navigates to the Hosts destination without disturbing the attachment. Later
+   persistent features are rows here, not new controls elsewhere.
+4. Project/thread header: sort, grouped/flat layout and add-project controls.
    Sorting and layout choices are persisted.
-4. Project groups: rotating chevron + folder icon + 13px medium name; hover
+5. Project groups: rotating chevron + folder icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. Inline rename
@@ -247,7 +276,7 @@ in both states.
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
    expansion so the list can be collapsed again).
-5. Footer: gear + "Settings" → settings route.
+6. Footer: gear + "Settings" → settings route.
 
 ### Chat header
 
@@ -475,7 +504,15 @@ Groups share the composer's opaque floating-card treatment. Rows pair a title
 and description with a control; sparse groups use space, dense lists use inset
 hairlines. Restore defaults requires confirmation. Compact clients have no room
 for the rail beside the content: the same sections become a full-width list that
-pushes to one section at a time, with a back control in its header.
+pushes to one section at a time, and both pages wear the shell's one nav bar —
+Back to whatever Settings was opened from, then Back to the section list. The
+page itself draws no header and no back row.
+
+**Compact rows stack.** Where a wide row puts its label left and its control
+right, a compact row puts the label and description above a full-width control:
+no fixed-width label column, prose that wraps rather than overflowing, and no
+horizontal clipping. A row whose control is a 44pt switch keeps it beside the
+label at both widths, since a switch never squeezes the text.
 
 Every section is present on every client, including over a remote link. Computer
 Use configuration is host settings and stays editable; only its **System
@@ -555,13 +592,16 @@ Theme, language and device name belong to the client. An explicit client choice
 overrides the attached host's replicated setting; restoring that row reveals the
 host setting again. Changing hosts replaces the workspace store, shell and all
 descendant views in the same window. The local kernel and remote hosting controls
-remain alive independently, so **Connect** and **Back to local** never relaunch
-the process and never interrupt other attached clients.
+remain alive independently, so connecting to a host and returning to **This
+computer** never relaunch the process and never interrupt other attached
+clients.
 
-Settings → Remote has two independent halves. **Connecting** — saved hosts,
-discovery, the pair form and certificate repair — is client work and is present
-on every client. **Hosting this computer** needs a listener and a discovery
-beacon, so it only appears where the client can host. Pairing follows the same
+Settings → Remote is **hosting this computer** and nothing else: the listener,
+the discovery beacon, minted pairing codes and the devices that have paired with
+this machine. It needs a listener and a beacon, so the section only exists where
+the client can host — a phone or a browser has no such setting. Choosing which
+host to talk to is a product surface, not a setting: it lives in **Hosts**,
+reached from the sidebar's feature area at both widths. Pairing follows the same
 rules everywhere: a fingerprint pinned by an invite or a discovery result applies
 only to the endpoint it came from and is dropped if either field is edited; an
 answer from a superseded attempt is discarded rather than applied; and a client

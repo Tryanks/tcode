@@ -116,9 +116,9 @@ tcode-headless pair      # prints a fresh pairing code and QR code
 
 Release builds also serve the browser client at `https://<host>:47420/`.
 
-**Connect a screen.** It is the same panel everywhere — Settings → Remote on the
-desktop, the opening screen on a phone or a fresh browser tab: pair by code or
-pick a nearby host, then **Connect**. Browser: open the host's HTTPS URL and
+**Connect a screen.** It is the same surface everywhere — the sidebar's
+**Hosts** entry on the desktop, the opening screen on a phone or a fresh browser
+tab: pair by code or pick a nearby host, then tap it to connect. Browser: open the host's HTTPS URL and
 verify its certificate in the browser first. See
 [pairing and certificate trust](docs/remote.md) for the native and browser flows.
 

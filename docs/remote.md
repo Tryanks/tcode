@@ -179,17 +179,20 @@ split and a narrow one the compact stack.
 
 ### Another desktop
 
-1. Open **Settings → Remote** on the client.
-2. Under **Find hosts on this network**, choose **Search**, then **Use** beside
-   a discovered host. This fills the address, port and fingerprint; you still
-   need the pairing code. Alternatively, fill **Pair with a code** manually.
+1. Open **Hosts** on the client — the sidebar entry under the search field, or
+   the opening screen when nothing is paired yet.
+2. Under **Nearby**, choose **Refresh**, then pick a discovered host. That fills
+   the address, port and fingerprint on the **Pair a host** page; you still need
+   the pairing code. Otherwise choose **Pair a host** and fill it in yourself.
    You can also paste the host's pairing link into the address or code field.
 3. Choose **Pair**. Compare the displayed fingerprint with the host's fingerprint
-   through a trusted channel before choosing **Connect** under **Paired hosts**.
-4. Choose **Connect**. The same window immediately replaces its workspace with
-   that host's projects and threads. Select another paired host to switch again;
-   **Back to local** immediately restores the local workspace. Switching closes
-   only this window's old client link, not either host.
+   through a trusted channel, then choose **Connect to ‹host›**.
+4. The same window immediately replaces its workspace with that host's projects
+   and threads. Tap another paired host to switch again; **This computer**
+   restores the local workspace, and a host row's **⋯ → Disconnect** leaves
+   without forgetting it. Switching closes only this window's old client link,
+   not either host. Opening **Hosts** by itself changes nothing about the
+   attachment.
 
 You can also pair from the desktop executable. Replace the sample address and
 code with the host's current values:
@@ -213,15 +216,15 @@ same client data directory for pairing and connecting.
 ### Phone and tablet
 
 1. Install the Android debug APK or re-sign and install the unsigned iOS IPA.
-2. The app opens on **Hosts** — the same **Settings → Remote** panel every
+2. The app opens on **Hosts** — the same surface every
    client has. Scan the host's QR code, or fill in the address, port and pairing
-   code. Selecting a host under **Discover** fills the address, port and
+   code. Selecting a host under **Nearby** fills the address, port and
    fingerprint; you still enter the code. Allow camera or local-network access
    when the system asks. Native QR scanning uses AVFoundation on iOS and
    CameraX/ML Kit on Android; a simulator's permission and cancel flows do not
    prove that real camera recognition works.
 3. Choose **Pair**. Compare the displayed fingerprint with the host through a
-   trusted channel, then choose **Connect**.
+   trusted channel, then choose **Connect to ‹host›**.
 4. Open a thread from the list, or use **+** to start one. Read replies, send or
    queue a message, steer a running turn, stop it, and answer approvals — the
    same views the desktop shows, laid out for the width.
