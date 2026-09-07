@@ -8958,6 +8958,7 @@ dependencies = [
  "imara-diff",
  "lb-wry",
  "log",
+ "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -8981,6 +8982,8 @@ dependencies = [
  "tcode-services",
  "tcode-voice",
  "web-time",
+ "webview2-com",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

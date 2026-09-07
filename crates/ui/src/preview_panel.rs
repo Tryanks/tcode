@@ -26,6 +26,15 @@
 //! or allowing a stale completion to replace a newer preview. macOS keeps the
 //! proven synchronous child-view path.
 //!
+//! ## Load errors
+//!
+//! A navigation that fails — an untrusted certificate, a dead port — leaves the
+//! previous document on screen, so the JavaScript status probe cannot see it.
+//! [`load_error`] observes the platform's own navigation callbacks (WKWebView's
+//! delegate, WebView2's `NavigationCompleted`) and keeps the last failure per
+//! webview; `preview_status` reports it as `load_error` and `preview_wait_for`
+//! fails with it instead of waiting out its timeout.
+//!
 //! ## Known caveat — native overlay
 //!
 //! A `gpui-wry` WebView is a **native child view drawn over** the gpui window,
@@ -62,6 +71,11 @@ pub(crate) const PREVIEW_BACKEND: bool = cfg!(all(
     any(target_os = "macos", target_os = "windows")
 ))]
 pub(crate) mod lifecycle;
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows")
+))]
+mod load_error;
 
 /// The reply channel a broker request is answered on.
 type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;

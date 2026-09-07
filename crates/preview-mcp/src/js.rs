@@ -9,9 +9,8 @@ pub const STATUS: &str = r#"(() => ({
   loading: document.readyState !== "complete"
 }))()"#;
 
-/// Build a DOM outline: page metadata plus an array of visible interactive
-/// elements with `{ tag, role, name, selector, x, y, width, height }`. Ported
-/// (reduced) from T3's `captureAutomationSnapshot` in-page script.
+/// Build a compact DOM outline: page metadata plus an array of visible
+/// interactive elements with `{ tag, role, name, selector, x, y, width, height }`.
 pub const SNAPSHOT: &str = r##"(() => {
   const MAX_ELEMENTS = 100;
   const MAX_TEXT = 4000;

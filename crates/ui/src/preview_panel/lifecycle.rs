@@ -20,11 +20,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Weak;
 use std::time::Duration;
 
-use gpui::{AppContext as _, Context, Entity, Window};
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_wry::WebView;
 use preview_mcp::js;
 use tcode_protocol::PreviewResponse;
 
+use super::load_error::{self, LoadError};
 use super::{ReplyTx, unavailable_message};
 
 const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
@@ -178,14 +179,21 @@ impl BrowserLifecycle {
     ) -> Availability {
         let availability = self.ensure(key, Some(url), window, cx);
         match &availability {
-            Availability::Ready(webview) => match webview.read(cx).raw().load_url(url) {
-                Ok(()) => {
-                    self.warm.insert(key.to_string());
+            Availability::Ready(webview) => {
+                let raw = webview.read(cx).raw();
+                // Clear the previous failure now rather than on WebKit's
+                // asynchronous didStart, so a wait_for issued right after
+                // this navigation cannot fail on the old record.
+                load_error::forget(raw);
+                match raw.load_url(url) {
+                    Ok(()) => {
+                        self.warm.insert(key.to_string());
+                    }
+                    Err(error) => {
+                        log::warn!("preview: failed to navigate {key}: {error}");
+                    }
                 }
-                Err(error) => {
-                    log::warn!("preview: failed to navigate {key}: {error}");
-                }
-            },
+            }
             #[cfg(target_os = "windows")]
             Availability::Starting(_) => {
                 if let Some(WebViewSlot::Creating { pending_url, .. }) = self.slots.get_mut(key) {
@@ -265,13 +273,14 @@ impl BrowserLifecycle {
     }
 
     /// Tear down one ready or in-progress browser generation.
-    pub fn drop_view(&mut self, key: &str) {
+    pub fn drop_view(&mut self, key: &str, cx: &App) {
+        self.forget_load_error(key, cx);
         self.slots.remove(key);
         self.warm.remove(key);
     }
 
     /// Tear down every browser whose session key is no longer live.
-    pub fn prune(&mut self, live_keys: &HashSet<String>) {
+    pub fn prune(&mut self, live_keys: &HashSet<String>, cx: &App) {
         let deleted = self
             .slots
             .keys()
@@ -279,8 +288,21 @@ impl BrowserLifecycle {
             .cloned()
             .collect::<Vec<_>>();
         for key in deleted {
+            self.forget_load_error(&key, cx);
             self.slots.remove(&key);
             self.warm.remove(&key);
+        }
+    }
+
+    /// The last navigation failure the platform reported for this browser, if
+    /// the current page is still the one it left behind.
+    pub(super) fn load_error(&self, key: &str, cx: &App) -> Option<LoadError> {
+        load_error::get(self.ready_view(key)?.read(cx).raw())
+    }
+
+    fn forget_load_error(&self, key: &str, cx: &App) {
+        if let Some(view) = self.ready_view(key) {
+            load_error::forget(view.read(cx).raw());
         }
     }
 
@@ -442,6 +464,7 @@ impl BrowserLifecycle {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        load_error::install(&raw);
         let warm = if let Some(url) = &pending_url {
             match raw.load_url(url) {
                 Ok(()) => true,
@@ -533,6 +556,7 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
+        load_error::install(&raw);
         let webview = cx.new(|cx| {
             let mut view = WebView::new(raw, window, cx);
             set_webview_visible(&mut view, false);
@@ -751,6 +775,7 @@ mod platform {
     }
 
     fn drop_raw_webview(raw: wry::WebView, key: &str, reason: &str) {
+        load_error::forget(&raw);
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(raw))).is_err() {
             log::error!("preview: raw webview drop panicked for {key} after {reason}");
         }

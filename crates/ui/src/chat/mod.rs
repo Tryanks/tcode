@@ -1877,8 +1877,8 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// Git quick-action split button adapted from T3 Code's `GitActionsControl`.
-    /// The primary action and dropdown choices follow the current git status.
+    /// Git quick-action split button whose primary action and dropdown choices
+    /// follow the current git status.
     fn render_git_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (quick, items) = self.workspace_store.read(cx).chat_git_controls()?;
         let border = cx.theme().border;
