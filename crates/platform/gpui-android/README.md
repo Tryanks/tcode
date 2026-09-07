@@ -78,6 +78,16 @@ the script's defaults are Homebrew paths. `CARGO_NDK_PLATFORM` defaults to 26.
 The debug build embeds the shared font/SVG assets so it does not depend on
 source paths from the development machine.
 
+For testing performance on a phone, run `crates/android/host/build.sh --release`.
+This uses the `android-release` Cargo profile: release optimization (including
+fat LTO), unwind panics, and unstripped symbols with line information for
+`ndk-stack`. The matching unstripped library is in
+`crates/android/host/app/src/main/jniLibs/arm64-v8a`; preserve it alongside crash
+logs before another build overwrites it. Gradle still runs `assembleDebug`, so
+the APK is debug-signed and installs with the same `adb install -r` command above
+without signing setup. Both modes print the APK path and size and overwrite the
+same APK. Omitting the flag keeps the native dev build.
+
 See [the design spec](../../../docs/DESIGN.md#compact-layout) for application behavior and
 platform verification, and [remote work mode](../../../docs/remote.md) for
 pairing with a host. Android emulator loopback is the emulator itself; use a
