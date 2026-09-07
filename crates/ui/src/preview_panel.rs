@@ -27,6 +27,15 @@
 //! or allowing a stale completion to replace a newer preview. macOS keeps the
 //! proven synchronous child-view path.
 //!
+//! ## Load errors
+//!
+//! A navigation that fails — an untrusted certificate, a dead port — leaves the
+//! previous document on screen, so the JavaScript status probe cannot see it.
+//! [`load_error`] observes the platform's own navigation callbacks (WKWebView's
+//! delegate, WebView2's `NavigationCompleted`) and keeps the last failure per
+//! webview; `preview_status` reports it as `load_error` and `preview_wait_for`
+//! fails with it instead of waiting out its timeout.
+//!
 //! ## Known caveat — native overlay
 //!
 //! A `gpui-wry` WebView is a **native child view drawn over** the gpui window,
@@ -73,6 +82,8 @@ type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) mod lifecycle;
+#[cfg(not(target_os = "linux"))]
+mod load_error;
 
 #[cfg(not(target_os = "linux"))]
 pub use native::PreviewPanel;
@@ -249,7 +260,7 @@ mod native {
 
         fn drop_webview(&mut self, key: &str, cx: &mut Context<Self>) {
             self.lifecycle
-                .update(cx, |lifecycle, _| lifecycle.drop_view(key));
+                .update(cx, |lifecycle, cx| lifecycle.drop_view(key, cx));
             if self.mirrored.as_deref() == Some(key) {
                 self.mirrored = None;
             }
@@ -265,7 +276,7 @@ mod native {
                 self.mirrored = None;
             }
             self.lifecycle
-                .update(cx, |lifecycle, _| lifecycle.prune(&live));
+                .update(cx, |lifecycle, cx| lifecycle.prune(&live, cx));
         }
 
         /// Mirror a URL into the store, then navigate through the lifecycle.
@@ -439,7 +450,8 @@ mod native {
                     let payload = serde_json::json!({
                         "ok": true,
                         "url": self.store.read(cx).preview_url(&key),
-                        "note": "call preview_status for live page state once loaded",
+                        "note": "call preview_status for live page state once loaded; \
+                                 it reports load_error when the page failed to load",
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
@@ -460,7 +472,8 @@ mod native {
                     let payload = serde_json::json!({
                         "ok": true,
                         "url": self.store.read(cx).preview_url(&key),
-                        "note": "page is loading; call preview_status for live state",
+                        "note": "page is loading; call preview_status for live state, \
+                                 which reports load_error when the page failed to load",
                     });
                     let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
                 }
@@ -564,12 +577,18 @@ mod native {
                     })
                 })
                 .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
+            // The page cannot see a failed navigation, so the JS probe would
+            // keep describing whatever was on screen before it.
+            let load_error = self.lifecycle.read(cx).load_error(key, cx);
             let (status_reply, status_result) = async_channel::bounded(1);
             cx.spawn(async move |_, _| {
                 let result = match status_result.recv().await {
                     Ok(Ok(PreviewReply::Json(mut value))) => {
                         if let Some(object) = value.as_object_mut() {
                             object.insert("canvas".into(), canvas);
+                            if let Some(load_error) = load_error {
+                                object.insert("load_error".into(), load_error.to_json());
+                            }
                             Ok(PreviewReply::Json(value))
                         } else {
                             Err("preview status returned a non-object value".into())
@@ -660,17 +679,24 @@ mod native {
                         return;
                     }
                     let (probe_reply, probe_result) = async_channel::bounded(1);
-                    if this
-                        .update(cx, |panel, cx| {
+                    // A failed navigation never changes the page, so waiting on
+                    // it can only time out; report the platform error instead.
+                    let Ok(failure) = this.update(cx, |panel, cx| {
+                        let failure = panel.lifecycle.read(cx).load_error(&key, cx);
+                        if failure.is_none() {
                             panel.lifecycle.update(cx, |lifecycle, cx| {
                                 lifecycle.evaluate_ready(&key, &probe, probe_reply.clone(), cx);
                             });
-                        })
-                        .is_err()
-                    {
+                        }
+                        failure
+                    }) else {
                         let _ = reply
                             .send(Err("preview panel was dropped while waiting".into()))
                             .await;
+                        return;
+                    };
+                    if let Some(failure) = failure {
+                        let _ = reply.send(Err(failure.describe())).await;
                         return;
                     }
 

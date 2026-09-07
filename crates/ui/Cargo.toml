@@ -30,6 +30,8 @@ desktop = [
     "dep:objc2-foundation",
     "dep:objc2-image-io",
     "dep:objc2-web-kit",
+    "dep:webview2-com",
+    "dep:windows-core",
 ]
 
 [dependencies]
@@ -77,9 +79,14 @@ block2 = { version = "0.6.2", optional = true }
 objc2 = { version = "0.6.4", optional = true }
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"], optional = true }
 objc2-core-foundation = { version = "0.3.2", features = ["CFData", "CFString"], optional = true }
-objc2-foundation = { version = "0.3.2", features = ["NSError", "NSNotification", "NSOperation", "NSString", "block2"], optional = true }
+objc2-foundation = { version = "0.3.2", features = ["NSDictionary", "NSError", "NSNotification", "NSOperation", "NSString", "NSURLError", "block2"], optional = true }
 objc2-image-io = { version = "0.3.2", features = ["CGImageDestination"], optional = true }
-objc2-web-kit = { version = "0.3.2", features = ["WKSnapshotConfiguration", "WKWebView"], optional = true }
+objc2-web-kit = { version = "0.3.2", features = ["WKNavigationDelegate", "WKSnapshotConfiguration", "WKWebView"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Pinned to the version lb-wry resolves, so both drive the same WebView2 objects.
+webview2-com = { version = "0.38.2", optional = true }
+windows-core = { version = "0.61", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
