@@ -169,13 +169,7 @@ impl ClientHost for NativeClientHost {
         let spawn = std::thread::Builder::new()
             .name("tcode-pair".into())
             .spawn(move || {
-                let result = crate::client::pair_pinned(
-                    &request.addr,
-                    request.port,
-                    &request.code,
-                    &device_name,
-                    &request.fingerprint,
-                );
+                let result = crate::client::pair(&request.origin, &request.code, &device_name);
                 let _ = sender.send_blocking(result);
             });
         Box::pin(async move {
@@ -232,9 +226,7 @@ impl ClientHost for NativeClientHost {
                         .map(|beacon| DiscoveredHost {
                             host_id: beacon.host_id,
                             name: beacon.name,
-                            addr: beacon.addr,
-                            port: beacon.port,
-                            fp: beacon.fp,
+                            origin: tcode_client::pairing::lan_origin(&beacon.addr, beacon.port),
                         })
                         .collect();
                     let _ = sender.send_blocking(hosts);
@@ -257,10 +249,6 @@ impl ClientHost for NativeClientHost {
             || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
             |scanner| scanner(),
         )
-    }
-
-    fn certificate_changed(&self, host_id: &str) -> bool {
-        crate::client::certificate_changed(host_id)
     }
 }
 

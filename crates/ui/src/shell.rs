@@ -225,7 +225,7 @@ pub struct AppShell {
     window_state: Entity<WindowState>,
     setup: ShellSetup,
     attachment: Option<ShellAttachment>,
-    /// Saved hosts, discovery, pairing and certificate repair: the hosts
+    /// Saved hosts, discovery, pairing and authentication repair: the hosts
     /// destination, and the same panel Settings → Remote shows.
     hosts: Entity<RemotePanel>,
     nav: Entity<NavStackState>,

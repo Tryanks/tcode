@@ -144,7 +144,6 @@ impl RemoteController {
             pairing.host_id.clone(),
             pairing.host_name.clone(),
             server.local_addr().port(),
-            pairing.fp.clone(),
         ));
         self.pairing = Some((pairing, Instant::now()));
         self.server = Some(server);
@@ -554,14 +553,14 @@ impl HostingPanel {
         let url = pair_url(&PairInvite {
             host_id: code.host_id.clone(),
             name: code.host_name.clone(),
-            addrs: if code.addrs.is_empty() {
-                vec!["127.0.0.1".to_owned()]
-            } else {
-                code.addrs.clone()
-            },
-            port: code.port,
+            origin: tcode_client::pairing::lan_origin(
+                code.addrs
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("127.0.0.1"),
+                code.port,
+            ),
             code: code.code.clone(),
-            fp: code.fp.clone(),
         });
         let addresses = if code.addrs.is_empty() {
             crate::tr!("remote.code.no_addresses").into_owned()
@@ -598,10 +597,6 @@ impl HostingPanel {
                                     .font_semibold()
                                     .child(digits),
                             )
-                            .child(div().text_size(px(11.)).child(crate::tr!(
-                                "hosts.pair.security_id",
-                                security_id = tcode_client::pairing::display_fingerprint(&code.fp)
-                            )))
                             .child(
                                 div()
                                     .text_size(px(13.))

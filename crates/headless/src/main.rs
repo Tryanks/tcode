@@ -102,7 +102,6 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         pairing.host_id.clone(),
         pairing.host_name.clone(),
         server.local_addr().port(),
-        pairing.fp.clone(),
     );
     println!(
         "Listening on {} (press Ctrl-C to stop)",
@@ -150,8 +149,12 @@ fn pair_command(args: &[String]) -> Result<(), String> {
     } else {
         "127.0.0.1"
     };
-    let (bytes, _) =
-        tcode_remote::client::tls_http(loopback, address.port(), "GET", "/admin/pair", "", "")?;
+    let bytes = tcode_remote::client::http(
+        &tcode_remote::client::lan_origin(loopback, address.port()),
+        "GET",
+        "/admin/pair",
+        "",
+    )?;
     let pairing: PairingCode = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     print_pairing(&pairing, address)
 }
@@ -165,14 +168,11 @@ fn print_pairing(pairing: &PairingCode, bound: SocketAddr) -> Result<(), String>
     let url = pair_url(&PairInvite {
         host_id: pairing.host_id.clone(),
         name: pairing.host_name.clone(),
-        addrs,
-        port: pairing.port,
+        origin: tcode_remote::client::lan_origin(&addrs[0], pairing.port),
         code: pairing.code.clone(),
-        fp: pairing.fp.clone(),
     });
     let qr = QrCode::new(url.as_bytes()).map_err(|error| error.to_string())?;
     println!("Connection code: {}", pairing.code);
-    println!("Security ID: {}", pairing.fp);
     println!("Expires in: {} seconds", pairing.expires_in_secs);
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
@@ -205,7 +205,7 @@ fn browser_urls(pairing: &PairingCode, bound: SocketAddr) -> Vec<String> {
     ips.into_iter()
         .map(|ip| {
             format!(
-                "https://{}/#code={}",
+                "http://{}/#code={}",
                 SocketAddr::new(ip, bound.port()),
                 pairing.code
             )
@@ -273,8 +273,7 @@ mod tests {
     fn browser_links_and_admin_json_carry_the_pairing_code_in_the_fragment() {
         let pairing = PairingCode {
             code: "123456".into(),
-            browser_url: "https://192.168.1.4:47420/#code=123456".into(),
-            fp: "ab".repeat(32),
+            browser_url: "http://192.168.1.4:47420/#code=123456".into(),
             expires_in_secs: 300,
             host_id: "host".into(),
             host_name: "Host".into(),
@@ -285,13 +284,13 @@ mod tests {
         assert_eq!(
             browser_urls(&pairing, "0.0.0.0:47420".parse().unwrap()),
             [
-                "https://192.168.1.4:47420/#code=123456",
-                "https://127.0.0.1:47420/#code=123456",
+                "http://192.168.1.4:47420/#code=123456",
+                "http://127.0.0.1:47420/#code=123456",
             ]
         );
         assert_eq!(
             serde_json::to_value(pairing).unwrap()["browser_url"],
-            "https://192.168.1.4:47420/#code=123456"
+            "http://192.168.1.4:47420/#code=123456"
         );
     }
 }

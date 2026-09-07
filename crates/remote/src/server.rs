@@ -38,7 +38,6 @@ pub struct PairingCode {
     pub code: String,
     #[serde(default)]
     pub browser_url: String,
-    pub fp: String,
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
@@ -61,8 +60,6 @@ struct ActiveCode {
 }
 
 struct Shared {
-    fingerprint: String,
-    tls: futures_rustls::TlsAcceptor,
     mux: HostMux,
     auth: Mutex<AuthStore>,
     pairing: Mutex<Option<ActiveCode>>,
@@ -126,14 +123,11 @@ impl Drop for RemoteServer {
 
 pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
     let auth = AuthStore::open(&config.data_dir, &config.host_name)?;
-    let (tls, fingerprint) = auth.tls_config()?;
     let listener = TcpListener::bind(config.listen)?;
     listener.set_nonblocking(true)?;
     let local_addr = listener.local_addr()?;
     let (shutdown, shutdown_rx) = async_channel::bounded::<()>(1);
     let shared = Arc::new(Shared {
-        fingerprint,
-        tls: futures_rustls::TlsAcceptor::from(Arc::new(tls)),
         mux,
         auth: Mutex::new(auth),
         pairing: Mutex::new(None),
@@ -197,14 +191,7 @@ async fn handle_connection(
     peer: SocketAddr,
     shared: Arc<Shared>,
 ) -> io::Result<()> {
-    let mut stream = futures_lite::future::race(shared.tls.accept(stream), async {
-        smol::Timer::after(Duration::from_secs(5)).await;
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "TLS handshake timed out",
-        ))
-    })
-    .await?;
+    let mut stream = stream;
     let request = match futures_lite::future::race(read_request(&mut stream), async {
         smol::Timer::after(Duration::from_secs(5)).await;
         Err(io::Error::new(
@@ -269,7 +256,6 @@ struct PairResponse {
     host_id: String,
     host_name: String,
     token: String,
-    fp: String,
 }
 
 async fn pair<S>(stream: &mut S, request: Request, shared: &Shared) -> io::Result<()>
@@ -307,7 +293,6 @@ where
         let mut auth = shared.auth.lock().unwrap();
         let token = auth.issue_token(request.device_name)?;
         PairResponse {
-            fp: shared.fingerprint.clone(),
             host_id: auth.host_id.to_string(),
             host_name: auth.host_name.clone(),
             token,
@@ -364,12 +349,11 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
         shared.local_addr.ip()
     };
     let browser_url = format!(
-        "https://{}/#code={code}",
+        "http://{}/#code={code}",
         SocketAddr::new(browser_ip, shared.local_addr.port())
     );
     let auth = shared.auth.lock().unwrap();
     PairingCode {
-        fp: shared.fingerprint.clone(),
         code,
         browser_url,
         expires_in_secs: PAIRING_LIFETIME.as_secs(),
@@ -462,7 +446,7 @@ struct Hello {
 }
 
 async fn websocket(
-    mut stream: futures_rustls::server::TlsStream<Async<std::net::TcpStream>>,
+    mut stream: Async<std::net::TcpStream>,
     request: Request,
     shared: Arc<Shared>,
 ) -> io::Result<()> {

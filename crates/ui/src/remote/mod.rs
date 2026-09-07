@@ -2,7 +2,7 @@
 //!
 //! This is a product surface, not a settings page. It answers one question —
 //! *which host am I talking to* — with saved hosts, discovery, pairing and
-//! certificate repair, and it is reached from the sidebar's feature area at
+//! authentication repair, and it is reached from the sidebar's feature area at
 //! every width. It needs `tcode_client` and the attachment owner's switch
 //! action, and nothing else: it compiles on every client, including
 //! `--no-default-features`.
@@ -164,9 +164,8 @@ impl RemotePanel {
             .and_then(|attachment| attachment.host.fixed_pairing_endpoint());
         let form = PairForm::new(fixed, window, cx);
         let mut subscriptions = Vec::new();
-        // One parser for all three fields: an invite pasted anywhere fills the
-        // whole form, including the fingerprint it pins.
-        for input in [&form.address, &form.port, &form.code] {
+        // An invite pasted into either field fills the whole form.
+        for input in [&form.address, &form.code] {
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
@@ -258,7 +257,7 @@ impl RemotePanel {
         let Some((request, generation)) = self.form.begin_pair(cx) else {
             return;
         };
-        let address = format!("{}:{}", request.addr, request.port);
+        let address = request.origin.clone();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = client.pair(request).await;
@@ -360,10 +359,7 @@ impl RemotePanel {
             })
     }
 
-    /// One saved host. Tapping it connects — or, when this window is already
-    /// on it, goes back to its workspace. A host whose certificate no longer
-    /// matches the pinned one refuses to connect and offers repair instead:
-    /// pairing again is the only way to accept a new certificate.
+    /// Saved machines offer pairing again when authorization is rejected.
     fn host_row(&self, host: &PairedHost, current: bool, cx: &mut Context<Self>) -> AnyElement {
         let reason = if current {
             self.store
@@ -376,23 +372,10 @@ impl RemotePanel {
         } else {
             None
         };
-        let changed = matches!(
-            reason,
-            Some(
-                tcode_client::ConnectionFailure::CertificateChanged
-                    | tcode_client::ConnectionFailure::AuthenticationRejected
-            )
-        ) || self
-            .client(cx)
-            .is_some_and(|client| client.certificate_changed(&host.host_id));
-        let address = host
-            .addrs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "?".to_owned());
+        let needs_pairing = reason == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
         let subtitle = format!(
-            "{address}:{} · {}",
-            host.port,
+            "{} · {}",
+            host.origin,
             match host.last_connected_unix {
                 Some(unix) => crate::tr!(
                     "hosts.last_connected",
@@ -429,19 +412,17 @@ impl RemotePanel {
                         .truncate()
                         .child(subtitle),
                 )
-                .when(changed || reason.is_some(), |column| {
+                .when_some(reason, |column, reason| {
                     column.child(
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().danger_foreground)
-                            .child(failure_label(reason.unwrap_or(
-                                tcode_client::ConnectionFailure::CertificateChanged,
-                            ))),
+                            .child(failure_label(reason)),
                     )
                 }),
         )
         .when(current, |row| row.child(self.status_glyph(cx)))
-        .when(changed, |row| {
+        .when(needs_pairing, |row| {
             row.child(
                 Button::new(SharedString::from(format!("repair-{}", host.host_id)))
                     .primary()
@@ -450,18 +431,14 @@ impl RemotePanel {
                     .on_click(cx.listener(move |panel, _, window, cx| {
                         panel.form.restart();
                         panel.form.browsing = false;
-                        panel.form.pin_discovered(
-                            repair_host.addrs.first().cloned().unwrap_or_default(),
-                            repair_host.port,
-                            String::new(),
-                            window,
-                            cx,
-                        );
+                        panel
+                            .form
+                            .fill_discovered(repair_host.origin.clone(), window, cx);
                         panel.open_pair(cx);
                     })),
             )
         })
-        .when(!changed, |row| {
+        .when(!needs_pairing, |row| {
             row.on_click(move |_, window, cx| {
                 let switch = cx.global::<ClientAttachment>().switcher();
                 switch(AttachmentTarget::Remote(connect_host.clone()), window, cx);
@@ -533,11 +510,11 @@ impl RemotePanel {
             );
         }
         for beacon in &self.form.discovered {
-            let (addr, port, fingerprint) = (beacon.addr.clone(), beacon.port, beacon.fp.clone());
+            let origin = beacon.origin.clone();
             let name = SharedString::from(beacon.name.clone());
             rows.push(
                 list_row(
-                    SharedString::from(format!("nearby-{}-{}", beacon.host_id, beacon.addr)),
+                    SharedString::from(format!("nearby-{}-{}", beacon.host_id, beacon.origin)),
                     name.clone(),
                     cx,
                 )
@@ -552,7 +529,7 @@ impl RemotePanel {
                                 .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
                                 .truncate()
-                                .child(format!("{}:{}", beacon.addr, beacon.port)),
+                                .child(beacon.origin.clone()),
                         ),
                 )
                 .child(
@@ -561,12 +538,9 @@ impl RemotePanel {
                         .flex_none()
                         .text_color(cx.theme().muted_foreground),
                 )
-                // Discovery carries no code: prefill the endpoint and pin its
-                // fingerprint so the user only types digits.
+                // Discovery carries no code: prefill the origin so only digits remain.
                 .on_click(cx.listener(move |panel, _, window, cx| {
-                    panel
-                        .form
-                        .pin_discovered(addr.clone(), port, fingerprint.clone(), window, cx);
+                    panel.form.fill_discovered(origin.clone(), window, cx);
                     panel.open_pair(cx);
                 }))
                 .into_any_element(),
@@ -699,15 +673,10 @@ impl RemotePanel {
                     }),
             )
             .when(!fixed, |column| {
-                column
-                    .child(self.field(
-                        crate::tr!("hosts.pair.address").into_owned().into(),
-                        &self.form.address,
-                    ))
-                    .child(self.field(
-                        crate::tr!("hosts.pair.port").into_owned().into(),
-                        &self.form.port,
-                    ))
+                column.child(self.field(
+                    crate::tr!("hosts.pair.address").into_owned().into(),
+                    &self.form.address,
+                ))
             })
             .child(self.field(
                 crate::tr!("hosts.pair.code").into_owned().into(),
@@ -731,13 +700,6 @@ impl RemotePanel {
                         .child(crate::tr!("hosts.pair.filled")),
                 )
             })
-            .when(!self.form.fingerprint.is_empty(), |column| {
-                column.child(div().text_size(px(13.)).min_w_0().child(crate::tr!(
-                    "hosts.pair.security_id",
-                    security_id =
-                        tcode_client::pairing::display_fingerprint(&self.form.fingerprint)
-                )))
-            })
             .when_some(self.form.error.clone(), |column, error| {
                 column.child(
                     div()
@@ -757,39 +719,13 @@ impl RemotePanel {
         self.page_with_footer(body.into_any_element(), action.into_any_element(), cx)
     }
 
-    /// Paired, not yet connected: show the pinned fingerprint next to the one
-    /// the host displays, so a swapped certificate is caught before any traffic.
+    /// Confirm the machine name before attaching its workspace.
     fn render_pair_confirm(&self, name: &str, cx: &mut Context<Self>) -> AnyElement {
         let body = v_flex()
             .w_full()
             .px(px(PAGE_PADDING))
             .py(px(16.))
-            .gap_3()
-            .child(
-                crate::material::group(cx).child(
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .px_3()
-                        .py_3()
-                        .child(
-                            div()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(14.))
-                                .min_w_0()
-                                .child(tcode_client::pairing::display_fingerprint(
-                                    &self.form.fingerprint,
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .min_w_0()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::tr!("hosts.pair.security_id_compare")),
-                        ),
-                ),
-            );
+            .child(name.to_owned());
         let action = Button::new("hosts-pair-connect")
             .primary()
             .w_full()
@@ -885,7 +821,6 @@ pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
     match reason {
         Unreachable => crate::tr!("remote.failure.unreachable"),
         Timeout => crate::tr!("remote.failure.timeout"),
-        CertificateChanged => crate::tr!("remote.failure.certificate_changed"),
         AuthenticationRejected => crate::tr!("remote.failure.authentication_rejected"),
         ProtocolMismatch => crate::tr!("remote.failure.protocol_mismatch"),
         HostClosed => crate::tr!("remote.failure.host_closed"),

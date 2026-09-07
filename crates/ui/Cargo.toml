@@ -7,7 +7,7 @@ edition = "2024"
 default = ["remote", "desktop"]
 # Hosting this machine: listener, discovery beacon, minted pairing codes and
 # device revocation. Off for wasm targets, which cannot listen or advertise.
-# Client pairing (saved hosts, the pair form, certificate repair) is *not* here:
+# Client pairing (saved hosts, the pair form, authentication repair) is *not* here:
 # it is shared UI over `tcode_client` and compiles everywhere.
 remote-hosting = ["dep:tcode-remote", "tcode-remote/server", "tcode-remote/client", "dep:qrcode"]
 # Transitional alias for the pre-split feature name.
@@ -50,6 +50,7 @@ local-permissions = ["dep:computer-use-mcp"]
 pasteboard-image = ["dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
+url = "2"
 agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }

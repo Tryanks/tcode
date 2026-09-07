@@ -33,7 +33,6 @@ pub enum ConnectionState {
 pub enum ConnectionFailure {
     Unreachable,
     Timeout,
-    CertificateChanged,
     AuthenticationRejected,
     ProtocolMismatch,
     HostClosed,
@@ -41,10 +40,7 @@ pub enum ConnectionFailure {
 
 impl ConnectionFailure {
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::CertificateChanged | Self::AuthenticationRejected | Self::ProtocolMismatch
-        )
+        matches!(self, Self::AuthenticationRejected | Self::ProtocolMismatch)
     }
 
     /// Older hosts did not send machine-readable rejection reasons.

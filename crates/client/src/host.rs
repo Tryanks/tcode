@@ -22,10 +22,8 @@ pub struct Transport {
 /// What the pairing form submits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairRequest {
-    pub addr: String,
-    pub port: u16,
+    pub origin: String,
     pub code: String,
-    pub fingerprint: String,
 }
 
 /// A host advertised on the client's local network.
@@ -33,9 +31,7 @@ pub struct PairRequest {
 pub struct DiscoveredHost {
     pub host_id: String,
     pub name: String,
-    pub addr: String,
-    pub port: u16,
-    pub fp: String,
+    pub origin: String,
 }
 
 /// Preferences which belong to the client and are never sent to the host.
@@ -68,24 +64,27 @@ pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
                     .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
                     .map(str::to_owned)
             };
-            let fp = field("fp")?;
             let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
-            if port == 0 || !crate::pairing::valid_fingerprint(&fp) {
+            if port == 0 {
                 return None;
             }
             Some(DiscoveredHost {
                 host_id: field("host_id")?,
                 name: field("name")?,
-                addr: field("addr")?,
-                fp,
-                port,
+                origin: crate::pairing::parse_origin(&crate::pairing::lan_origin(
+                    &field("addr")?,
+                    port,
+                ))
+                .ok()?,
             })
         })
         .collect();
     // One row per host. Native mDNS already ranks by the receiving interface;
     // JSON platform browsers preserve their first, platform-ranked address.
-    found.retain(|host| !host.addr.starts_with("127.") && host.addr != "::1");
-    found.sort_by_key(|host| (host.host_id.clone(), host.addr.contains(':')));
+    found.retain(|host| {
+        !host.origin.starts_with("http://127.") && !host.origin.starts_with("http://[::1]")
+    });
+    found.sort_by_key(|host| (host.host_id.clone(), host.origin.contains('[')));
     found.dedup_by(|a, b| a.host_id == b.host_id);
     found
 }
@@ -109,7 +108,7 @@ pub trait ClientHost: 'static {
     fn set_last_host_id(&self, host_id: Option<&str>);
 
     /// Browsers can only pair with the origin that served the application.
-    fn fixed_pairing_endpoint(&self) -> Option<(String, u16)> {
+    fn fixed_pairing_endpoint(&self) -> Option<String> {
         None
     }
 
@@ -128,10 +127,6 @@ pub trait ClientHost: 'static {
 
     fn scan_qr(&self) -> HostFuture<'_, Result<String, String>> {
         Box::pin(async { Err("unsupported".into()) })
-    }
-
-    fn certificate_changed(&self, _host_id: &str) -> bool {
-        false
     }
 
     /// Whether [`ClientHost::deliver_artifact`] can actually hand a produced
@@ -162,13 +157,11 @@ mod tests {
 
     #[test]
     fn discovered_hosts_are_bounded_validated_and_deduplicated() {
-        let fingerprint = "ab".repeat(32);
         let json = serde_json::json!([
-            {"host_id":"b","name":"IPv6","addr":"fd00::2","port":47420,"fp":fingerprint},
-            {"host_id":"a","name":"Loopback","addr":"127.0.0.1","port":47420,"fp":fingerprint},
-            {"host_id":"b","name":"IPv4","addr":"192.168.1.2","port":47420,"fp":fingerprint},
-            {"host_id":"c","name":"Bad pin","addr":"192.168.1.3","port":47420,"fp":"no"},
-            {"host_id":"d","name":"Bad port","addr":"192.168.1.4","port":0,"fp":fingerprint}
+            {"host_id":"b","name":"IPv6","addr":"fd00::2","port":47420},
+            {"host_id":"a","name":"Loopback","addr":"127.0.0.1","port":47420},
+            {"host_id":"b","name":"IPv4","addr":"192.168.1.2","port":47420},
+            {"host_id":"d","name":"Bad port","addr":"192.168.1.4","port":0}
         ]);
 
         assert_eq!(
@@ -176,9 +169,7 @@ mod tests {
             vec![DiscoveredHost {
                 host_id: "b".into(),
                 name: "IPv4".into(),
-                addr: "192.168.1.2".into(),
-                port: 47_420,
-                fp: fingerprint,
+                origin: "http://192.168.1.2:47420".into(),
             }]
         );
         assert!(parse_discovered_hosts("not json").is_empty());

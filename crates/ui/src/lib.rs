@@ -26,7 +26,7 @@ pub mod markdown;
 pub mod material;
 mod orchestrate_settings;
 pub mod overlay;
-/// The shared pairing form: endpoint-bound fingerprints, stale-result
+/// The shared pairing form: origin validation, stale-result
 /// generations and fixed-origin behavior, reused by every client shell.
 pub mod pairing;
 pub mod palette;

@@ -149,17 +149,9 @@ async fn initial_target(
         return (saved, None);
     }
     let code = code.unwrap();
-    let (addr, port) = host.fixed_pairing_endpoint().unwrap();
-    let address = format!("{addr}:{port}");
-    match host
-        .pair(PairRequest {
-            addr,
-            port,
-            code,
-            fingerprint: String::new(),
-        })
-        .await
-    {
+    let origin = host.fixed_pairing_endpoint().unwrap();
+    let address = origin.clone();
+    match host.pair(PairRequest { origin, code }).await {
         Ok(paired) => {
             save_host(host, &paired);
             host.set_last_host_id(Some(&paired.host_id));
@@ -195,16 +187,8 @@ pub async fn debug_pair_and_connect(code: String) -> String {
     if !started {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
-    let (addr, port) = WebHost.fixed_pairing_endpoint().unwrap();
-    let paired = match WebHost
-        .pair(PairRequest {
-            addr,
-            port,
-            code,
-            fingerprint: String::new(),
-        })
-        .await
-    {
+    let origin = WebHost.fixed_pairing_endpoint().unwrap();
+    let paired = match WebHost.pair(PairRequest { origin, code }).await {
         Ok(host) => host,
         Err(error) => return serde_json::json!({"error":error}).to_string(),
     };

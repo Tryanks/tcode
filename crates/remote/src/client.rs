@@ -1,13 +1,10 @@
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use sha2::{Digest as _, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustls::pki_types::ServerName;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
@@ -18,7 +15,7 @@ use smol::Async;
 use tungstenite::Message;
 
 pub use tcode_client::pairing::{
-    PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
+    PairInvite, PairedHost, is_pairing_code, lan_origin, pair_url, parse_pair_url,
 };
 pub use tcode_client::{ConnectionFailure, ConnectionState};
 
@@ -33,51 +30,28 @@ struct PairResponse {
     host_id: String,
     host_name: String,
     token: String,
-    fp: String,
 }
 
-pub fn pair(addr: &str, port: u16, code: &str, device_name: &str) -> Result<PairedHost, String> {
-    pair_pinned(addr, port, code, device_name, "")
-}
-
-pub fn pair_pinned(
-    addr: &str,
-    port: u16,
-    code: &str,
-    device_name: &str,
-    fingerprint: &str,
-) -> Result<PairedHost, String> {
+pub fn pair(origin: &str, code: &str, device_name: &str) -> Result<PairedHost, String> {
+    let origin = tcode_client::pairing::parse_origin(origin)?;
     if !is_pairing_code(code) || device_name.is_empty() || device_name.len() > 256 {
         return Err("invalid pairing request".into());
     }
     let body = serde_json::json!({ "code": code, "device_name": device_name }).to_string();
-    let (bytes, seen) = tls_http(addr, port, "POST", "/pair", &body, fingerprint)?;
+    let bytes = http(&origin, "POST", "/pair", &body)?;
     let response: PairResponse =
         serde_json::from_slice(&bytes).map_err(|_| "invalid pairing response")?;
-    if !same_fingerprint(&seen, &response.fp) {
-        return Err(CERT_CHANGED.into());
-    }
     Ok(PairedHost {
         host_id: response.host_id,
         name: response.host_name,
-        addrs: vec![addr.to_owned()],
-        port,
+        origin,
         token: response.token,
-        fingerprint: seen,
         last_connected_unix: None,
     })
 }
 
-/// Bounded HTTP/1.1 over TLS, also used by the loopback headless admin client.
-/// Empty pin is allowed only for explicit pairing / legacy migration.
-pub fn tls_http(
-    addr: &str,
-    port: u16,
-    method: &str,
-    path: &str,
-    body: &str,
-    pin: &str,
-) -> Result<(Vec<u8>, String), String> {
+/// Bounded HTTP/1.1; HTTPS origins use the standard WebPKI trust roots.
+pub fn http(origin: &str, method: &str, path: &str, body: &str) -> Result<Vec<u8>, String> {
     use std::io::{Read as _, Write as _};
     if !matches!(
         (method, path),
@@ -86,7 +60,12 @@ pub fn tls_http(
     {
         return Err("invalid HTTP request".into());
     }
-    let (config, seen) = tls_client_config(pin)?;
+    let url = url::Url::parse(origin).map_err(|e| e.to_string())?;
+    let addr = url
+        .host_str()
+        .ok_or("missing host")?
+        .trim_matches(['[', ']']);
+    let port = url.port_or_known_default().ok_or("missing port")?;
     let socket = TcpStream::connect_timeout(&socket_addr(addr, port)?, Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     socket
@@ -95,20 +74,32 @@ pub fn tls_http(
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
-    let session =
-        rustls::ClientConnection::new(config, ServerName::try_from("tcode.local").unwrap())
-            .map_err(|e| e.to_string())?;
-    let mut stream = rustls::StreamOwned::new(session, socket);
+    trait HttpStream: std::io::Read + std::io::Write {}
+    impl<T: std::io::Read + std::io::Write> HttpStream for T {}
+    let mut stream: Box<dyn HttpStream> = if url.scheme() == "https" {
+        let session = rustls::ClientConnection::new(
+            tls_client_config()?,
+            ServerName::try_from(addr.to_owned()).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Box::new(rustls::StreamOwned::new(session, socket))
+    } else if url.scheme() == "http" {
+        Box::new(socket)
+    } else {
+        return Err("unsupported scheme".into());
+    };
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         authority(addr, port),
         body.len()
     );
-    stream.write_all(request.as_bytes()).map_err(tls_error)?;
-    stream.flush().map_err(tls_error)?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
-    // The server closes its HTTP stream without TLS close_notify; accept that
-    // only when the complete Content-Length-delimited response was received.
+    // A tunnel may close TLS without close_notify. Require the complete
+    // Content-Length-delimited response before accepting such a close.
     let read = (&mut stream).take(65537).read_to_end(&mut bytes);
     if bytes.len() > 65536 {
         return Err("HTTP response too large".into());
@@ -118,7 +109,7 @@ pub fn tls_http(
         .position(|w| w == b"\r\n\r\n")
         .ok_or_else(|| {
             read.err()
-                .map(tls_error)
+                .map(|e| e.to_string())
                 .unwrap_or_else(|| "invalid HTTP response".into())
         })?;
     let head = std::str::from_utf8(&bytes[..split]).map_err(|_| "invalid HTTP response")?;
@@ -135,8 +126,7 @@ pub fn tls_http(
     if body.len() != length {
         return Err("incomplete HTTP response".into());
     }
-    let fingerprint = seen.lock().unwrap().clone();
-    Ok((body.to_vec(), fingerprint))
+    Ok(body.to_vec())
 }
 
 pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
@@ -144,12 +134,6 @@ pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
         Ok(bytes) => {
             let hosts: Vec<PairedHost> =
                 serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            for host in &hosts {
-                HOST_PATHS
-                    .lock()
-                    .unwrap()
-                    .insert(host.host_id.clone(), data_dir.to_owned());
-            }
             Ok(hosts)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -159,18 +143,7 @@ pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
 
 pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     fs::create_dir_all(data_dir)?;
-    // A UI may still hold its pre-migration record while updating last-used.
-    // Never erase a persisted TOFU pin when saving such a legacy record.
-    let existing = load_hosts(data_dir)?;
-    let mut merged = hosts.to_vec();
-    for host in &mut merged {
-        if host.fingerprint.is_empty()
-            && let Some(old) = existing.iter().find(|old| old.host_id == host.host_id)
-        {
-            host.fingerprint = old.fingerprint.clone();
-        }
-    }
-    let bytes = serde_json::to_vec_pretty(&merged).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec_pretty(hosts).map_err(io::Error::other)?;
     let temporary = data_dir.join("hosts.json.tmp");
     use std::io::Write as _;
     let mut options = fs::OpenOptions::new();
@@ -183,12 +156,6 @@ pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     let mut file = options.open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
-    for host in hosts {
-        HOST_PATHS
-            .lock()
-            .unwrap()
-            .insert(host.host_id.clone(), data_dir.to_owned());
-    }
     fs::rename(temporary, data_dir.join("hosts.json"))
 }
 
@@ -216,13 +183,12 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
 }
 
 async fn connection_loop(
-    mut host: PairedHost,
+    host: PairedHost,
     device_name: String,
     outgoing: Receiver<String>,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
 ) {
-    CERT_ERRORS.lock().unwrap().remove(&host.host_id);
     let mut buffered = VecDeque::<String>::new();
     let mut subscriptions = HashMap::<String, String>::new();
     let mut attempt = 1_u32;
@@ -231,7 +197,7 @@ async fn connection_loop(
         let _ = state
             .send(ConnectionState::Reconnecting { attempt, reason })
             .await;
-        let failure = match race_addresses(&mut host, &device_name).await {
+        let failure = match race_addresses(&host, &device_name).await {
             Ok(mut websocket) => {
                 let _ = state.send(ConnectionState::Syncing).await;
                 let mut failure = None;
@@ -285,9 +251,6 @@ async fn connection_loop(
             Err(error) => error,
         };
         if failure.is_terminal() {
-            if failure == ConnectionFailure::CertificateChanged {
-                CERT_ERRORS.lock().unwrap().insert(host.host_id.clone());
-            }
             let _ = state
                 .send(ConnectionState::Offline { reason: failure })
                 .await;
@@ -320,43 +283,60 @@ async fn connection_loop(
     incoming.close();
 }
 
-type WebSocket = WebSocketStream<futures_rustls::client::TlsStream<Async<TcpStream>>>;
+trait SocketStream: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send {}
+impl<T: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send> SocketStream
+    for T
+{
+}
+type WebSocket = WebSocketStream<Box<dyn SocketStream>>;
 
 fn connection_failure(error: String) -> ConnectionFailure {
-    if error.contains(CERT_CHANGED) {
-        ConnectionFailure::CertificateChanged
-    } else {
-        ConnectionFailure::Unreachable
-    }
+    log::debug!("remote connection failed: {error}");
+    ConnectionFailure::Unreachable
 }
 
 async fn race_addresses(
-    host: &mut PairedHost,
+    host: &PairedHost,
     device_name: &str,
 ) -> Result<WebSocket, ConnectionFailure> {
+    let url = url::Url::parse(&host.origin).map_err(|e| connection_failure(e.to_string()))?;
+    let name = url
+        .host_str()
+        .ok_or(ConnectionFailure::Unreachable)?
+        .trim_matches(['[', ']'])
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or(ConnectionFailure::Unreachable)?;
+    let addresses = futures_lite::future::race(
+        smol::unblock(move || {
+            (name.as_str(), port)
+                .to_socket_addrs()
+                .map(|a| a.collect::<Vec<_>>())
+                .map_err(|e| connection_failure(e.to_string()))
+        }),
+        async {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            Err(ConnectionFailure::Timeout)
+        },
+    )
+    .await?;
     let mut attempts = futures_util::stream::FuturesUnordered::new();
-    for (index, address) in host.addrs.clone().into_iter().enumerate() {
-        let mut candidate = host.clone();
+    for (index, address) in addresses.into_iter().enumerate() {
+        let url = &url;
         attempts.push(async move {
             smol::Timer::after(Duration::from_millis(250 * index as u64)).await;
-            let result = futures_lite::future::race(
-                open_websocket(&address, &mut candidate, device_name),
-                async {
-                    smol::Timer::after(Duration::from_secs(15)).await;
-                    Err(ConnectionFailure::Timeout)
-                },
-            )
-            .await;
-            (result, candidate)
+            futures_lite::future::race(open_websocket(address, url, host, device_name), async {
+                smol::Timer::after(Duration::from_secs(15)).await;
+                Err(ConnectionFailure::Timeout)
+            })
+            .await
         });
     }
     let mut failure = ConnectionFailure::Unreachable;
-    while let Some((result, candidate)) = attempts.next().await {
+    while let Some(result) = attempts.next().await {
         match result {
-            Ok(socket) => {
-                *host = candidate;
-                return Ok(socket);
-            }
+            Ok(socket) => return Ok(socket),
             Err(error) if error.is_terminal() => return Err(error),
             Err(error) => failure = error,
         }
@@ -390,43 +370,43 @@ async fn send_before(
 }
 
 async fn open_websocket(
-    address: &str,
-    host: &mut PairedHost,
+    address: SocketAddr,
+    origin: &url::Url,
+    host: &PairedHost,
     device_name: &str,
 ) -> Result<WebSocket, ConnectionFailure> {
-    // A foreground reconnect can still carry the UI's original legacy record.
-    // Consult the durable pin before allowing TOFU again.
-    if host.fingerprint.is_empty() {
-        let path = HOST_PATHS.lock().unwrap().get(&host.host_id).cloned();
-        if let Some(path) = path
-            && let Some(saved) = load_hosts(&path)
-                .map_err(|e| connection_failure(e.to_string()))?
-                .into_iter()
-                .find(|saved| saved.host_id == host.host_id)
-        {
-            host.fingerprint = saved.fingerprint;
-        }
-    }
-    let socket = smol::unblock({
-        let address = address.to_owned();
-        let port = host.port;
-        move || socket_addr(&address, port)
+    let tcp = Async::<TcpStream>::connect(address)
+        .await
+        .map_err(|e| connection_failure(e.to_string()))?;
+    let stream: Box<dyn SocketStream> = if origin.scheme() == "https" {
+        let name = origin
+            .host_str()
+            .ok_or(ConnectionFailure::Unreachable)?
+            .trim_matches(['[', ']'])
+            .to_owned();
+        Box::new(
+            futures_rustls::TlsConnector::from(tls_client_config().map_err(connection_failure)?)
+                .connect(
+                    ServerName::try_from(name).map_err(|e| connection_failure(e.to_string()))?,
+                    tcp,
+                )
+                .await
+                .map_err(|e| connection_failure(e.to_string()))?,
+        )
+    } else if origin.scheme() == "http" {
+        Box::new(tcp)
+    } else {
+        return Err(ConnectionFailure::Unreachable);
+    };
+    let mut url = origin.clone();
+    url.set_scheme(if origin.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
     })
-    .await
-    .map_err(connection_failure)?;
-    let (config, seen) = tls_client_config(&host.fingerprint).map_err(connection_failure)?;
-    let tcp = Async::<TcpStream>::connect(socket)
-        .await
-        .map_err(|e| connection_failure(tls_error(e)))?;
-    let stream = futures_rustls::TlsConnector::from(config)
-        .connect(ServerName::try_from("tcode.local").unwrap(), tcp)
-        .await
-        .map_err(|e| connection_failure(tls_error(e)))?;
-    if host.fingerprint.is_empty() {
-        persist_tofu_pin(host, &seen.lock().unwrap()).map_err(connection_failure)?;
-    }
-    let url = format!("wss://{}/ws", authority(address, host.port));
-    let (mut websocket, _) = async_tungstenite::client_async(url, stream)
+    .map_err(|_| ConnectionFailure::Unreachable)?;
+    url.set_path("/ws");
+    let (mut websocket, _) = async_tungstenite::client_async(url.as_str(), stream)
         .await
         .map_err(|e| connection_failure(e.to_string()))?;
     let hello = serde_json::json!({
@@ -465,25 +445,6 @@ async fn open_websocket(
         Some(Err(error)) => Err(connection_failure(error.to_string())),
         None => Err(ConnectionFailure::HostClosed),
     }
-}
-
-fn persist_tofu_pin(host: &mut PairedHost, observed: &str) -> Result<(), String> {
-    // Two initial connections must not overwrite each other's first pin.
-    let _migration = PIN_MIGRATION.lock().unwrap();
-    let path = HOST_PATHS.lock().unwrap().get(&host.host_id).cloned();
-    if let Some(path) = path {
-        let mut hosts = load_hosts(&path).map_err(|e| e.to_string())?;
-        if let Some(saved) = hosts.iter_mut().find(|saved| saved.host_id == host.host_id) {
-            if !saved.fingerprint.is_empty() && !same_fingerprint(&saved.fingerprint, observed) {
-                return Err(CERT_CHANGED.into());
-            }
-            saved.fingerprint = observed.to_owned();
-        }
-        save_hosts(&path, &hosts).map_err(|e| e.to_string())?;
-    }
-    log::warn!("legacy paired host has no certificate pin; trusting first TLS connection");
-    host.fingerprint = observed.to_owned();
-    Ok(())
 }
 
 async fn relay_connected(
@@ -645,111 +606,14 @@ fn socket_addr(address: &str, port: u16) -> Result<SocketAddr, String> {
         .ok_or_else(|| "DNS returned no addresses".into())
 }
 
-pub const CERT_CHANGED: &str = "host certificate changed; pair again";
-static PIN_MIGRATION: Mutex<()> = Mutex::new(());
-static HOST_PATHS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static CERT_ERRORS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-/// Retain the repair affordance for saved hosts after detaching their live link.
-pub fn certificate_changed(host_id: &str) -> bool {
-    CERT_ERRORS.lock().unwrap().contains(host_id)
-}
-
-fn tls_error(error: io::Error) -> String {
-    if error.to_string().contains(CERT_CHANGED) {
-        CERT_CHANGED.into()
-    } else {
-        "TLS connection failed".into()
-    }
-}
-
-fn same_fingerprint(left: &str, right: &str) -> bool {
-    tcode_client::pairing::valid_fingerprint(left)
-        && tcode_client::pairing::valid_fingerprint(right)
-        && left
-            .bytes()
-            .zip(right.bytes())
-            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-            == 0
-}
-
-struct PinVerifier {
-    pin: String,
-    seen: Arc<Mutex<String>>,
-}
-impl std::fmt::Debug for PinVerifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PinVerifier")
-    }
-}
-impl ServerCertVerifier for PinVerifier {
-    fn verify_server_cert(
-        &self,
-        cert: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let fp: String = Sha256::digest(cert.as_ref())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        if !self.pin.is_empty() && !same_fingerprint(&fp, &self.pin) {
-            return Err(rustls::Error::General(CERT_CHANGED.into()));
-        }
-        *self.seen.lock().unwrap() = fp;
-        Ok(ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-type ObservedPin = Arc<Mutex<String>>;
-fn tls_client_config(pin: &str) -> Result<(Arc<rustls::ClientConfig>, ObservedPin), String> {
-    if !pin.is_empty() && !tcode_client::pairing::valid_fingerprint(pin) {
-        return Err("invalid certificate fingerprint".into());
-    }
-    let seen = Arc::new(Mutex::new(String::new()));
+fn tls_client_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|e| e.to_string())?
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(PinVerifier {
-        pin: pin.to_owned(),
-        seen: seen.clone(),
-    }))
+    .with_root_certificates(roots)
     .with_no_client_auth();
-    Ok((Arc::new(config), seen))
+    Ok(Arc::new(config))
 }

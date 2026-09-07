@@ -1,41 +1,20 @@
-//! The client half of pairing, shared by every shell.
-//!
-//! Only the presentation differs between the desktop settings page and the
-//! phone sheet; the rules do not, and they are the parts that are easy to get
-//! subtly wrong:
-//!
-//! - **A pinned fingerprint is bound to the endpoint it came from.** An invite
-//!   or a discovery result pins a certificate for one `addr:port`. Edit either
-//!   field and the pin no longer applies, so the request goes out unpinned
-//!   rather than pinning a stranger's certificate to the typed address.
-//! - **Results are generation-stamped.** Browsing and pairing are slow and the
-//!   user can reopen or retarget the form while they run; a reply from a
-//!   superseded attempt is dropped instead of overwriting the current state.
-//! - **A fixed origin is not editable.** A browser can only pair with the origin
-//!   that served it, so where `ClientHost::fixed_pairing_endpoint` answers, the
-//!   address and port are fixed, discovery is pointless and both are hidden.
-
+//! Shared origin form; generation stamps discard superseded pairing results.
 use gpui::{App, AppContext as _, Entity, Window};
 use tcode_client::host::{DiscoveredHost, PairRequest};
-use tcode_client::pairing::{PairedHost, is_pairing_code, parse_pair_url};
+use tcode_client::pairing::{PairedHost, is_pairing_code, parse_origin, parse_pair_url};
 
 use crate::widgets::input::InputState;
 
 /// Default port a tcode host listens on.
-pub const DEFAULT_REMOTE_PORT: u16 = 47_420;
+pub use tcode_client::pairing::DEFAULT_REMOTE_PORT;
 
 pub struct PairForm {
-    /// The certificate fingerprint pinned for `pin_endpoint`, if any.
-    pub fingerprint: String,
-    pin_endpoint: Option<(String, u16)>,
-    fixed_endpoint: Option<(String, u16)>,
+    fixed_endpoint: Option<String>,
     pub discovered: Vec<DiscoveredHost>,
     pub browsing: bool,
-    /// Paired but not yet connected: the shell shows the fingerprint for
-    /// comparison before any traffic flows.
+    /// Paired but waiting for the user to connect.
     pub paired: Option<PairedHost>,
     pub address: Entity<InputState>,
-    pub port: Entity<InputState>,
     pub code: Entity<InputState>,
     pub busy: bool,
     pub error: Option<String>,
@@ -49,32 +28,16 @@ pub struct PairForm {
 
 impl PairForm {
     /// `fixed` is [`tcode_client::host::ClientHost::fixed_pairing_endpoint`]:
-    /// `Some` pins the address and port and hides both fields.
-    pub fn new(fixed: Option<(String, u16)>, window: &mut Window, cx: &mut App) -> Self {
+    /// `Some` fixes the origin and hides the address field.
+    pub fn new(fixed: Option<String>, window: &mut Window, cx: &mut App) -> Self {
         Self {
-            fingerprint: String::new(),
-            pin_endpoint: None,
             discovered: Vec::new(),
             browsing: false,
             paired: None,
             address: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(crate::tr!("hosts.pair.address_placeholder").into_owned())
-                    .default_value(
-                        fixed
-                            .as_ref()
-                            .map(|(addr, _)| addr.clone())
-                            .unwrap_or_default(),
-                    )
-            }),
-            port: cx.new(|cx| {
-                InputState::new(window, cx).default_value(
-                    fixed
-                        .as_ref()
-                        .map(|(_, port)| *port)
-                        .unwrap_or(DEFAULT_REMOTE_PORT)
-                        .to_string(),
-                )
+                    .default_value(fixed.as_ref().cloned().unwrap_or_default())
             }),
             code: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -99,44 +62,25 @@ impl PairForm {
         !self.has_fixed_endpoint() && (self.browsing || !self.discovered.is_empty())
     }
 
-    /// The submittable request, or `None` while the form is incomplete. The
-    /// pinned fingerprint travels only when the endpoint still matches the one
-    /// it was pinned for.
+    /// Validate the origin and six-digit code before submission.
     pub fn request(&self, cx: &App) -> Option<PairRequest> {
-        let addr = self.address.read(cx).value().trim().to_owned();
-        let port = self
-            .port
-            .read(cx)
-            .value()
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port > 0)?;
+        let origin = parse_origin(
+            self.fixed_endpoint
+                .as_deref()
+                .unwrap_or(self.address.read(cx).value().as_ref()),
+        )
+        .ok()?;
         let code = self.code.read(cx).value().to_string();
-        if addr.is_empty() || addr.contains(char::is_whitespace) || !is_pairing_code(&code) {
+        if !is_pairing_code(&code) {
             return None;
         }
-        Some(PairRequest {
-            fingerprint: if self
-                .pin_endpoint
-                .as_ref()
-                .is_some_and(|(pinned, pinned_port)| pinned == &addr && *pinned_port == port)
-            {
-                self.fingerprint.clone()
-            } else {
-                String::new()
-            },
-            addr,
-            port,
-            code,
-        })
+        Some(PairRequest { origin, code })
     }
 
     /// Reset for a fresh attempt and stamp it. Any in-flight browse or pair
     /// result from the previous generation is discarded when it lands.
     pub fn restart(&mut self) -> u64 {
         self.paired = None;
-        self.fingerprint.clear();
-        self.pin_endpoint = None;
         self.error = None;
         self.filled = false;
         self.busy = false;
@@ -182,7 +126,6 @@ impl PairForm {
         self.busy = false;
         match result {
             Ok(host) => {
-                self.fingerprint = host.fingerprint.clone();
                 self.paired = Some(host);
             }
             Err(error) => self.error = Some(pair_error(&error, address)),
@@ -196,22 +139,14 @@ impl PairForm {
     }
 
     /// Parse a `tcode://pair?…` invite. A fixed-origin client keeps its own
-    /// endpoint and adopts only the code and the pin.
+    /// origin and adopts only the code.
     pub fn fill_invite(&mut self, value: &str, window: &mut Window, cx: &mut App) -> bool {
         let Some(invite) = parse_pair_url(value) else {
             return false;
         };
-        let Some(addr) = invite.addrs.first().cloned() else {
-            return false;
-        };
-        self.fingerprint = invite.fp;
-        self.pin_endpoint = Some((addr.clone(), invite.port));
         if self.fixed_endpoint.is_none() {
             self.address
-                .update(cx, |state, cx| state.set_value(addr, window, cx));
-            self.port.update(cx, |state, cx| {
-                state.set_value(invite.port.to_string(), window, cx)
-            });
+                .update(cx, |state, cx| state.set_value(invite.origin, window, cx));
         }
         self.code
             .update(cx, |state, cx| state.set_value(invite.code, window, cx));
@@ -220,24 +155,11 @@ impl PairForm {
         true
     }
 
-    /// Adopt a discovered host: fill the endpoint, pin its fingerprint to that
-    /// endpoint and clear the code so only the six digits remain to type.
-    pub fn pin_discovered(
-        &mut self,
-        addr: String,
-        port: u16,
-        fingerprint: String,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.pin_endpoint = Some((addr.clone(), port));
-        self.fingerprint = fingerprint;
+    /// Fill a discovered origin and focus the connection code.
+    pub fn fill_discovered(&mut self, origin: String, window: &mut Window, cx: &mut App) {
         self.error = None;
         self.address
-            .update(cx, |state, cx| state.set_value(addr, window, cx));
-        self.port.update(cx, |state, cx| {
-            state.set_value(port.to_string(), window, cx)
-        });
+            .update(cx, |state, cx| state.set_value(origin, window, cx));
         self.code.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.focus(window, cx);
@@ -276,31 +198,27 @@ mod tests {
         DiscoveredHost {
             host_id: name.into(),
             name: name.into(),
-            addr: "192.168.1.9".into(),
-            port: 47_420,
-            fp: "ab".repeat(32),
+            origin: "http://192.168.1.9:47420".into(),
         }
     }
 
-    /// A browser can only reach the origin that served it. An invite pasted
-    /// there contributes its code and its pin, but must not silently retarget
-    /// the connection at the address printed in the invite — and because the
-    /// endpoint then differs from the pinned one, the request goes out unpinned
-    /// rather than pinning a stranger's certificate to this origin.
+    /// A pasted invite cannot retarget the browser away from its serving origin.
     #[gpui::test]
-    fn a_fixed_origin_keeps_its_endpoint_and_drops_a_mismatched_pin(cx: &mut TestAppContext) {
+    fn a_fixed_origin_keeps_its_endpoint(cx: &mut TestAppContext) {
         let (form, cx) = cx.add_window_view(|window, cx| {
-            Holder(PairForm::new(Some(("app.example".into(), 443)), window, cx))
+            Holder(PairForm::new(
+                Some("https://app.example".into()),
+                window,
+                cx,
+            ))
         });
         // Built by the producer the host actually uses, so the test cannot
         // drift from the invite format.
         let invite = tcode_client::pairing::pair_url(&tcode_client::pairing::PairInvite {
             host_id: "h".into(),
             name: "Host".into(),
-            addrs: vec!["10.0.0.4".into()],
-            port: 47_420,
+            origin: "http://10.0.0.4:47420".into(),
             code: "123456".into(),
-            fp: "cd".repeat(32),
         });
         cx.update(|window, cx| {
             form.update(cx, |holder, cx| {
@@ -312,15 +230,10 @@ mod tests {
             let form = &holder.0;
             assert!(form.has_fixed_endpoint());
             assert!(!form.show_discovery(), "a fixed origin cannot browse");
-            assert_eq!(form.address.read(cx).value(), "app.example");
-            assert_eq!(form.port.read(cx).value(), "443");
+            assert_eq!(form.address.read(cx).value(), "https://app.example");
             assert_eq!(form.code.read(cx).value(), "123456");
             let request = form.request(cx).expect("a complete request");
-            assert_eq!((request.addr.as_str(), request.port), ("app.example", 443));
-            assert_eq!(
-                request.fingerprint, "",
-                "a pin for another endpoint must not travel with this one"
-            );
+            assert_eq!(request.origin, "https://app.example");
         });
     }
 

@@ -152,10 +152,10 @@ popped with a 200ms lateral transition.
   takes.
 - **Add a machine** — the connection form, pushed by **Add a machine**, by a
   **Nearby machines** row that prefilled an endpoint, or by a
-  certificate-changed row's **Add again**.
+  rejected-authentication row's **Pair again**.
   Labels sit above full-width fields, the primary action is pinned at the foot
-  of the page above the keyboard, and adding ends on an explicit security ID
-  comparison before anything connects.
+  of the page above the keyboard, and adding ends with the machine name and **Connect**. The single **Address**
+  field accepts a host, host:port, or full HTTP(S) origin.
 - **Threads** — the shared sidebar under a nav bar titled **Threads**, with the
   attached machine's name as its subtitle and new-thread and settings actions.
   New thread starts a draft directly when the machine has one project and
@@ -298,7 +298,7 @@ settings page.
 | Syncing | Hello accepted; waiting for the first host message |
 | Connected | First host message received and the link healthy; no status banner |
 | Reconnecting | Content is kept; the banner names the retry attempt and failure reason |
-| Offline | Terminal certificate, authentication or protocol failure; the banner explains how to recover |
+| Offline | Terminal authentication or protocol failure; the banner explains how to recover |
 | Certificate changed / authentication rejected | An explicit error and a **Pair again** entry point; retrying stops |
 | Protocol mismatch | **Update the app**; retrying stops |
 
@@ -719,15 +719,12 @@ connection codes and **Connected devices**. It needs a listener and a beacon,
 so the section only exists where the client can host — a phone or a browser has
 no such setting. Choosing which machine to talk to is a product surface, not a
 setting: it lives in **Machines**, reached from the sidebar's feature area at
-both widths. Adding a machine follows the same rules everywhere: a security ID
-pinned by an invite or a discovery result applies
-only to the endpoint it came from and is dropped if either field is edited; an
-answer from a superseded attempt is discarded rather than applied; and a client
-that can only reach the origin that served it (a browser) fixes the address and
-port, hides discovery, and hides the camera scan unless it has one. A machine
-whose certificate no longer matches the pinned one cannot be connected to —
-the row offers **Pair again** instead. Rejected authentication offers the same
-repair action. Protocol mismatch says **Update the app**. The shell banner and
+both widths. Adding a machine follows the same rules everywhere: an answer
+from a superseded attempt is discarded; the form accepts one HTTP(S) origin;
+and a browser fixes that origin to the page that served it, hides discovery,
+and hides camera scanning. Pairing confirmation shows the machine name and
+**Connect**. Rejected authentication offers **Pair again**.
+Protocol mismatch says **Update the app**. The shell banner and
 attached machine row show the connection failure reason; syncing and reconnecting
 use a warning dot, terminal offline failures use a danger dot, and only a
 connection that has received its first host message uses a success dot. Syncing

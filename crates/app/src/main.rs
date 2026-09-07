@@ -175,10 +175,8 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
         .parse()
         .map_err(|error| format!("invalid port: {error}"))?;
     let host = smol::block_on(client_host.pair(tcode_client::host::PairRequest {
-        addr: addr.clone(),
-        port,
+        origin: tcode_client::pairing::lan_origin(addr, port),
         code: code.clone(),
-        fingerprint: String::new(),
     }))?;
     let mut hosts = client_host.load_hosts();
     hosts.retain(|existing| existing.host_id != host.host_id);

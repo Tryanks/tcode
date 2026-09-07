@@ -1,4 +1,4 @@
-//! Real host pipe and TLS/WebSocket transport, including a stopped host process.
+//! Real host pipe and HTTP/WebSocket transport, including a stopped host process.
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tcode_client::{ConnectionFailure, ConnectionState};
@@ -74,13 +74,18 @@ fn races_stalled_address_and_applies_first_host_message() {
     let data = TestDir::new();
     let server = server(&data);
     let code = server.new_pairing_code();
-    let mut host = pair("127.0.0.1", server.local_addr().port(), &code.code, "race").unwrap();
-    // TCP connects, but TLS cannot complete because this listener never accepts.
+    let mut host = pair(
+        &format!("http://127.0.0.1:{}", server.local_addr().port()),
+        &code.code,
+        "race",
+    )
+    .unwrap();
+    // TCP connects, but the WebSocket upgrade cannot complete because this listener never accepts.
     // Unlike an unroutable IP, this deterministically stalls on every CI network.
     let _stalled =
         std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, server.local_addr().port()))
             .unwrap();
-    host.addrs.insert(0, "::1".into());
+    host.origin = format!("http://localhost:{}", server.local_addr().port());
     let start = Instant::now();
     let client = connect(host, "race".into());
     wait(&client, Duration::from_secs(2), |s| {
@@ -107,8 +112,7 @@ fn rejected_token_is_terminal_without_retry() {
     let server = server(&data);
     let code = server.new_pairing_code();
     let mut host = pair(
-        "127.0.0.1",
-        server.local_addr().port(),
+        &format!("http://127.0.0.1:{}", server.local_addr().port()),
         &code.code,
         "reject",
     )
@@ -169,7 +173,12 @@ fn stopped_host_times_out() {
     }
     let code: tcode_remote::server::PairingCode =
         serde_json::from_slice(&std::fs::read(ready).unwrap()).unwrap();
-    let host = pair("127.0.0.1", code.port, &code.code, "stop").unwrap();
+    let host = pair(
+        &format!("http://127.0.0.1:{}", code.port),
+        &code.code,
+        "stop",
+    )
+    .unwrap();
     let client = connect(host, "stop".into());
     ping(&client);
     wait(&client, Duration::from_secs(2), |s| {

@@ -81,20 +81,8 @@ impl ClientHost for WebHost {
         }
     }
 
-    fn fixed_pairing_endpoint(&self) -> Option<(String, u16)> {
-        let location = window().location();
-        Some((
-            location.hostname().unwrap_or_default(),
-            location
-                .port()
-                .ok()
-                .and_then(|port| port.parse().ok())
-                .unwrap_or(if location.protocol().ok().as_deref() == Some("https:") {
-                    443
-                } else {
-                    80
-                }),
-        ))
+    fn fixed_pairing_endpoint(&self) -> Option<String> {
+        window().location().origin().ok()
     }
 
     fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
@@ -166,14 +154,12 @@ async fn pair(code: &str, device_name: &str) -> Result<PairedHost, String> {
                 .map(str::to_owned)
                 .ok_or_else(|| JsValue::from_str(&format!("Pairing response missing {key}")))
         };
-        let (addr, port) = WebHost.fixed_pairing_endpoint().unwrap();
+        let origin = WebHost.fixed_pairing_endpoint().unwrap();
         Ok(PairedHost {
             host_id: field("host_id")?,
             name: field("host_name")?,
             token: field("token")?,
-            fingerprint: field("fp")?,
-            addrs: vec![addr],
-            port,
+            origin,
             last_connected_unix: None,
         })
     }

@@ -25,34 +25,6 @@ impl Drop for TestDir {
     }
 }
 
-fn trusted_config(
-    data: &TestDir,
-) -> (
-    Arc<rustls::ClientConfig>,
-    rustls::pki_types::ServerName<'static>,
-) {
-    let cert = rustls::pki_types::CertificateDer::from(
-        std::fs::read(data.0.join("remote-cert.der")).unwrap(),
-    );
-    let auth: Value =
-        serde_json::from_slice(&std::fs::read(data.0.join("remote.json")).unwrap()).unwrap();
-    let name = rustls::pki_types::ServerName::try_from(format!(
-        "{}.local",
-        auth["host_id"].as_str().unwrap()
-    ))
-    .unwrap();
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert).unwrap();
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    (Arc::new(config), name)
-}
-
 fn fake_host() -> (HostMux, Arc<AtomicUsize>) {
     let (to_host, host_rx) = async_channel::unbounded::<String>();
     let (host_tx, from_host) = async_channel::unbounded::<String>();
@@ -153,9 +125,9 @@ fn pairing_is_single_use_and_five_failures_invalidate() {
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
     let port = server.local_addr().port();
     let code = server.new_pairing_code();
-    let paired = pair("127.0.0.1", port, &code.code, "phone").unwrap();
+    let paired = pair(&format!("http://127.0.0.1:{}", port), &code.code, "phone").unwrap();
     assert!(!paired.token.is_empty());
-    assert!(pair("127.0.0.1", port, &code.code, "again").is_err());
+    assert!(pair(&format!("http://127.0.0.1:{}", port), &code.code, "again").is_err());
 
     let code = server.new_pairing_code();
     let wrong = if code.code == "999999" {
@@ -164,9 +136,9 @@ fn pairing_is_single_use_and_five_failures_invalidate() {
         "999999"
     };
     for _ in 0..5 {
-        assert!(pair("127.0.0.1", port, wrong, "attacker").is_err());
+        assert!(pair(&format!("http://127.0.0.1:{}", port), wrong, "attacker").is_err());
     }
-    assert!(pair("127.0.0.1", port, &code.code, "phone").is_err());
+    assert!(pair(&format!("http://127.0.0.1:{}", port), &code.code, "phone").is_err());
     server.shutdown();
 }
 
@@ -177,9 +149,9 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     let server = serve(mux.clone(), config(data.0.clone(), 0)).unwrap();
     let port = server.local_addr().port();
     let code_a = server.new_pairing_code();
-    let host_a = pair("127.0.0.1", port, &code_a.code, "A").unwrap();
+    let host_a = pair(&format!("http://127.0.0.1:{}", port), &code_a.code, "A").unwrap();
     let code_b = server.new_pairing_code();
-    let host_b = pair("127.0.0.1", port, &code_b.code, "B").unwrap();
+    let host_b = pair(&format!("http://127.0.0.1:{}", port), &code_b.code, "B").unwrap();
     let client_a = connect(host_a, "A".into());
     let client_b = connect(host_b, "B".into());
     wait_state(&client_a, ConnectionState::Syncing);
@@ -243,13 +215,8 @@ fn wrong_token_gets_rejected_and_closed() {
         let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
             .await
             .unwrap();
-        let (config, name) = trusted_config(&data);
-        let stream = futures_rustls::TlsConnector::from(config)
-            .connect(name, stream)
-            .await
-            .unwrap();
         let (mut websocket, _) =
-            async_tungstenite::client_async(format!("wss://127.0.0.1:{port}/ws"), stream)
+            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
                 .await
                 .unwrap();
         websocket
@@ -282,7 +249,7 @@ fn devices_are_listed_and_revoking_refuses_the_token() {
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
     let port = server.local_addr().port();
     let code = server.new_pairing_code();
-    let paired = pair("127.0.0.1", port, &code.code, "laptop").unwrap();
+    let paired = pair(&format!("http://127.0.0.1:{}", port), &code.code, "laptop").unwrap();
 
     let devices = server.devices();
     assert_eq!(devices.len(), 1);
@@ -298,13 +265,8 @@ fn devices_are_listed_and_revoking_refuses_the_token() {
         let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
             .await
             .unwrap();
-        let (config, name) = trusted_config(&data);
-        let stream = futures_rustls::TlsConnector::from(config)
-            .connect(name, stream)
-            .await
-            .unwrap();
         let (mut websocket, _) =
-            async_tungstenite::client_async(format!("wss://127.0.0.1:{port}/ws"), stream)
+            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
                 .await
                 .unwrap();
         websocket
@@ -347,9 +309,7 @@ fn static_bundle_get_and_head_share_headers() {
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
-            let (config, name) = trusted_config(&dir);
-            let session = rustls::ClientConnection::new(config, name).unwrap();
-            let mut stream = rustls::StreamOwned::new(session, stream);
+            let mut stream = stream;
             write!(
                 stream,
                 "{method} {path} HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -373,117 +333,37 @@ fn static_bundle_get_and_head_share_headers() {
 }
 
 #[test]
-fn tls_pinned_handshake_and_tofu_pairing() {
-    use tcode_remote::client::{CERT_CHANGED, pair_pinned};
+fn admin_pair_is_plain_http_and_creates_no_certificate_identity() {
     let data = TestDir::new();
     let (mux, _) = fake_host();
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let port = server.local_addr().port();
-    let code = server.new_pairing_code();
-    let other = TestDir::new();
-    let (mux2, _) = fake_host();
-    let other_server = serve(mux2, config(other.0.clone(), 0)).unwrap();
-    let wrong_pin = other_server.new_pairing_code().fp;
-    // A different real certificate is rejected before consuming the code.
-    assert!(
-        pair_pinned("127.0.0.1", port, &code.code, "bad", &wrong_pin)
-            .unwrap_err()
-            .contains(CERT_CHANGED)
-    );
-    assert!(server.devices().is_empty());
-    let host = pair_pinned("127.0.0.1", port, &code.code, "pinned", &code.fp).unwrap();
-    assert_eq!(host.fingerprint, code.fp);
-    let client = connect(host, "pinned".into());
-    wait_state(&client, ConnectionState::Syncing);
-    client.to_host.close();
-    let code = server.new_pairing_code();
-    let mut host = pair("127.0.0.1", port, &code.code, "TOFU").unwrap();
-    assert_eq!(host.fingerprint, code.fp);
-    host.fingerprint = wrong_pin;
-    let id = host.host_id.clone();
-    let client = connect(host, "changed".into());
-    wait_state(
-        &client,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::CertificateChanged,
-        },
-    );
-    assert!(tcode_remote::client::certificate_changed(&id));
-    other_server.shutdown();
-    server.shutdown();
-}
-
-#[test]
-fn legacy_first_connect_persists_pin_and_identity_survives_restart() {
-    let data = TestDir::new();
-    let client_data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let port = server.local_addr().port();
-    let code = server.new_pairing_code();
-    let mut host = pair("127.0.0.1", port, &code.code, "legacy").unwrap();
-    host.fingerprint.clear();
-    tcode_remote::client::save_hosts(&client_data.0, &[host.clone()]).unwrap();
-    let client = connect(host.clone(), "legacy".into());
-    wait_state(&client, ConnectionState::Syncing);
-    let hosts = tcode_remote::client::load_hosts(&client_data.0).unwrap();
-    assert_eq!(hosts[0].fingerprint, code.fp);
-    client.to_host.close();
-    // A stale UI record cannot TOFU again against a changed certificate.
-    let other = TestDir::new();
-    let (other_mux, _) = fake_host();
-    let other_server = serve(other_mux, config(other.0.clone(), 0)).unwrap();
-    host.port = other_server.local_addr().port();
-    let retry = connect(host.clone(), "stale legacy UI".into());
-    wait_state(
-        &retry,
-        ConnectionState::Offline {
-            reason: ConnectionFailure::CertificateChanged,
-        },
-    );
-    assert!(tcode_remote::client::certificate_changed(&host.host_id));
+    let origin = format!("http://{}", server.local_addr());
+    let bytes = tcode_remote::client::http(&origin, "GET", "/admin/pair", "").unwrap();
+    let reply: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(reply.get("fp").is_none());
     assert_eq!(
-        tcode_remote::client::load_hosts(&client_data.0).unwrap()[0].fingerprint,
-        code.fp
+        reply["browser_url"],
+        format!("{origin}/#code={}", reply["code"].as_str().unwrap())
     );
-    other_server.shutdown();
-    server.shutdown();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), port)).unwrap();
-    assert_eq!(server.new_pairing_code().fp, code.fp);
+    assert!(!data.0.join("remote-cert.der").exists());
+    assert!(!data.0.join("remote-key.der").exists());
+    let host = pair(&origin, reply["code"].as_str().unwrap(), "phone").unwrap();
+    let client_data = TestDir::new();
+    tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&host)).unwrap();
+    assert_eq!(
+        tcode_remote::client::load_hosts(&client_data.0).unwrap(),
+        [host]
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        for file in ["remote-cert.der", "remote-key.der"] {
+        for path in [data.0.join("remote.json"), client_data.0.join("hosts.json")] {
             assert_eq!(
-                std::fs::metadata(data.0.join(file))
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
         }
     }
-    server.shutdown();
-}
-
-#[test]
-fn listener_never_serves_plaintext_http() {
-    use std::io::{Read as _, Write as _};
-    let data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let mut socket = std::net::TcpStream::connect(server.local_addr()).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    socket
-        .write_all(b"GET /admin/pair HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .unwrap();
-    let mut reply = [0u8; 512];
-    let read = socket.read(&mut reply).unwrap_or(0);
-    assert!(!reply[..read].starts_with(b"HTTP/"));
     server.shutdown();
 }
 
@@ -494,46 +374,28 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
     let code = server.new_pairing_code();
     let mut host = pair(
-        "127.0.0.1",
-        server.local_addr().port(),
+        &format!("http://127.0.0.1:{}", server.local_addr().port()),
         &code.code,
         "deadline",
     )
     .unwrap();
-    let cert = rustls::pki_types::CertificateDer::from(
-        std::fs::read(data.0.join("remote-cert.der")).unwrap(),
-    );
-    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(
-        std::fs::read(data.0.join("remote-key.der")).unwrap(),
-    );
-    let tls = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(vec![cert], key.into())
-    .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    host.port = listener.local_addr().unwrap().port();
-    let (upgraded, saw_tls) = async_channel::bounded(1);
+    host.origin = format!("http://{}", listener.local_addr().unwrap());
+    let (upgraded, saw_tcp) = async_channel::bounded(1);
     let (release, held) = async_channel::bounded::<()>(1);
     let fixture = std::thread::spawn(move || {
         smol::block_on(async {
             let listener = smol::Async::new(listener).unwrap();
             let (stream, _) = listener.accept().await.unwrap();
-            let _tls = futures_rustls::TlsAcceptor::from(Arc::new(tls))
-                .accept(stream)
-                .await
-                .unwrap();
+            let _stream = stream;
             upgraded.send(()).await.unwrap();
-            // Keep the authenticated TCP/TLS connection open, but never answer the upgrade.
+            // Keep the TCP connection open, but never answer the upgrade.
             let _ = held.recv().await;
         })
     });
     let start = Instant::now();
     let client = connect(host, "deadline".into());
-    saw_tls.recv_blocking().unwrap();
+    saw_tcp.recv_blocking().unwrap();
     smol::block_on(async {
         futures_lite::future::race(
             async {
