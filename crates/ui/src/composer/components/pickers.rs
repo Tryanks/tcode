@@ -388,8 +388,8 @@ impl Composer {
             .into_any_element()
     }
 
-    /// The circular context-window meter (ring showing used%, red > 90%) + a
-    /// hover/click popover (T3's `ContextWindowMeter`).
+    /// The circular context-window meter (ring showing used%, red > 90%) and
+    /// its hover/click popover.
     pub(in super::super) fn render_context_meter(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.workspace_store.read(cx).composer_state();
         let usage = composer.token_usage;
