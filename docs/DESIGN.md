@@ -587,12 +587,29 @@ no fixed-width label column, prose that wraps rather than overflowing, and no
 horizontal clipping. A row whose control is a 44pt switch keeps it beside the
 label at both widths, since a switch never squeezes the text.
 
-Every section is present on every client, including over a remote link. Computer
-Use configuration is host settings and stays editable; only its **System
-permissions** group is local — it shows live status and Grant/Recheck when this
-build can read them *and* the workspace is this machine's, and otherwise says to
-manage system permissions on the named host. A client never reports the host's
-permission state from its own OS.
+Both the compact list and wide rail divide Settings into two captioned groups,
+in this order: **This device** contains General (appearance, language and device
+name) plus Other devices wherever the build can host connections; **‹machine
+name› settings** contains Providers, Usage, Orchestrate, Computer Use, Browser
+and Archived Threads. The attached host's display name supplies ‹machine name›;
+a local attachment uses the machine name shown by the hosting panel, and a
+client with neither uses **Machine settings**. The captions use the same compact
+11px muted caption style as captions inside Settings pages; this grouping is
+ownership guidance, not a platform test.
+
+A section is listed only when at least one of its rows applies to the current
+device and attachment. Applicability comes from capabilities, never directly
+from the operating system: replicated machine settings remain editable over a
+remote link, while operations that drive a local native facility require that
+facility here. Thus Browser is omitted without an embedded preview backend and
+Other devices is omitted without hosting support. A mixed section stays listed
+for its applicable rows and withholds only the unavailable rows. Computer Use
+configuration is replicated and stays editable; only its **System permissions**
+group is local — it shows live status and Grant/Recheck when this build can read
+them *and* the workspace is this machine's, and otherwise says to manage system
+permissions on the named host. A client never reports the host's permission
+state from its own OS. A stale deep link or command targeting a withheld section
+lands on the Settings root rather than opening an empty page.
 
 Editable fields are seeded from the host's settings the first time a real
 snapshot exists, not from local defaults, and a field the user has since edited

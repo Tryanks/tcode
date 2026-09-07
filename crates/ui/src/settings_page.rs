@@ -54,18 +54,18 @@ enum Section {
 }
 
 /// Navigation order, shared by the desktop rail and the compact section list.
-/// Remote is *hosting this machine* and nothing else: a client that cannot
-/// listen or advertise has no such setting, and choosing which host to talk to
-/// is a product surface (`crate::remote`), not a setting.
+/// Device-local settings come first; replicated settings for the attached
+/// machine follow. Remote is *hosting this device* and nothing else: choosing
+/// which host to talk to is a product surface (`crate::remote`), not a setting.
 #[cfg(feature = "remote-hosting")]
 const SECTIONS: [Section; 8] = [
     Section::General,
+    Section::Remote,
     Section::Providers,
     Section::Usage,
-    Section::Browser,
-    Section::ComputerUse,
     Section::Orchestrate,
-    Section::Remote,
+    Section::ComputerUse,
+    Section::Browser,
     Section::Archived,
 ];
 #[cfg(not(feature = "remote-hosting"))]
@@ -73,13 +73,75 @@ const SECTIONS: [Section; 7] = [
     Section::General,
     Section::Providers,
     Section::Usage,
-    Section::Browser,
-    Section::ComputerUse,
     Section::Orchestrate,
+    Section::ComputerUse,
+    Section::Browser,
     Section::Archived,
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionGroup {
+    Device,
+    Machine,
+}
+
+/// Capabilities relevant to Settings applicability. The OS-specific questions
+/// are answered by the capability owners; Settings only consumes their result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SettingsCapabilities {
+    preview_backend: bool,
+    hosting: bool,
+    local_permissions: bool,
+    remote_attachment: bool,
+}
+
+impl SettingsCapabilities {
+    fn current(store: &WorkspaceStore) -> Self {
+        Self {
+            preview_backend: crate::preview_panel::PREVIEW_BACKEND,
+            hosting: cfg!(feature = "remote-hosting"),
+            local_permissions: cfg!(all(feature = "local-permissions", target_os = "macos")),
+            remote_attachment: store.is_remote(),
+        }
+    }
+
+    fn can_manage_local_permissions(self) -> bool {
+        self.local_permissions && !self.remote_attachment
+    }
+}
+
 impl Section {
+    fn group(self) -> SectionGroup {
+        match self {
+            Self::General => SectionGroup::Device,
+            #[cfg(feature = "remote-hosting")]
+            Self::Remote => SectionGroup::Device,
+            Self::Providers
+            | Self::Usage
+            | Self::Browser
+            | Self::ComputerUse
+            | Self::Orchestrate
+            | Self::Archived => SectionGroup::Machine,
+        }
+    }
+
+    /// A section is navigable when at least one row can do real work for this
+    /// client and attachment. Replicated host settings remain applicable over
+    /// remote links; the Browser section has only embedded-preview rows.
+    fn applies(&self, cx: &SettingsCapabilities) -> bool {
+        match self {
+            Self::Browser => cx.preview_backend,
+            #[cfg(feature = "remote-hosting")]
+            Self::Remote => cx.hosting,
+            Self::General
+            | Self::Providers
+            | Self::Usage
+            | Self::ComputerUse
+            | Self::Orchestrate
+            | Self::Archived => true,
+        }
+    }
+
     fn id(self) -> &'static str {
         match self {
             Self::General => "settings-nav-general",
@@ -197,9 +259,12 @@ pub struct SettingsPage {
     title_model_picker: Entity<ProviderModelPicker>,
     /// Shared provider/model picker configured for fallback reviews.
     fallback_review_model_picker: Entity<ProviderModelPicker>,
+    /// Editable name this client presents to machines it connects to.
+    device_name_input: SettingsInput,
     /// Stable entities keep expanded state and lazily-created inputs across rerenders.
     acp_cards: Vec<(String, Entity<AcpAgentCard>)>,
     section: Section,
+    capabilities: SettingsCapabilities,
     /// Latches the one usage refresh fired when Usage becomes the active
     /// section; cleared as soon as the page shows anything else.
     usage_refresh_sent: bool,
@@ -242,12 +307,23 @@ impl SettingsPage {
             })
     }
 
+    fn return_to_settings_root(window_state: &Entity<WindowState>, cx: &mut Context<Self>) {
+        window_state.update(cx, |state, cx| {
+            if state.compact
+                && state.destination() == crate::window_state::Destination::SettingsSection
+            {
+                state.back(cx);
+            }
+        });
+    }
+
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let capabilities = SettingsCapabilities::current(store.read(cx));
         let title_generation = store.read(cx).settings().title_generation;
         let title_model_picker = cx.new(|cx| {
             ProviderModelPicker::selection(
@@ -333,7 +409,13 @@ impl SettingsPage {
 
         // Consume relaunch and in-app navigation requests through the same
         // channel used by in-app Settings links.
-        let section = Self::take_requested_section(&window_state, cx).unwrap_or(Section::General);
+        let requested_section = Self::take_requested_section(&window_state, cx);
+        let section = requested_section
+            .filter(|section| section.applies(&capabilities))
+            .unwrap_or(Section::General);
+        if requested_section.is_some_and(|section| !section.applies(&capabilities)) {
+            Self::return_to_settings_root(&window_state, cx);
+        }
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
@@ -345,10 +427,16 @@ impl SettingsPage {
         let home_url_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!("browser.home_url.placeholder"))
         });
+        let device_name = store.read(cx).client_device_name();
+        let device_name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(crate::tr!("settings.device_name.placeholder"))
+                .default_value(device_name.clone())
+        });
         let auto_archive_idle_input = cx.new(|cx| InputState::new(window, cx));
         let auto_archive_keep_input = cx.new(|cx| InputState::new(window, cx));
         #[cfg(all(feature = "local-permissions", target_os = "macos"))]
-        let local_permissions = (!store.read(cx).is_remote()).then(|| {
+        let local_permissions = capabilities.can_manage_local_permissions().then(|| {
             let store = store.clone();
             cx.new(|cx| crate::local_permissions::LocalPermissions::new(store, window, cx))
         });
@@ -362,8 +450,14 @@ impl SettingsPage {
             hosting_panel,
             title_model_picker,
             fallback_review_model_picker,
+            device_name_input: SettingsInput {
+                state: device_name_input.clone(),
+                pushed: device_name,
+                dirty: false,
+            },
             acp_cards: Vec::new(),
             section,
+            capabilities,
             usage_refresh_sent: false,
             home_url_input: SettingsInput::new(home_url_input.clone()),
             auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
@@ -380,6 +474,15 @@ impl SettingsPage {
                     let value = input.read(cx).value().to_string();
                     if this.home_url_input.is_user_edit(&value) {
                         this.commit_home_url(cx);
+                    }
+                }
+            }));
+        page._subscriptions
+            .push(cx.subscribe(&device_name_input, |this, input, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    if this.device_name_input.is_user_edit(&value) {
+                        this.commit_device_name(cx);
                     }
                 }
             }));
@@ -447,6 +550,18 @@ impl SettingsPage {
             .to_string();
         let home_url = (!value.is_empty()).then_some(value);
         self.dispatch_settings(move |store| store.set_browser_home_url(home_url), cx);
+    }
+
+    fn commit_device_name(&self, cx: &mut Context<Self>) {
+        let value = self
+            .device_name_input
+            .state
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let name = (!value.is_empty()).then_some(value);
+        self.dispatch_settings(move |store| store.set_client_device_name(name), cx);
     }
 
     fn commit_auto_archive_idle_days(&self, cx: &mut Context<Self>) {
@@ -545,6 +660,12 @@ impl SettingsPage {
     }
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if !section.applies(&self.capabilities) {
+            self.section = Section::General;
+            Self::return_to_settings_root(&self.window_state, cx);
+            cx.notify();
+            return;
+        }
         self.section = section;
         // Which section is open is this page's business; *that* a detail is
         // open is navigation, and belongs to the window's one history.
@@ -585,6 +706,7 @@ impl SettingsPage {
             cx,
         )
         .aria_selected(active)
+        .debug_selector(move || section.id().into())
         // Keep the hitbox, stable element id, and hover style on the
         // same element. Splitting them across an outer clickable and
         // an anonymous inner row leaves GPUI tracking two overlapping
@@ -610,6 +732,44 @@ impl SettingsPage {
         .into_any_element()
     }
 
+    fn group_caption(&self, group: SectionGroup, cx: &Context<Self>) -> AnyElement {
+        let (label, selector) = match group {
+            SectionGroup::Device => (
+                crate::tr!("settings.this_device").into_owned(),
+                "settings-device-caption",
+            ),
+            SectionGroup::Machine => {
+                let store = self.store.read(cx);
+                let name = if store.is_remote() {
+                    store.remote_host_name().map(str::to_owned)
+                } else {
+                    #[cfg(feature = "remote-hosting")]
+                    {
+                        Some(crate::remote::machine_name())
+                    }
+                    #[cfg(not(feature = "remote-hosting"))]
+                    {
+                        None
+                    }
+                }
+                .filter(|name| !name.trim().is_empty());
+                let label = name.map_or_else(
+                    || crate::tr!("settings.machine_settings_fallback").into_owned(),
+                    |name| crate::tr!("settings.machine_settings", name = name).into_owned(),
+                );
+                (label, "settings-machine-caption")
+            }
+        };
+        div()
+            .debug_selector(move || selector.into())
+            .pl_3()
+            .pb(px(6.))
+            .text_size(px(11.))
+            .font_medium()
+            .text_color(cx.theme().muted_foreground)
+            .child(label)
+            .into_any_element()
+    }
     fn render_nav(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut tabs = v_flex()
             .id("settings-nav-tabs")
@@ -619,7 +779,18 @@ impl SettingsPage {
             .min_h_0()
             .px_2()
             .gap(px(2.));
-        for section in SECTIONS {
+        let mut group = None;
+        for section in SECTIONS
+            .into_iter()
+            .filter(|section| section.applies(&self.capabilities))
+        {
+            if group != Some(section.group()) {
+                let next = section.group();
+                tabs = tabs
+                    .when(group.is_some(), |tabs| tabs.pt_3())
+                    .child(self.group_caption(next, cx));
+                group = Some(next);
+            }
             tabs = tabs.child(self.nav_item(section, cx));
         }
         v_flex()
@@ -645,51 +816,60 @@ impl SettingsPage {
     /// The page draws no header and no back row: in compact every page wears
     /// the shell's one nav bar (`crate::shell`).
     pub(crate) fn render_compact_list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rows: Vec<AnyElement> = SECTIONS
-            .iter()
-            .map(|section| {
-                let section = *section;
-                let label = section.label();
-                crate::material::accessible_clickable(
-                    gpui_base::h_flex(),
-                    section.id(),
-                    Role::Button,
-                    label.clone(),
-                    cx,
-                )
-                .w_full()
-                .min_h(px(48.))
-                .px_3()
-                .gap_3()
-                .items_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(cx.theme().list_hover))
-                .child(
-                    Icon::new(section.icon())
-                        .size_4()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .child(div().flex_1().text_size(px(15.)).child(label))
-                .child(
-                    Icon::new(IconName::ChevronRight)
-                        .xsmall()
-                        .text_color(cx.theme().muted_foreground),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
-                .into_any_element()
+        let group = |group| {
+            let rows: Vec<AnyElement> = SECTIONS
+                .into_iter()
+                .filter(|section| section.group() == group && section.applies(&self.capabilities))
+                .map(|section| {
+                    let label = section.label();
+                    crate::material::accessible_clickable(
+                        gpui_base::h_flex(),
+                        section.id(),
+                        Role::Button,
+                        label.clone(),
+                        cx,
+                    )
+                    .debug_selector(move || section.id().into())
+                    .w_full()
+                    .min_h(px(48.))
+                    .px_3()
+                    .gap_3()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(cx.theme().list_hover))
+                    .child(
+                        Icon::new(section.icon())
+                            .size_4()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().flex_1().text_size(px(15.)).child(label))
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_section(section, cx)))
+                    .into_any_element()
+                })
+                .collect();
+            (!rows.is_empty()).then(|| {
+                v_flex()
+                    .w_full()
+                    .child(self.group_caption(group, cx))
+                    .child(crate::material::grouped(rows, cx))
             })
-            .collect();
+        };
         div()
             .id("settings-section-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
             .child(
-                v_flex()
-                    .w_full()
-                    .p_3()
-                    .gap_3()
-                    .child(crate::material::grouped(rows, cx)),
+                v_flex().w_full().p_3().gap_4().children(
+                    [group(SectionGroup::Device), group(SectionGroup::Machine)]
+                        .into_iter()
+                        .flatten(),
+                ),
             )
             .into_any_element()
     }
@@ -793,6 +973,8 @@ impl SettingsPage {
                             .clone()
                             .unwrap_or_default();
                         page.home_url_input.push(home_url, window, cx);
+                        let device_name = page.store.read(cx).client_device_name();
+                        page.device_name_input.push(device_name, window, cx);
                         page.auto_archive_idle_input.push(
                             DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS.to_string(),
                             window,
@@ -858,9 +1040,11 @@ impl SettingsPage {
         let settings = store.settings();
         let language_overridden = store.client_language_override().is_some();
         let theme_overridden = store.client_theme_override().is_some();
+        let device_name_overridden = store.client_device_name_override().is_some();
         let appearance = vec![
             self.language_row(settings.language.as_deref(), language_overridden, cx),
             self.theme_row(settings.theme_mode, theme_overridden, cx),
+            self.device_name_row(device_name_overridden, cx),
         ];
         let delete_confirm_reset = self.reset_action(
             "reset-delete-confirm",
@@ -1124,6 +1308,34 @@ impl SettingsPage {
                 cx,
             ))
             .child(self.fallback_review_model_picker.clone())
+            .into_any_element()
+    }
+
+    fn device_name_row(&self, overridden: bool, cx: &mut Context<Self>) -> AnyElement {
+        let compact = self.window_state.read(cx).compact;
+        let reset = self.reset_action("reset-device-name", overridden, cx, |this, window, cx| {
+            this.dispatch_settings(|store| store.set_client_device_name(None), cx);
+            let name = this.store.read(cx).client_device_name();
+            this.device_name_input.push(name, window, cx);
+        });
+        self.row_frame(cx)
+            .debug_selector(|| "settings-device-name-row".into())
+            .child(self.row_labels(
+                crate::tr!("settings.device_name.title"),
+                crate::tr!("settings.device_name.description"),
+                reset,
+                cx,
+            ))
+            .child(
+                div()
+                    .when(compact, |field| field.w_full())
+                    .when(!compact, |field| field.w(px(240.)))
+                    .child(
+                        Input::new(&self.device_name_input.state)
+                            .small()
+                            .rounded(crate::material::radius_input()),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1930,7 +2142,9 @@ impl SettingsPage {
     fn permissions_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let column =
             v_flex().child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
-        if let Some(rows) = self.local_permission_rows() {
+        if self.capabilities.can_manage_local_permissions()
+            && let Some(rows) = self.local_permission_rows()
+        {
             return column.child(rows).into_any_element();
         }
         let message = match self.store.read(cx).remote_host_name() {
@@ -2391,13 +2605,142 @@ impl Render for SettingsPage {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext, size};
     use tcode_protocol::SettingsPatch;
     use tcode_runtime::pipe::{HostServices, spawn_host};
     use tcode_services::store::SessionStore;
 
     use super::*;
     use crate::store::WorkspaceAttachment;
+
+    fn capabilities(
+        preview_backend: bool,
+        hosting: bool,
+        local_permissions: bool,
+        remote_attachment: bool,
+    ) -> SettingsCapabilities {
+        SettingsCapabilities {
+            preview_backend,
+            hosting,
+            local_permissions,
+            remote_attachment,
+        }
+    }
+
+    fn assert_section_applicability(
+        capabilities: SettingsCapabilities,
+        expected: &[(Section, bool)],
+    ) {
+        for (section, applies) in expected {
+            assert_eq!(
+                section.applies(&capabilities),
+                *applies,
+                "unexpected applicability for {section:?} under {capabilities:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sections_apply_from_client_capabilities_and_attachment() {
+        let common = [
+            (Section::General, true),
+            (Section::Providers, true),
+            (Section::Usage, true),
+            (Section::Orchestrate, true),
+            (Section::ComputerUse, true),
+            (Section::Archived, true),
+        ];
+
+        let local_desktop = capabilities(true, true, true, false);
+        assert_section_applicability(local_desktop, &common);
+        assert!(Section::Browser.applies(&local_desktop));
+        assert!(local_desktop.can_manage_local_permissions());
+        #[cfg(feature = "remote-hosting")]
+        assert!(Section::Remote.applies(&local_desktop));
+
+        let remote_desktop = capabilities(true, true, true, true);
+        assert_section_applicability(remote_desktop, &common);
+        assert!(Section::Browser.applies(&remote_desktop));
+        assert!(!remote_desktop.can_manage_local_permissions());
+        #[cfg(feature = "remote-hosting")]
+        assert!(Section::Remote.applies(&remote_desktop));
+
+        let remote_phone = capabilities(false, false, false, true);
+        assert_section_applicability(remote_phone, &common);
+        assert!(!Section::Browser.applies(&remote_phone));
+        assert!(!remote_phone.can_manage_local_permissions());
+        #[cfg(feature = "remote-hosting")]
+        assert!(!Section::Remote.applies(&remote_phone));
+    }
+
+    struct CompactSettingsProbe {
+        page: Entity<SettingsPage>,
+    }
+
+    impl Render for CompactSettingsProbe {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.page
+                .update(cx, |page, cx| page.render_compact_list(cx))
+        }
+    }
+
+    #[gpui::test]
+    fn compact_list_groups_sections_and_omits_inapplicable_ones(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-settings-sections-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .expect("spawn settings test host");
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (_probe, cx) = cx.add_window_view(|window, cx| {
+            let page = cx.new(|cx| {
+                let mut page = SettingsPage::new(store.clone(), window_state.clone(), window, cx);
+                page.capabilities = capabilities(false, false, false, true);
+                page
+            });
+            CompactSettingsProbe { page }
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        assert!(cx.debug_bounds("settings-device-caption").is_some());
+        assert!(cx.debug_bounds("settings-machine-caption").is_some());
+        assert!(cx.debug_bounds("settings-nav-general").is_some());
+        assert!(cx.debug_bounds("settings-nav-computer-use").is_some());
+        assert!(cx.debug_bounds("settings-nav-browser").is_none());
+        #[cfg(feature = "remote-hosting")]
+        assert!(cx.debug_bounds("settings-nav-remote").is_none());
+
+        // A stale palette/deep-link target is rejected by the same predicate
+        // and returns a compact detail route to the root list.
+        window_state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.open_settings(cx);
+            state.go(crate::window_state::Destination::SettingsSection, cx);
+            state.pending_settings_section = Some("browser".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            window_state.read_with(cx, |state, _| state.destination()),
+            crate::window_state::Destination::Settings
+        );
+
+        host.shutdown_blocking().expect("stop host");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// A client that renders before its host answers must not present its own
     /// defaults as the host's configuration, must adopt the host's values the

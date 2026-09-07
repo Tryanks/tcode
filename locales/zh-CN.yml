@@ -185,6 +185,9 @@ quit:
 settings:
   title: "设置"
   sections: "全部设置"
+  this_device: "本设备"
+  machine_settings: "%{name} 设置"
+  machine_settings_fallback: "主机设置"
   general: "通用"
   providers: "提供商"
   usage: "用量"
@@ -235,6 +238,10 @@ settings:
     system: "跟随系统"
     light: "浅色"
     dark: "深色"
+  device_name:
+    title: "设备名称"
+    description: "这台设备连接主机时显示的名称。"
+    placeholder: "我的设备"
   word_wrap:
     title: "diff 自动换行"
     description: "默认在 diff 面板中自动换行过长内容。"

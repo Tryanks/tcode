@@ -185,6 +185,9 @@ quit:
 settings:
   title: "Settings"
   sections: "All settings"
+  this_device: "This device"
+  machine_settings: "%{name} settings"
+  machine_settings_fallback: "Machine settings"
   general: "General"
   providers: "Providers"
   usage: "Usage"
@@ -235,6 +238,10 @@ settings:
     system: "System default"
     light: "Light"
     dark: "Dark"
+  device_name:
+    title: "Device name"
+    description: "The name this device shows to machines it connects to."
+    placeholder: "My device"
   word_wrap:
     title: "Word wrap in diffs"
     description: "Wrap long lines in the diff panel by default."
