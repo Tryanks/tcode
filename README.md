@@ -115,21 +115,21 @@ tcode-headless serve --listen 0.0.0.0:47420 --name build-server
 tcode-headless pair      # prints a fresh connection code and QR code
 ```
 
-Release builds also serve the browser app at `https://<machine>:47420/`.
+Release builds also serve the browser app at `http://<machine>:47420/`.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
 or the opening screen on a phone or a fresh browser tab. Add the machine with
 its connection code, or choose it under **Nearby machines**, then connect.
-In a browser, open the machine's HTTPS URL and accept its certificate first.
+In a browser, open the printed HTTP link.
 See [Use tcode from other devices](docs/remote.md) for the native-app and
 browser steps.
 
-**Security.** Connections use TLS with a self-signed certificate for each
-machine. Native apps save its security ID when you add the machine. Adding a
-machine also creates a device token that you can remove from that machine. QR
-codes carry the security ID; when you type a code, compare the security IDs
-before connecting. Details, a systemd unit, and troubleshooting are in
-[Use tcode from other devices](docs/remote.md).
+**Security.** LAN connections use plain HTTP and WebSockets. Adding a machine
+creates a device token that can be revoked on that machine. Anyone who captures
+LAN traffic can read the token; use a VPN or HTTPS tunnel on untrusted networks.
+See [Reaching your machine from outside](docs/remote.md#reaching-your-machine-from-outside)
+for Tailscale, WireGuard, Cloudflare Tunnel and frp, and the
+[remote guide](docs/remote.md) for setup and troubleshooting.
 
 ## Getting started
 

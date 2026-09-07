@@ -13,7 +13,6 @@ shorter introduction, see
 | Machine | The computer where tcode runs providers and terminals and stores projects and threads. You can use the desktop app or `tcode-headless` there. |
 | Device | A desktop, phone, tablet or browser that opens a machine and sends actions to it. |
 | Adding a machine | Exchanging a single-use, six-digit connection code for a device token. A code expires after five minutes; five wrong attempts invalidate it. Generating a new code replaces the previous code. |
-| Security ID | The SHA-256 digest of the machine's TLS certificate. Native apps save it to recognize the same machine later. |
 | Connected device | One saved device record on the machine, with a name and a token that you can remove. |
 
 Add the machine separately on each device. Project files, provider processes and
@@ -30,7 +29,7 @@ and other data they need to show and operate that work.
 3. Enable **Let other devices connect to this machine**. The listener binds all
    IPv4 interfaces. Allow its TCP port through your firewall from the LAN or
    overlay you use.
-4. Read the connection code and security ID, or scan the QR code from your
+4. Read the connection code, or scan the QR code from your
    phone. Use **New code** if the code expires or you need to add another
    device.
 5. Check **Connected devices** after adding a device. Use **Remove** to withdraw
@@ -72,9 +71,9 @@ does not serve the browser app.
      --data-dir "$HOME/.local/share/tcode-host"
    ```
 
-   Startup prints a connection code, its expiry, the full security ID, a
+   Startup prints a connection code, its expiry, a
    `tcode://pair` link and a terminal QR code. Release builds also print browser
-   HTTPS URLs. Use an address reachable from your device, not `0.0.0.0`.
+   HTTP URLs. Use an address reachable from your device, not `0.0.0.0`.
 5. Allow inbound TCP `47420` from your LAN or overlay. In another shell on the
    same machine, generate a new code when needed:
 
@@ -106,8 +105,8 @@ top-level option; the `serve` and `pair` subcommands do not accept `--help`.
 The `tcode-headless --data-dir` option takes precedence over `TCODE_DATA_DIR`.
 Without the option, `TCODE_DATA_DIR` selects the store; otherwise tcode uses the
 platform app-data directory with a `tcode` subdirectory. This includes settings,
-threads, connection records and the machine's TLS identity. It does not move
-project working directories into the store.
+threads and connection records. It does not move project working directories
+into the store.
 
 For example, this selects the same store as the explicit path above:
 
@@ -116,9 +115,8 @@ TCODE_DATA_DIR="$HOME/.local/share/tcode-host" \
   "$HOME/.local/bin/tcode-headless" serve --name build-server
 ```
 
-Keep this directory across restarts and back it up with its certificate and
-key. Use a separate directory for a separate machine identity. The desktop app
-also honors `TCODE_DATA_DIR`, including when adding or connecting to a machine.
+Keep this directory across restarts and back it up. Use a separate directory
+for a separate machine identity. The desktop app also honors `TCODE_DATA_DIR`, including when adding or connecting to a machine.
 
 ### Run with systemd
 
@@ -178,8 +176,8 @@ The script optionally uses `wasm-opt` if installed. Build the bundle before the
 option, not a `serve` flag. The resulting executable is
 `target/release/tcode-headless`.
 
-tcode serves the browser app at `/` over HTTPS, on the same port as the
-connection-code exchange and secure WebSockets. Without `web`, static requests
+tcode serves the browser app at `/` over HTTP, on the same port as the
+connection-code exchange and WebSockets. Without `web`, static requests
 return 404 while native apps can still add and connect to the machine. The
 browser runs the same shell as the desktop app; it lays itself out from the
 canvas size, so a wide tab gets the desktop split and a narrow one gets the
@@ -192,12 +190,11 @@ compact stack.
 1. Open **Machines** on this device — the sidebar entry under the search field,
    or the opening screen when no machine has been added yet.
 2. Under **Nearby machines**, choose **Refresh**, then pick a machine. That fills
-   the address, port and security ID on the **Add a machine** page; you still
+   the address on the **Add a machine** page; you still
    need the connection code. Otherwise choose **Add a machine** and fill it in
    yourself. You can also paste the machine's connection link into the address
    or code field.
-3. Choose **Add a machine**. Compare the displayed security ID with the one shown on the
-   machine through a trusted channel, then choose **Connect to ‹machine›**.
+3. Choose **Add a machine**, confirm the machine name, then choose **Connect to ‹machine›**.
 4. The same window immediately opens that machine's projects and threads.
    Choose another machine under **Your machines** to switch again;
    **This machine** restores the local workspace, and a machine row's
@@ -213,8 +210,7 @@ tcode --pair 192.168.1.10 47420 123456
 ```
 
 This saves the machine in this device's `hosts.json` and prints its machine ID.
-It uses TOFU and does not show a security-ID comparison prompt. Check the saved
-security ID against the one shown on the machine before connecting. Replace
+Replace
 `HOST_ID` below with the printed ID:
 
 ```sh
@@ -228,14 +224,12 @@ same device data directory for `--pair` and `--connect`.
 
 1. Install the Android debug APK or re-sign and install the unsigned iOS IPA.
 2. The app opens on **Machines** — the same screen every device has. Scan the
-   machine's QR code, or fill in the address, port and connection code.
-   Selecting a machine under **Nearby machines** fills the address, port and
-   security ID; you still enter the code. Allow camera or local-network access
+   machine's QR code, or fill in the address and connection code.
+   Selecting a machine under **Nearby machines** fills the address; you still enter the code. Allow camera or local-network access
    when the system asks. Native QR scanning uses AVFoundation on iOS and
    CameraX/ML Kit on Android; a simulator's permission and cancel flows do not
    prove that real camera recognition works.
-3. Choose **Add a machine**. Compare the displayed security ID with the one shown on the
-   machine through a trusted channel, then choose **Connect to ‹machine›**.
+3. Choose **Add a machine**, confirm the machine name, then choose **Connect to ‹machine›**.
 4. Open a thread from the list, or use **+** to start one. Read replies, send or
    queue a message, steer a running turn, stop it, and answer approvals — the
    same views the desktop shows, laid out for the width.
@@ -250,29 +244,32 @@ portrait returns to the stack with the same thread and draft. See
 ### From a browser
 
 1. Open the `Browser:` link printed by `tcode-headless`, for example
-   `https://192.168.1.10:47420/#code=123456`. The link carries the single-use
-   connection code and adds the machine automatically on first load. Use HTTPS;
-   tcode does not serve plaintext HTTP.
-2. Inspect the certificate in the browser warning and compare its SHA-256
-   security ID with the one shown on the machine through a trusted channel.
-   Accept the self-signed certificate exception for this machine. Acceptance is
-   normally needed once in that browser profile, not a guarantee that warnings
-   never recur.
-3. The browser exchanges the link's code, saves the issued device token, removes
-   the fragment from the address bar, and opens the machine's thread list. Later
-   visits to the bare URL reconnect with that saved token. If the link's code
-   expired, the normal code-only form shows the error; generate a fresh code,
-   enter its six digits, and choose **Add a machine**. The address and port remain fixed to
-   the page's origin and nearby-machine search stays hidden.
-4. The page is the same app as on the desktop; resizing the window moves it
-   between the split and the compact stack. To use a different machine, open
-   that machine's HTTPS URL.
+   `http://192.168.1.10:47420/#code=123456`. The link carries the single-use
+   connection code and adds the machine automatically on first load.
+2. The browser exchanges the code, saves the device token, removes the fragment,
+   and opens Threads. Later visits reconnect with that token. If the code has
+   expired, generate a fresh code and enter it in the code-only form.
+3. The address stays fixed to the page's origin and nearby search is hidden.
+   Open another machine's URL to use that machine. Resizing the page switches
+   between the shared wide and compact layouts.
 
-The browser stores added machines and tokens in this origin's `localStorage`
-under `tcode.hosts`, and the last machine under `tcode.last_host`. Clearing site
-data means you must add the machine again. The in-page security ID is a display
-value from the machine; JavaScript does not verify or pin the browser's TLS
-certificate.
+The browser stores machines and tokens in this origin's `localStorage` under
+`tcode.hosts`, and the last machine under `tcode.last_host`. Clearing site data
+means you must add the machine again. WebSockets follow the page's scheme:
+`ws://` for HTTP and `wss://` for HTTPS supplied by an external tunnel.
+
+### Machine addresses
+
+The **Address** field accepts `host`, `host:port`, or a full HTTP(S) origin.
+Shorthand defaults to HTTP and port `47420`; explicit URLs keep their standard
+port, so `https://tunnel.example.com` uses 443. IPv6 literals are supported,
+including `[fd00::1]:47420`. Paths, credentials, queries and fragments are not
+machine origins.
+
+Saved machines contain one `origin`, for example `http://192.168.1.10:47420`.
+Older `hosts.json` records migrate their first saved address and port to an HTTP
+origin, preserving the machine ID, name, token and last connection time. Saving
+writes the new format. Discovery and pairing invitations provide origin hints.
 
 ### Device preferences
 
@@ -287,7 +284,7 @@ name, Android from the device model.
 
 | Port | Purpose |
 | --- | --- |
-| `47420/TCP` by default | TLS listener: adding devices, secure WebSockets, and the optional browser app. Use your configured port if you change it. |
+| `47420/TCP` by default | HTTP listener: adding devices, WebSockets, and the optional browser app. Use your configured port if you change it. |
 | `5353/UDP` on the LAN | Bonjour / mDNS search for `_tcode._tcp.local.` machines. Optional when you enter an address yourself. |
 | Your dev server's TCP port | Direct access from another desktop's preview browser. Separate from the tcode listener. |
 
@@ -300,7 +297,7 @@ Nearby-machine search advertises identity and address hints; it does not grant
 access.
 
 For desktop preview, tcode rewrites `localhost`, `127.0.0.1` and `0.0.0.0` in
-HTTP(S) preview URLs to the added machine's first saved address, preserving the
+HTTP(S) preview URLs to the hostname in the added machine's origin, preserving the
 port, path, query and fragment. For example, `http://localhost:5173/app` becomes
 `http://192.168.1.10:5173/app` for that machine. Configure the dev server to
 listen on all interfaces (`0.0.0.0` or `::`) and allow its port from your LAN or
@@ -309,51 +306,19 @@ server reachable.
 
 ## Security
 
-### Certificate identity and comparison
-
-tcode creates a self-signed certificate for each machine on first start. It
-stores `remote-cert.der` and the PKCS#8 private key `remote-key.der` beside
-`remote.json` and reuses them after restart. A partial, unreadable or corrupt
-identity causes startup to fail instead of silently rotating it. Preserve both
-files when moving tcode to another machine. If you intentionally replace the
-certificate, devices must add the machine again.
-
-The full security ID is SHA-256 over the entire DER certificate. Headless
-output, connection links and QR payloads carry the full value. UI cards display
-an abbreviated value (eight groups of four hexadecimal digits); native apps pin
-all 32 digest bytes. Compare the displayed groups with the same prefix shown on
-the machine, or compare the full saved security ID with `tcode-headless` output
-for a full check.
-
-When a native app adds a machine from a link or QR code, it checks the supplied
-security ID before sending the connection code. Obtain that link from the
-machine through a trusted channel. Nearby-machine search is only a hint, even
-though it supplies a security ID.
-
-Manual address and code entry without a supplied security ID uses TOFU: the app
-accepts and saves the first certificate it reaches. The six-digit code does not
-independently authenticate that certificate. An attacker on that first
-connection could impersonate the machine. Compare security IDs through a
-trusted channel before proceeding; the comparison screen appears after the
-code exchange, so it does not protect a code already sent to the wrong
-endpoint. Native apps reject a changed pin before sending a saved device token.
-Older saved machines with no security ID acquire and persist a pin on their
-first connection, also using TOFU.
-
-Browsers use their own TLS certificate trust and exceptions. The security ID
-returned by the page is not a JavaScript certificate check. Compare the actual
-certificate in the browser's certificate details when establishing trust.
+The LAN transport is plain HTTP and `ws://`. Anyone on the LAN who captures
+traffic can read the device token and the work sent over the connection. Use a
+tunnel or VPN on untrusted networks. tcode never provisions or manages TLS.
 
 ### Device tokens and storage
 
 Adding a device issues a random bearer device token. The machine's `remote.json`
 stores device names, IDs and token hashes, not raw tokens. Native apps store raw
-tokens and certificate security IDs in `hosts.json` in their own data directory.
+tokens and origins in `hosts.json` in their own data directory.
 Phone records are in the app's private data directory; Android uses its
 `filesDir`. Browser records use `localStorage` as described above.
 
-On Unix, tcode writes `remote.json` and `hosts.json` with mode `0600` and keeps
-the certificate and key at `0600`. These are filesystem permissions, not file
+On Unix, tcode writes `remote.json` and `hosts.json` with mode `0600`. These are filesystem permissions, not file
 encryption. Protect this device's data directory and browser profile: possession
 of a device token grants that device's access. There are no per-device project
 permissions or read-only device roles.
@@ -370,18 +335,22 @@ desktop UI, stop `tcode-headless`, back up `remote.json`, remove the matching
 entry from its `devices` array, preserve its permissions, and restart. Do not
 edit that file while tcode is running: it holds the device list in memory.
 
-### What is encrypted
+## Reaching your machine from outside
 
-TLS encrypts the connection-code exchange, device tokens and the WebSocket
-traffic between a device and the machine, including thread events, terminal
-grid updates and attachment transfers. The embedded browser files are served
-over HTTPS too. The machine decrypts this traffic and runs the requested work.
+- **Tailscale / WireGuard:** once your machine and device are on the VPN, there
+  is nothing to configure in tcode. Save the machine's VPN address, such as
+  `http://100.64.0.10:47420`, and allow the listener in the VPN's access rules.
+  Discovery usually stays on the LAN, so type the address when needed.
+- **Cloudflare Tunnel / frp:** forward your tunnel's HTTPS endpoint to tcode's
+  local HTTP listener, including WebSocket upgrades. Save the tunnel's HTTPS
+  origin, such as `https://tunnel.example.com`. The tunnel manages TLS.
+- **Tailscale HTTPS:** save its HTTPS origin when using its HTTPS forwarding.
+  Native clients use standard trusted roots and hostname validation.
 
-tcode does not encrypt its stored JSON files or project files at rest. mDNS
-advertisements are not encrypted. Preview pages connect directly to the dev
-server: HTTP preview traffic is not protected by the tcode TLS connection.
-Provider connections use each provider's own transport; using other devices
-does not add encryption to them.
+The six-digit code and device-token authorization remain required through a
+tunnel or VPN. Protect tunnel access and your stored tokens. tcode does not
+encrypt stored JSON or project files; preview servers and provider connections
+use their own transports.
 
 ## Troubleshooting
 
@@ -391,8 +360,7 @@ does not add encryption to them.
 | Cannot reach the machine | Check that tcode is running, that the address is reachable from this device, and that the TCP port is allowed. Use the overlay address if no nearby machine appears. This device's `127.0.0.1` points to itself. |
 | `tcode-headless pair` cannot reach a running listener | Check its port and IPv4/IPv6 family. The listener must accept loopback connections; `pair` always uses loopback. |
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
-| Browser fails before adding the machine | Use HTTPS and review the certificate exception. Check that JavaScript and site storage are allowed. |
-| “This machine's security ID changed. Add it again.” | Stop and compare the machine's current security ID through a trusted channel. Check for a replaced data directory or identity. Restore the original certificate and key from your backup, or add the machine again only after verifying the replacement. Native apps go **Offline** on a pin mismatch. |
+| Browser fails before adding the machine | Check the HTTP host or your HTTPS tunnel. Check that JavaScript and site storage are allowed. |
 | Connection rejected after adding the machine | Check whether the device was removed. Add the machine again with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
 | Preview cannot load a dev server | Make the dev server listen on all interfaces, open its own port and check the first address saved for the added machine. The tcode port does not carry the preview page connection. |
 
@@ -400,8 +368,8 @@ does not add encryption to them.
 host message. **Reconnecting · attempt N** appears immediately when a connection
 is lost, with its failure reason. Retry delays grow from one to thirty seconds;
 only traffic received after the hello handshake resets backoff. Native clients
-race saved addresses at 250 ms intervals, with one 15 s budget per address for
-TCP, TLS, WebSocket upgrade and hello. The first successful address wins.
+race addresses resolved for the saved origin at 250 ms intervals, with one 15 s budget per address for
+TCP, optional TLS, WebSocket upgrade and hello. The first successful address wins.
 
 Native clients probe after 10 s without an inbound frame and reconnect if no
 frame arrives in the next 20 s. Every connected write has a 10 s deadline.
@@ -411,10 +379,10 @@ background tabs; making the page visible or coming online wakes reconnection.
 
 A disconnected device keeps cached thread content for reading and disables
 writes; unvisited threads may have only cached list information. Subscriptions
-resume after reconnecting. Temporary network failures keep retrying. Certificate
-changes and rejected authentication stop at **Offline** with **Pair again**;
-protocol mismatches stop with **Update the app**. Compare a changed security ID
-through a trusted channel before pairing again.
+resume after reconnecting. Temporary network failures keep retrying. Rejected
+authentication stops at **Offline** with **Pair again**; protocol mismatches
+stop with **Update the app**. TLS errors on an HTTPS tunnel are logged and
+reported as unreachable.
 
 ## Limits
 
