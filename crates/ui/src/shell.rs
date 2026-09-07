@@ -2055,7 +2055,7 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let (_, state) = async_channel::unbounded();
         let transport = RefCell::new(Some(Transport {
-            to_host,
+            to_host: to_host.into(),
             from_host,
             state,
         }));

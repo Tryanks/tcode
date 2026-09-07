@@ -19,8 +19,13 @@ pub use tcode_client::pairing::{
 };
 pub use tcode_client::{ConnectionFailure, ConnectionState};
 
+use tcode_client::{
+    outgoing::{Outgoing, OutgoingReceiver, subscription_key},
+    recovery::{Backoff, Wake},
+};
+
 pub struct RemoteClient {
-    pub to_host: Sender<String>,
+    pub to_host: Outgoing,
     pub from_host: Receiver<String>,
     pub state: Receiver<ConnectionState>,
 }
@@ -160,7 +165,7 @@ pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
 }
 
 pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
-    let (to_host, outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     std::thread::Builder::new()
@@ -183,28 +188,50 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
 }
 
 async fn connection_loop(
-    host: PairedHost,
+    mut host: PairedHost,
     device_name: String,
-    outgoing: Receiver<String>,
+    outgoing: OutgoingReceiver,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
 ) {
     let mut buffered = VecDeque::<String>::new();
     let mut subscriptions = HashMap::<String, String>::new();
-    let mut attempt = 1_u32;
+    let mut backoff = Backoff::default();
     let mut reason = None;
     while !outgoing.is_closed() && !incoming.is_closed() {
         let _ = state
-            .send(ConnectionState::Reconnecting { attempt, reason })
+            .send(ConnectionState::Reconnecting {
+                attempt: backoff.attempt(),
+                reason,
+            })
             .await;
-        let failure = match race_addresses(&host, &device_name).await {
+        let mut stable_ms = 0;
+        let mut interrupted = None;
+        let opened = futures_lite::future::race(
+            async { Ok(race_addresses(&host, &device_name).await) },
+            async { Err(outgoing.wake.recv().await) },
+        )
+        .await;
+        let opened = match opened {
+            Ok(result) => result,
+            Err(wake) => {
+                if let Ok(Wake::Origin(origin)) = wake {
+                    host.origin = origin;
+                }
+                continue;
+            }
+        };
+        let failure = match opened {
             Ok(mut websocket) => {
                 let _ = state.send(ConnectionState::Syncing).await;
                 let mut failure = None;
                 for line in subscriptions.values() {
-                    if let Err(error) = send_bounded(
+                    if let Err(error) = send_interruptible(
                         &mut websocket,
                         Message::Text(line.trim_end().to_owned().into()),
+                        Instant::now() + Duration::from_secs(10),
+                        &outgoing,
+                        &mut interrupted,
                     )
                     .await
                     {
@@ -217,9 +244,12 @@ async fn connection_loop(
                         if subscription_key(&line).is_some() {
                             continue;
                         }
-                        if let Err(error) = send_bounded(
+                        if let Err(error) = send_interruptible(
                             &mut websocket,
                             Message::Text(line.trim_end().to_owned().into()),
+                            Instant::now() + Duration::from_secs(10),
+                            &outgoing,
+                            &mut interrupted,
                         )
                         .await
                         {
@@ -227,12 +257,14 @@ async fn connection_loop(
                             failure = Some(error);
                             break;
                         }
+                        outgoing.sent(&line);
                     }
                 }
                 match failure {
                     Some(error) => error,
                     None => {
-                        let (error, healthy) = relay_connected(
+                        let started = Instant::now();
+                        let (error, healthy, wake) = relay_connected(
                             &mut websocket,
                             &outgoing,
                             &incoming,
@@ -242,7 +274,13 @@ async fn connection_loop(
                         )
                         .await;
                         if healthy {
-                            attempt = 0;
+                            stable_ms = started.elapsed().as_millis() as u64;
+                        }
+                        if let Some(wake) = wake {
+                            if let Wake::Origin(origin) = wake {
+                                host.origin = origin;
+                            }
+                            continue;
                         }
                         error
                     }
@@ -250,6 +288,12 @@ async fn connection_loop(
             }
             Err(error) => error,
         };
+        if let Some(wake) = interrupted {
+            if let Wake::Origin(origin) = wake {
+                host.origin = origin;
+            }
+            continue;
+        }
         if failure.is_terminal() {
             let _ = state
                 .send(ConnectionState::Offline { reason: failure })
@@ -261,19 +305,24 @@ async fn connection_loop(
             break;
         }
         reason = Some(failure);
-        let seconds = (1_u64 << attempt.clamp(1, 6).saturating_sub(1)).min(30);
-        attempt = attempt.saturating_add(1).max(1);
+        let delay = backoff.failed(stable_ms, jitter_sample());
         // Publish loss before sleeping, so the UI never claims this socket is alive.
         let _ = state
-            .send(ConnectionState::Reconnecting { attempt, reason })
+            .send(ConnectionState::Reconnecting {
+                attempt: backoff.attempt(),
+                reason,
+            })
             .await;
-        buffer_during_backoff(
+        if let Some(Wake::Origin(origin)) = buffer_during_backoff(
             &outgoing,
             &mut buffered,
             &mut subscriptions,
-            Duration::from_secs(seconds),
+            Duration::from_millis(delay),
         )
-        .await;
+        .await
+        {
+            host.origin = origin;
+        }
     }
     let _ = state
         .send(ConnectionState::Offline {
@@ -344,8 +393,18 @@ async fn race_addresses(
     Err(failure)
 }
 
-async fn send_bounded(socket: &mut WebSocket, message: Message) -> Result<(), ConnectionFailure> {
-    send_before(socket, message, Instant::now() + Duration::from_secs(10)).await
+async fn send_interruptible(
+    socket: &mut WebSocket,
+    message: Message,
+    deadline: Instant,
+    outgoing: &OutgoingReceiver,
+    interrupted: &mut Option<Wake>,
+) -> Result<(), ConnectionFailure> {
+    futures_lite::future::race(send_before(socket, message, deadline), async {
+        *interrupted = outgoing.wake.recv().await.ok();
+        Err(ConnectionFailure::Unreachable)
+    })
+    .await
 }
 
 async fn send_before(
@@ -449,49 +508,77 @@ async fn open_websocket(
 
 async fn relay_connected(
     websocket: &mut WebSocket,
-    outgoing: &Receiver<String>,
+    outgoing: &OutgoingReceiver,
     incoming: &Sender<String>,
     subscriptions: &mut HashMap<String, String>,
     buffered: &mut VecDeque<String>,
     state: &Sender<ConnectionState>,
-) -> (ConnectionFailure, bool) {
+) -> (ConnectionFailure, bool, Option<Wake>) {
     let mut healthy = false;
+    let mut interrupted = None;
     let mut connected = false;
     let mut deadline = Instant::now() + Duration::from_secs(10);
     let mut probing = false;
+    let mut foreground_probe = false;
     loop {
         enum Input {
             Outgoing(Result<String, async_channel::RecvError>),
             WebSocket(Option<Result<Message, tungstenite::Error>>),
             Timer,
+            Wake(Result<Wake, async_channel::RecvError>),
         }
         let input = {
+            let wake = outgoing.wake.recv().fuse();
             let outbound = outgoing.recv().fuse();
             let websocket_input = websocket.next().fuse();
             let timer = futures_util::FutureExt::fuse(smol::Timer::at(deadline));
-            futures_util::pin_mut!(outbound, websocket_input, timer);
+            futures_util::pin_mut!(outbound, websocket_input, timer, wake);
             futures_util::select! {
                 line = outbound => Input::Outgoing(line),
                 message = websocket_input => Input::WebSocket(message),
                 _ = timer => Input::Timer,
+                wake = wake => Input::Wake(wake),
             }
         };
         if matches!(&input, Input::WebSocket(Some(Ok(message))) if !matches!(message, Message::Close(_)))
         {
             healthy = true;
             probing = false;
+            foreground_probe = false;
             deadline = Instant::now() + Duration::from_secs(10);
         }
         let failure = match input {
+            Input::Wake(Ok(Wake::Probe)) => {
+                foreground_probe = true;
+                probing = true;
+                deadline = Instant::now() + Duration::from_secs(3);
+                send_interruptible(
+                    websocket,
+                    Message::Ping(Vec::new().into()),
+                    deadline,
+                    outgoing,
+                    &mut interrupted,
+                )
+                .await
+                .err()
+            }
+            Input::Wake(Ok(wake)) => return (ConnectionFailure::Unreachable, healthy, Some(wake)),
+            Input::Wake(Err(_)) => Some(ConnectionFailure::HostClosed),
             Input::Timer if probing => Some(ConnectionFailure::Timeout),
             Input::Timer => {
                 probing = true;
                 // Keep the silence window absolute so timer scheduling does not
                 // accumulate beyond the 10 + 20 second liveness budget.
                 deadline += Duration::from_secs(20);
-                send_before(websocket, Message::Ping(Vec::new().into()), deadline)
-                    .await
-                    .err()
+                send_interruptible(
+                    websocket,
+                    Message::Ping(Vec::new().into()),
+                    deadline,
+                    outgoing,
+                    &mut interrupted,
+                )
+                .await
+                .err()
             }
             Input::Outgoing(Ok(line)) => {
                 remember_subscription(&line, subscriptions);
@@ -500,15 +587,21 @@ async fn relay_connected(
                 } else {
                     Instant::now() + Duration::from_secs(10)
                 };
-                let failure = send_before(
+                let failure = send_interruptible(
                     websocket,
                     Message::Text(line.trim_end().to_owned().into()),
                     send_deadline,
+                    outgoing,
+                    &mut interrupted,
                 )
                 .await
                 .err();
                 if failure.is_some() {
-                    buffered.push_back(line);
+                    if subscription_key(&line).is_none() {
+                        buffered.push_back(line);
+                    }
+                } else {
+                    outgoing.sent(&line);
                 }
                 failure
             }
@@ -524,11 +617,15 @@ async fn relay_connected(
                     .err()
                     .map(|_| ConnectionFailure::HostClosed)
             }
-            Input::WebSocket(Some(Ok(Message::Ping(payload)))) => {
-                send_before(websocket, Message::Pong(payload), deadline)
-                    .await
-                    .err()
-            }
+            Input::WebSocket(Some(Ok(Message::Ping(payload)))) => send_interruptible(
+                websocket,
+                Message::Pong(payload),
+                deadline,
+                outgoing,
+                &mut interrupted,
+            )
+            .await
+            .err(),
             Input::WebSocket(Some(Ok(Message::Close(_))) | None) => {
                 Some(ConnectionFailure::HostClosed)
             }
@@ -536,38 +633,48 @@ async fn relay_connected(
             Input::WebSocket(Some(Ok(_))) => None,
         };
         if let Some(failure) = failure {
-            return (failure, healthy);
+            return (
+                failure,
+                healthy,
+                interrupted.or_else(|| foreground_probe.then_some(Wake::Reconnect)),
+            );
         }
     }
 }
 
 async fn buffer_during_backoff(
-    outgoing: &Receiver<String>,
+    outgoing: &OutgoingReceiver,
     buffered: &mut VecDeque<String>,
     subscriptions: &mut HashMap<String, String>,
     duration: Duration,
-) {
+) -> Option<Wake> {
     let deadline = futures_util::FutureExt::fuse(smol::Timer::after(duration));
     futures_util::pin_mut!(deadline);
     loop {
         enum Input {
             Line(Result<String, async_channel::RecvError>),
             Done,
+            Wake(Result<Wake, async_channel::RecvError>),
         }
         let input = {
+            let wake = outgoing.wake.recv().fuse();
             let line = outgoing.recv().fuse();
-            futures_util::pin_mut!(line);
+            futures_util::pin_mut!(line, wake);
             futures_util::select! {
                 line = line => Input::Line(line),
                 _ = deadline => Input::Done,
+                wake = wake => Input::Wake(wake),
             }
         };
         match input {
             Input::Line(Ok(line)) => {
                 remember_subscription(&line, subscriptions);
-                buffered.push_back(line);
+                if subscription_key(&line).is_none() {
+                    buffered.push_back(line);
+                }
             }
-            Input::Line(Err(_)) | Input::Done => return,
+            Input::Wake(wake) => return wake.ok(),
+            Input::Line(Err(_)) | Input::Done => return None,
         }
     }
 }
@@ -576,15 +683,6 @@ fn remember_subscription(line: &str, subscriptions: &mut HashMap<String, String>
     if let Some(key) = subscription_key(line) {
         subscriptions.insert(key, line.to_owned());
     }
-}
-
-fn subscription_key(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
-    let payload = value.get("payload")?;
-    if !matches!(payload.get("type")?.as_str()?, "subscribe" | "unsubscribe") {
-        return None;
-    }
-    serde_json::to_string(payload.get("content")?.get("topic")?).ok()
 }
 
 fn authority(address: &str, port: u16) -> String {
@@ -616,4 +714,14 @@ fn tls_client_config() -> Result<Arc<rustls::ClientConfig>, String> {
     .with_root_certificates(roots)
     .with_no_client_auth();
     Ok(Arc::new(config))
+}
+
+fn jitter_sample() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Timing entropy decorrelates clients without adding a cryptographic RNG.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    f64::from(nanos % 1_000_001) / 1_000_000.
 }

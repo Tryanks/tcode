@@ -14,7 +14,7 @@ pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// A live link to a host: NDJSON lines in both directions plus connection state.
 pub struct Transport {
-    pub to_host: async_channel::Sender<String>,
+    pub to_host: crate::outgoing::Outgoing,
     pub from_host: async_channel::Receiver<String>,
     pub state: async_channel::Receiver<ConnectionState>,
 }
@@ -119,6 +119,12 @@ pub trait ClientHost: 'static {
 
     fn browse_hosts(&self) -> HostFuture<'_, Vec<DiscoveredHost>> {
         Box::pin(async { Vec::new() })
+    }
+
+    /// Refresh a saved LAN origin after an unreachable reconnect cycle.
+    /// Browser adapters leave their page origin fixed.
+    fn refresh_origin(&self, _host_id: &str) -> HostFuture<'_, Option<String>> {
+        Box::pin(async { None })
     }
 
     fn supports_qr(&self) -> bool {

@@ -243,7 +243,7 @@ impl LocalKernel {
         // receiver simply ends the forwarder on its first poll.
         let (_, state) = async_channel::unbounded();
         Transport {
-            to_host: connection.to_host,
+            to_host: connection.to_host.into(),
             from_host: connection.from_host,
             state,
         }

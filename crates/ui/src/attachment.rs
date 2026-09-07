@@ -178,7 +178,7 @@ mod tests {
     ) -> Transport {
         let (_, state) = async_channel::unbounded();
         Transport {
-            to_host,
+            to_host: to_host.into(),
             from_host,
             state,
         }

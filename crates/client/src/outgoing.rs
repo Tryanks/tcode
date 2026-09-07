@@ -1,0 +1,202 @@
+//! Admission is bounded before crossing the transport task boundary. A line
+//! remains charged while a disconnected adapter holds it for retry.
+use crate::recovery::Wake;
+use async_channel::{Receiver, Sender};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Mutex},
+};
+
+pub const MAX_LINES: usize = 256;
+pub const MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Default)]
+struct Queue {
+    lines: VecDeque<String>,
+    subscriptions: BTreeMap<String, String>,
+    count: usize,
+    bytes: usize,
+}
+
+#[derive(Clone)]
+pub struct Outgoing {
+    sender: Sender<String>,
+    queue: Option<Arc<Mutex<Queue>>>,
+    wake: Option<Sender<Wake>>,
+}
+
+pub struct OutgoingReceiver {
+    receiver: Receiver<String>,
+    queue: Arc<Mutex<Queue>>,
+    pub wake: Receiver<Wake>,
+}
+
+pub fn channel() -> (Outgoing, OutgoingReceiver) {
+    let (sender, receiver) = async_channel::bounded(1);
+    let (wake_tx, wake) = async_channel::unbounded();
+    let queue = Arc::new(Mutex::new(Queue::default()));
+    (
+        Outgoing {
+            sender,
+            queue: Some(queue.clone()),
+            wake: Some(wake_tx),
+        },
+        OutgoingReceiver {
+            receiver,
+            queue,
+            wake,
+        },
+    )
+}
+
+impl From<Sender<String>> for Outgoing {
+    fn from(sender: Sender<String>) -> Self {
+        Self {
+            sender,
+            queue: None,
+            wake: None,
+        }
+    }
+}
+
+impl Outgoing {
+    pub fn try_send(&self, line: String) -> Result<(), async_channel::TrySendError<String>> {
+        let Some(queue) = &self.queue else {
+            return self.sender.try_send(line);
+        };
+        if self.sender.is_closed() {
+            return Err(async_channel::TrySendError::Closed(line));
+        }
+        let mut queue = queue.lock().unwrap();
+        if let Some(key) = subscription_key(&line) {
+            queue.subscriptions.insert(key, line);
+        } else {
+            if queue.count >= MAX_LINES || line.len() > MAX_BYTES.saturating_sub(queue.bytes) {
+                log::error!("outgoing queue full; rejecting new non-subscription line");
+                return Err(async_channel::TrySendError::Full(line));
+            }
+            queue.count += 1;
+            queue.bytes += line.len();
+            queue.lines.push_back(line);
+        }
+        // A single notification covers all queued work, including coalesced topics.
+        let _ = self.sender.try_send(String::new());
+        Ok(())
+    }
+
+    pub async fn send(&self, line: String) -> Result<(), async_channel::TrySendError<String>> {
+        self.try_send(line)
+    }
+
+    pub fn send_blocking(&self, line: String) -> Result<(), async_channel::TrySendError<String>> {
+        self.try_send(line)
+    }
+
+    pub fn close(&self) -> bool {
+        self.sender.close()
+    }
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+    pub fn queued(&self) -> usize {
+        self.queue
+            .as_ref()
+            .map_or(0, |queue| queue.lock().unwrap().count)
+    }
+    pub fn wake(&self, wake: Wake) {
+        if let Some(sender) = &self.wake {
+            let _ = sender.try_send(wake);
+        }
+    }
+}
+
+impl OutgoingReceiver {
+    pub async fn recv(&self) -> Result<String, async_channel::RecvError> {
+        loop {
+            {
+                let mut queue = self.queue.lock().unwrap();
+                if let Some((_, line)) = queue.subscriptions.pop_first() {
+                    return Ok(line);
+                }
+                if let Some(line) = queue.lines.pop_front() {
+                    return Ok(line);
+                }
+            }
+            self.receiver.recv().await?;
+        }
+    }
+    pub fn sent(&self, line: &str) {
+        if subscription_key(line).is_none() {
+            let mut queue = self.queue.lock().unwrap();
+            queue.count -= 1;
+            queue.bytes -= line.len();
+        }
+    }
+    pub fn close(&self) -> bool {
+        self.receiver.close()
+    }
+    pub fn is_closed(&self) -> bool {
+        self.receiver.is_closed()
+    }
+}
+
+pub fn subscription_key(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
+    let payload = value.get("payload")?;
+    if !matches!(payload.get("type")?.as_str()?, "subscribe" | "unsubscribe") {
+        return None;
+    }
+    serde_json::to_string(payload.get("content")?.get("topic")?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_counts_inflight_bytes_and_preserves_older_lines() {
+        let (sender, receiver) = channel();
+        for index in 0..MAX_LINES {
+            sender.try_send(index.to_string()).unwrap();
+        }
+        assert!(matches!(
+            sender.try_send("rejected".into()),
+            Err(async_channel::TrySendError::Full(_))
+        ));
+        let first = smol::block_on(receiver.recv()).unwrap();
+        assert_eq!(first, "0");
+        assert_eq!(
+            sender.queued(),
+            256,
+            "inflight lines remain charged until sent"
+        );
+        receiver.sent(&first);
+        sender.try_send("accepted".into()).unwrap();
+        for index in 1..MAX_LINES {
+            assert_eq!(smol::block_on(receiver.recv()).unwrap(), index.to_string());
+        }
+        assert_eq!(smol::block_on(receiver.recv()).unwrap(), "accepted");
+        let (sender, receiver) = channel();
+        sender.try_send("x".repeat(MAX_BYTES)).unwrap();
+        assert!(sender.try_send("x".into()).is_err());
+        let line = smol::block_on(receiver.recv()).unwrap();
+        receiver.sent(&line);
+        assert_eq!(sender.queued(), 0);
+        assert!(sender.try_send("x".repeat(MAX_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn subscriptions_coalesce_even_when_command_queue_is_full() {
+        let (sender, receiver) = channel();
+        sender.try_send("x".repeat(MAX_BYTES)).unwrap();
+        for id in 0..1000 {
+            sender.try_send(format!(r#"{{"id":{id},"payload":{{"type":"subscribe","content":{{"topic":"Index","after":null}}}}}}"#)).unwrap();
+        }
+        let line = smol::block_on(receiver.recv()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+            999
+        );
+        assert_eq!(sender.queued(), 1);
+    }
+}

@@ -9,6 +9,8 @@ use tcode_client::{
     ConnectionFailure, ConnectionState,
     heartbeat::{Heartbeat, Tick},
     host::Transport,
+    outgoing::{OutgoingReceiver, subscription_key},
+    recovery::Backoff,
 };
 use wasm_bindgen::{JsCast as _, prelude::*};
 
@@ -138,7 +140,7 @@ impl Drop for Socket {
 }
 
 pub fn connect(token: String, device_name: String) -> Transport {
-    let (to_host, outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     wasm_bindgen_futures::spawn_local(async move {
@@ -166,39 +168,33 @@ enum Input {
     Event(Event),
 }
 
-async fn next(outgoing: &Receiver<String>, events: &Receiver<Event>) -> Input {
+async fn next(outgoing: &OutgoingReceiver, events: &Receiver<Event>) -> Input {
     race(async { Input::Line(outgoing.recv().await) }, async {
         Input::Event(events.recv().await.unwrap_or(Event::Lost))
     })
     .await
 }
 
-fn subscription_key(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
-    let payload = value.get("payload")?;
-    if !matches!(payload.get("type")?.as_str()?, "subscribe" | "unsubscribe") {
-        return None;
-    }
-    serde_json::to_string(payload.get("content")?.get("topic")?).ok()
-}
-
 async fn connection_loop(
     token: String,
     device_name: String,
-    outgoing: &Receiver<String>,
+    outgoing: &OutgoingReceiver,
     incoming: &Sender<String>,
     state: &Sender<ConnectionState>,
 ) {
     let mut subscriptions = BTreeMap::<String, String>::new();
     let mut buffered = VecDeque::<String>::new();
-    let mut attempt = 1_u32;
+    let mut backoff = Backoff::default();
     let mut delay = 0;
     let mut reason = None;
     loop {
         if outgoing.is_closed() {
             return;
         }
-        let _ = state.try_send(ConnectionState::Reconnecting { attempt, reason });
+        let _ = state.try_send(ConnectionState::Reconnecting {
+            attempt: backoff.attempt(),
+            reason,
+        });
         // Each attempt has its own event queue, including foreground wakeups.
         let (tx, events) = async_channel::unbounded();
         let wake_tx = tx.clone();
@@ -226,10 +222,12 @@ async fn connection_loop(
         // Discard any backoff timer/wakeup already queued before opening.
         while events.try_recv().is_ok() {}
         let mut immediate = false;
+        let mut stable_ms = 0;
         reason = Some(ConnectionFailure::Unreachable);
         if let Ok(socket) = Socket::new(&tx) {
             let mut timer = Some(Timer::new(15000, tx.clone()));
             let mut ready = false;
+            let mut ready_since = None;
             let mut connected = false;
             let mut heartbeat = Heartbeat::new(now_ms());
             loop {
@@ -246,6 +244,8 @@ async fn connection_loop(
                             if ready {
                                 break;
                             }
+                        } else {
+                            outgoing.sent(&line);
                         }
                     }
                     Input::Event(Event::Open) => {
@@ -296,19 +296,20 @@ async fn connection_loop(
                                 failed = true;
                                 break;
                             }
+                            outgoing.sent(line);
                             buffered.pop_front();
                         }
                         if failed {
                             break;
                         }
                         ready = true;
+                        ready_since = Some(now_ms());
                         heartbeat.received(now_ms());
                         timer = Some(Timer::new(15000, tx.clone()));
                     }
                     Input::Event(Event::Text(line)) => {
                         heartbeat.received(now_ms());
                         timer = Some(Timer::new(15000, tx.clone()));
-                        attempt = 0;
                         if !connected {
                             connected = true;
                             let _ = state.try_send(ConnectionState::Connected);
@@ -359,13 +360,15 @@ async fn connection_loop(
                     }
                 }
             }
+            if connected {
+                stable_ms = ready_since.map_or(0, |start| now_ms().saturating_sub(start));
+            }
         }
         delay = if immediate {
             0
         } else {
-            (1000_i32 << attempt.saturating_sub(1).min(5)).min(30_000)
+            backoff.failed(stable_ms, js_sys::Math::random()) as i32
         };
-        attempt = attempt.saturating_add(1).max(1);
     }
 }
 

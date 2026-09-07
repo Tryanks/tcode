@@ -2,7 +2,9 @@
 
 pub mod heartbeat;
 pub mod host;
+pub mod outgoing;
 pub mod pairing;
+pub mod recovery;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -54,7 +56,7 @@ impl ConnectionFailure {
 }
 
 struct HostLinkInner {
-    to_host: async_channel::Sender<String>,
+    to_host: outgoing::Outgoing,
     from_host: async_channel::Receiver<String>,
     pending: Mutex<HashMap<u64, async_channel::Sender<HostMessage>>>,
     events_tx: async_channel::Sender<EventEnvelope>,
@@ -79,14 +81,14 @@ pub type CommandFuture =
 
 impl HostLink {
     pub fn new(
-        to_host: async_channel::Sender<String>,
+        to_host: impl Into<outgoing::Outgoing>,
         from_host: async_channel::Receiver<String>,
     ) -> Self {
         let (events_tx, events_rx) = async_channel::unbounded();
         let (connection_state_tx, connection_state_rx) = async_channel::unbounded();
         Self {
             inner: Arc::new(HostLinkInner {
-                to_host,
+                to_host: to_host.into(),
                 from_host,
                 pending: Mutex::new(HashMap::new()),
                 events_tx,
@@ -139,7 +141,23 @@ impl HostLink {
 
     fn send_payload(&self, id: u64, payload: ClientPayload) -> Result<(), ProtocolError> {
         let line = encode_line(&ClientMessage { id, payload })?;
-        self.inner.to_host.try_send(line).map_err(transport_error)
+        self.inner
+            .to_host
+            .try_send(line)
+            .map_err(|error| ProtocolError {
+                code: if error.is_full() {
+                    "queue_full"
+                } else {
+                    "transport_closed"
+                }
+                .into(),
+                message: if error.is_full() {
+                    "QueueFull"
+                } else {
+                    "transport closed"
+                }
+                .into(),
+            })
     }
 
     fn begin_request(
@@ -303,6 +321,14 @@ impl HostLink {
             .collect()
     }
 
+    pub fn queued_outgoing(&self) -> usize {
+        self.inner.to_host.queued()
+    }
+
+    pub fn wake(&self, wake: recovery::Wake) {
+        self.inner.to_host.wake(wake);
+    }
+
     pub fn connection_state(&self) -> ConnectionState {
         self.inner.connection_state.lock().unwrap().clone()
     }
@@ -393,6 +419,20 @@ pub use preview::rewrite_preview_url;
 mod tests {
     use super::*;
     use tcode_protocol::{IndexSnapshot, ServerEvent};
+
+    #[test]
+    fn full_transport_queue_rejects_requests_without_leaving_a_waiter() {
+        let (outgoing, _receiver) = outgoing::channel();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let link = HostLink::new(outgoing, from_host);
+        for _ in 0..outgoing::MAX_LINES {
+            link.dispatch(Command::OpenLatestSession).unwrap();
+        }
+        let error = smol::block_on(link.command(Command::OpenLatestSession)).unwrap_err();
+        assert_eq!(error.code, "queue_full");
+        assert_eq!(link.queued_outgoing(), 256);
+        assert!(link.inner.pending.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn hello_rejection_reasons_preserve_legacy_retry_behavior() {

@@ -240,6 +240,37 @@ impl ClientHost for NativeClientHost {
         }
     }
 
+    fn refresh_origin(&self, host_id: &str) -> HostFuture<'_, Option<String>> {
+        let host_id = host_id.to_owned();
+        Box::pin(async move {
+            let previous = self
+                .load_hosts()
+                .into_iter()
+                .find(|host| host.host_id == host_id)?;
+            if !lan_http_origin(&previous.origin) {
+                return None;
+            }
+            let hint = self.browse_hosts().await.into_iter().find(|hint| {
+                hint.host_id == host_id
+                    && hint.origin != previous.origin
+                    && lan_http_origin(&hint.origin)
+            })?;
+            // Reload after browsing so concurrent pairing/preferences never get overwritten.
+            let mut hosts = self.load_hosts();
+            let saved = hosts.iter_mut().find(|host| host.host_id == host_id)?;
+            if saved.origin != previous.origin {
+                return None;
+            }
+            saved.origin = hint.origin.clone();
+            crate::client::save_hosts(&self.data_dir, &hosts)
+                .map_err(|error| {
+                    log::error!("could not persist refreshed machine address: {error}");
+                })
+                .ok()?;
+            Some(hint.origin)
+        })
+    }
+
     fn supports_qr(&self) -> bool {
         self.qr_scanner.is_some()
     }
@@ -249,6 +280,21 @@ impl ClientHost for NativeClientHost {
             || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
             |scanner| scanner(),
         )
+    }
+}
+
+fn lan_http_origin(origin: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    if url.scheme() != "http" || tcode_client::pairing::parse_origin(origin).is_err() {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => ip.is_unique_local() || ip.is_unicast_link_local(),
+        Some(url::Host::Domain(name)) => name.ends_with(".local"),
+        None => false,
     }
 }
 
@@ -349,6 +395,52 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn discovery_refresh_matches_identity_persists_origin_and_preserves_token() {
+        let dir = TestDir::new();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = calls.clone();
+        let client = NativeClientHost::new(dir.0.clone(), "phone").with_browser(move || {
+            observed.set(observed.get() + 1);
+            Box::pin(async {
+                vec![
+                    DiscoveredHost {
+                        host_id: "wrong".into(),
+                        name: "Wrong".into(),
+                        origin: "http://192.168.1.99:47420".into(),
+                    },
+                    DiscoveredHost {
+                        host_id: "right".into(),
+                        name: "Right".into(),
+                        origin: "http://192.168.1.25:47420".into(),
+                    },
+                ]
+            })
+        });
+        let saved = PairedHost {
+            host_id: "right".into(),
+            name: "My machine".into(),
+            origin: "http://192.168.1.24:47420".into(),
+            token: "unchanged-token".into(),
+            last_connected_unix: Some(42),
+        };
+        client.save_hosts(std::slice::from_ref(&saved));
+        assert_eq!(
+            smol::block_on(client.refresh_origin("right")).as_deref(),
+            Some("http://192.168.1.25:47420")
+        );
+        let refreshed = client.load_hosts().remove(0);
+        assert_eq!(refreshed.token, saved.token);
+        assert_eq!(refreshed.name, saved.name);
+        assert_eq!(refreshed.last_connected_unix, Some(42));
+        assert_eq!(calls.get(), 1);
+        let mut tunnel = refreshed;
+        tunnel.origin = "https://tunnel.example.com".into();
+        client.save_hosts(&[tunnel]);
+        assert_eq!(smol::block_on(client.refresh_origin("right")), None);
+        assert_eq!(calls.get(), 1, "HTTPS must not browse");
+    }
 
     #[test]
     fn device_name_prefers_environment_override() {

@@ -190,7 +190,8 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     wait_state(
         &client_a,
         ConnectionState::Reconnecting {
-            attempt: 1,
+            // This socket lived less than 30 seconds, so it must not reset retry history.
+            attempt: 2,
             reason: Some(ConnectionFailure::HostClosed),
         },
     );
