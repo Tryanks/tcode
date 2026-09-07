@@ -331,7 +331,8 @@ over proportionate verification.
 
 Settings show two model lists: **Collaboration models**, bundled
 with GPT-6 Astra and Claude Fable 5.1, and **Execution models**, bundled with
-GPT-5.6 Sol and Claude Opus 5. Other models may still initiate `/orchestrate`.
+GPT-6 Astra and Claude Opus 5. The two Astra rows are separate role-specific
+profiles with different descriptions. Other models may still initiate `/orchestrate`.
 `collaborate` opens a read-only peer discussion, continued through `send`;
 `dispatch` assigns concrete work to execution models. Model selection considers
 the whole cross-provider fleet, preferring tcode Orchestrate to native subagents.
@@ -341,20 +342,31 @@ serve as the main decision model. Turning every peer off still permits the main
 thread to use `/orchestrate` and dispatch execution work. Status chips and switch
 tooltips explicitly name collaboration to make this distinction visible.
 
-Each provider/model ID occurs once across both lists, regardless of endpoint.
-Add pickers exclude configured models and settings patches enforce uniqueness.
+Each provider/model ID occurs once per list, regardless of endpoint. The same ID
+may have separate collaboration and execution profiles. Each add picker excludes
+models configured in its own list, and settings patches enforce within-list uniqueness.
 Each row has an editable description, enable switch, restore/delete actions,
 a read-only list of available reasoning efforts, and a Fast switch when supported
 (or when a stored value needs to remain visible). Effort is selected per tool call
 from the live provider catalog, with bundled startup fallbacks. There is no saved
 fixed-effort field. Collaboration is limited to medium/high; omitted effort uses
-medium when available. Sol's description recommends medium for routine execution,
-high/xhigh as difficulty grows, and max for the hardest well-defined problems.
+medium when available. GPT-6 execution starts at low as the baseline and escalates
+only when a specific piece demonstrably needs depth. Fast mode remains independent.
+Once a provider catalog is loaded, a configured model absent from it is rendered
+unavailable with the catalog mismatch and dispatch or collaboration is rejected;
+an empty pre-discovery catalog continues to use bundled fallbacks.
 
 The main workflow has no self-concept. Peer descriptions contain their collaboration
 self-concepts: the main thread sees only other peers, and a consulted peer receives
 its own description with the discussion brief. These texts emphasize complementary
 perspectives, useful initiative within scope, and proportionate verification.
+Astra may use Computer Use in a collaboration thread to gather focused decision
+evidence by observing and reading the app UI. It reports visible state, state ids,
+read text, and discrepancies rather than treating observation as implementation.
+It operates the UI only when the lead's brief explicitly requests it and the
+thread's access mode permits it. Bulk UI sweeps and code changes remain execution
+work for `dispatch`. Enabled Computer Use registrations are attached to child
+threads, including collaboration children.
 
 Both add-model popovers reuse the provider/model picker with fixed tabs and a
 300px scrollable model list.
