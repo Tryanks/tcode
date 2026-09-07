@@ -1249,7 +1249,31 @@ fn collaboration_and_execution_resolve_separate_profile_lists() {
         resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
             .is_err()
     );
+    // Disabling one role leaves the other role's row untouched.
+    assert_eq!(
+        resolve_orchestrate_dispatch(
+            &settings,
+            "codex",
+            Some("gpt-6-astra"),
+            Some("low"),
+            None,
+            &HashMap::new()
+        )
+        .unwrap()
+        .1,
+        "gpt-6-astra"
+    );
     settings.decision_models[0].enabled = true;
+    settings.child_models[0].enabled = false;
+    assert!(
+        resolve_orchestrate_dispatch(&settings, "codex", None, None, None, &HashMap::new())
+            .is_err()
+    );
+    assert!(
+        resolve_orchestrate_collaboration(&settings, "codex", None, None, None, &HashMap::new())
+            .is_ok()
+    );
+    settings.child_models[0].enabled = true;
     settings.decision_models[0].profile_id = Some("custom".into());
     assert!(
         resolve_orchestrate_collaboration(
