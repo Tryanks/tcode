@@ -421,13 +421,6 @@ impl LegacyOrchestrateModel {
             });
         }
         if !collaboration
-            && self.effort.is_some()
-            && self.entry.provider == ProviderKind::Codex
-            && self.entry.model == "gpt-5.6-sol"
-        {
-            return Some(self.entry);
-        }
-        if !collaboration
             && self.entry.provider == ProviderKind::ClaudeCode
             && self.entry.model == "claude-opus-5"
             && self.entry.description == OLD_DEFAULT_OPUS_DEFINITION
@@ -1464,7 +1457,6 @@ mod tests {
             r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","profile_id":"custom","enabled":true,"fast":false}"#,
             r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":false,"fast":false}"#,
             r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":true,"fast":true}"#,
-            r#"{"description":"Execution model for scoped implementation, debugging with a reproduction, migrations, code review, data analysis, and evidence gathering. Use medium for routine work with a clear brief; increase through high and xhigh as interacting constraints or reasoning difficulty grow; use max for the hardest well-defined problems or when a lower effort has demonstrably stalled. Choose any supported effort that fits the task, not just the endpoints. Keep unrelated improvements out of scope. Report the concrete result and relevant checks concisely.","enabled":true,"fast":false,"effort":"low"}"#,
         ];
         for row in customized {
             let expected: serde_json::Value = serde_json::from_str(row).unwrap();
@@ -1660,8 +1652,8 @@ mod tests {
         })).unwrap();
         assert_eq!(settings.child_models.len(), 2);
         let sol = &settings.child_models[0];
-        assert!(sol.description.contains("Routine work"));
-        assert!(sol.description.contains("Difficult bugs"));
+        assert!(sol.description.contains("medium effort: Routine work"));
+        assert!(sol.description.contains("max effort: Difficult bugs"));
         assert!(!sol.enabled);
         assert!(sol.fast);
         assert_eq!(sol.profile_id.as_deref(), Some("custom"));
