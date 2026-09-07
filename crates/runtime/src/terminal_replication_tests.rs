@@ -558,13 +558,19 @@ fn deltas_carry_only_changed_rows_and_stop_when_the_grid_is_quiet() {
         "one line of output must not replace the whole screen"
     );
 
-    // Nothing happens, so nothing is published.
+    // Nothing happens on screen, so no grid content is published. A slow
+    // prompt or the periodic working-directory refresh may still emit a
+    // metadata-only delta; that is not a repaint.
     std::thread::sleep(Duration::from_millis(300));
     while let Ok(envelope) = replica.events.try_recv() {
-        assert!(
-            !matches!(envelope.event, ServerEvent::TerminalDelta { .. }),
-            "an idle terminal published a delta"
-        );
+        if let ServerEvent::TerminalDelta { delta, .. } = envelope.event {
+            assert!(
+                delta.rows_replaced.is_empty() && delta.history.is_none(),
+                "an idle terminal published grid content: {} rows, history {:?}",
+                delta.rows_replaced.len(),
+                delta.history.is_some()
+            );
+        }
     }
 
     session.shutdown();
