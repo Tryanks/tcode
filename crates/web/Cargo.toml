@@ -30,7 +30,7 @@ js-sys = "=0.3.98"
 web-sys = { version = "=0.3.98", features = [
     "Window", "Document", "Element", "HtmlCanvasElement", "HtmlAnchorElement", "Node",
     "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList",
-    "Location", "Navigator", "Storage", "Request", "RequestInit",
+    "Location", "History", "Navigator", "Storage", "Request", "RequestInit",
     "Headers", "Response", "WebSocket", "Event", "EventTarget", "MessageEvent",
-    "Blob", "BlobPropertyBag", "Url",
+    "Blob", "BlobPropertyBag", "Url", "UrlSearchParams",
 ] }

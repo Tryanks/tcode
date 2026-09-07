@@ -36,6 +36,8 @@ pub struct RemoteConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingCode {
     pub code: String,
+    #[serde(default)]
+    pub browser_url: String,
     pub fp: String,
     pub expires_in_secs: u64,
     pub host_id: String,
@@ -345,15 +347,36 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
         expires: Instant::now() + PAIRING_LIFETIME,
         failures: 0,
     });
+    let addrs = local_addrs();
+    let browser_ip = if shared.local_addr.ip().is_unspecified() {
+        addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<std::net::IpAddr>().ok())
+            .find(|ip| ip.is_ipv4() == shared.local_addr.is_ipv4())
+            .unwrap_or_else(|| {
+                if shared.local_addr.is_ipv6() {
+                    std::net::Ipv6Addr::LOCALHOST.into()
+                } else {
+                    std::net::Ipv4Addr::LOCALHOST.into()
+                }
+            })
+    } else {
+        shared.local_addr.ip()
+    };
+    let browser_url = format!(
+        "https://{}/#code={code}",
+        SocketAddr::new(browser_ip, shared.local_addr.port())
+    );
     let auth = shared.auth.lock().unwrap();
     PairingCode {
         fp: shared.fingerprint.clone(),
         code,
+        browser_url,
         expires_in_secs: PAIRING_LIFETIME.as_secs(),
         host_id: auth.host_id.to_string(),
         host_name: auth.host_name.clone(),
         port: shared.local_addr.port(),
-        addrs: local_addrs(),
+        addrs,
     }
 }
 

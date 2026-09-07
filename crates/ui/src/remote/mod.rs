@@ -220,6 +220,10 @@ impl RemotePanel {
         cx.notify();
     }
 
+    pub(crate) fn set_pairing_error(&mut self, error: Option<String>) {
+        self.form.error = error;
+    }
+
     fn client(&self, cx: &App) -> Option<Rc<dyn ClientHost>> {
         cx.try_global::<ClientAttachment>()
             .map(ClientAttachment::host)

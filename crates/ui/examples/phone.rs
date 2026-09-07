@@ -48,6 +48,7 @@ fn main() {
                     activate: true,
                     setup: ShellSetup {
                         initial: tcode_ui::last_host_target(host.as_ref()),
+                        initial_pairing_error: None,
                         client_host: Some(host),
                         local: None,
                         seed_blocking: false,
