@@ -169,9 +169,12 @@ Compact replaces the split with a navigation stack over one history:
 **Settings → Settings section** over wherever they were opened from, pushed and
 popped with a 200ms lateral transition.
 
-A cold launch reconnects to the last saved machine and starts with exactly
-**Machines → Threads**. Loading the host's state does not restore Thread or
-Panel pages; Back returns to Machines while keeping the connection.
+On iOS and Android, a cold launch restores the client-local navigation path,
+selected conversation and machine. Settings pages restore the page beneath them;
+Add a machine restores Machines. A removed machine returns to Machines. A
+conversation missing from the host's Index baseline returns to Threads; until
+that baseline arrives the restored page shows its loading skeleton. Desktop
+launch behavior is unchanged.
 
 - **Machines** — which machine this window talks to, and nothing else: **This
   machine** where the device has one, the added machines, one **Add a machine**

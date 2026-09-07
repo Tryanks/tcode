@@ -123,6 +123,10 @@ impl ClientHost for NativeClientHost {
             appearance: value("appearance"),
             language: value("language"),
             device_name: value("device_name"),
+            navigation: prefs
+                .get("navigation")
+                .filter(|value| !value.is_null())
+                .cloned(),
         }
     }
 
@@ -131,6 +135,7 @@ impl ClientHost for NativeClientHost {
         prefs["appearance"] = serde_json::json!(preferences.appearance);
         prefs["language"] = serde_json::json!(preferences.language);
         prefs["device_name"] = serde_json::json!(preferences.device_name);
+        prefs["navigation"] = serde_json::json!(preferences.navigation);
         self.write_prefs(&prefs);
     }
 
@@ -512,6 +517,7 @@ mod tests {
                 appearance: Some("dark".into()),
                 language: Some("zh-CN".into()),
                 device_name: Some("My phone".into()),
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -522,6 +528,7 @@ mod tests {
             appearance: Some("light".into()),
             language: None,
             device_name: Some("Renamed".into()),
+            navigation: Some(serde_json::json!({"history": ["hosts", "threads"]})),
         });
 
         let saved: serde_json::Value =
@@ -529,6 +536,10 @@ mod tests {
         assert_eq!(saved["last_host_id"], "host-before-client-seam");
         assert_eq!(saved["future_field"]["preserve"], true);
         assert_eq!(saved["appearance"], "light");
+        assert_eq!(
+            host.load_preferences().navigation.unwrap()["history"],
+            serde_json::json!(["hosts", "threads"])
+        );
         assert!(saved["language"].is_null());
 
         host.set_last_host_id(Some("next-host"));

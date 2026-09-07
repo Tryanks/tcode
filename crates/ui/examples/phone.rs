@@ -52,6 +52,7 @@ fn main() {
                         client_host: Some(host),
                         local: None,
                         seed_blocking: false,
+                        restore_navigation: true,
                     },
                     ..Default::default()
                 },

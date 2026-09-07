@@ -500,6 +500,7 @@ fn main() {
                         // Only here: bootstrap applies locale and theme from the
                         // host's own settings before the first frame.
                         seed_blocking: true,
+                        restore_navigation: false,
                     },
                 },
             );

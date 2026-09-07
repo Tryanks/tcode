@@ -216,7 +216,7 @@ impl WorkspaceStore {
     pub fn mark_session_unread(&mut self, session_id: String) {
         self.dispatch(Command::MarkSessionUnread { session_id });
     }
-    pub(super) fn leave_session(&mut self) {
+    pub(crate) fn leave_session(&mut self) {
         self.clear_terminal_topics();
         if let Some(status) = &self.session_status_replica
             && !status.draft

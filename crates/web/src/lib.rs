@@ -120,6 +120,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                         // A browser tab runs no host of its own.
                         local: None,
                         seed_blocking: false,
+                        restore_navigation: false,
                     },
                     ..Default::default()
                 },

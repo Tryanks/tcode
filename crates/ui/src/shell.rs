@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::overlay::{Notification, OverlayExt as _};
 use crate::theme::ActiveTheme as _;
+use crate::window_state::{NavigationPanel, NavigationSnapshot};
 use gpui::{
     AnyElement, AnyView, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Div,
     ElementId, Entity, Global, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
@@ -219,6 +220,20 @@ pub struct ShellSetup {
     /// asks for it, and only because it applies locale and theme from them
     /// before the first frame; a single-threaded client cannot wait at all.
     pub seed_blocking: bool,
+    /// Mobile bootstrap restores client-local navigation. Desktop defaults to
+    /// a fresh path; the phone example can opt into the mobile policy.
+    pub restore_navigation: bool,
+}
+
+struct NavigationPersistence {
+    scheduled: Option<NavigationSnapshot>,
+    task: Option<Task<()>>,
+}
+
+struct PendingNavigationRestore {
+    session_id: String,
+    panel: NavigationPanel,
+    panel_open: bool,
 }
 
 pub struct AppShell {
@@ -235,6 +250,8 @@ pub struct AppShell {
     mounted: Vec<Destination>,
     /// Which surface the compact panel destination is showing.
     panel_shows_terminal: bool,
+    navigation: Option<NavigationPersistence>,
+    pending_navigation_restore: Option<PendingNavigationRestore>,
     operation_toasts: HashMap<RuntimeOperationId, ToastId>,
     next_toast_id: ToastId,
     /// Tracks the palette's open state across frames so it can be focused on the
@@ -286,10 +303,32 @@ fn next_sidebar_overlay_visibility(
 impl AppShell {
     pub fn new(
         window_state: Entity<WindowState>,
-        setup: ShellSetup,
+        mut setup: ShellSetup,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut restored = setup
+            .restore_navigation
+            .then(|| {
+                setup
+                    .client_host
+                    .as_ref()?
+                    .load_preferences()
+                    .navigation
+                    .and_then(NavigationSnapshot::from_preferences)
+            })
+            .flatten();
+        if let Some(snapshot) = &mut restored {
+            setup.initial = setup.client_host.as_ref().and_then(|host| {
+                host.load_hosts()
+                    .into_iter()
+                    .find(|saved| Some(&saved.host_id) == snapshot.host_id.as_ref())
+                    .map(AttachmentTarget::Remote)
+            });
+            if setup.initial.is_none() {
+                snapshot.without_host();
+            }
+        }
         // Seed the layout from the window before any child view exists, so the
         // first frame is already the right one rather than a wide split that
         // reflows on the second.
@@ -303,6 +342,7 @@ impl AppShell {
             // gets the same push or pop out of it.
             cx.observe(&window_state, |this, _, cx| {
                 this.sync_nav(NavMotion::Animated, cx);
+                this.schedule_navigation_save(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&window_state, window, |this, _, _: &OpenThread, w, cx| {
@@ -326,6 +366,11 @@ impl AppShell {
             nav: cx.new(|_| NavStackState::new()),
             mounted: Vec::new(),
             panel_shows_terminal: false,
+            navigation: setup.restore_navigation.then_some(NavigationPersistence {
+                scheduled: None,
+                task: None,
+            }),
+            pending_navigation_restore: None,
             operation_toasts: HashMap::new(),
             next_toast_id: 1,
             palette_was_open: false,
@@ -336,6 +381,28 @@ impl AppShell {
         if let Some(target) = shell.setup.initial.take() {
             shell.attach(target, window, cx);
         }
+        if let Some(snapshot) = restored {
+            shell
+                .window_state
+                .update(cx, |state, cx| state.restore(&snapshot, cx));
+            shell.panel_shows_terminal = snapshot.panel == NavigationPanel::Terminal;
+            if let Some(session_id) = snapshot.session_id
+                && let Some(store) = shell.store()
+            {
+                // Select once, before the baseline can trigger an empty-workspace
+                // draft fallback. Validation below never selects it again.
+                store.update(cx, |store, _| store.select_session(session_id.clone()));
+                if let Some(attachment) = &mut shell.attachment {
+                    attachment.observed_session_id = Some(session_id.clone());
+                }
+                shell.pending_navigation_restore = Some(PendingNavigationRestore {
+                    session_id,
+                    panel: snapshot.panel,
+                    panel_open: snapshot.history.contains(&Destination::Panel),
+                });
+            }
+        }
+        shell.schedule_navigation_save(cx);
         shell
     }
 
@@ -372,6 +439,121 @@ impl AppShell {
 // ---------------------------------------------------------------------------
 
 impl AppShell {
+    fn navigation_snapshot(&self, cx: &App) -> NavigationSnapshot {
+        let store = self.store();
+        let host_id = store
+            .as_ref()
+            .and_then(|store| store.read(cx).remote_host_id().map(str::to_owned));
+        let session_id = store
+            .as_ref()
+            .and_then(|store| store.read(cx).active_session_id());
+        let panel = self
+            .pending_navigation_restore
+            .as_ref()
+            .map(|pending| pending.panel)
+            .unwrap_or_else(|| {
+                if self.panel_shows_terminal {
+                    NavigationPanel::Terminal
+                } else {
+                    match store
+                        .as_ref()
+                        .map(|store| store.read(cx).panel_state().right_tab)
+                    {
+                        Some(RightTab::Plan) => NavigationPanel::Plan,
+                        Some(RightTab::Preview) => NavigationPanel::Preview,
+                        _ => NavigationPanel::Diff,
+                    }
+                }
+            });
+        NavigationSnapshot {
+            history: self.window_state.read(cx).history().to_vec(),
+            host_id,
+            session_id,
+            panel,
+        }
+    }
+
+    fn schedule_navigation_save(&mut self, cx: &mut Context<Self>) {
+        if self.navigation.is_none() {
+            return;
+        }
+        let Some(host) = self.setup.client_host.clone() else {
+            return;
+        };
+        let snapshot = self.navigation_snapshot(cx);
+        let navigation = self.navigation.as_mut().expect("enabled above");
+        if navigation.scheduled.as_ref() == Some(&snapshot) {
+            return;
+        }
+        navigation.scheduled = Some(snapshot.clone());
+        navigation.task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(150))
+                .await;
+            let mut preferences = host.load_preferences();
+            preferences.navigation = serde_json::to_value(snapshot).ok();
+            host.save_preferences(&preferences);
+        }));
+    }
+
+    fn reconcile_navigation_restore(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = &self.pending_navigation_restore else {
+            return;
+        };
+        let Some(store) = self.store() else {
+            self.pending_navigation_restore = None;
+            return;
+        };
+        if !store.read(cx).index_hydrated() {
+            if store.read(cx).active_session_id().as_deref() != Some(&pending.session_id) {
+                self.pending_navigation_restore = None;
+            }
+            return;
+        }
+        if !store
+            .read(cx)
+            .sidebar_sessions()
+            .iter()
+            .any(|meta| meta.id == pending.session_id && meta.archived_at.is_none())
+        {
+            let pending = self
+                .pending_navigation_restore
+                .take()
+                .expect("checked above");
+            store.update(cx, |store, cx| {
+                if store.active_session_id().as_deref() == Some(&pending.session_id) {
+                    store.leave_session();
+                    cx.notify();
+                }
+            });
+            self.window_state
+                .update(cx, |state, cx| state.discard_restored_thread(cx));
+            return;
+        }
+        if store.read(cx).active_session_id().as_deref() != Some(&pending.session_id) {
+            // A user selection made while syncing supersedes restoration.
+            self.pending_navigation_restore = None;
+            return;
+        }
+        if store.read(cx).chat_loading() {
+            return;
+        }
+        let pending = self
+            .pending_navigation_restore
+            .take()
+            .expect("checked above");
+        if pending.panel_open {
+            self.show_panel(pending.panel.id(), cx);
+        } else {
+            let tab = match pending.panel {
+                NavigationPanel::Plan => RightTab::Plan,
+                NavigationPanel::Preview => RightTab::Preview,
+                _ => RightTab::Diff,
+            };
+            store.update(cx, |store, cx| store.set_right_tab(tab, cx));
+        }
+    }
+
     /// Point this window at `target`, replacing the attachment beneath the
     /// navigation root. The window, its stack and its overlays stay put.
     pub fn switch_to(
@@ -416,6 +598,7 @@ impl AppShell {
     }
 
     fn attach(&mut self, target: AttachmentTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_navigation_restore = None;
         if let Some(old) = self.attachment.take() {
             old.link.close(cx).close();
         }
@@ -459,6 +642,8 @@ impl AppShell {
                             .update(cx, |state, cx| state.leave_route_for_chat(cx));
                     }
                 }
+                this.reconcile_navigation_restore(cx);
+                this.schedule_navigation_save(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &RuntimeEvent, w, cx| {
@@ -689,6 +874,16 @@ impl AppShell {
 
     /// "Show me this thread." Compact pushes; wide switches the content route.
     fn open_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self
+            .store()
+            .and_then(|store| store.read(cx).active_session_id());
+        if self
+            .pending_navigation_restore
+            .as_ref()
+            .is_some_and(|pending| selected.as_deref() != Some(pending.session_id.as_str()))
+        {
+            self.pending_navigation_restore = None;
+        }
         if self.compact(cx) {
             self.go(Destination::Thread, cx);
         } else {
@@ -700,6 +895,9 @@ impl AppShell {
                 .chat
                 .update(cx, |chat, cx| chat.focus_composer(window, cx));
         }
+        // Selecting another thread can leave the destination unchanged. Its
+        // checkpoint must not depend on the host delivering a notification.
+        self.schedule_navigation_save(cx);
     }
 
     /// Answer a platform Back gesture (or a Back control). `true` means it was
@@ -1261,8 +1459,18 @@ impl AppShell {
                     title
                 }
             })
-            .unwrap_or_else(|| compact_label("new_thread"));
-        let chat = attachment.chat.clone();
+            .unwrap_or_else(|| {
+                compact_label(if self.pending_navigation_restore.is_some() {
+                    "thread"
+                } else {
+                    "new_thread"
+                })
+            });
+        let body = if self.pending_navigation_restore.is_some() {
+            crate::material::loading_skeleton(cx)
+        } else {
+            attachment.chat.clone().into_any_element()
+        };
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
@@ -1287,7 +1495,7 @@ impl AppShell {
                 cx,
             ))
             .children(self.render_connection_banner(cx))
-            .child(div().flex_1().min_h_0().child(chat))
+            .child(div().flex_1().min_h_0().child(body))
             .into_any_element()
     }
 
@@ -1301,7 +1509,11 @@ impl AppShell {
         };
         let store = attachment.link.store.read(cx);
         let panel = store.panel_state();
-        let terminal = self.panel_shows_terminal;
+        let selected_panel = self
+            .pending_navigation_restore
+            .as_ref()
+            .map(|pending| pending.panel.id());
+        let terminal = selected_panel.map_or(self.panel_shows_terminal, |id| id == "terminal");
         let mut segments = crate::material::segmented_track("compact-panel-track", cx);
         for (id, label, selected) in [
             (
@@ -1312,17 +1524,23 @@ impl AppShell {
             (
                 "diff",
                 crate::tr!("diff.title").into_owned(),
-                !terminal && panel.right_tab == RightTab::Diff,
+                selected_panel.map_or(!terminal && panel.right_tab == RightTab::Diff, |id| {
+                    id == "diff"
+                }),
             ),
             (
                 "plan",
                 crate::tr!("plan.tab_plan").into_owned(),
-                !terminal && panel.right_tab == RightTab::Plan,
+                selected_panel.map_or(!terminal && panel.right_tab == RightTab::Plan, |id| {
+                    id == "plan"
+                }),
             ),
             (
                 "preview",
                 crate::tr!("preview.title").into_owned(),
-                !terminal && panel.right_tab == RightTab::Preview,
+                selected_panel.map_or(!terminal && panel.right_tab == RightTab::Preview, |id| {
+                    id == "preview"
+                }),
             ),
         ] {
             segments = segments.child(
@@ -1336,7 +1554,9 @@ impl AppShell {
             );
         }
 
-        let body: AnyElement = if terminal {
+        let body: AnyElement = if self.pending_navigation_restore.is_some() {
+            crate::material::loading_skeleton(cx)
+        } else if terminal {
             attachment
                 .chat
                 .read(cx)
@@ -1397,6 +1617,15 @@ impl AppShell {
     }
 
     fn show_panel(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        if let Some(pending) = &mut self.pending_navigation_restore {
+            pending.panel = match id {
+                "terminal" => NavigationPanel::Terminal,
+                "plan" => NavigationPanel::Plan,
+                "preview" => NavigationPanel::Preview,
+                _ => NavigationPanel::Diff,
+            };
+            pending.panel_open = true;
+        }
         let Some(attachment) = &self.attachment else {
             return;
         };
@@ -1424,6 +1653,7 @@ impl AppShell {
                 }
             }
         });
+        self.schedule_navigation_save(cx);
         cx.notify();
     }
 
@@ -2057,6 +2287,9 @@ mod tests {
     struct ReturningClient {
         saved: tcode_client::pairing::PairedHost,
         transport: RefCell<Option<Transport>>,
+        preferences: RefCell<tcode_client::host::ClientPreferences>,
+        machine_exists: bool,
+        saves: Cell<usize>,
     }
 
     impl ClientHost for ReturningClient {
@@ -2065,7 +2298,20 @@ mod tests {
         }
 
         fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
-            vec![self.saved.clone()]
+            if self.machine_exists {
+                vec![self.saved.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn load_preferences(&self) -> tcode_client::host::ClientPreferences {
+            self.preferences.borrow().clone()
+        }
+
+        fn save_preferences(&self, preferences: &tcode_client::host::ClientPreferences) {
+            *self.preferences.borrow_mut() = preferences.clone();
+            self.saves.set(self.saves.get() + 1);
         }
 
         fn save_hosts(&self, _: &[tcode_client::pairing::PairedHost]) {}
@@ -2092,9 +2338,18 @@ mod tests {
         }
     }
 
-    #[gpui::test]
-    fn a_cold_start_with_the_last_host_has_only_hosts_then_threads(cx: &mut TestAppContext) {
-        let (to_host, _outgoing) = async_channel::unbounded();
+    fn mount_restored<'a>(
+        cx: &'a mut TestAppContext,
+        history: &[&str],
+        machine_exists: bool,
+    ) -> (
+        Entity<AppShell>,
+        MountedShell,
+        Rc<ReturningClient>,
+        &'a mut VisualTestContext,
+    ) {
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (_, state) = async_channel::unbounded();
         let client = Rc::new(ReturningClient {
@@ -2106,61 +2361,351 @@ mod tests {
                 last_connected_unix: Some(1),
             },
             transport: RefCell::new(Some(Transport {
-                to_host,
+                to_host: to_host.into(),
                 from_host,
                 state,
             })),
+            preferences: RefCell::new(tcode_client::host::ClientPreferences {
+                navigation: Some(serde_json::json!({
+                    "history": history,
+                    "host_id": "last-host",
+                    "session_id": "thread-a",
+                    "panel": "plan"
+                })),
+                ..Default::default()
+            }),
+            machine_exists,
+            saves: Cell::new(0),
         });
-        let (shell, cx) = cx.add_window_view(move |window, cx| {
+        let setup_client = client.clone();
+        let window = cx.open_window(size(px(393.), px(852.)), move |window, cx| {
             let state = cx.new(|_| WindowState::new(false));
             AppShell::new(
                 state,
                 ShellSetup {
-                    initial: crate::last_host_target(client.as_ref()),
-                    client_host: Some(client),
+                    initial: crate::last_host_target(setup_client.as_ref()),
+                    client_host: Some(setup_client),
+                    restore_navigation: true,
                     ..Default::default()
                 },
                 window,
                 cx,
             )
         });
-        resize(cx, 393.);
-        // Hydration and a selected conversation can arrive after the initial
-        // frame. Neither is an intent to navigate to Thread or Panel.
-        incoming
+        let shell = window.root(cx).unwrap();
+        let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
+        draw(cx);
+        (shell, MountedShell { outgoing, incoming }, client, cx)
+    }
+
+    fn await_restore_update(
+        shell: &Entity<AppShell>,
+        cx: &mut VisualTestContext,
+        ready: impl Fn(&WorkspaceStore) -> bool,
+    ) {
+        let store = store_of(shell, cx);
+        for _ in 0..500 {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            if store.read_with(cx, |store, _| ready(store)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("restore host update never arrived");
+    }
+
+    fn restore_index(
+        shell: &Entity<AppShell>,
+        host: &MountedShell,
+        present: bool,
+        cx: &mut VisualTestContext,
+    ) {
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::Codex,
+            "/project".into(),
+            None,
+        );
+        meta.id = "thread-a".into();
+        host.incoming
             .try_send(
                 encode_line(&HostMessage::Event(EventEnvelope {
                     request_id: None,
                     topic: Topic::Index,
                     event: ServerEvent::IndexSnapshot(IndexSnapshot {
                         activity: Default::default(),
-                        sessions: Vec::new(),
+                        sessions: if present { vec![meta] } else { Vec::new() },
                         projects: Vec::new(),
                     }),
                 }))
                 .unwrap(),
             )
             .unwrap();
-        let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| {
-            store.drain_host_events_for_test(cx);
-            store.select_session("already-open-thread".into());
+        await_restore_update(shell, cx, WorkspaceStore::index_hydrated);
+    }
+
+    fn restore_status(shell: &Entity<AppShell>, host: &MountedShell, cx: &mut VisualTestContext) {
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: "thread-a".into(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(session_status(
+                        "thread-a",
+                        std::path::Path::new("/project"),
+                    )),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        await_restore_update(shell, cx, |store| store.chat_active_session().is_some());
+    }
+
+    #[gpui::test]
+    fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
+        let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "the restored destination shows a skeleton before its Index baseline"
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [
+                    Destination::Hosts,
+                    Destination::Threads,
+                    Destination::Thread
+                ]
+            );
+            assert_eq!(
+                shell
+                    .store()
+                    .unwrap()
+                    .read(cx)
+                    .active_session_id()
+                    .as_deref(),
+                Some("thread-a")
+            );
         });
-        draw(cx);
+        restore_index(&shell, &host, true, cx);
+        restore_index(&shell, &host, true, cx);
+        let subscriptions = sent(&host).into_iter().filter(|payload| matches!(payload,
+            ClientPayload::Subscribe(subscription) if subscription.topic == Topic::SessionEvents { session_id: "thread-a".into() }
+        )).count();
+        assert_eq!(
+            subscriptions, 1,
+            "baseline reconciliation must not select again"
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history().last(),
+                Some(&Destination::Thread)
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn cold_start_discards_settings_above_the_restored_thread(cx: &mut TestAppContext) {
+        let (shell, _, _, cx) = mount_restored(
+            cx,
+            &["hosts", "threads", "thread", "settings", "settings_section"],
+            true,
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [
+                    Destination::Hosts,
+                    Destination::Threads,
+                    Destination::Thread
+                ]
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn cold_start_waits_for_index_before_popping_a_missing_session(cx: &mut TestAppContext) {
+        let (shell, host, client, cx) =
+            mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "the restored Panel also waits behind a skeleton"
+        );
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history().last(),
+                Some(&Destination::Panel)
+            )
+        });
+        restore_index(&shell, &host, false, cx);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(
                 shell.window_state.read(cx).history(),
                 [Destination::Hosts, Destination::Threads]
             );
-            assert_eq!(shell.mounted, [Destination::Hosts, Destination::Threads]);
+            assert_eq!(shell.store().unwrap().read(cx).active_session_id(), None);
         });
-        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        cx.executor().advance_clock(Duration::from_millis(151));
         draw(cx);
+        let preferences = client.load_preferences();
+        assert_eq!(
+            preferences.navigation.unwrap()["history"],
+            serde_json::json!(["hosts", "threads"])
+        );
+    }
+
+    #[gpui::test]
+    fn cold_start_missing_session_pops_even_if_status_arrives_before_index(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, host, _, cx) =
+            mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
+        restore_status(&shell, &host, cx);
+        restore_index(&shell, &host, false, cx);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Hosts, Destination::Threads]
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
+        let (shell, host, client, cx) =
+            mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "status alone is not the conversation baseline"
+        );
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: "thread-a".into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    from: 0,
+                    records: Vec::new(),
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.pending_navigation_restore.is_none());
+            assert_eq!(
+                shell.window_state.read(cx).history().last(),
+                Some(&Destination::Panel)
+            );
+            assert_eq!(
+                shell.store().unwrap().read(cx).panel_state().right_tab,
+                RightTab::Plan
+            );
+        });
+        // A preference changed during the debounce must survive the checkpoint.
+        client.preferences.borrow_mut().language = Some("zh-CN".into());
+        cx.executor().advance_clock(Duration::from_millis(151));
+        draw(cx);
+        assert_eq!(client.load_preferences().language.as_deref(), Some("zh-CN"));
+        assert_eq!(
+            client.load_preferences().navigation.unwrap()["panel"],
+            "plan"
+        );
+    }
+
+    #[gpui::test]
+    fn same_page_thread_selection_is_checkpointed_without_waiting_for_host(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
+        store_of(&shell, cx).update(cx, |store, _| store.select_session("thread-b".into()));
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.open_thread(cx));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(151));
+        draw(cx);
+        let navigation = client.load_preferences().navigation.unwrap();
+        assert_eq!(navigation["session_id"], "thread-b");
+        assert_eq!(
+            navigation["history"],
+            serde_json::json!(["hosts", "threads", "thread"])
+        );
+    }
+
+    #[gpui::test]
+    fn navigation_checkpoint_debounces_selection_and_history_without_losing_preferences(
+        cx: &mut TestAppContext,
+    ) {
+        let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            store.select_session("thread-b".into());
+            cx.notify();
+        });
+        shell
+            .read_with(cx, |shell, _| shell.window_state())
+            .update(cx, |state, cx| state.go(Destination::Settings, cx));
+        draw(cx);
+        assert_eq!(client.saves.get(), 0);
+        cx.executor().advance_clock(Duration::from_millis(151));
+        draw(cx);
+        assert_eq!(client.saves.get(), 1);
+        let navigation = client.load_preferences().navigation.unwrap();
+        assert_eq!(navigation["session_id"], "thread-b");
+        assert_eq!(
+            navigation["history"],
+            serde_json::json!(["hosts", "threads", "thread", "settings"])
+        );
+        // The store cached preferences before this checkpoint. A theme edit
+        // must retain the shell's newer history and selection.
+        store.update(cx, |store, _| {
+            store.set_client_theme(Some(tcode_core::settings::ThemeMode::Light))
+        });
+        assert_eq!(client.load_preferences().navigation, Some(navigation));
+        assert_eq!(
+            client.load_preferences().appearance.as_deref(),
+            Some("light")
+        );
+    }
+
+    #[gpui::test]
+    fn cold_start_with_a_missing_machine_restores_hosts(cx: &mut TestAppContext) {
+        let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], false);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
-            assert!(shell.store().is_some(), "Back preserves the attachment");
+            assert!(shell.store().is_none());
         });
-        assert!(!cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        assert!(sent(&host).is_empty());
+    }
+
+    #[gpui::test]
+    fn cold_start_does_not_restore_the_pair_form(cx: &mut TestAppContext) {
+        let (shell, _, _, cx) = mount_restored(cx, &["hosts", "threads", "hosts", "pair"], true);
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(
+                shell.window_state.read(cx).history(),
+                [Destination::Hosts, Destination::Threads, Destination::Hosts]
+            )
+        });
     }
 
     fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {

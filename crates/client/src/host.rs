@@ -40,6 +40,9 @@ pub struct ClientPreferences {
     pub appearance: Option<String>,
     pub language: Option<String>,
     pub device_name: Option<String>,
+    /// Opaque, client-local UI restoration state. The shell owns its schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigation: Option<serde_json::Value>,
 }
 
 /// Parse bounded JSON supplied by platform discovery bridges.

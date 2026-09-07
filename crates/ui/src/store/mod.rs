@@ -1370,6 +1370,11 @@ impl WorkspaceStore {
         effective_client_settings(&self.settings_replica, &self.client_preferences)
     }
 
+    /// Whether the Index baseline has arrived, including an empty Index.
+    pub fn index_hydrated(&self) -> bool {
+        self.index_hydrated
+    }
+
     /// Whether [`WorkspaceStore::settings`] reflects the host yet.
     pub fn settings_hydrated(&self) -> bool {
         self.settings_hydrated
@@ -1448,7 +1453,11 @@ impl WorkspaceStore {
 
     fn save_client_preferences(&self) {
         if let Some(host) = &self.client_host {
-            host.save_preferences(&self.client_preferences);
+            let mut preferences = self.client_preferences.clone();
+            // Navigation is written by the shell while this store is alive.
+            // Appearance edits must not replace it with our startup snapshot.
+            preferences.navigation = host.load_preferences().navigation;
+            host.save_preferences(&preferences);
         }
     }
 
@@ -2574,6 +2583,7 @@ mod tests {
             appearance: Some("light".into()),
             language: Some("system".into()),
             device_name: Some("Desk client".into()),
+            ..Default::default()
         });
         let reloaded = tcode_remote::NativeClientHost::new(root.clone(), "different fallback");
         let preferences = reloaded.load_preferences();

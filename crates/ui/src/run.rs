@@ -124,7 +124,9 @@ pub fn run_shell(
 
     let title = options.title;
     let has_local = options.setup.local.is_some();
-    let setup = Rc::new(RefCell::new(Some(options.setup)));
+    let mut setup = options.setup;
+    setup.restore_navigation |= cfg!(any(target_os = "ios", target_os = "android"));
+    let setup = Rc::new(RefCell::new(Some(setup)));
     let mounted: Rc<RefCell<Option<Entity<AppShell>>>> = Rc::new(RefCell::new(None));
     // Who this client is, and how it re-points at another host. Installed
     // *before* the window, because the views the window builds — the pair form

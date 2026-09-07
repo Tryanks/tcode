@@ -1,4 +1,5 @@
 use gpui::{Context, Entity, EventEmitter, SharedString};
+use serde::{Deserialize, Serialize};
 
 use crate::store::WorkspaceStore;
 
@@ -7,7 +8,8 @@ use crate::store::WorkspaceStore;
 /// that one history. There is no second navigation authority: the compact
 /// navigation stack mirrors it, and the wide layout derives its [`Route`] from
 /// whichever destination is on top.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Destination {
     /// Which host this window talks to: the root, and a place that can also be
     /// *visited* from an attached workspace without detaching from it.
@@ -24,6 +26,81 @@ pub enum Destination {
     /// One settings section's detail. Which section it is belongs to the page;
     /// *that a detail is open* is navigation and belongs here.
     SettingsSection,
+}
+
+/// The shell's client-local checkpoint, independent of the host's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct NavigationSnapshot {
+    pub history: Vec<Destination>,
+    pub host_id: Option<String>,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub panel: NavigationPanel,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NavigationPanel {
+    Terminal,
+    #[default]
+    Diff,
+    Plan,
+    Preview,
+}
+
+impl NavigationPanel {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Diff => "diff",
+            Self::Plan => "plan",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+impl NavigationSnapshot {
+    pub fn from_preferences(value: serde_json::Value) -> Option<Self> {
+        let mut snapshot: Self = serde_json::from_value(value).ok()?;
+        // Ignore malformed/unbounded local state rather than building an
+        // arbitrary number of mounted views during startup.
+        if snapshot.history.len() > 128 {
+            return None;
+        }
+        snapshot.history.retain(|destination| {
+            !matches!(
+                destination,
+                Destination::Settings | Destination::SettingsSection | Destination::Pair
+            )
+        });
+        if snapshot.history.first() != Some(&Destination::Hosts) {
+            snapshot.history.insert(0, Destination::Hosts);
+        }
+        snapshot.history.dedup();
+        if snapshot.host_id.is_none() {
+            snapshot.without_host();
+        } else if snapshot.session_id.is_none() {
+            snapshot.without_thread();
+        }
+        Some(snapshot)
+    }
+
+    pub fn without_host(&mut self) {
+        self.host_id = None;
+        self.session_id = None;
+        self.history = vec![Destination::Hosts];
+    }
+
+    fn without_thread(&mut self) {
+        self.session_id = None;
+        if let Some(index) = self
+            .history
+            .iter()
+            .position(|destination| matches!(destination, Destination::Thread | Destination::Panel))
+        {
+            self.history.truncate(index);
+        }
+    }
 }
 
 impl Destination {
@@ -102,6 +179,23 @@ impl WindowState {
 
     pub fn history(&self) -> &[Destination] {
         &self.history
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: &NavigationSnapshot, cx: &mut Context<Self>) {
+        self.history.clone_from(&snapshot.history);
+        cx.notify();
+    }
+
+    /// A restored thread was archived/deleted while this client was away.
+    pub(crate) fn discard_restored_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .history
+            .iter()
+            .position(|destination| matches!(destination, Destination::Thread | Destination::Panel))
+        {
+            self.history.truncate(index);
+            cx.notify();
+        }
     }
 
     pub fn destination(&self) -> Destination {
