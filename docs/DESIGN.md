@@ -160,9 +160,15 @@ popped with a 200ms lateral transition.
   attached machine's name as its subtitle and new-thread and settings actions.
   New thread starts a draft directly when the machine has one project and
   otherwise opens the command palette, which already owns "new thread in
-  ‹project›" and can search. A project header separates one project from the
-  next, so it appears only from the second project onwards: with a single
-  project the threads are listed directly, under no caption.
+  ‹project›" and can search. **Recent** is the default: all unarchived threads
+  across projects ordered by last activity, with the project name beside the
+  relative time in the muted subtitle. **By project** keeps the grouped list.
+  The list header has a 44pt layout toggle sharing the wide sidebar’s persisted
+  Flat/Grouped setting; search opens the shared palette in either view. Both
+  views use the same plain rows, status glyphs and approval/input washes.
+  In By project, a header separates one project from the next, so it appears
+  only from the second project onwards: with a single project the threads are
+  listed directly, under no caption.
 - **Thread** — the shared chat view. Its desktop header is replaced by the nav
   bar; the timeline, composer, approvals and user-input panels are the same
   entities the wide layout uses.

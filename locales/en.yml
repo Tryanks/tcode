@@ -97,6 +97,8 @@ sidebar:
   threads: "Threads"
   all_projects: "All projects"
   filter_project: "Filter by project"
+  recent: "Recent"
+  by_project: "By project"
   layout_flat: "Switch to flat thread list"
   layout_grouped: "Group by project"
   filter_empty: "No threads in this project yet."

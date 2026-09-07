@@ -1195,11 +1195,23 @@ impl SessionsSidebar {
             SidebarLayout::Flat => crate::tr!("sidebar.layout_grouped"),
             SidebarLayout::Grouped => crate::tr!("sidebar.layout_flat"),
         };
+        let compact = self.compact(cx);
         Button::new("toggle-sidebar-layout")
             .ghost()
             .xsmall()
             .compact()
-            .icon(IconName::LayoutDashboard)
+            .map(|button| {
+                if compact {
+                    button
+                        .with_size(px(44.))
+                        .w(px(44.))
+                        .h(px(44.))
+                        .child(Icon::new(IconName::LayoutDashboard).size(px(18.)))
+                } else {
+                    button.icon(IconName::LayoutDashboard)
+                }
+            })
+            .aria_label(tooltip.clone())
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let next = match layout {
@@ -2267,10 +2279,10 @@ const COMPACT_ROW_HEIGHT: f32 = 56.;
 const COMPACT_SEARCH_HEIGHT: f32 = 40.;
 
 impl SessionsSidebar {
-    /// Compact thread list with search and project groups. Navigation replaces
+    /// Compact thread list with shared layout preference. Navigation replaces
     /// persistent row selection; desktop-only controls stay in the desktop list.
     fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (groups, collapsed_projects, sessions, flags) = {
+        let (groups, collapsed_projects, sessions, flags, layout) = {
             let store = self.store.read(cx);
             let sessions = store.sidebar_sessions();
             let flags = sessions
@@ -2294,7 +2306,7 @@ impl SessionsSidebar {
                 .filter(|group| store.is_project_collapsed(&group.project.id))
                 .map(|group| group.project.id.clone())
                 .collect::<HashSet<_>>();
-            (groups, collapsed, sessions, flags)
+            (groups, collapsed, sessions, flags, store.sidebar_layout())
         };
 
         let body = if self.loading {
@@ -2334,27 +2346,50 @@ impl SessionsSidebar {
             )
             .into_any_element()
         } else {
-            // Plain rows at the page inset, hairline-separated, under one
-            // caption per project: the same list style the Machines page uses.
-            // A project header separates one project from the next, so with a
-            // single project there is nothing to separate: the caption names
-            // the only thing on the page and the collapse it carries would just
-            // hide the whole list.
-            let grouped = groups.len() > 1;
             let mut list = v_flex().w_full().pb(px(24.));
-            for group in &groups {
-                let collapsed = grouped && collapsed_projects.contains(&group.project.id);
-                if grouped {
-                    list = list.child(self.render_compact_group_header(group, collapsed, cx));
-                }
-                if collapsed {
-                    continue;
-                }
-                let rows = visible_threads(&group.sessions, &self.collapsed_parents)
+            if layout == SidebarLayout::Flat {
+                let mut recent = sessions
+                    .iter()
+                    .filter(|meta| meta.archived_at.is_none())
+                    .collect::<Vec<_>>();
+                recent.sort_by(|a, b| {
+                    b.updated_at
+                        .cmp(&a.updated_at)
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+                let rows = recent
                     .into_iter()
-                    .map(|meta| self.render_compact_thread(meta, &sessions, &flags, cx))
+                    .map(|meta| {
+                        let project = groups.iter().find(|group| {
+                            meta.project_id.as_deref() == Some(group.project.id.as_str())
+                        });
+                        self.render_compact_thread(
+                            meta,
+                            &sessions,
+                            &flags,
+                            project.map(|group| group.project.name.clone()),
+                            cx,
+                        )
+                    })
                     .collect();
                 list = list.child(crate::material::plain_list(rows, cx));
+            } else {
+                // A single project needs no separator or collapse affordance.
+                let grouped = groups.len() > 1;
+                for group in &groups {
+                    let collapsed = grouped && collapsed_projects.contains(&group.project.id);
+                    if grouped {
+                        list = list.child(self.render_compact_group_header(group, collapsed, cx));
+                    }
+                    if collapsed {
+                        continue;
+                    }
+                    let rows = visible_threads(&group.sessions, &self.collapsed_parents)
+                        .into_iter()
+                        .map(|meta| self.render_compact_thread(meta, &sessions, &flags, None, cx))
+                        .collect();
+                    list = list.child(crate::material::plain_list(rows, cx));
+                }
             }
             div()
                 .id("compact-thread-list")
@@ -2382,6 +2417,26 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_delete))
             .child(self.render_compact_search(cx))
             .child(self.render_feature_rows(cx))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .px(px(COMPACT_PAGE_PADDING))
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(match layout {
+                                SidebarLayout::Flat => crate::tr!("sidebar.recent"),
+                                SidebarLayout::Grouped => crate::tr!("sidebar.by_project"),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "compact-layout-toggle".into())
+                            .child(self.render_layout_toggle(layout, cx)),
+                    ),
+            )
             .child(body)
             .into_any_element()
     }
@@ -2489,6 +2544,7 @@ impl SessionsSidebar {
         meta: &SessionMeta,
         sessions: &[SessionMeta],
         flags: &HashMap<String, ThreadFlags>,
+        project_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
@@ -2505,6 +2561,10 @@ impl SessionsSidebar {
                 .into(),
             cx,
         )
+        .debug_selector({
+            let id = session_id.clone();
+            move || format!("compact-row-{id}")
+        })
         // Rows needing the user carry a 6% semantic wash; everything else sits
         // on the paper with only hover and pressed tints.
         .when(state.waiting_for_approval, |row| {
@@ -2545,6 +2605,19 @@ impl SessionsSidebar {
                         .text_size(px(13.))
                         .line_height(px(18.))
                         .text_color(cx.theme().muted_foreground)
+                        .when_some(project_name, |line, name| {
+                            line.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .debug_selector({
+                                        let name = name.clone();
+                                        move || format!("compact-project-{name}")
+                                    })
+                                    .child(name),
+                            )
+                            .child(div().flex_none().child("·"))
+                        })
                         .when_some(status, |line, (label, color)| {
                             line.child(div().flex_none().text_color(color).child(label))
                                 .child(div().flex_none().child("·"))
@@ -3032,8 +3105,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// Renders the compact thread list over `projects` projects, one thread
-    /// each, and reports whether it drew any project header.
+    /// Exercise Recent and its persisted layout toggle at phone geometry,
+    /// returning whether By project draws a section header.
     fn compact_list_has_project_headers(cx: &mut TestAppContext, projects: usize) -> bool {
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
@@ -3054,6 +3127,7 @@ mod tests {
             .map(|(index, project)| {
                 let mut meta = session(&format!("thread-{index}"), None);
                 meta.project_id = Some(project.id.clone());
+                meta.updated_at = 100 + index as u64;
                 meta
             })
             .collect::<Vec<_>>();
@@ -3079,9 +3153,54 @@ mod tests {
             cx.debug_bounds("compact-thread-list").is_some(),
             "the seeded threads are listed"
         );
+        assert_eq!(
+            store.read_with(cx, |store, _| store.sidebar_layout()),
+            SidebarLayout::Flat
+        );
+        assert!(cx.debug_bounds("compact-group-header").is_none());
+        for index in 0..projects {
+            assert!(
+                cx.debug_bounds(if index == 0 {
+                    "compact-project-project-0"
+                } else {
+                    "compact-project-project-1"
+                })
+                .is_some(),
+                "Recent names each project in the subtitle"
+            );
+        }
+        if projects == 2 {
+            assert!(
+                cx.debug_bounds("compact-row-thread-1").unwrap().top()
+                    < cx.debug_bounds("compact-row-thread-0").unwrap().top(),
+                "last activity orders threads across projects"
+            );
+        }
+        let toggle = cx.debug_bounds("compact-layout-toggle").unwrap();
+        assert_eq!(toggle.size, size(px(44.), px(44.)));
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            if store.read_with(cx, |store, _| store.sidebar_layout()) == SidebarLayout::Grouped {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "layout change reaches the replica"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let headers = cx.debug_bounds("compact-group-header").is_some();
 
         host.shutdown_blocking().expect("stop host");
+        let persisted = tcode_services::settings::SettingsStore::new(root.clone()).load();
+        assert_eq!(
+            persisted.sidebar_layout,
+            SidebarLayout::Grouped,
+            "the actual header action persists the shared choice"
+        );
         let _ = std::fs::remove_dir_all(root);
         headers
     }
@@ -3090,7 +3209,7 @@ mod tests {
     /// project there is nothing to separate, so the compact list shows its
     /// threads directly; a second project brings the headers back.
     #[gpui::test]
-    fn the_compact_thread_list_shows_project_headers_only_with_more_than_one(
+    fn compact_recent_orders_projects_and_switches_to_persisted_grouped_view(
         cx: &mut TestAppContext,
     ) {
         assert!(
