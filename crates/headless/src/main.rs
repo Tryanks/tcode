@@ -96,24 +96,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     )
     .map_err(|error| format!("remote listener failed: {error}"))?;
     let pairing = server.new_pairing_code();
-    print_pairing(&pairing)?;
-    #[cfg(feature = "web")]
-    {
-        let bound = server.local_addr();
-        if bound.ip().is_unspecified() {
-            let mut addrs = pairing.addrs.clone();
-            addrs.push(if bound.is_ipv6() { "::1" } else { "127.0.0.1" }.into());
-            for addr in addrs {
-                if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
-                    if ip.is_ipv4() == bound.is_ipv4() {
-                        println!("Browser: https://{}/", SocketAddr::new(ip, bound.port()));
-                    }
-                }
-            }
-        } else {
-            println!("Browser: https://{bound}/");
-        }
-    }
+    print_pairing(&pairing, server.local_addr())?;
     let beacon = start_beacon(
         pairing.host_id.clone(),
         pairing.host_name.clone(),
@@ -169,10 +152,10 @@ fn pair_command(args: &[String]) -> Result<(), String> {
     let (bytes, _) =
         tcode_remote::client::tls_http(loopback, address.port(), "GET", "/admin/pair", "", "")?;
     let pairing: PairingCode = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    print_pairing(&pairing)
+    print_pairing(&pairing, address)
 }
 
-fn print_pairing(pairing: &PairingCode) -> Result<(), String> {
+fn print_pairing(pairing: &PairingCode, bound: SocketAddr) -> Result<(), String> {
     let addrs = if pairing.addrs.is_empty() {
         vec!["127.0.0.1".to_owned()]
     } else {
@@ -192,7 +175,41 @@ fn print_pairing(pairing: &PairingCode) -> Result<(), String> {
     println!("Expires in: {} seconds", pairing.expires_in_secs);
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
+    #[cfg(feature = "web")]
+    for url in browser_urls(pairing, bound) {
+        println!("Browser: {url}");
+    }
+    #[cfg(not(feature = "web"))]
+    let _ = bound;
     Ok(())
+}
+
+#[cfg(any(feature = "web", test))]
+fn browser_urls(pairing: &PairingCode, bound: SocketAddr) -> Vec<String> {
+    let ips = if bound.ip().is_unspecified() {
+        pairing
+            .addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<std::net::IpAddr>().ok())
+            .filter(|ip| ip.is_ipv4() == bound.is_ipv4())
+            .chain(std::iter::once(if bound.is_ipv6() {
+                std::net::Ipv6Addr::LOCALHOST.into()
+            } else {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            }))
+            .collect()
+    } else {
+        vec![bound.ip()]
+    };
+    ips.into_iter()
+        .map(|ip| {
+            format!(
+                "https://{}/#code={}",
+                SocketAddr::new(ip, bound.port()),
+                pairing.code
+            )
+        })
+        .collect()
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
@@ -248,6 +265,37 @@ fn wait_for_interrupt() {
     }
     while !INTERRUPTED.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_links_and_admin_json_carry_the_pairing_code_in_the_fragment() {
+        let pairing = PairingCode {
+            code: "123456".into(),
+            browser_url: "https://192.168.1.4:47420/#code=123456".into(),
+            fp: "ab".repeat(32),
+            expires_in_secs: 300,
+            host_id: "host".into(),
+            host_name: "Host".into(),
+            port: 47_420,
+            addrs: vec!["192.168.1.4".into()],
+        };
+
+        assert_eq!(
+            browser_urls(&pairing, "0.0.0.0:47420".parse().unwrap()),
+            [
+                "https://192.168.1.4:47420/#code=123456",
+                "https://127.0.0.1:47420/#code=123456",
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(pairing).unwrap()["browser_url"],
+            "https://192.168.1.4:47420/#code=123456"
+        );
     }
 }
 

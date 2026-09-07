@@ -6,9 +6,11 @@ mod transport;
 
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
-use host::{WebHost, window};
+use host::{WebHost, take_pairing_code, window};
 #[cfg(feature = "debug-exports")]
-use tcode_client::host::{ClientHost as _, PairRequest, Transport};
+use tcode_client::host::Transport;
+use tcode_client::host::{ClientHost as _, PairRequest};
+use tcode_client::pairing::PairedHost;
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -77,6 +79,8 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     gpui_web::init_logging();
     prepare_canvas(canvas_id)?;
+    let host = Rc::new(WebHost);
+    let (initial, initial_pairing_error) = initial_target(host.as_ref()).await;
     let platform = Rc::new(gpui_web::WebPlatform::new_with_backend(
         true,
         gpui_web::WebBackendPreference::Auto,
@@ -86,7 +90,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         .with_http_client(http_client)
         .with_assets(tcode_ui::assets::Assets)
         .run_embedded(|cx| {
-            let host: Rc<dyn tcode_client::host::ClientHost> = Rc::new(WebHost);
+            let host: Rc<dyn tcode_client::host::ClientHost> = host;
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
@@ -110,7 +114,8 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
                     setup: tcode_ui::ShellSetup {
-                        initial: tcode_ui::last_host_target(host.as_ref()),
+                        initial,
+                        initial_pairing_error,
                         client_host: Some(host),
                         // A browser tab runs no host of its own.
                         local: None,
@@ -130,6 +135,48 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         });
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
     Ok(())
+}
+
+async fn initial_target(
+    host: &WebHost,
+) -> (Option<tcode_ui::remote::AttachmentTarget>, Option<String>) {
+    let saved = tcode_ui::last_host_target(host);
+    let code = match take_pairing_code() {
+        Ok(code) => code,
+        Err(error) => return (saved, Some(error)),
+    };
+    if saved.is_some() || code.is_none() {
+        return (saved, None);
+    }
+    let code = code.unwrap();
+    let (addr, port) = host.fixed_pairing_endpoint().unwrap();
+    let address = format!("{addr}:{port}");
+    match host
+        .pair(PairRequest {
+            addr,
+            port,
+            code,
+            fingerprint: String::new(),
+        })
+        .await
+    {
+        Ok(paired) => {
+            save_host(host, &paired);
+            host.set_last_host_id(Some(&paired.host_id));
+            (
+                Some(tcode_ui::remote::AttachmentTarget::Remote(paired)),
+                None,
+            )
+        }
+        Err(error) => (None, Some(tcode_ui::pairing::pair_error(&error, &address))),
+    }
+}
+
+fn save_host(host: &WebHost, paired: &PairedHost) {
+    let mut hosts = host.load_hosts();
+    hosts.retain(|saved| saved.host_id != paired.host_id);
+    hosts.push(paired.clone());
+    host.save_hosts(&hosts);
 }
 
 #[cfg(feature = "debug-exports")]

@@ -223,6 +223,9 @@ pub struct ShellSetup {
     pub local: Option<LocalTransport>,
     /// Where to attach at launch; `None` opens on the hosts list.
     pub initial: Option<AttachmentTarget>,
+    /// A browser link that could not be paired opens the normal form with the
+    /// one-shot failure visible after its URL fragment has been cleared.
+    pub initial_pairing_error: Option<String>,
     /// Wait for the first snapshots while attaching. Only desktop bootstrap
     /// asks for it, and only because it applies locale and theme from them
     /// before the first frame; a single-threaded client cannot wait at all.
@@ -314,7 +317,11 @@ impl AppShell {
                 this.sync_layout(window, cx);
             }),
         ];
-        let hosts = cx.new(|cx| RemotePanel::new(None, window, cx));
+        let hosts = cx.new(|cx| {
+            let mut panel = RemotePanel::new(None, window, cx);
+            panel.set_pairing_error(setup.initial_pairing_error.clone());
+            panel
+        });
         let mut shell = Self {
             window_state,
             attachment: None,

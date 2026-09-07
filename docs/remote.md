@@ -235,18 +235,23 @@ portrait returns to the stack with the same thread and draft. See
 
 ### Browser
 
-1. Open the headless host's URL, for example `https://192.168.1.10:47420/`.
-   Use HTTPS; the host does not serve plaintext HTTP.
+1. Open the `Browser:` link printed by the headless host, for example
+   `https://192.168.1.10:47420/#code=123456`. The link carries the single-use
+   pairing code and pairs automatically on first load. Use HTTPS; the host does
+   not serve plaintext HTTP.
 2. Inspect the certificate in the browser warning and compare its SHA-256
    fingerprint with the host through a trusted channel. Accept the self-signed
    certificate exception for this host. Acceptance is normally needed once in
    that browser profile, not a guarantee that warnings never recur.
-3. Enter the pairing code and choose **Pair**. The page fixes the address and
-   port to its own origin, so you enter only the code, and it hides discovery:
-   a browser can only reach the origin that served it.
-4. Check the displayed fingerprint and choose **Connect**. The page is the same
-   client as the desktop app; resizing the window moves it between the split and
-   the compact stack. To use a different host, open that host's HTTPS URL.
+3. The browser exchanges the link's code, saves the issued device token, removes
+   the fragment from the address bar, and opens the host's thread list. Later
+   visits to the bare URL reconnect with that saved token. If the link's code
+   expired, the normal code-only pairing form shows the error; mint a fresh code,
+   enter its six digits, and choose **Pair** as the manual fallback. The address
+   and port remain fixed to the page's origin and discovery stays hidden.
+4. The page is the same client as the desktop app; resizing the window moves it
+   between the split and the compact stack. To use a different host, open that
+   host's HTTPS URL.
 
 The browser stores paired hosts and tokens in this origin's `localStorage`
 under `tcode.hosts`, and the last host under `tcode.last_host`. Clearing site

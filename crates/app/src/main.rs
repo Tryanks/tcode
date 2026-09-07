@@ -497,6 +497,7 @@ fn main() {
                         client_host: Some(native_client.clone()),
                         local: Some(Rc::new(move || local_kernel.transport())),
                         initial: Some(initial_target.clone()),
+                        initial_pairing_error: None,
                         // Only here: bootstrap applies locale and theme from the
                         // host's own settings before the first frame.
                         seed_blocking: true,

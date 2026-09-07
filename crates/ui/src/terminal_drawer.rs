@@ -1,11 +1,15 @@
+#[cfg(not(target_family = "wasm"))]
+use std::time::Instant;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     ops::Range,
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
+#[cfg(target_family = "wasm")]
+use web_time::Instant;
 
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};

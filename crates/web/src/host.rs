@@ -9,6 +9,31 @@ pub(crate) fn window() -> web_sys::Window {
     web_sys::window().expect("tcode-web requires a browser window")
 }
 
+pub(crate) fn take_pairing_code() -> Result<Option<String>, String> {
+    let window = window();
+    let location = window.location();
+    let hash = location.hash().map_err(js_error)?;
+    let params =
+        web_sys::UrlSearchParams::new_with_str(hash.trim_start_matches('#')).map_err(js_error)?;
+    let Some(code) = params.get("code") else {
+        return Ok(None);
+    };
+    let clean_url = format!(
+        "{}{}",
+        location.pathname().map_err(js_error)?,
+        location.search().map_err(js_error)?
+    );
+    window
+        .history()
+        .and_then(|history| history.replace_state_with_url(&JsValue::NULL, "", Some(&clean_url)))
+        .map_err(js_error)?;
+    Ok(Some(code))
+}
+
+fn js_error(error: JsValue) -> String {
+    error.as_string().unwrap_or_else(|| format!("{error:?}"))
+}
+
 fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
 }
