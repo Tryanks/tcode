@@ -5347,6 +5347,49 @@ fn store_writer_profile_secret_is_visible_to_fresh_store() {
     );
 }
 
+/// A project's unsent draft is keyed by the project, so deleting the project
+/// drops the draft's parked terminal workspace and its persisted terminal
+/// preferences instead of leaving them behind forever.
+#[test]
+fn deleting_a_project_clears_its_drafts_terminal_state() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-delete-project-draft");
+    let root = test_store.root().clone();
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+
+    state.update(cx, |state, cx| {
+        state.start_draft("doomed".into(), root.clone(), cx);
+        let draft_id = state.selected.clone().expect("draft selected");
+        state.host.set_terminal_height(&draft_id, 320., cx);
+        state.host.park_active(&draft_id, cx);
+    });
+    let destination = ConversationDestination::ProjectDraft("doomed".into());
+    state.read(|state| {
+        assert!(state.host.terminal_workspaces.contains_key(&destination));
+        assert!(
+            state
+                .host
+                .terminal_preferences
+                .contains_key(&destination.preference_key())
+        );
+    });
+
+    state.update(cx, |state, cx| state.host.delete_project("doomed", cx));
+    cx.run_until_parked();
+
+    state.read(|state| {
+        assert!(
+            !state.host.terminal_workspaces.contains_key(&destination),
+            "the deleted project's draft kept its terminal workspace"
+        );
+        assert!(
+            state.host.terminal_preferences.is_empty(),
+            "the deleted project's draft kept terminal preferences: {:?}",
+            state.host.terminal_preferences
+        );
+    });
+}
+
 #[test]
 fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
     let cx = &mut TestAppContext::default();

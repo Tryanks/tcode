@@ -200,8 +200,10 @@ fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
 
 impl WorkspaceStore {
     fn destination(status: &SessionStatus) -> ConversationDestination {
-        if status.draft {
-            ConversationDestination::ProjectDraft(status.session_id.clone())
+        if status.draft
+            && let Some(project_id) = status.project_id.clone()
+        {
+            ConversationDestination::ProjectDraft(project_id)
         } else {
             ConversationDestination::Thread(status.session_id.clone())
         }
@@ -433,9 +435,12 @@ impl WorkspaceStore {
         let destination = self.session_status_replica.as_ref().map(Self::destination);
         if let (
             Some(tcode_core::ui::ConversationDestination::ProjectDraft(draft)),
-            Some(tcode_core::ui::ConversationDestination::Thread(thread)),
+            Some(tcode_core::ui::ConversationDestination::Thread(_)),
         ) = (&self.active_destination, &destination)
-            && draft == thread
+            && self
+                .session_status_replica
+                .as_ref()
+                .is_some_and(|status| status.project_id.as_deref() == Some(draft.as_str()))
             && let Some(ui) = self
                 .conversation_ui
                 .remove(self.active_destination.as_ref().unwrap())
@@ -556,6 +561,20 @@ impl WorkspaceStore {
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+                // Client state for a conversation the index no longer lists has
+                // nothing left to return to: a deleted project takes its draft's
+                // state, a deleted thread its own. Archived threads stay listed,
+                // so archiving keeps its state.
+                self.conversation_ui
+                    .retain(|destination, _| match destination {
+                        ConversationDestination::ProjectDraft(project_id) => snapshot
+                            .projects
+                            .iter()
+                            .any(|project| project.id == *project_id),
+                        ConversationDestination::Thread(session_id) => {
+                            snapshot.sessions.iter().any(|meta| meta.id == *session_id)
+                        }
+                    });
                 self.background_session_flags = snapshot.activity.clone();
                 if let Some(id) = &self.selected_session_id {
                     self.background_session_flags.remove(id);
@@ -724,8 +743,22 @@ impl WorkspaceStore {
     fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
         match &self.session_status_replica {
             // A draft has no index entry of its own; it stays until the user
-            // navigates away.
-            Some(status) if status.draft => return,
+            // navigates away. Its project leaving the index is the exception:
+            // there is nothing left to draft into, so it is treated like a
+            // vanished thread.
+            Some(status) if status.draft => {
+                let project_gone = status.project_id.as_ref().is_some_and(|project_id| {
+                    !self
+                        .index_replica
+                        .1
+                        .iter()
+                        .any(|project| project.id == *project_id)
+                });
+                if !project_gone {
+                    return;
+                }
+                self.leave_session();
+            }
             Some(status) => {
                 let session_id = status.session_id.clone();
                 if self.session_visible(&session_id) {
@@ -2151,6 +2184,42 @@ mod tests {
         })
     }
 
+    /// Leave user state in whatever project draft is on screen, so a later
+    /// assertion can tell a cleared entry from a freshly defaulted one.
+    fn mark_draft_state(cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>) {
+        workspace.update(cx, |store, _| {
+            let draft = store
+                .conversation_ui
+                .keys()
+                .find(|destination| matches!(destination, ConversationDestination::ProjectDraft(_)))
+                .cloned()
+                .expect("draft conversation state");
+            store
+                .conversation_ui
+                .get_mut(&draft)
+                .expect("draft conversation state")
+                .right_panel_open = true;
+        });
+    }
+
+    fn assert_no_draft_state(cx: &mut TestAppContext, workspace: &gpui::Entity<WorkspaceStore>) {
+        workspace.read_with(cx, |store, _| {
+            let stranded: Vec<_> = store
+                .conversation_ui
+                .iter()
+                .filter(|(destination, ui)| {
+                    matches!(destination, ConversationDestination::ProjectDraft(_))
+                        && ui.right_panel_open
+                })
+                .map(|(destination, _)| destination)
+                .collect();
+            assert!(
+                stranded.is_empty(),
+                "the deleted project's draft state outlived it: {stranded:?}"
+            );
+        });
+    }
+
     fn archived(cx: &TestAppContext, workspace: &gpui::Entity<WorkspaceStore>, id: &str) -> bool {
         workspace.read_with(cx, |store, _| {
             store
@@ -2269,7 +2338,7 @@ mod tests {
         workspace.update(cx, |store, _| {
             store
                 .conversation_ui
-                .get_mut(&ConversationDestination::ProjectDraft(draft_id.clone()))
+                .get_mut(&ConversationDestination::ProjectDraft("p".into()))
                 .expect("draft conversation state")
                 .right_panel_open = true;
         });
@@ -2294,7 +2363,7 @@ mod tests {
             assert!(
                 store
                     .conversation_ui
-                    .get(&ConversationDestination::ProjectDraft(draft_id.clone()))
+                    .get(&ConversationDestination::ProjectDraft("p".into()))
                     .is_some_and(|ui| ui.right_panel_open),
                 "the reopened draft lost the state the user left in it"
             );
@@ -3252,5 +3321,169 @@ mod tests {
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
+    }
+
+    /// A draft's client state follows its project, so deleting the project
+    /// takes the draft's `ConversationUiState` with it instead of stranding an
+    /// entry keyed by the transient draft session id.
+    #[gpui::test]
+    fn removing_a_project_clears_its_drafts_conversation_state(cx: &mut TestAppContext) {
+        let root = scratch_root("remove-project-draft-ui");
+        let disk = SessionStore::open_at(root.clone()).expect("open test store");
+        for project in ["doomed", "kept"] {
+            disk.upsert_project(&project_at(project, &root))
+                .expect("persist project");
+        }
+        disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
+            .expect("persist session");
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+
+        workspace.update(cx, |store, cx| {
+            store.start_draft("doomed".into(), root.clone(), cx)
+        });
+        wait_until(cx, &workspace, "draft for the doomed project", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.session_status_replica.as_ref().is_some_and(|status| {
+                    status.draft && status.project_id.as_deref() == Some("doomed")
+                })
+            })
+        });
+        mark_draft_state(cx, &workspace);
+
+        // The user leaves the draft standing and deletes its project while
+        // viewing another thread.
+        workspace.update(cx, |store, _| store.select_session("kept-thread".into()));
+        wait_until(cx, &workspace, "kept thread selected", |cx| {
+            selected_status(cx, &workspace, "kept-thread")
+        });
+        workspace.update(cx, |store, _| store.delete_project("doomed".into()));
+        wait_until(cx, &workspace, "project removed", |cx| {
+            workspace.read_with(cx, |store, _| {
+                !store
+                    .index_replica
+                    .1
+                    .iter()
+                    .any(|project| project.id == "doomed")
+            })
+        });
+        assert_no_draft_state(cx, &workspace);
+        assert!(
+            selected_status(cx, &workspace, "kept-thread"),
+            "deleting a background project moved the user"
+        );
+
+        shutdown_test_host(&host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Deleting the project whose draft is on screen leaves nothing to draft
+    /// into, so the workspace falls back to another project's draft instead of
+    /// sitting on a conversation that no longer exists.
+    #[gpui::test]
+    fn removing_the_viewed_drafts_project_falls_back_to_another_draft(cx: &mut TestAppContext) {
+        let root = scratch_root("remove-viewed-project-draft-ui");
+        let disk = SessionStore::open_at(root.clone()).expect("open test store");
+        for project in ["doomed", "kept"] {
+            disk.upsert_project(&project_at(project, &root))
+                .expect("persist project");
+        }
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+
+        workspace.update(cx, |store, cx| {
+            store.start_draft("doomed".into(), root.clone(), cx)
+        });
+        wait_until(cx, &workspace, "draft for the doomed project", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.session_status_replica.as_ref().is_some_and(|status| {
+                    status.draft && status.project_id.as_deref() == Some("doomed")
+                })
+            })
+        });
+        mark_draft_state(cx, &workspace);
+
+        workspace.update(cx, |store, _| store.delete_project("doomed".into()));
+        wait_until(cx, &workspace, "the kept project's draft", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store.session_status_replica.as_ref().is_some_and(|status| {
+                    status.draft && status.project_id.as_deref() == Some("kept")
+                })
+            })
+        });
+        assert_no_draft_state(cx, &workspace);
+
+        shutdown_test_host(&host);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Committing a draft into a real session moves its client state from the
+    /// project-draft key to the new thread key, so the user keeps the panel
+    /// layout they were typing in.
+    #[gpui::test]
+    fn committing_a_draft_carries_its_conversation_state_to_the_thread(cx: &mut TestAppContext) {
+        let root = scratch_root("commit-draft-ui");
+        let disk = SessionStore::open_at(root.clone()).expect("open test store");
+        disk.upsert_project(&project_at("p", &root))
+            .expect("persist project");
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+
+        workspace.update(cx, |store, cx| {
+            store.start_draft("p".into(), root.clone(), cx)
+        });
+        wait_until(cx, &workspace, "draft for p", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| status.draft && status.project_id.as_deref() == Some("p"))
+            })
+        });
+        let draft_id = workspace
+            .read_with(cx, |store, _| store.selected_session_id.clone())
+            .expect("draft selected");
+        workspace.update(cx, |store, _| {
+            store
+                .conversation_ui
+                .get_mut(&ConversationDestination::ProjectDraft("p".into()))
+                .expect("draft conversation state")
+                .right_panel_open = true;
+        });
+
+        command(
+            &host,
+            Command::SendTurn {
+                session_id: draft_id.clone(),
+                text: "first turn".into(),
+                attachment_paths: Vec::new(),
+            },
+        );
+        wait_until(cx, &workspace, "draft committed", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .session_status_replica
+                    .as_ref()
+                    .is_some_and(|status| !status.draft && status.session_id == draft_id)
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .conversation_ui
+                    .get(&ConversationDestination::Thread(draft_id.clone()))
+                    .is_some_and(|ui| ui.right_panel_open),
+                "the committed thread lost the state the user left in its draft"
+            );
+            assert!(
+                !store
+                    .conversation_ui
+                    .contains_key(&ConversationDestination::ProjectDraft("p".into())),
+                "the committed draft's state was copied instead of moved"
+            );
+        });
+
+        shutdown_test_host(&host);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
