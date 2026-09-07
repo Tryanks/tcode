@@ -36,6 +36,7 @@ public final class GpuiActivity extends NativeActivity {
     private static final int HOST_CANCELLED = 1;
     private static final int HOST_ERROR = 2;
 
+    public PreviewHost previewHost;
     private GpuiInputView inputView;
     private boolean keyboardVisible;
     private boolean keyboardShowPending;
@@ -85,6 +86,7 @@ public final class GpuiActivity extends NativeActivity {
         FrameLayout.LayoutParams layout = new FrameLayout.LayoutParams(1, 1);
         layout.gravity = Gravity.BOTTOM | Gravity.START;
         addContentView(inputView, layout);
+        previewHost = new PreviewHost(this);
 
         View decor = getWindow().getDecorView();
         decor.setOnApplyWindowInsetsListener((view, insets) -> {

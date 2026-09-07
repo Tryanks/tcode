@@ -2,6 +2,7 @@ mod dispatcher;
 mod display;
 mod host;
 mod platform;
+pub mod webview;
 mod window;
 
 use android_activity::AndroidApp;

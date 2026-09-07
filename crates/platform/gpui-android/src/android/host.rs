@@ -29,7 +29,7 @@ pub(crate) enum HostEvent {
     Back,
 }
 
-static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+pub(super) static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 static EVENTS: Mutex<VecDeque<HostEvent>> = Mutex::new(VecDeque::new());
 
 pub(crate) fn initialize(app: &AndroidApp) {

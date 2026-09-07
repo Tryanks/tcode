@@ -14,7 +14,7 @@ mod android;
 #[cfg(target_os = "android")]
 pub use android::{
     init_platform, insets, jni_commit_text, jni_delete_backward, jni_finish_composing_text,
-    jni_key_event, jni_on_back, jni_on_insets, jni_set_composing_text, set_back_callback,
+    jni_key_event, jni_on_back, jni_on_insets, jni_set_composing_text, set_back_callback, webview,
 };
 
 #[cfg(not(target_os = "android"))]
