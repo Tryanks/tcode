@@ -238,6 +238,13 @@ One inset, applied once, at the page:
 - **Terminal exception.** The terminal grid stays edge to edge horizontally —
   it is measured in columns, and narrowing it drops columns — but it still sits
   inside the window's safe rect and keeps 8pt of air below the segmented control.
+  On iOS and Android, focusing the grid raises the software keyboard and adds one
+  44pt special-key row at the bottom of that rect, directly above the keyboard.
+  The row reserves its height before the grid is measured, so it never covers the
+  last terminal row. It contains Esc, Tab, sticky Ctrl and Alt, four arrows, then
+  a horizontally scrolling `- / | ~` tail; sticky modifiers highlight until the
+  next terminal key or committed character consumes them. Desktop and browser
+  terminals never draw the row.
 
 Prose inside the content (errors, notices, file headers) wraps against the page
 inset rather than running past it. Code and diff lines do not wrap: they scroll

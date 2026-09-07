@@ -50,6 +50,7 @@ pub mod sidebar;
 pub mod sizing;
 pub mod store;
 mod terminal_drawer;
+mod terminal_key_bar;
 pub mod theme;
 mod thread_export;
 pub mod time;

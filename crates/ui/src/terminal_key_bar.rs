@@ -1,0 +1,479 @@
+//! Touch-only terminal keys that a software keyboard cannot produce.
+//!
+//! This owns only the sticky modifier state and presentation. Byte encoding
+//! remains in `tcode_protocol::terminal::mappings`, fed by the same replicated
+//! terminal modes as hardware key events.
+
+use crate::material;
+use crate::theme::ActiveTheme as _;
+use gpui::{
+    App, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
+};
+use gpui_base::{StyledExt as _, h_flex, v_flex};
+use tcode_protocol::terminal::{
+    KeyboardModes, TerminalMode,
+    mappings::{self, Modifiers},
+};
+
+const KEY_BAR_HEIGHT: f32 = 44.;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalKey {
+    Escape,
+    Tab,
+    Left,
+    Up,
+    Down,
+    Right,
+    Symbol(char),
+}
+
+impl TerminalKey {
+    fn mapping_name(self) -> String {
+        match self {
+            Self::Escape => "escape".to_owned(),
+            Self::Tab => "tab".to_owned(),
+            Self::Left => "left".to_owned(),
+            Self::Up => "up".to_owned(),
+            Self::Down => "down".to_owned(),
+            Self::Right => "right".to_owned(),
+            Self::Symbol(symbol) => symbol.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalKeyBarEvent(pub(crate) TerminalKey);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StickyModifiers {
+    control: bool,
+    alt: bool,
+}
+
+impl StickyModifiers {
+    fn take(&mut self) -> Modifiers {
+        let modifiers = Modifiers {
+            control: self.control,
+            alt: self.alt,
+            ..Modifiers::default()
+        };
+        *self = Self::default();
+        modifiers
+    }
+}
+
+pub(crate) struct TerminalKeyBar {
+    terminal_focus: FocusHandle,
+    encoder: TerminalKeyEncoder,
+}
+
+#[derive(Debug, Default)]
+struct TerminalKeyEncoder {
+    modifiers: StickyModifiers,
+}
+
+impl TerminalKeyEncoder {
+    fn new() -> Self {
+        Self {
+            modifiers: StickyModifiers::default(),
+        }
+    }
+
+    fn encode_key(
+        &mut self,
+        key: TerminalKey,
+        mode: TerminalMode,
+        keyboard_mode: KeyboardModes,
+        modify_other_keys: Option<u8>,
+    ) -> Vec<u8> {
+        let key = key.mapping_name();
+        let modifiers = self.modifiers.take();
+        mappings::key_bytes(
+            &key,
+            modifiers,
+            mode,
+            keyboard_mode,
+            modify_other_keys,
+            true,
+        )
+        .unwrap_or_else(|| key.into_bytes())
+    }
+
+    /// Encode committed software-keyboard text. Sticky modifiers apply to the
+    /// first character only; every character still passes through the shared
+    /// mapping so kitty and modifyOtherKeys modes match hardware input.
+    fn encode_text(
+        &mut self,
+        text: &str,
+        mode: TerminalMode,
+        keyboard_mode: KeyboardModes,
+        modify_other_keys: Option<u8>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (index, character) in text.chars().enumerate() {
+            let key = match character {
+                '\n' | '\r' => "enter".to_owned(),
+                '\t' => "tab".to_owned(),
+                character => character.to_string(),
+            };
+            let modifiers = if index == 0 {
+                self.modifiers.take()
+            } else {
+                Modifiers::default()
+            };
+            if let Some(encoded) = mappings::key_bytes(
+                &key,
+                modifiers,
+                mode,
+                keyboard_mode,
+                modify_other_keys,
+                true,
+            ) {
+                bytes.extend(encoded);
+            } else {
+                bytes.extend(character.to_string().into_bytes());
+            }
+        }
+        bytes
+    }
+}
+
+impl TerminalKeyBar {
+    pub(crate) fn new(terminal_focus: FocusHandle) -> Self {
+        Self {
+            terminal_focus,
+            encoder: TerminalKeyEncoder::new(),
+        }
+    }
+
+    pub(crate) fn encode_key(
+        &mut self,
+        key: TerminalKey,
+        mode: TerminalMode,
+        keyboard_mode: KeyboardModes,
+        modify_other_keys: Option<u8>,
+    ) -> Vec<u8> {
+        self.encoder
+            .encode_key(key, mode, keyboard_mode, modify_other_keys)
+    }
+
+    pub(crate) fn encode_text(
+        &mut self,
+        text: &str,
+        mode: TerminalMode,
+        keyboard_mode: KeyboardModes,
+        modify_other_keys: Option<u8>,
+    ) -> Vec<u8> {
+        self.encoder
+            .encode_text(text, mode, keyboard_mode, modify_other_keys)
+    }
+
+    fn key_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        accessibility_label: String,
+        key: TerminalKey,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let focus = self.terminal_focus.clone();
+        material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
+            .flex_none()
+            .size(px(material::TOUCH_TARGET))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .rounded(material::radius_button())
+            .text_size(px(13.))
+            .hover(|style| style.bg(cx.theme().accent))
+            .on_click(cx.listener(move |_, _, window, cx| {
+                focus.focus(window, cx);
+                cx.emit(TerminalKeyBarEvent(key));
+            }))
+            .child(label)
+    }
+
+    fn modifier_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        accessibility_label: String,
+        selected: bool,
+        control: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let focus = self.terminal_focus.clone();
+        material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
+            .aria_selected(selected)
+            .flex_none()
+            .size(px(material::TOUCH_TARGET))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .rounded(material::radius_button())
+            .text_size(px(12.))
+            .font_medium()
+            .when(selected, |style| {
+                style
+                    .bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
+            })
+            .when(!selected, |style| {
+                style.hover(|hover| hover.bg(cx.theme().accent))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if control {
+                    this.encoder.modifiers.control = !this.encoder.modifiers.control;
+                } else {
+                    this.encoder.modifiers.alt = !this.encoder.modifiers.alt;
+                }
+                focus.focus(window, cx);
+                cx.notify();
+            }))
+            .child(label)
+    }
+}
+
+impl EventEmitter<TerminalKeyBarEvent> for TerminalKeyBar {}
+
+impl Render for TerminalKeyBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fixed = h_flex()
+            .flex_none()
+            .child(self.key_button(
+                "terminal-key-escape",
+                "Esc",
+                crate::tr!("terminal.key_escape").into_owned(),
+                TerminalKey::Escape,
+                cx,
+            ))
+            .child(self.key_button(
+                "terminal-key-tab",
+                "Tab",
+                crate::tr!("terminal.key_tab").into_owned(),
+                TerminalKey::Tab,
+                cx,
+            ))
+            .child(self.modifier_button(
+                "terminal-key-control",
+                "Ctrl",
+                crate::tr!("terminal.key_control").into_owned(),
+                self.encoder.modifiers.control,
+                true,
+                cx,
+            ))
+            .child(self.modifier_button(
+                "terminal-key-alt",
+                "Alt",
+                crate::tr!("terminal.key_alt").into_owned(),
+                self.encoder.modifiers.alt,
+                false,
+                cx,
+            ));
+        let arrows = [
+            (
+                "terminal-key-left",
+                "←",
+                "terminal.key_left",
+                TerminalKey::Left,
+            ),
+            ("terminal-key-up", "↑", "terminal.key_up", TerminalKey::Up),
+            (
+                "terminal-key-down",
+                "↓",
+                "terminal.key_down",
+                TerminalKey::Down,
+            ),
+            (
+                "terminal-key-right",
+                "→",
+                "terminal.key_right",
+                TerminalKey::Right,
+            ),
+        ];
+        let mut fixed = fixed;
+        for (id, label, translation, key) in arrows {
+            fixed = fixed.child(self.key_button(
+                id,
+                label,
+                crate::tr!(translation).into_owned(),
+                key,
+                cx,
+            ));
+        }
+
+        let mut symbols = h_flex().flex_none();
+        for (id, label, symbol) in [
+            ("terminal-key-dash", "-", '-'),
+            ("terminal-key-slash", "/", '/'),
+            ("terminal-key-pipe", "|", '|'),
+            ("terminal-key-tilde", "~", '~'),
+        ] {
+            symbols = symbols.child(self.key_button(
+                id,
+                label,
+                crate::tr!("terminal.key_symbol", symbol = symbol).into_owned(),
+                TerminalKey::Symbol(symbol),
+                cx,
+            ));
+        }
+
+        h_flex()
+            .id("terminal-key-bar")
+            .debug_selector(|| "terminal-key-bar".into())
+            .role(Role::Toolbar)
+            .aria_label(crate::tr!("terminal.key_bar"))
+            .flex_none()
+            .w_full()
+            .h(px(KEY_BAR_HEIGHT))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .child(fixed)
+            .child(
+                v_flex()
+                    .id("terminal-key-symbol-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_x_scroll()
+                    .child(symbols),
+            )
+    }
+}
+
+pub(crate) fn should_show_terminal_key_bar(terminal_focused: bool, cx: &App) -> bool {
+    crate::window_seam::soft_keyboard_for_key_bar(cx) && terminal_focused
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+
+    #[test]
+    fn sticky_control_encodes_one_character_then_clears() {
+        let mut state = TerminalKeyEncoder {
+            modifiers: StickyModifiers {
+                control: true,
+                alt: false,
+            },
+        };
+        assert_eq!(
+            state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+            vec![0x03]
+        );
+        assert_eq!(state.modifiers, StickyModifiers::default());
+        assert_eq!(
+            state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+            b"c"
+        );
+    }
+
+    #[test]
+    fn arrows_use_the_replicated_application_cursor_mode() {
+        let mut state = TerminalKeyEncoder {
+            modifiers: StickyModifiers::default(),
+        };
+        assert_eq!(
+            state.encode_key(
+                TerminalKey::Up,
+                TerminalMode::empty(),
+                KeyboardModes::NO_MODE,
+                None
+            ),
+            b"\x1b[A"
+        );
+        assert_eq!(
+            state.encode_key(
+                TerminalKey::Up,
+                TerminalMode::APP_CURSOR,
+                KeyboardModes::NO_MODE,
+                None,
+            ),
+            b"\x1bOA"
+        );
+    }
+
+    #[test]
+    fn escape_is_the_terminal_escape_byte() {
+        let mut state = TerminalKeyEncoder {
+            modifiers: StickyModifiers::default(),
+        };
+        assert_eq!(
+            state.encode_key(
+                TerminalKey::Escape,
+                TerminalMode::empty(),
+                KeyboardModes::NO_MODE,
+                None,
+            ),
+            vec![0x1b]
+        );
+    }
+
+    struct KeyBarProbe {
+        terminal_focused: bool,
+        bar: Entity<TerminalKeyBar>,
+    }
+
+    impl Render for KeyBarProbe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().when(
+                should_show_terminal_key_bar(self.terminal_focused, cx),
+                |root| root.child(self.bar.clone()),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn bar_renders_only_for_a_focused_soft_keyboard_terminal(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (probe, cx) = cx.add_window_view(|_, cx| {
+            let focus = cx.focus_handle();
+            let bar_focus = focus.clone();
+            KeyBarProbe {
+                terminal_focused: false,
+                bar: cx.new(|_| TerminalKeyBar::new(bar_focus)),
+            }
+        });
+        let cx: &mut VisualTestContext = cx;
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+        };
+
+        cx.update(|_, cx| crate::window_seam::override_soft_keyboard_for_test(cx, false));
+        probe.update(cx, |probe, cx| {
+            probe.terminal_focused = true;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("terminal-key-bar").is_none());
+        cx.update(|_, cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        probe.update(cx, |probe, cx| {
+            probe.terminal_focused = false;
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("terminal-key-bar").is_none());
+
+        probe.update(cx, |probe, cx| {
+            probe.terminal_focused = true;
+            cx.notify();
+        });
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("terminal-key-bar")
+                .expect("focused phone terminal key bar")
+                .size
+                .height,
+            px(KEY_BAR_HEIGHT)
+        );
+    }
+}

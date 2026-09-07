@@ -15,8 +15,8 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{ContextMenuExt as _, DropdownMenu as _};
 use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
-    Action, AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Entity, ExternalPaths,
-    FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
+    Action, AnyElement, App, AppContext as _, Bounds, ClipboardItem, ContentMask, Context, Entity,
+    ExternalPaths, FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight, Hsla, InputHandler,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, Role,
     ScrollWheelEvent, StatefulInteractiveElement as _, Styled as _, Task, TextAlign, TextRun,
@@ -34,6 +34,9 @@ use crate::{
     store::{
         StoreChange, TopicKind, WorkspaceStore, observe_store_topics,
         terminal::{HyperlinkMatch, SelectionKind, SelectionSide, TerminalModel},
+    },
+    terminal_key_bar::{
+        TerminalKey, TerminalKeyBar, TerminalKeyBarEvent, should_show_terminal_key_bar,
     },
 };
 use tcode_core::ui::{MAX_TERMINALS_PER_SESSION, TerminalSplitDirection};
@@ -335,6 +338,7 @@ struct TerminalGridCache {
 pub struct TerminalDrawer {
     workspace_store: Entity<WorkspaceStore>,
     focus_handle: FocusHandle,
+    key_bar: Entity<TerminalKeyBar>,
     grid_bounds: Rc<RefCell<HashMap<u64, GridGeometry>>>,
     /// Last-known panel sizes of the active split (from its resize handle),
     /// used to apportion the drawer body between the two panes when resizing
@@ -386,6 +390,7 @@ impl TerminalDrawer {
             },
         );
         let focus_handle = cx.focus_handle().tab_index(0).tab_stop(true);
+        let key_bar = cx.new(|_| TerminalKeyBar::new(focus_handle.clone()));
         let focus_store = workspace_store.clone();
         let focus_in = window.on_focus_in(&focus_handle, cx, move |_, cx| {
             focus_store.read(cx).with_terminal_workspace(|workspace| {
@@ -406,6 +411,14 @@ impl TerminalDrawer {
                 }
             });
         });
+        let key_bar_subscription = cx.subscribe_in(
+            &key_bar,
+            window,
+            |this, _, event: &TerminalKeyBarEvent, window, cx| {
+                this.send_key_bar_key(event.0, cx);
+                this.focus_handle.focus(window, cx);
+            },
+        );
         #[cfg(not(test))]
         let blink_task = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -430,6 +443,7 @@ impl TerminalDrawer {
         Self {
             workspace_store,
             focus_handle,
+            key_bar,
             grid_bounds: Rc::new(RefCell::new(HashMap::new())),
             split_sizes: Rc::new(RefCell::new(Vec::new())),
             row_layout_cache: RefCell::new(HashMap::new()),
@@ -437,7 +451,7 @@ impl TerminalDrawer {
             cell_height: TERMINAL_CELL_HEIGHT,
             scroll_remainder: HashMap::new(),
             selection_drag: SelectionDrag::default(),
-            _focus_subscriptions: vec![focus_in, focus_out],
+            _focus_subscriptions: vec![focus_in, focus_out, key_bar_subscription],
             marked_text: None,
             bell_tabs: HashSet::new(),
             hovered_link: None,
@@ -496,6 +510,57 @@ impl TerminalDrawer {
             let text = prepare_terminal_paste(text, mode.contains(Mode::BRACKETED_PASTE));
             terminal.write_input(text.into_bytes());
         });
+    }
+
+    fn send_key_bar_key(&mut self, key: TerminalKey, cx: &mut Context<Self>) {
+        let terminal = self
+            .workspace_store
+            .read(cx)
+            .with_terminal_workspace(|workspace| {
+                workspace.active().map(|entry| entry.terminal.clone())
+            })
+            .flatten();
+        let Some(terminal) = terminal else {
+            return;
+        };
+        let bytes = self.key_bar.update(cx, |bar, _| {
+            bar.encode_key(
+                key,
+                terminal.mode(),
+                terminal.keyboard_mode(),
+                terminal.modify_other_keys(),
+            )
+        });
+        terminal.write_input(bytes);
+        self.note_input(cx);
+    }
+
+    fn send_committed_text(&mut self, terminal_id: u64, text: &str, cx: &mut Context<Self>) {
+        let terminal = self
+            .workspace_store
+            .read(cx)
+            .with_terminal_workspace(|workspace| {
+                workspace
+                    .terminal(terminal_id)
+                    .map(|entry| entry.terminal.clone())
+            })
+            .flatten();
+        let Some(terminal) = terminal else {
+            return;
+        };
+        let bytes = self.key_bar.update(cx, |bar, cx| {
+            let bytes = bar.encode_text(
+                text,
+                terminal.mode(),
+                terminal.keyboard_mode(),
+                terminal.modify_other_keys(),
+            );
+            cx.notify();
+            bytes
+        });
+        if !bytes.is_empty() {
+            terminal.write_input(bytes);
+        }
     }
 
     fn on_terminal_copy(
@@ -1743,6 +1808,10 @@ impl Render for TerminalDrawer {
                 })
                 .child(body),
             )
+            .when(
+                should_show_terminal_key_bar(self.terminal_focused, cx),
+                |drawer| drawer.child(self.key_bar.clone()),
+            )
     }
 }
 
@@ -2224,9 +2293,7 @@ impl InputHandler for TerminalInputHandler {
             drawer.cursor_phase = true;
             drawer.bell_tabs.remove(&terminal_id);
             if !text.is_empty() {
-                drawer.with_terminal_id(terminal_id, cx, |terminal| {
-                    terminal.write_input(text.into_bytes());
-                });
+                drawer.send_committed_text(terminal_id, &text, cx);
             }
             cx.notify();
         });

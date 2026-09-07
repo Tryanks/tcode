@@ -79,6 +79,26 @@ pub const fn soft_keyboard() -> bool {
     cfg!(any(target_os = "ios", target_os = "android"))
 }
 
+pub(crate) fn soft_keyboard_for_key_bar(_cx: &App) -> bool {
+    #[cfg(test)]
+    if let Some(override_) = _cx.try_global::<SoftKeyboardOverride>() {
+        return override_.0;
+    }
+    soft_keyboard()
+}
+
+#[cfg(test)]
+struct SoftKeyboardOverride(bool);
+
+#[cfg(test)]
+impl Global for SoftKeyboardOverride {}
+
+/// Override the platform capability inside one isolated GPUI test app.
+#[cfg(test)]
+pub(crate) fn override_soft_keyboard_for_test(cx: &mut App, value: bool) {
+    cx.set_global(SoftKeyboardOverride(value));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
