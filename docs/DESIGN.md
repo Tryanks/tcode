@@ -662,7 +662,8 @@ The Preview tab exists on every client. Its URL field, open-in-system-browser
 and copy-URL work everywhere; the embedded browser, history, JS automation and
 screenshots need a system webview. macOS, Windows and Android builds have
 an embedded browser (screenshots are supported on macOS and Android). Android
-uses an activity-owned WebView above the GPUI surface, follows the panel bounds
+uses an activity-attached child window for each WebView above the GPUI surface
+(NativeActivity does not paint ordinary Java view children), follows the panel bounds
 through rotation and keyboard insets, and hides it when leaving the compact
 Preview destination. Page inputs use the WebView’s native keyboard focus. Without one the tab explains that and offers the portable actions rather
 than dead back/reload/screenshot controls, agent automation requests are

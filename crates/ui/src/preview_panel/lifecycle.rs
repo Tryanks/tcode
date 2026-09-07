@@ -155,7 +155,7 @@ impl BrowserLifecycle {
 
     /// Get or lazily create the browser for `key`.
     ///
-    /// Windows retains the newest URL while asynchronous creation runs.
+    /// Windows and Android retain the newest URL while asynchronous creation runs.
     /// The synchronous adapter starts at `about:blank`.
     pub fn ensure(
         &mut self,
@@ -174,7 +174,7 @@ impl BrowserLifecycle {
     }
 
     /// Navigate a session and mark it warm only if the native load was accepted.
-    /// A Windows creation in progress retains the newest requested URL instead.
+    /// An asynchronous creation in progress retains the newest requested URL instead.
     pub fn navigate(
         &mut self,
         key: &str,
@@ -814,7 +814,8 @@ mod platform {
         window: &mut Window,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
-        let (raw, mut events) = match super::super::android::RawWebView::new() {
+        let initial_url = initial_url.unwrap_or("about:blank").to_owned();
+        let (raw, mut events) = match super::super::android::RawWebView::new(&initial_url) {
             Ok(created) => created,
             Err(error) => {
                 lifecycle.record_unavailable(error, cx);
@@ -831,7 +832,7 @@ mod platform {
             WebViewSlot::Creating {
                 id,
                 phase: CreationPhase::Queued,
-                pending_url: initial_url.map(str::to_owned),
+                pending_url: Some(initial_url.clone()),
             },
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -855,7 +856,9 @@ mod platform {
                         let Some((key, pending_url)) = lifecycle.remove_creation(id) else {
                             return;
                         };
-                        if let Some(url) = pending_url {
+                        if let Some(url) = pending_url
+                            && url != initial_url
+                        {
                             let _ = raw.load_url(&url);
                         }
                         let view = cx.new(|cx| WebView::new(raw, events, cx));

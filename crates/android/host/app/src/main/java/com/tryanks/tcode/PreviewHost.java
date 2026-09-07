@@ -6,21 +6,14 @@ import android.os.Bundle;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.net.http.SslError;
-import android.view.View;
-import android.view.ViewGroup;
-import android.view.KeyEvent;
-import android.view.inputmethod.InputMethodManager;
-import android.content.Context;
 import android.webkit.*;
-import android.widget.FrameLayout;
 import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 
 /** Activity-owned children. Every entry point and WebView callback runs on the Java UI thread. */
 public final class PreviewHost implements Application.ActivityLifecycleCallbacks {
     private final Activity activity;
-    private final FrameLayout container;
-    private final HashMap<Long, WebView> views = new HashMap<>();
+    private final HashMap<Long, TcodeWebView> views = new HashMap<>();
     private boolean resumed = true;
 
     private static native void nativeResult(long request, String value, byte[] png, String error);
@@ -29,8 +22,6 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
 
     public PreviewHost(Activity activity) {
         this.activity = activity;
-        container = new FrameLayout(activity);
-        activity.addContentView(container, new FrameLayout.LayoutParams(-1, -1));
         activity.getApplication().registerActivityLifecycleCallbacks(this);
     }
 
@@ -46,18 +37,11 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
         try {
             if (operation.equals("create")) {
                 if (views.containsKey(id)) throw new IllegalStateException("duplicate preview");
-                WebView view = new WebView(activity) {
-                    // NativeActivity otherwise sends unhandled keys to its GPUI input queue.
-                    @Override public boolean dispatchKeyEvent(KeyEvent event) {
-                        if (super.dispatchKeyEvent(event)) return true;
-                        return event.getKeyCode() != KeyEvent.KEYCODE_BACK;
-                    }
-                };
+                TcodeWebView view = new TcodeWebView(activity);
                 view.getSettings().setJavaScriptEnabled(true);
                 view.getSettings().setDomStorageEnabled(true);
                 view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
                 view.getSettings().setAllowFileAccess(false);
-                view.setVisibility(View.GONE);
                 view.setWebViewClient(new WebViewClient() {
                     @Override public void onPageStarted(WebView v, String url, Bitmap icon) {
                         event(id, 0, url, 0, "");
@@ -87,32 +71,23 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                     }
                 });
                 views.put(id, view);
-                container.addView(view, new FrameLayout.LayoutParams(0, 0));
-                event(id, 7, "about:blank", 0, "");
-                view.loadUrl("about:blank");
+                event(id, 7, value.isEmpty() ? "about:blank" : value, 0, "");
+                view.loadUrl(value.isEmpty() ? "about:blank" : value);
                 return;
             }
-            WebView view = views.get(id);
+            TcodeWebView view = views.get(id);
             if (view == null) throw new IllegalStateException("preview browser is not open");
             switch (operation) {
                 case "destroy":
                     blur(view);
                     views.remove(id);
-                    container.removeView(view);
-                    view.stopLoading();
-                    view.destroy();
+                    view.destroyPreview();
                     break;
                 case "bounds":
-                    FrameLayout.LayoutParams bounds = new FrameLayout.LayoutParams(width, height);
-                    // FrameLayout lays out in its own window position, including any OS offset.
-                    int[] origin = new int[2];
-                    container.getLocationInWindow(origin);
-                    bounds.leftMargin = x - origin[0];
-                    bounds.topMargin = y - origin[1];
-                    view.setLayoutParams(bounds);
+                    view.setPreviewBounds(x, y, width, height);
                     break;
-                case "show": view.setVisibility(View.VISIBLE); break;
-                case "hide": blur(view); view.setVisibility(View.GONE); break;
+                case "show": view.setPreviewVisible(true); break;
+                case "hide": view.setPreviewVisible(false); break;
                 case "blur": blur(view); break;
                 case "navigate": view.loadUrl(value); break;
                 case "back": if (view.canGoBack()) view.goBack(); break;
@@ -145,25 +120,17 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
         }
     }
 
-    private void blur(WebView view) {
-        if (view.hasFocus()) {
-            ((InputMethodManager)activity.getSystemService(Context.INPUT_METHOD_SERVICE))
-                    .hideSoftInputFromWindow(view.getWindowToken(), 0);
-            view.clearFocus();
-        }
-    }
+    private void blur(TcodeWebView view) { view.releasePreviewFocus(); }
 
     @Override public void onActivityPaused(Activity a) {
         if (a != activity) return;
         resumed = false;
-        container.setVisibility(View.GONE);
-        for (WebView view : views.values()) view.onPause();
+        for (TcodeWebView view : views.values()) view.pausePreview();
     }
     @Override public void onActivityResumed(Activity a) {
         if (a != activity) return;
         resumed = true;
-        container.setVisibility(View.VISIBLE);
-        for (WebView view : views.values()) view.onResume();
+        for (TcodeWebView view : views.values()) view.resumePreview();
     }
     @Override public void onActivityDestroyed(Activity a) {
         if (a != activity) return;

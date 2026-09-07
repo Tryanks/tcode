@@ -172,6 +172,9 @@ pub struct PreviewPanel {
     url_input: Entity<InputState>,
     /// Session id whose URL is currently mirrored into `url_input`.
     mirrored: Option<String>,
+    /// The last URL copied into the editor; preserve an unsent edit until the
+    /// actual page URL or conversation changes.
+    mirrored_url: Option<String>,
     #[cfg(all(
         feature = "native-preview",
         any(target_os = "macos", target_os = "windows", target_os = "android")
@@ -222,6 +225,7 @@ impl PreviewPanel {
             window_state,
             url_input,
             mirrored: None,
+            mirrored_url: None,
             #[cfg(all(
                 feature = "native-preview",
                 any(target_os = "macos", target_os = "windows", target_os = "android")
@@ -479,14 +483,15 @@ impl Render for PreviewPanel {
                 .child(crate::tr!("browser.disabled_panel"));
         }
         let active = self.active_key(cx);
-        if active != self.mirrored {
-            let value = active
-                .as_ref()
-                .and_then(|id| self.store.read(cx).preview_url(id))
-                .unwrap_or_default();
+        let current_url = active
+            .as_ref()
+            .and_then(|id| self.store.read(cx).preview_url(id));
+        if active != self.mirrored || current_url != self.mirrored_url {
+            let value = current_url.clone().unwrap_or_default();
             self.url_input
                 .update(cx, |state, cx| state.set_value(&value, window, cx));
             self.mirrored = active.clone();
+            self.mirrored_url = current_url;
         }
 
         let body = self.render_body(active.as_deref(), window, cx);

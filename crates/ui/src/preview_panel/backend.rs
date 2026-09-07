@@ -26,7 +26,7 @@ const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly
 /// The error `preview_screenshot` reports where native-webview snapshots have no
 /// implementation.
 #[cfg_attr(any(target_os = "macos", target_os = "android"), allow(dead_code))]
-const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS";
+const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS and Android";
 
 fn wait_timeout_message(pending: &[String]) -> String {
     format!(

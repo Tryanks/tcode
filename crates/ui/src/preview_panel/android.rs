@@ -18,14 +18,15 @@ pub struct RawWebView {
     title: RefCell<String>,
 }
 impl RawWebView {
-    pub(super) fn new() -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<Event>), String>
-    {
-        let (browser, events) = Browser::new()?;
+    pub(super) fn new(
+        initial_url: &str,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<Event>), String> {
+        let (browser, events) = Browser::new(initial_url)?;
         Ok((
             Self {
                 browser,
                 error: RefCell::new(None),
-                url: RefCell::new(String::new()),
+                url: RefCell::new(initial_url.to_owned()),
                 title: RefCell::new(String::new()),
             },
             events,

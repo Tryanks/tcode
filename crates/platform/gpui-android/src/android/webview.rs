@@ -42,7 +42,7 @@ pub struct Browser {
     id: u64,
 }
 impl Browser {
-    pub fn new() -> Result<(Self, mpsc::UnboundedReceiver<Event>), String> {
+    pub fn new(initial_url: &str) -> Result<(Self, mpsc::UnboundedReceiver<Event>), String> {
         if super::host::APP.lock().is_none() {
             return Err("Android activity is unavailable".into());
         }
@@ -50,7 +50,7 @@ impl Browser {
         let (sender, receiver) = mpsc::unbounded();
         VIEWS.lock().insert(id, sender);
         let browser = Self { id };
-        browser.command("create", "", [0; 4]);
+        browser.command("create", initial_url, [0; 4]);
         Ok((browser, receiver))
     }
     pub fn command(&self, operation: &str, value: &str, bounds: [i32; 4]) {

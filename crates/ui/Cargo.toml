@@ -24,7 +24,7 @@ desktop = [
 # GPUI's platform file dialogs (`prompt_for_paths` / `prompt_for_new_path`).
 # Guards only the Browse and Save-to-disk actions.
 native-dialogs = []
-# Embedded webview preview backend. Only macOS and Windows have one; the panel,
+# Embedded webview preview backend. Available on macOS, Windows and Android; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
     "dep:gpui-android",
