@@ -246,6 +246,28 @@ mod tests {
         });
     }
 
+    /// Connecting somewhere else is the one thing that discards where the
+    /// window has been: the previous host's pages are not this host's.
+    #[gpui::test]
+    fn entering_a_workspace_clears_the_previous_host_s_pages(cx: &mut TestAppContext) {
+        let state = cx.new(|_| WindowState::new(false).with_compact(true));
+        state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.go(Destination::Thread, cx);
+            state.go(Destination::Panel, cx);
+
+            state.enter_workspace(cx);
+            assert_eq!(
+                state.history(),
+                [Destination::Hosts, Destination::Threads],
+                "the new host starts at its own thread list"
+            );
+            assert!(state.back(cx));
+            assert_eq!(state.destination(), Destination::Hosts);
+            assert!(!state.back(cx));
+        });
+    }
+
     /// Wide has no page stack: Back leaves the settings route in one step and
     /// reports "not consumed" once the workspace is showing.
     #[gpui::test]
