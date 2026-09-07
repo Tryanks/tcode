@@ -169,8 +169,9 @@ conversation.
 
 A newly opened conversation starts with the last 200 event records. Earlier
 history is available through **Load earlier messages** above the timeline and
-loads automatically when the reader scrolls to the top. Only one page loads at
-a time; leaving the conversation cancels it. The control reports loading and
+prefetches when the viewport top is within two viewport heights of the first
+loaded record (the first 20 rows before geometry is known). Only one page of
+at most 200 records loads at a time; leaving the conversation cancels it. The control reports loading and
 retains a readable error if the host cannot supply the page.
 
 Prepending preserves the visible turn and its offset in pixels. Existing list
@@ -584,7 +585,9 @@ platform pays that inset.
 The composer holds the draft plus removable attachment, terminal-context and
 review-comment chips. Its controls select the provider/model, model parameters,
 approval mode and Build/Plan mode, subject to provider capabilities. Context
-usage comes from the live session. Sending during a turn queues the message;
+usage comes from the live session. The same context ring appears beside Send
+in the compact controls row, with a 44pt hit target opening its details sheet.
+Sending during a turn queues the message;
 the secondary send action steers when the provider supports it. Stop interrupts
 the current turn. Queue/steer guidance belongs in the send tooltip.
 

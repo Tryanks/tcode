@@ -2834,6 +2834,61 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn history_prefetch_keeps_one_bounded_page_in_flight(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-prefetch-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = test_host(SessionStore::open_at(root.clone()).unwrap());
+        let status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("history".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).unwrap();
+
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                tcode_client::HostLink::new(to_host, from_host),
+                WorkspaceAttachment::Local,
+                None,
+                false,
+                cx,
+            )
+        });
+        workspace.update(cx, |store, _| {
+            store.selected_session_id = Some("large".into());
+            store.session_from.insert("large".into(), 1800);
+            store.session_replica = Some(("large".into(), Default::default()));
+            store.session_status_replica = Some(status);
+        });
+        while outgoing.try_recv().is_ok() {}
+        workspace.update(cx, |store, cx| store.load_earlier_messages(cx));
+        cx.run_until_parked();
+        let request = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            request.payload,
+            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+                before: 1800,
+                limit: 200,
+                ..
+            })
+        ));
+        workspace.update(cx, |store, cx| {
+            assert!(store.history_loading());
+            store.load_earlier_messages(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            outgoing.try_recv().is_err(),
+            "scrolling while loading must not queue another page"
+        );
+    }
+
     fn test_host(store: SessionStore) -> SpawnedHost {
         spawn_host(store, HostServices::default()).expect("spawn test host")
     }

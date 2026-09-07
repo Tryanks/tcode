@@ -361,6 +361,17 @@ pub struct ChatView {
     markdown_remeasured_turns: Vec<usize>,
 }
 
+// ListState retains measured row heights, so variable-height turns use the same
+// pixel geometry as scrolling rather than treating a long turn as one short row.
+fn history_prefetch_due(list: &ListState, first_visible: usize) -> bool {
+    let height = list.viewport_bounds().size.height;
+    if height > px(0.) {
+        -list.scroll_px_offset_for_scrollbar().y <= height * 2.
+    } else {
+        first_visible < 20
+    }
+}
+
 impl ChatView {
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.window_state.read(cx).compact {
@@ -404,7 +415,7 @@ impl ChatView {
             let chat = chat.clone();
             window.defer(cx, move |_, cx| {
                 let _ = chat.update(cx, |chat, cx| {
-                    if visible_turns.start == 0
+                    if history_prefetch_due(&chat.list_state, visible_turns.start)
                         && !chat.list_state.is_following_tail()
                         && chat.workspace_store.read(cx).history_error().is_none()
                     {
@@ -3252,6 +3263,61 @@ mod tests {
         assert!(candidates.constructions < timeline.entries.len());
         assert!(candidates.entries.iter().any(|entry| entry.turn == 5));
         assert!(candidates.entries.iter().any(|entry| entry.turn == 199));
+    }
+
+    #[gpui::test]
+    fn compact_composer_shows_context_usage(cx: &mut TestAppContext) {
+        use gpui::px;
+        let mut timeline = synthetic_markdown_timeline(1);
+        timeline.usage = Some(agent::TokenUsage {
+            used_tokens: Some(100_000),
+            context_window: Some(200_000),
+            ..Default::default()
+        });
+        let (store, _, _) = seed_chat(cx, timeline);
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            crate::composer::Composer::new_with_layout(store, true, window, cx)
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let meter = cx
+            .debug_bounds("context-meter")
+            .expect("compact context meter");
+        assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
+        assert!(meter.left() >= px(0.) && meter.right() <= px(393.));
+    }
+
+    #[gpui::test]
+    fn history_prefetch_starts_two_screens_before_the_top(cx: &mut TestAppContext) {
+        use super::history_prefetch_due;
+        use gpui::{FollowMode, ListAlignment, ListState, px};
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(60));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let height = list.viewport_bounds().size.height;
+        assert!(height > px(0.));
+        list.set_follow_mode(FollowMode::Normal);
+        list.set_offset_from_scrollbar(gpui::point(px(0.), -(height * 2. + px(1.))));
+        assert!(!history_prefetch_due(
+            &list,
+            list.logical_scroll_top().item_ix
+        ));
+        list.set_offset_from_scrollbar(gpui::point(px(0.), -height * 2.));
+        assert!(list.logical_scroll_top().item_ix > 0);
+        assert!(history_prefetch_due(
+            &list,
+            list.logical_scroll_top().item_ix
+        ));
+        let unmeasured = ListState::new(60, ListAlignment::Bottom, px(0.));
+        assert!(history_prefetch_due(&unmeasured, 19));
+        assert!(!history_prefetch_due(&unmeasured, 20));
     }
 
     #[gpui::test]

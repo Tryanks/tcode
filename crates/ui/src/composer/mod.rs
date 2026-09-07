@@ -1007,6 +1007,7 @@ impl Render for Composer {
                 .child(self.render_model_picker(cx))
                 .child(self.render_traits_picker(cx))
                 .child(div().flex_1())
+                .child(self.render_context_meter(cx))
                 .child(self.render_primary_action(turn_running, cx))
                 .child(
                     h_flex()
@@ -1022,6 +1023,7 @@ impl Render for Composer {
                 .child(self.render_overflow_menu(cx))
                 .child(div().flex_1())
                 .children(mic)
+                .child(self.render_context_meter(cx))
                 .child(self.render_primary_action(turn_running, cx))
         } else {
             control_row_base

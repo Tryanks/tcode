@@ -406,6 +406,8 @@ impl Composer {
         track.a = 0.35;
 
         let trigger = Button::new("context-meter")
+            .debug_selector(|| "context-meter".into())
+            .aria_label(crate::tr!("composer.context_window_title").into_owned())
             .ghost()
             .compact()
             .h(px(28.))
@@ -421,7 +423,7 @@ impl Composer {
         crate::material::overlay_popover("context-popover")
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
-                popover.bottom_sheet(crate::tr!("mobile.model"))
+                popover.bottom_sheet(crate::tr!("composer.context_window_title"))
             })
             .trigger(trigger)
             .content(move |_, _, cx| {
