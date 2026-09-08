@@ -1310,6 +1310,21 @@ impl AppShell {
         )
     }
 
+    fn palette_action(&self, cx: &mut Context<Self>) -> AnyElement {
+        nav_icon_button(
+            "compact-open-palette",
+            crate::tr!("sidebar.search").into_owned(),
+            IconName::Search,
+            self.attachment.is_some(),
+            cx,
+        )
+        .debug_selector(|| "compact-open-palette".into())
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.on_toggle_palette(&TogglePalette, window, cx);
+        }))
+        .into_any_element()
+    }
+
     fn render_hosts_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let back = self.back_control(cx);
         let hosts = self.hosts.clone();
@@ -1322,7 +1337,11 @@ impl AppShell {
                 back,
                 crate::tr!("hosts.title").into_owned().into(),
                 None,
-                vec![],
+                self.attachment
+                    .as_ref()
+                    .map(|_| self.palette_action(cx))
+                    .into_iter()
+                    .collect(),
                 window,
                 cx,
             ))
@@ -1382,7 +1401,14 @@ impl AppShell {
         v_flex()
             .size_full()
             .bg(crate::material::content_surface(cx))
-            .child(nav_bar(back, title, None, vec![], window, cx))
+            .child(nav_bar(
+                back,
+                title,
+                None,
+                vec![self.palette_action(cx)],
+                window,
+                cx,
+            ))
             .child(body)
             .into_any_element()
     }
@@ -1506,6 +1532,7 @@ impl AppShell {
                 title.into(),
                 (!project.is_empty()).then(|| nav_subtitle(project, cx)),
                 vec![
+                    self.palette_action(cx),
                     nav_icon_button(
                         "compact-panels",
                         crate::tr!("chat.panels").into_owned(),
@@ -2295,7 +2322,18 @@ impl Render for AppShell {
         } else {
             self.render_wide(window, cx)
         };
-        crate::touch_scroll::root(self.within_seam(body, cx))
+        let dismissal = self
+            .attachment
+            .as_ref()
+            .map(|attachment| attachment.palette.read(cx).outside_dismissal.clone());
+        crate::touch_scroll::root(
+            div()
+                .size_full()
+                .children(
+                    dismissal.map(|dismissal| dismissal.release_listener().into_any_element()),
+                )
+                .child(self.within_seam(body, cx)),
+        )
     }
 }
 
@@ -2303,7 +2341,7 @@ impl Render for AppShell {
 mod tests {
     use std::cell::RefCell;
 
-    use gpui::{TestAppContext, VisualTestContext, size};
+    use gpui::{Focusable as _, TestAppContext, VisualTestContext, size};
     use tcode_client::host::Transport;
     use tcode_protocol::{
         ClientPayload, Command, EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic,
@@ -3064,6 +3102,88 @@ mod tests {
                 [Destination::Hosts, Destination::Threads]
             );
         });
+    }
+
+    #[gpui::test]
+    fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (shell, _host, cx) = mount(cx);
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        for selector in ["compact-search", "compact-open-palette"] {
+            let button = cx.debug_bounds(selector).expect("compact palette entry");
+            cx.simulate_click(button.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(state.read_with(cx, |state, _| state.palette_open));
+            let card = cx.debug_bounds("palette-card").expect("palette sheet");
+            assert_eq!(card.left(), px(0.));
+            assert_eq!(card.right(), px(393.));
+            assert_eq!(card.bottom(), px(852.));
+            let position = gpui::point(px(30.), px(26.));
+            let history = state.read_with(cx, |state, _| state.history().to_vec());
+            cx.simulate_event(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+            draw(cx);
+            cx.simulate_event(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+            assert!(!state.read_with(cx, |state, _| state.palette_open));
+            assert_eq!(
+                state.read_with(cx, |state, _| state.history().to_vec()),
+                history
+            );
+            cx.simulate_click(button.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(state.read_with(cx, |state, _| state.palette_open));
+            cx.update(|window, cx| {
+                let palette = &shell.read(cx).attachment.as_ref().unwrap().palette;
+                assert!(
+                    palette
+                        .read(cx)
+                        .focus_handle(cx)
+                        .contains_focused(window, cx)
+                );
+            });
+            cx.update(|_, cx| {
+                cx.set_global(WindowSeam::new(|| {
+                    let mut insets = gpui::WindowInsets::default();
+                    insets.safe_area.top = px(47.);
+                    insets.safe_area.bottom = px(34.);
+                    insets.ime.bottom = px(400.);
+                    insets
+                }));
+            });
+            draw(cx);
+            let card = cx.debug_bounds("palette-card").unwrap();
+            assert_eq!(card.top(), px(99.));
+            assert_eq!(card.bottom(), px(452.));
+            assert_eq!(card.size.width, px(393.));
+            let list = cx.debug_bounds("palette-list").unwrap();
+            assert!(list.size.height > px(0.) && list.bottom() <= card.bottom());
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+                assert!(
+                    state.read(cx).palette_open,
+                    "Back dismisses the keyboard first"
+                );
+                cx.set_global(WindowSeam::flush());
+                shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+            });
+            assert!(!state.read_with(cx, |state, _| state.palette_open));
+            state.update(cx, |state, cx| state.open_thread(cx));
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+        }
     }
 
     fn draw(cx: &mut VisualTestContext) {

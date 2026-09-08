@@ -112,6 +112,7 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
+    pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
     _search_task: Option<Task<()>>,
@@ -153,6 +154,7 @@ impl CommandPalette {
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
+            outside_dismissal: crate::overlay::OutsideDismissal::default(),
             content_hits: Vec::new(),
             search_generation: 0,
             _search_task: None,
@@ -527,8 +529,20 @@ impl Render for CommandPalette {
             self.selected = total - 1;
         }
         let muted = cx.theme().muted_foreground;
+        let compact = self.window_state.read(cx).compact;
+        let viewport = window.viewport_size();
+        let insets = crate::window_seam::WindowSeam::current(cx).content_insets();
+        let available =
+            (viewport.height - insets.top - insets.bottom - px(if compact { 52. } else { 120. }))
+                .max(px(0.));
+        let dismissal = self.outside_dismissal.clone();
 
-        let mut list_content = v_flex().w_full().px_2().py_2().gap_1();
+        let mut list_content = v_flex()
+            .flex_none()
+            .w_full()
+            .px(px(if compact { 16. } else { 8. }))
+            .py_2()
+            .gap_1();
         let mut flat = 0usize;
         for group in &groups {
             list_content = list_content.child(
@@ -635,6 +649,7 @@ impl Render for CommandPalette {
         }
         let list = div()
             .id("palette-list")
+            .debug_selector(|| "palette-list".into())
             .role(Role::ListBox)
             .aria_label(crate::tr!("palette.results"))
             .flex_1()
@@ -644,13 +659,18 @@ impl Render for CommandPalette {
 
         let card = crate::material::overlay_contour(
             v_flex()
-                .w(if self.window_state.read(cx).compact {
-                    window.viewport_size().width - px(32.)
+                .w(if compact {
+                    viewport.width
                 } else {
-                    px(640.)
+                    px(640.).min(viewport.width - px(32.))
                 })
-                .max_h(px(440.))
-                .rounded(crate::material::radius_overlay())
+                .h(px(440.).min(available))
+                .when(compact, |card| {
+                    card.rounded_t(crate::material::radius_overlay_sheet())
+                })
+                .when(!compact, |card| {
+                    card.rounded(crate::material::radius_overlay())
+                })
                 .overflow_hidden(),
             cx,
         )
@@ -658,7 +678,7 @@ impl Render for CommandPalette {
             h_flex()
                 .flex_none()
                 .h(px(48.))
-                .px_3()
+                .px(px(if compact { 16. } else { 12. }))
                 .gap_2()
                 .items_center()
                 .child(Icon::new(IconName::Search).small().text_color(muted))
@@ -671,42 +691,54 @@ impl Render for CommandPalette {
                 ),
         )
         .child(list)
-        .child(
-            h_flex()
-                .flex_none()
-                .h(px(34.))
-                .px_3()
-                .gap_3()
-                .items_center()
-                .text_size(px(11.))
-                .text_color(muted)
-                .child(crate::tr!("palette.navigate"))
-                .child(crate::tr!("palette.select"))
-                .child(crate::tr!("palette.close")),
-        );
+        .when(!compact, |card| {
+            card.child(
+                h_flex()
+                    .flex_none()
+                    .h(px(34.))
+                    .px_3()
+                    .gap_3()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(crate::tr!("palette.navigate"))
+                    .child(crate::tr!("palette.select"))
+                    .child(crate::tr!("palette.close")),
+            )
+        });
 
-        div()
+        let card = card
+            .id("palette-card")
+            .debug_selector(|| "palette-card".into())
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_mouse_down_out(cx.listener(move |this, event, window, cx| {
+                dismissal.consume(event, window, cx);
+                this.close(cx);
+            }));
+        let overlay = div()
             .id("palette-overlay")
             .track_focus(&self.focus_handle)
-            .absolute()
-            .inset_0()
-            .size_full()
-            .bg(gpui::black().opacity(0.35))
+            .occlude()
+            .w(viewport.width)
+            .h(viewport.height)
+            .bg(crate::material::scrim(1., cx))
             .flex()
-            .justify_center()
+            .flex_col()
+            .items_center()
+            .when(compact, |overlay| overlay.justify_end().pb(insets.bottom))
+            .when(!compact, |overlay| overlay.pt(insets.top + px(96.)))
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close(cx);
-                }),
-            )
-            .child(
-                div()
-                    .mt(px(96.))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(card),
-            )
+            .child(card);
+        gpui::deferred(
+            gpui::anchored()
+                .position(gpui::point(px(0.), px(0.)))
+                .child(overlay),
+        )
+        .with_priority(gpui_base::POPUP_PRIORITY)
     }
 }
 
@@ -785,9 +817,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn arrow_keys_move_and_clamp_the_highlight_while_the_query_keeps_focus(
-        cx: &mut TestAppContext,
-    ) {
+    fn empty_query_lists_commands_and_arrow_keys_keep_query_focus(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-palette-keyboard-test-{}",
@@ -805,6 +835,28 @@ mod tests {
         cx.update(|window, cx| {
             let query = palette.read(cx).query.clone();
             query.read(cx).focus_handle(cx).focus(window, cx);
+        });
+
+        cx.update(|_, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(palette.query.read(cx).value().is_empty());
+                let items = palette.flat_items(cx);
+                assert!(
+                    items
+                        .iter()
+                        .any(|item| matches!(item.action, Action::OpenSettings))
+                );
+                assert!(
+                    items
+                        .iter()
+                        .any(|item| matches!(item.action, Action::ToggleTheme))
+                );
+                assert!(
+                    items
+                        .iter()
+                        .any(|item| matches!(item.action, Action::ToggleTerminal))
+                );
+            });
         });
 
         dispatch_palette_key(&palette, cx, "down");

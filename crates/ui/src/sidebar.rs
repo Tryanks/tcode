@@ -2689,6 +2689,7 @@ impl SessionsSidebar {
                     crate::tr!("mobile.search_threads"),
                     cx,
                 )
+                .debug_selector(|| "compact-search".into())
                 .h(px(COMPACT_SEARCH_HEIGHT))
                 .items_center()
                 .gap(px(8.))

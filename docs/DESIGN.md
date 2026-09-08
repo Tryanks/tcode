@@ -365,6 +365,8 @@ the layout follows the keyboard immediately.
 
 ### Bottom sheets
 
+The shared command palette opens from the Threads search pill and the Search nav action on Thread, attached Machines and Settings pages, using a full-width bottom sheet with a focused input above touch-scrollable commands and search results.
+
 Compact pickers and details use the shared bottom sheet: an opaque T3 surface
 spanning the full window width, independent of the wide popover’s desktop width.
 Only its top corners are rounded, at 16pt; content is inset 16pt. The full-page
