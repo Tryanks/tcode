@@ -210,12 +210,38 @@ fn malformed_message_id(line: &str) -> Option<u64> {
 }
 
 pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, message: ClientMessage) {
-    let ClientMessage { id, payload } = message;
+    let ClientMessage { id, payload, key } = message;
     match payload {
         ClientPayload::Command(command) => {
+            let scoped_key = key.filter(|_| command.requires_delivery_key()).map(|key| {
+                let (device, key) = key.split_once(':').unwrap_or(("local", &key));
+                (device.to_owned(), key.to_owned())
+            });
+            if let Some((device, key)) = &scoped_key {
+                let mut completed = cx.completed.lock().unwrap();
+                if let Some(cache) = completed.get_mut(device)
+                    && let Some(index) = cache.iter().position(|(cached, _)| cached == key)
+                {
+                    let cached = cache.remove(index).unwrap();
+                    let result = cached.1.clone();
+                    cache.push_back(cached);
+                    cx.send_message(HostMessage::Ack { id, result });
+                    return;
+                }
+            }
+            cx.delivery_key = scoped_key.as_ref().map(|(_, key)| key.clone());
             let outcome = dispatch_command(state, cx, command);
+            cx.delivery_key = None;
             match outcome {
                 CommandOutcome::Immediate(result) => {
+                    if let Some((device, key)) = scoped_key {
+                        let mut completed = cx.completed.lock().unwrap();
+                        let cache = completed.entry(device).or_default();
+                        cache.push_back((key, result.clone()));
+                        while cache.len() > 512 {
+                            cache.pop_front();
+                        }
+                    }
                     cx.send_message(HostMessage::Ack { id, result })
                 }
                 CommandOutcome::StoreBarrier(barrier) => {

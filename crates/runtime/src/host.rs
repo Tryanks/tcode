@@ -29,10 +29,20 @@ pub type HostTask<T> = smol::Task<T>;
 /// Clones are `Send` and may be held by background work. All state mutation
 /// returns through `mailbox`; emitted events enter the serialized host-output
 /// stream.
+type CompletedCommands = std::collections::HashMap<
+    String,
+    std::collections::VecDeque<(
+        String,
+        Result<tcode_protocol::CommandResponse, tcode_protocol::ProtocolError>,
+    )>,
+>;
+
 #[derive(Clone)]
 pub struct HostCx {
     mailbox: smol::channel::Sender<HostFn>,
     events: smol::channel::Sender<String>,
+    pub(crate) delivery_key: Option<String>,
+    pub(crate) completed: std::sync::Arc<std::sync::Mutex<CompletedCommands>>,
 }
 
 impl HostCx {
@@ -40,7 +50,12 @@ impl HostCx {
         mailbox: smol::channel::Sender<HostFn>,
         events: smol::channel::Sender<String>,
     ) -> Self {
-        Self { mailbox, events }
+        Self {
+            mailbox,
+            events,
+            completed: Default::default(),
+            delivery_key: None,
+        }
     }
 
     pub fn emit(&mut self, event: HostEvent) {

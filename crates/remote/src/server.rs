@@ -586,6 +586,8 @@ struct Hello {
     #[serde(rename = "type")]
     kind: String,
     protocol_version: u32,
+    #[serde(default)]
+    supported_versions: Vec<u32>,
     token: String,
 }
 
@@ -615,7 +617,7 @@ async fn websocket(
         _ => None,
     };
     if let Some(hello) = &hello
-        && hello.protocol_version != tcode_protocol::PROTOCOL_VERSION
+        && !matches!(hello.protocol_version, 3 | 4)
     {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
@@ -629,9 +631,16 @@ async fn websocket(
         let _ = websocket.close(None).await;
         return Ok(());
     }
+    let version = hello.as_ref().map_or(3, |hello| {
+        if hello.protocol_version == 4 || hello.supported_versions.contains(&4) {
+            4
+        } else {
+            3
+        }
+    });
     let token = hello.filter(|hello| {
         hello.kind == "hello"
-            && hello.protocol_version == tcode_protocol::PROTOCOL_VERSION
+            && matches!(hello.protocol_version, 3 | 4)
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
     let Some(token) = token.map(|hello| hello.token) else {
@@ -651,7 +660,7 @@ async fn websocket(
             "type": "hello_ok",
             "host_id": auth.host_id,
             "host_name": auth.host_name,
-            "protocol_version": tcode_protocol::PROTOCOL_VERSION
+            "protocol_version": version
         })
     };
     websocket
@@ -696,6 +705,7 @@ async fn websocket(
                 }
                 if let Ok(tcode_protocol::ClientMessage {
                     id,
+                    key: _,
                     payload:
                         tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting { action }),
                 }) = serde_json::from_str(&line)
@@ -724,7 +734,18 @@ async fn websocket(
                         .map_err(io::Error::other)?;
                     continue;
                 }
-                let mut line = line.to_string();
+                // The authenticated token scopes keys across socket lifetimes.
+                // Ignore client-supplied prefixes so devices cannot share a cache.
+                let mut value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
+                    if uuid::Uuid::parse_str(key).is_err() {
+                        let _ = websocket.close(None).await;
+                        break;
+                    }
+                    let device = format!("{:x}", Sha1::digest(token.as_bytes()));
+                    value["key"] = format!("{device}:{key}").into();
+                }
+                let mut line = value.to_string();
                 if !line.ends_with('\n') {
                     line.push('\n');
                 }

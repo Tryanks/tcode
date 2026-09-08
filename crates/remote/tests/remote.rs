@@ -471,6 +471,7 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
             .to_host
             .send_blocking(
                 serde_json::to_string(&tcode_protocol::ClientMessage {
+                    key: None,
                     id: 900,
                     payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
                         action,

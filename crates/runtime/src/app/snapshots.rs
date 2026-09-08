@@ -247,6 +247,7 @@ impl AppState {
                 .queue
                 .iter()
                 .map(|message| QueuedMessageStatus {
+                    delivery_key: message.delivery_key.clone(),
                     id: message.id,
                     text: message.text.clone(),
                     fire_at_unix_secs: message.not_before.and_then(|time| {

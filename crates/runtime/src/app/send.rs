@@ -43,6 +43,9 @@ impl AppState {
             return;
         };
         active.push_scheduled(text, attachments, not_before);
+        if let Some(message) = active.queue.last_mut() {
+            message.delivery_key = cx.delivery_key.clone();
+        }
         let should_start = matches!(active.runtime, Runtime::Idle)
             && !(active.draft
                 && matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. }));
@@ -244,6 +247,9 @@ impl AppState {
         // See `on_turn_accepted`, which records the user message only after the
         // adapter confirms provider submission.
         active.push_queued(text, attachments);
+        if let Some(message) = active.queue.last_mut() {
+            message.delivery_key = cx.delivery_key.clone();
+        }
 
         // If the user switched models — or a provider that can't switch its
         // approval mode live (Codex) had its mode changed, or a launch-time
@@ -372,6 +378,9 @@ impl AppState {
         };
         active.push_queued(text, attachments);
         if let Some(message) = active.queue.last_mut() {
+            message.delivery_key = cx.delivery_key.clone();
+        }
+        if let Some(message) = active.queue.last_mut() {
             message.relay_transcript = Some(transcript);
         }
         let dispatch_failed = self.dispatch_next_queued(target_id, cx).is_err();
@@ -418,6 +427,7 @@ impl AppState {
             &message.text,
             message.context_len,
             &message.attachments,
+            message.delivery_key.as_deref(),
             cx,
         );
         if let Some(window) = message.context_window_changed {
@@ -491,10 +501,16 @@ impl AppState {
         text: &str,
         context_len: Option<usize>,
         attachments: &[Attachment],
+        delivery_key: Option<&str>,
         cx: &mut HostCx,
     ) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
-            id: format!("local-user-{}", uuid::Uuid::new_v4()),
+            id: format!(
+                "local-user-{}",
+                delivery_key
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            ),
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
@@ -514,7 +530,12 @@ impl AppState {
         attachments: &[Attachment],
         cx: &mut HostCx,
     ) -> String {
-        let request_id = format!("local-steer-{}", uuid::Uuid::new_v4());
+        let request_id = format!(
+            "local-steer-{}",
+            cx.delivery_key
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        );
         self.record_event(
             session_id,
             &AgentEvent::SteerRequested {

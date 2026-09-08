@@ -1011,6 +1011,7 @@ impl AppState {
 
         let root_for_task = root.clone();
         let target_id = target_id.to_string();
+        let delivery_key = cx.delivery_key.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
@@ -1045,7 +1046,9 @@ impl AppState {
                             );
                         }
                         // Now that the worktree exists, run the deferred send.
+                        cx.delivery_key = delivery_key;
                         state.send_turn_assembled(&target_id, text, attachments, cx);
+                        cx.delivery_key = None;
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
