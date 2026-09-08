@@ -1012,6 +1012,7 @@ impl Render for Composer {
                         .gap_1()
                         .items_center()
                         .child(self.render_model_picker(cx))
+                        .child(self.render_traits_picker(cx))
                         .child(div().flex_1())
                         .child(self.render_primary_action(turn_running, cx)),
                 )
@@ -1023,7 +1024,6 @@ impl Render for Composer {
                         .items_center()
                         .child(self.render_permission_picker(cx))
                         .child(self.render_mode_chip(cx))
-                        .child(self.render_traits_picker(cx))
                         .child(div().flex_1())
                         .child(self.render_context_meter(cx)),
                 )

@@ -3430,11 +3430,10 @@ mod tests {
                 );
                 assert_eq!(permission.top(), meter.top());
                 assert_eq!(mode.top(), meter.top());
-                assert_eq!(effort.top(), meter.top());
-                assert!(permission.right() <= mode.left());
-                assert!(mode.right() <= effort.left() && effort.right() <= meter.left());
+                assert_eq!(effort.top(), model.top(), "Effort sits on the model row");
+                assert!(permission.right() <= mode.left() && mode.right() <= meter.left());
                 assert!(permission.left() >= px(0.) && meter.right() <= px(width));
-                assert!(model.right() <= send.left());
+                assert!(model.right() <= effort.left() && effort.right() <= send.left());
                 assert!(effort.size.width >= px(44.) && effort.size.height >= px(44.));
                 assert!(
                     meter.top() >= send.bottom(),
