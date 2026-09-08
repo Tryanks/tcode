@@ -1018,7 +1018,7 @@ mobile:
 web_auth:
   setup: "设置密码"
   login: "登录"
-  description: "使用密码打开这台机器的 tcode。"
+  description: "输入密码以使用这台主机上的 tcode。"
   password: "密码"
   confirm: "再次输入密码"
   minimum: "至少 8 个字符"
