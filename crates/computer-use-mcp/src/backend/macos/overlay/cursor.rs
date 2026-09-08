@@ -6,7 +6,8 @@ use super::OverlayActionKind;
 use super::ffi::{
     Id, class, send_id, send_id_color, send_id_cstr, send_id_id, send_id_rect, send_id_window_init,
     send_void, send_void_bool, send_void_f32, send_void_f64, send_void_id, send_void_isize,
-    send_void_point, send_void_rect, send_void_size, send_void_usize, status_window_level,
+    send_void_point, send_void_rect, send_void_rect_bool, send_void_size, send_void_usize,
+    status_window_level,
 };
 use super::geometry::{DisplayGeometry, ax_screen_to_appkit};
 
@@ -108,11 +109,12 @@ impl CursorUi {
         self.set_kind(kind);
         let appkit_point = ax_screen_to_appkit(ax_point, display);
         if self.visible {
-            animate_window_origin(self.window, window_origin(appkit_point));
+            animate_window_origin(self.window, window_origin(appkit_point), ANIMATION_DURATION);
         } else {
             // A hidden panel has no on-screen position to slide from: land on
-            // the point, then reveal.
-            let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(appkit_point));
+            // the point, then reveal. A zero-duration frame animation also
+            // supersedes any animation still running when the panel was hidden.
+            animate_window_origin(self.window, window_origin(appkit_point), 0.0);
         }
         self.set_visible(visible);
     }
@@ -129,9 +131,9 @@ impl CursorUi {
         self.set_kind(OverlayActionKind::Drag);
         let from = ax_screen_to_appkit(from_ax, from_display);
         let to = ax_screen_to_appkit(to_ax, to_display);
-        let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(from));
+        animate_window_origin(self.window, window_origin(from), 0.0);
         self.set_visible(visible);
-        animate_window_origin(self.window, window_origin(to));
+        animate_window_origin(self.window, window_origin(to), ANIMATION_DURATION);
     }
 
     /// Must only be called from the process main queue.
@@ -196,7 +198,7 @@ fn cursor_path() -> Option<Id> {
     send_id(path, c"CGPath")
 }
 
-fn animate_window_origin(window: Id, origin: CGPoint) {
+fn animate_window_origin(window: Id, origin: CGPoint, duration: f64) {
     let Some(context_class) = class(c"NSAnimationContext") else {
         let _ = send_void_point(window, c"setFrameOrigin:", origin);
         return;
@@ -207,12 +209,20 @@ fn animate_window_origin(window: Id, origin: CGPoint) {
     }
 
     let animated = send_id(context_class, c"currentContext").is_some_and(|context| {
-        let duration_set = send_void_f64(context, c"setDuration:", ANIMATION_DURATION);
+        let duration_set = send_void_f64(context, c"setDuration:", duration);
         if let Some(timing) = timing_function() {
             let _ = send_void_id(context, c"setTimingFunction:", timing);
         }
-        let moved = send_id(window, c"animator")
-            .is_some_and(|animator| send_void_point(animator, c"setFrameOrigin:", origin));
+        // NSWindow animates its full frame. Its animator accepts setFrameOrigin:
+        // but leaves an already-visible panel at the old point on macOS.
+        let moved = send_id(window, c"animator").is_some_and(|animator| {
+            send_void_rect_bool(
+                animator,
+                c"setFrame:display:",
+                rect(origin.x, origin.y, CURSOR_SIZE, CURSOR_SIZE),
+                true,
+            )
+        });
         duration_set && moved
     });
     let _ = send_void(context_class, c"endGrouping");
@@ -248,4 +258,66 @@ fn window_origin(point: (f64, f64)) -> CGPoint {
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> CGRect {
     CGRect::new(&CGPoint::new(x, y), &CGSize::new(width, height))
+}
+
+// Called by the main-thread, opt-in test harness. Normal libtest workers cannot
+// construct AppKit windows, so this regression has a dedicated native runner.
+#[cfg(all(test, target_arch = "aarch64"))]
+#[allow(dead_code)] // Also compiled by ordinary libtest, which cannot run AppKit.
+pub(super) fn verify_native() -> u32 {
+    use std::time::{Duration, Instant};
+    fn pump() {
+        let end = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < end {
+            // SAFETY: this runner owns the process main thread and its run loop.
+            unsafe {
+                core_foundation::runloop::CFRunLoopRunInMode(
+                    core_foundation::runloop::kCFRunLoopDefaultMode,
+                    0.01,
+                    0,
+                );
+            }
+        }
+    }
+    let display = super::ffi::display_frame_for_ax_point((100.0, 100.0)).expect("desktop display");
+    let mut cursor = CursorUi::new().expect("native cursor panel");
+    cursor.show(OverlayActionKind::Click, (100.0, 100.0), display, true);
+    pump();
+    let initial = super::ffi::native_panel_state(cursor.window).0;
+    cursor.show(OverlayActionKind::Move, (300.0, 200.0), display, true);
+    pump();
+    let (frame, visible, passthrough, number) = super::ffi::native_panel_state(cursor.window);
+    let expected = CGPoint::new(initial.origin.x + 200.0, initial.origin.y - 100.0);
+    assert!(
+        (frame.origin.x - expected.x).abs() < 1.0 && (frame.origin.y - expected.y).abs() < 1.0,
+        "latest move must reach its endpoint: {frame:?}, expected {expected:?}"
+    );
+    assert!(visible && passthrough);
+    cursor.show_drag((300.0, 200.0), (500.0, 300.0), display, display, true);
+    pump();
+    let (frame, _, _, _) = super::ffi::native_panel_state(cursor.window);
+    let expected = CGPoint::new(initial.origin.x + 400.0, initial.origin.y - 200.0);
+    assert!(
+        (frame.origin.x - expected.x).abs() < 1.0 && (frame.origin.y - expected.y).abs() < 1.0,
+        "drag must reach its final endpoint, not remain at its start"
+    );
+    cursor.show(OverlayActionKind::Move, (700.0, 100.0), display, true);
+    cursor.hide();
+    cursor.show(OverlayActionKind::Click, (200.0, 400.0), display, true);
+    pump();
+    let (frame, visible, _, _) = super::ffi::native_panel_state(cursor.window);
+    assert!(
+        visible
+            && (frame.origin.x - initial.origin.x - 100.0).abs() < 1.0
+            && (frame.origin.y - initial.origin.y + 300.0).abs() < 1.0,
+        "an older animation must not restore its endpoint after hide and new feedback: {frame:?}, initial {initial:?}, visible {visible}"
+    );
+    assert!(super::ffi::window_exists(number));
+    let _ = send_void(cursor.window, c"close");
+    pump();
+    assert!(
+        !super::ffi::window_exists(number),
+        "closed but retained native window must retire target feedback"
+    );
+    number
 }

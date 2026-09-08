@@ -247,8 +247,38 @@ impl std::error::Error for BackendError {}
 
 #[cfg(target_os = "macos")]
 pub use macos::{observe, perform_action};
+
+pub(crate) fn set_feedback_enabled(enabled: bool) {
+    #[cfg(target_os = "macos")]
+    macos::set_feedback_enabled(enabled);
+    #[cfg(not(target_os = "macos"))]
+    let _ = enabled;
+}
+
+pub(crate) fn clear_feedback(owner: Option<u64>, action: Option<u64>) {
+    #[cfg(target_os = "macos")]
+    macos::clear_feedback(owner, action);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (owner, action);
+}
 #[cfg(target_os = "windows")]
 pub use windows::{observe, perform_action};
+
+pub(crate) fn perform_action_with_feedback(
+    root: &RootInfo,
+    request: &ActionRequest,
+    feedback: &crate::feedback::FeedbackRun,
+) -> Result<ActionResult, BackendError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::perform_action_with_feedback(root, request, Some(feedback))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = feedback;
+        perform_action(root, request)
+    }
+}
 
 /// Enumerate desktop roots. The host process is never a root: in-process
 /// accessibility queries run the host's own accessibility callbacks on the

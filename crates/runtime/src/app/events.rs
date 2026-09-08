@@ -420,6 +420,7 @@ impl AppState {
         self.record_event(session_id, &event, cx);
 
         if let AgentEvent::TurnCompleted { status, .. } = &event {
+            self.cancel_computer_use_feedback(session_id);
             self.deliver_child_callback(session_id, *status, cx);
         }
         if let AgentEvent::ApprovalRequested(request) = &event {

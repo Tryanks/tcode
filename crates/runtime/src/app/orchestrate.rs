@@ -18,7 +18,9 @@ pub(super) struct McpWiring {
     pub(super) orchestrate_child_registrations: HashMap<String, agent::McpRegistration>,
     pub(super) orchestrate_requests:
         Option<smol::channel::Receiver<orchestrate_mcp::BrokerRequest>>,
-    pub(super) computer_use_registration: Option<agent::McpRegistration>,
+    pub(super) computer_use_url: Option<String>,
+    pub(super) computer_use_tokens: Option<computer_use_mcp::TokenRegistry>,
+    pub(super) computer_use_registrations: HashMap<String, agent::McpRegistration>,
 }
 
 impl AppState {
@@ -99,12 +101,46 @@ impl AppState {
         self.mcp.orchestrate_requests = Some(server.requests);
     }
 
-    pub fn attach_computer_use_mcp(&mut self, url: String, token: String) {
-        self.mcp.computer_use_registration = Some(agent::McpRegistration {
+    pub fn attach_computer_use_mcp(
+        &mut self,
+        url: String,
+        tokens: computer_use_mcp::TokenRegistry,
+    ) {
+        self.mcp.computer_use_url = Some(url);
+        self.mcp.computer_use_tokens = Some(tokens);
+    }
+
+    pub(super) fn computer_use_registration_for(
+        &mut self,
+        meta: &SessionMeta,
+    ) -> Option<agent::McpRegistration> {
+        if let Some(registration) = self.mcp.computer_use_registrations.get(&meta.id) {
+            return Some(registration.clone());
+        }
+        let token = self.mcp.computer_use_tokens.as_ref()?.register(&meta.id);
+        let registration = agent::McpRegistration {
             name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
-            url,
+            url: self.mcp.computer_use_url.clone()?,
             bearer_token: token,
-        });
+        };
+        self.mcp
+            .computer_use_registrations
+            .insert(meta.id.clone(), registration.clone());
+        Some(registration)
+    }
+
+    pub(super) fn cancel_computer_use_feedback(&self, session_id: &str) {
+        if let Some(tokens) = &self.mcp.computer_use_tokens {
+            tokens.cancel(session_id);
+        }
+    }
+
+    pub(super) fn revoke_computer_use_registration(&mut self, session_id: &str) {
+        if let Some(registration) = self.mcp.computer_use_registrations.remove(session_id)
+            && let Some(tokens) = &self.mcp.computer_use_tokens
+        {
+            tokens.revoke(session_id, &registration.bearer_token);
+        }
     }
 
     /// Pump orchestrator requests through the runtime on the host executor.

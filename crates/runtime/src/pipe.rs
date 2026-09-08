@@ -29,7 +29,7 @@ pub struct HostServices {
     /// entirely on the host executor; a remote transport must expose the same
     /// operations as correlated RPC instead of moving the channel.
     pub orchestrate: Option<orchestrate_mcp::OrchestrateMcpServer>,
-    /// Registration-only startup data (URL and bearer token); this contains no
+    /// Registration-only startup data (URL and token issuer); this contains no
     /// request receiver or live backend handle.
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
@@ -128,7 +128,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
                 state.attach_orchestrate_mcp(server);
             }
             if let Some(server) = services.computer_use.take() {
-                state.attach_computer_use_mcp(server.url, server.token);
+                state.attach_computer_use_mcp(server.url, server.tokens);
             }
             let mut cx = HostCx::new(mailbox_tx, event_tx);
             state.pump_orchestrate_requests(&mut cx);

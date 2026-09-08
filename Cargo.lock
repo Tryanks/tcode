@@ -1452,6 +1452,7 @@ dependencies = [
  "tcode-core",
  "tcode-services",
  "tokio",
+ "tokio-util",
  "uiautomation",
  "windows 0.62.2",
 ]
@@ -8828,6 +8829,7 @@ dependencies = [
  "base64 0.23.1",
  "computer-use-mcp",
  "log",
+ "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
  "serde",
@@ -9231,6 +9233,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

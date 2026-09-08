@@ -665,7 +665,9 @@ impl AppState {
         };
         commands
             .try_send(SessionCommand::Interrupt)
-            .map_err(provider_command_error)
+            .map_err(provider_command_error)?;
+        self.cancel_computer_use_feedback(target_id);
+        Ok(())
     }
 
     pub fn respond_approval(

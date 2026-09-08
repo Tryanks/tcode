@@ -181,13 +181,15 @@ struct WaitForParams {
 #[derive(Clone)]
 pub struct ComputerUseTools {
     tool_router: ToolRouter<Self>,
+    feedback: Arc<crate::feedback::FeedbackSession>,
 }
 
 #[tool_router]
 impl ComputerUseTools {
-    fn new() -> Self {
+    fn new(feedback: Arc<crate::feedback::FeedbackSession>) -> Self {
         Self {
             tool_router: Self::tool_router(),
+            feedback,
         }
     }
 
@@ -368,7 +370,12 @@ impl ComputerUseTools {
                        Results report worked/didnt/unknown per step, stop at the first failure with stopped_at, and use expect as a postcondition rather than treating event delivery as success. \
                        Input is refused when observe-only mode is enabled (allow_input=false) in Settings → Computer Use, and oversized output returns a preview plus a continuation ref for read_text."
     )]
-    async fn act_ui(&self, Parameters(params): Parameters<ActUiParams>) -> CallToolResult {
+    async fn act_ui(
+        &self,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        Parameters(params): Parameters<ActUiParams>,
+    ) -> CallToolResult {
+        let mut feedback = self.feedback.begin(Some(context.ct.clone()));
         let permissions = permissions();
         if let Some(result) = permission_gate(permissions, true, false) {
             return result;
@@ -400,9 +407,16 @@ impl ComputerUseTools {
         let mut stopped_at = None;
         let mut activation = "none";
         for (index, action) in params.actions.iter().enumerate() {
+            if !feedback.is_current() {
+                return tool_error("computer-use action cancelled");
+            }
             let result = match prepare_action(&previous.tree, action) {
-                Ok(request) => crate::backend::perform_action(&previous.root, &request)
-                    .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None)),
+                Ok(request) => crate::backend::perform_action_with_feedback(
+                    &previous.root,
+                    &request,
+                    &feedback,
+                )
+                .unwrap_or_else(|error| ActionResult::didnt(error.to_string(), Delivery::None)),
                 Err(error) => ActionResult::didnt(error, Delivery::None),
             };
             let didnt = result.outcome == ActionOutcome::Didnt;
@@ -437,13 +451,11 @@ impl ComputerUseTools {
             .expect
             .as_ref()
             .is_some_and(|condition| condition_satisfied(&previous.tree, condition));
-        let (successor, expectation_status, root_changed) = match poll_successor(
-            &previous,
-            params.expect.as_ref(),
-            expectation_preexisting,
-        )
-        .await
-        {
+        let successor_result = tokio::select! {
+            _ = context.ct.cancelled() => return tool_error("computer-use action cancelled"),
+            result = poll_successor(&previous, params.expect.as_ref(), expectation_preexisting) => result,
+        };
+        let (successor, expectation_status, root_changed) = match successor_result {
             Ok(result) => result,
             Err(error) => return backend_error(error),
         };
@@ -486,6 +498,9 @@ impl ComputerUseTools {
         }
         text.push_str("\n\n");
         text.push_str(&successor.harness_annotation);
+        if stopped_at.is_none() && !expectation_failed && feedback.is_current() {
+            feedback.complete();
+        }
         bounded_success(Some(&successor.state_id), text, Vec::new())
     }
 
@@ -644,9 +659,9 @@ impl ServerHandler for ComputerUseTools {
 
 pub type Service = StreamableHttpService<ComputerUseTools, LocalSessionManager>;
 
-pub fn service() -> Service {
+pub(crate) fn service(feedback: Arc<crate::feedback::FeedbackSession>) -> Service {
     StreamableHttpService::new(
-        || Ok(ComputerUseTools::new()),
+        move || Ok(ComputerUseTools::new(feedback.clone())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )

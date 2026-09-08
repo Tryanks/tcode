@@ -126,7 +126,15 @@ pub fn perform_action(
     root: &RootInfo,
     request: &ActionRequest,
 ) -> Result<ActionResult, BackendError> {
-    reflect_overlay(root, request);
+    perform_action_with_feedback(root, request, None)
+}
+
+pub(crate) fn perform_action_with_feedback(
+    root: &RootInfo,
+    request: &ActionRequest,
+    feedback: Option<&crate::feedback::FeedbackRun>,
+) -> Result<ActionResult, BackendError> {
+    reflect_overlay(root, request, feedback);
     match request.kind {
         ActionKind::Press => {
             let target = target(root, request)?;
@@ -428,24 +436,37 @@ fn keyboard_result_with_optional_foreground(
     }
 }
 
-fn reflect_overlay(root: &RootInfo, request: &ActionRequest) {
-    let enabled = crate::config::get().show_agent_cursor;
-    overlay::set_enabled(enabled);
-    if !enabled {
+fn reflect_overlay(
+    root: &RootInfo,
+    request: &ActionRequest,
+    feedback: Option<&crate::feedback::FeedbackRun>,
+) {
+    let Some(publication) = overlay::begin_action(feedback.map(|run| run.ticket())) else {
         return;
-    }
+    };
     use overlay::OverlayActionKind as K;
     match request.kind {
         ActionKind::Drag => {
             if let Some(path) = request.path.as_ref()
                 && let (Some(first), Some(last)) = (path.first(), path.last())
             {
-                overlay::show_drag(root.pid, (first[0], first[1]), (last[0], last[1]));
+                overlay::show_drag(
+                    publication,
+                    root.pid,
+                    root.window_id,
+                    (first[0], first[1]),
+                    (last[0], last[1]),
+                );
             }
         }
         ActionKind::TypeText | ActionKind::SetText | ActionKind::Keypress => {
-            if let Ok(point) = action_point(root, request) {
-                overlay::show_action(root.pid, K::Keyboard, point);
+            // Untargeted typing/key chords are valid backend actions. Their
+            // feedback belongs to the current root, not the previous pointer.
+            let point = action_point(root, request)
+                .ok()
+                .or_else(|| root.frame.has_area().then(|| root.frame.center()));
+            if let Some(point) = point {
+                overlay::show_action(publication, root.pid, root.window_id, K::Keyboard, point);
             }
         }
         other => {
@@ -455,7 +476,7 @@ fn reflect_overlay(root: &RootInfo, request: &ActionRequest) {
                 _ => K::Click,
             };
             if let Ok(point) = action_point(root, request) {
-                overlay::show_action(root.pid, kind, point);
+                overlay::show_action(publication, root.pid, root.window_id, kind, point);
             }
         }
     }
@@ -538,3 +559,5 @@ fn window_bounds(dictionary: CFDictionaryRef) -> Option<crate::outline::Frame> {
         h: number("Height")?,
     })
 }
+
+pub(crate) use overlay::{clear as clear_feedback, set_enabled as set_feedback_enabled};
