@@ -25,3 +25,6 @@ pub use server::{DeviceInfo, PairingCode, RemoteConfig, RemoteServer, StaticBund
 
 #[cfg(feature = "client")]
 pub mod preview;
+
+#[cfg(feature = "client")]
+mod endpoint;

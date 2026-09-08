@@ -550,3 +550,128 @@ fn browser_keepalive_shutdown_does_not_report_a_failed_navigation() {
     browser.read_exact(&mut [0; 4]).unwrap();
     assert_eq!(routes.error(), None);
 }
+
+#[test]
+fn native_bridge_preserves_reverse_half_close_auth_and_attachment_lifetime() {
+    for bridged in [false, true] {
+        let machine = Machine::new();
+        let server = machine.server.as_ref().unwrap();
+        let host = tcode_remote::client::PairedHost {
+            origin: format!("http://{}", server.local_addr()),
+            host_id: String::new(),
+            name: String::new(),
+            token: String::new(),
+            last_connected_unix: None,
+        };
+        let bridge = bridged.then(|| tcode_remote::preview::NativeProxy::new(&host).unwrap());
+        let address = bridge
+            .as_ref()
+            .map(|bridge| bridge.origin().trim_start_matches("http://").to_owned())
+            .unwrap_or_else(|| server.local_addr().to_string());
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = target.local_addr().unwrap();
+        let target = std::thread::spawn(move || {
+            let (mut target, _) = target.accept().unwrap();
+            target
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            target.write_all(b"response first").unwrap();
+            target.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut request = String::new();
+            target.read_to_string(&mut request).unwrap();
+            assert_eq!(request, "request after remote EOF");
+        });
+        let mut browser = TcpStream::connect(&address).unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        browser
+            .write_all(format!("CONNECT {destination} HTTP/1.1\r\n{}\r\n", machine.auth).as_bytes())
+            .unwrap();
+        assert!(head(&mut browser).starts_with("HTTP/1.1 200 "));
+        let mut reply = String::new();
+        browser.read_to_string(&mut reply).unwrap();
+        assert_eq!(reply, "response first");
+        browser.write_all(b"request after remote EOF").unwrap();
+        browser.shutdown(std::net::Shutdown::Write).unwrap();
+        target.join().unwrap();
+        if let Some(bridge) = bridge {
+            let mut unauthorized = TcpStream::connect(&address).unwrap();
+            unauthorized
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            unauthorized
+                .write_all(b"CONNECT localhost:1 HTTP/1.1\r\n\r\n")
+                .unwrap();
+            assert!(head(&mut unauthorized).starts_with("HTTP/1.1 407 "));
+            let mut pending = TcpStream::connect(&address).unwrap();
+            pending
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            pending.write_all(b"GET ").unwrap();
+            drop(bridge);
+            match pending.read(&mut [0]) {
+                Ok(0) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                    ) => {}
+                result => panic!("bridge did not close its pending connection: {result:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn admitted_pending_streams_cancel_and_stop_without_retaining_server() {
+    smol::block_on(async {
+        use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for shutdown in [false, true] {
+            let mut machine = Machine::new();
+            let listener = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = smol::net::TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let admission = machine.server.as_ref().unwrap().admit(stream);
+            let mut admission = Box::pin(admission);
+            assert!(
+                futures_lite::future::poll_once(&mut admission)
+                    .await
+                    .is_none()
+            );
+            peer.write_all(b"GET /admin").await.unwrap();
+            assert!(
+                futures_lite::future::poll_once(&mut admission)
+                    .await
+                    .is_none()
+            );
+            if shutdown {
+                machine.server.take().unwrap().shutdown();
+                admission.await.unwrap();
+            } else {
+                drop(admission);
+            }
+            futures_lite::future::race(
+                async {
+                    match peer.read(&mut [0]).await {
+                        Ok(0) => {}
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) => {}
+                        result => panic!("admitted stream did not close: {result:?}"),
+                    }
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(2)).await;
+                    panic!("admitted stream survived cancellation or shutdown");
+                },
+            )
+            .await;
+        }
+    });
+}

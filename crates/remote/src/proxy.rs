@@ -1,12 +1,10 @@
 //! Token-authenticated host-network egress. HTTPS stays an opaque byte tunnel.
 use std::io;
-use std::net::{SocketAddr, TcpStream};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_lite::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use smol::Async;
 use url::Url;
 
 use crate::{server::Shared, wire::Request};
@@ -22,16 +20,14 @@ fn credential(request: &Request) -> Option<String> {
     (user == "tcode").then(|| token.to_owned())
 }
 
-pub(crate) async fn handle(
-    mut stream: Async<TcpStream>,
-    request: Request,
-    peer: SocketAddr,
-    shared: &Shared,
-) -> io::Result<()> {
+pub(crate) async fn handle<S>(mut stream: S, request: Request, shared: &Shared) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let token =
         credential(&request).filter(|token| shared.auth.lock().unwrap().token_is_valid(token));
     let Some(token) = token else {
-        log::warn!("preview proxy authentication rejected from {peer}");
+        log::warn!("preview proxy authentication rejected");
         return stream.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"tcode-preview\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
     };
     let connect = request.method == "CONNECT";
@@ -141,7 +137,7 @@ pub(crate) async fn handle(
         }
     };
     log::info!(
-        "preview proxy {} {authority} from {peer}",
+        "preview proxy {} {authority}",
         if connect { "CONNECT" } else { "HTTP" }
     );
     if connect {
@@ -149,18 +145,19 @@ pub(crate) async fn handle(
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
     }
+    let (mut reader, mut writer) = futures_util::io::AsyncReadExt::split(stream);
     let activity = Mutex::new(Instant::now());
     futures_lite::future::race(
         async {
             if connect || upgrade {
                 futures_lite::future::try_zip(
                     async {
-                        copy(&stream, socket.clone(), &activity).await?;
+                        copy(&mut reader, socket.clone(), &activity).await?;
                         socket.shutdown(std::net::Shutdown::Write)
                     },
                     async {
-                        copy(socket.clone(), &stream, &activity).await?;
-                        stream.get_ref().shutdown(std::net::Shutdown::Write)
+                        copy(socket.clone(), &mut writer, &activity).await?;
+                        writer.close().await
                     },
                 )
                 .await
@@ -169,7 +166,7 @@ pub(crate) async fn handle(
                 futures_lite::future::race(
                     async {
                         upload(
-                            &stream,
+                            &mut reader,
                             socket.clone(),
                             length,
                             chunked.is_some(),
@@ -180,7 +177,7 @@ pub(crate) async fn handle(
                         // a pipelined Proxy-Authorization header to the destination.
                         std::future::pending::<io::Result<()>>().await
                     },
-                    copy(socket.clone(), &stream, &activity),
+                    copy(socket.clone(), &mut writer, &activity),
                 )
                 .await
             }

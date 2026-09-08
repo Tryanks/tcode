@@ -1,17 +1,13 @@
-use rustls::pki_types::ServerName;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use async_tungstenite::WebSocketStream;
 use futures_util::{FutureExt as _, StreamExt as _};
 use serde::Deserialize;
-use smol::Async;
 use tungstenite::Message;
 
 pub use tcode_client::pairing::{
@@ -38,12 +34,20 @@ struct PairResponse {
 }
 
 pub fn pair(origin: &str, code: &str, device_name: &str) -> Result<PairedHost, String> {
+    smol::block_on(pair_async(origin, code, device_name))
+}
+
+pub(crate) async fn pair_async(
+    origin: &str,
+    code: &str,
+    device_name: &str,
+) -> Result<PairedHost, String> {
     let origin = tcode_client::pairing::parse_origin(origin)?;
     if !is_pairing_code(code) || device_name.is_empty() || device_name.len() > 256 {
         return Err("invalid pairing request".into());
     }
     let body = serde_json::json!({ "code": code, "device_name": device_name }).to_string();
-    let bytes = http(&origin, "POST", "/pair", &body)?;
+    let bytes = http_request(&origin, "POST", "/pair", &body).await?;
     let response: PairResponse =
         serde_json::from_slice(&bytes).map_err(|_| "invalid pairing response")?;
     Ok(PairedHost {
@@ -57,7 +61,15 @@ pub fn pair(origin: &str, code: &str, device_name: &str) -> Result<PairedHost, S
 
 /// Bounded HTTP/1.1; HTTPS origins use the standard WebPKI trust roots.
 pub fn http(origin: &str, method: &str, path: &str, body: &str) -> Result<Vec<u8>, String> {
-    use std::io::{Read as _, Write as _};
+    smol::block_on(http_request(origin, method, path, body))
+}
+
+async fn http_request(
+    origin: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<Vec<u8>, String> {
     if !matches!(
         (method, path),
         ("POST", "/pair" | "/auth/setup" | "/auth/login")
@@ -67,53 +79,43 @@ pub fn http(origin: &str, method: &str, path: &str, body: &str) -> Result<Vec<u8
     {
         return Err("invalid HTTP request".into());
     }
-    let url = url::Url::parse(origin).map_err(|e| e.to_string())?;
-    let addr = url
-        .host_str()
-        .ok_or("missing host")?
-        .trim_matches(['[', ']']);
-    let port = url.port_or_known_default().ok_or("missing port")?;
-    let socket = TcpStream::connect_timeout(&socket_addr(addr, port)?, Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_read_timeout(Some(Duration::from_secs(
+    let endpoint = crate::endpoint::Endpoint::new(origin)?;
+    futures_lite::future::race(http_async(&endpoint, method, path, body), async {
+        smol::Timer::after(Duration::from_secs(
             if matches!(path, "/auth/setup" | "/auth/login") {
                 60
             } else {
                 5
             },
-        )))
-        .map_err(|e| e.to_string())?;
-    socket
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    trait HttpStream: std::io::Read + std::io::Write {}
-    impl<T: std::io::Read + std::io::Write> HttpStream for T {}
-    let mut stream: Box<dyn HttpStream> = if url.scheme() == "https" {
-        let session = rustls::ClientConnection::new(
-            tls_client_config()?,
-            ServerName::try_from(addr.to_owned()).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        Box::new(rustls::StreamOwned::new(session, socket))
-    } else if url.scheme() == "http" {
-        Box::new(socket)
-    } else {
-        return Err("unsupported scheme".into());
-    };
+        ))
+        .await;
+        Err("HTTP request timed out".into())
+    })
+    .await
+}
+
+pub(crate) async fn http_async(
+    endpoint: &crate::endpoint::Endpoint,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Result<Vec<u8>, String> {
+    use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut stream = endpoint.connect().await.map_err(|e| e.to_string())?;
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        authority(addr, port),
+        endpoint.authority(),
         body.len()
     );
     stream
         .write_all(request.as_bytes())
+        .await
         .map_err(|e| e.to_string())?;
-    stream.flush().map_err(|e| e.to_string())?;
+    stream.flush().await.map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     // A tunnel may close TLS without close_notify. Require the complete
     // Content-Length-delimited response before accepting such a close.
-    let read = (&mut stream).take(65537).read_to_end(&mut bytes);
+    let read = (&mut stream).take(65537).read_to_end(&mut bytes).await;
     if bytes.len() > 65536 {
         return Err("HTTP response too large".into());
     }
@@ -217,7 +219,7 @@ async fn connection_loop(
         let mut stable_ms = 0;
         let mut interrupted = None;
         let opened = futures_lite::future::race(
-            async { Ok(race_addresses(&host, &device_name).await) },
+            async { Ok(establish_websocket(&host, &device_name).await) },
             async { Err(outgoing.wake.recv().await) },
         )
         .await;
@@ -343,64 +345,22 @@ async fn connection_loop(
     incoming.close();
 }
 
-trait SocketStream: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send {}
-impl<T: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send> SocketStream
-    for T
-{
-}
-type WebSocket = WebSocketStream<Box<dyn SocketStream>>;
+type WebSocket = WebSocketStream<crate::endpoint::Stream>;
 
 fn connection_failure(error: String) -> ConnectionFailure {
     log::debug!("remote connection failed: {error}");
     ConnectionFailure::Unreachable
 }
 
-async fn race_addresses(
+async fn establish_websocket(
     host: &PairedHost,
     device_name: &str,
 ) -> Result<WebSocket, ConnectionFailure> {
     let url = url::Url::parse(&host.origin).map_err(|e| connection_failure(e.to_string()))?;
-    let name = url
-        .host_str()
-        .ok_or(ConnectionFailure::Unreachable)?
-        .trim_matches(['[', ']'])
-        .to_owned();
-    let port = url
-        .port_or_known_default()
-        .ok_or(ConnectionFailure::Unreachable)?;
-    let addresses = futures_lite::future::race(
-        async {
-            smol::net::resolve((name.as_str(), port))
-                .await
-                .map_err(|e| connection_failure(e.to_string()))
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(5)).await;
-            Err(ConnectionFailure::Timeout)
-        },
-    )
-    .await?;
-    let mut attempts = futures_util::stream::FuturesUnordered::new();
-    for (index, address) in addresses.into_iter().enumerate() {
-        let url = &url;
-        attempts.push(async move {
-            smol::Timer::after(Duration::from_millis(250 * index as u64)).await;
-            futures_lite::future::race(open_websocket(address, url, host, device_name), async {
-                smol::Timer::after(Duration::from_secs(15)).await;
-                Err(ConnectionFailure::Timeout)
-            })
-            .await
-        });
-    }
-    let mut failure = ConnectionFailure::Unreachable;
-    while let Some(result) = attempts.next().await {
-        match result {
-            Ok(socket) => return Ok(socket),
-            Err(error) if error.is_terminal() => return Err(error),
-            Err(error) => failure = error,
-        }
-    }
-    Err(failure)
+    let endpoint = crate::endpoint::Endpoint::new(&host.origin).map_err(connection_failure)?;
+    endpoint
+        .establish(|stream| open_websocket(stream, &url, host, device_name))
+        .await
 }
 
 async fn send_interruptible(
@@ -439,35 +399,12 @@ async fn send_before(
     .await
 }
 
-async fn open_websocket(
-    address: SocketAddr,
+pub(crate) async fn open_websocket(
+    stream: crate::endpoint::Stream,
     origin: &url::Url,
     host: &PairedHost,
     device_name: &str,
 ) -> Result<WebSocket, ConnectionFailure> {
-    let tcp = Async::<TcpStream>::connect(address)
-        .await
-        .map_err(|e| connection_failure(e.to_string()))?;
-    let stream: Box<dyn SocketStream> = if origin.scheme() == "https" {
-        let name = origin
-            .host_str()
-            .ok_or(ConnectionFailure::Unreachable)?
-            .trim_matches(['[', ']'])
-            .to_owned();
-        Box::new(
-            futures_rustls::TlsConnector::from(tls_client_config().map_err(connection_failure)?)
-                .connect(
-                    ServerName::try_from(name).map_err(|e| connection_failure(e.to_string()))?,
-                    tcp,
-                )
-                .await
-                .map_err(|e| connection_failure(e.to_string()))?,
-        )
-    } else if origin.scheme() == "http" {
-        Box::new(tcp)
-    } else {
-        return Err(ConnectionFailure::Unreachable);
-    };
     let mut url = origin.clone();
     url.set_scheme(if origin.scheme() == "https" {
         "wss"
@@ -701,37 +638,6 @@ fn remember_subscription(line: &str, subscriptions: &mut HashMap<String, String>
     }
 }
 
-fn authority(address: &str, port: u16) -> String {
-    if address.contains(':') && !address.starts_with('[') {
-        format!("[{address}]:{port}")
-    } else {
-        format!("{address}:{port}")
-    }
-}
-
-fn socket_addr(address: &str, port: u16) -> Result<SocketAddr, String> {
-    if address.len() > 253 || address.contains(['\r', '\n', '/', ' ']) {
-        return Err("invalid host address".into());
-    }
-    (address.trim_matches(['[', ']']), port)
-        .to_socket_addrs()
-        .map_err(|e| format!("DNS: {e}"))?
-        .next()
-        .ok_or_else(|| "DNS returned no addresses".into())
-}
-
-fn tls_client_config() -> Result<Arc<rustls::ClientConfig>, String> {
-    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| e.to_string())?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    Ok(Arc::new(config))
-}
-
 fn jitter_sample() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     // Timing entropy decorrelates clients without adding a cryptographic RNG.
@@ -740,4 +646,66 @@ fn jitter_sample() -> f64 {
         .unwrap_or_default()
         .subsec_nanos();
     f64::from(nanos % 1_000_001) / 1_000_000.
+}
+
+#[cfg(test)]
+mod establishment_tests {
+    use super::*;
+    use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[test]
+    fn stalled_http_times_out_and_cancelled_pairing_closes_its_stream() {
+        smol::block_on(async {
+            for cancel in [false, true] {
+                let listener = smol::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let origin = format!("http://{}", listener.local_addr().unwrap());
+                let (received, request_received) = async_channel::bounded(1);
+                let peer = smol::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut head = vec![];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await.unwrap();
+                        head.push(byte[0]);
+                    }
+                    received.send(()).await.unwrap();
+                    if !cancel {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nx")
+                            .await
+                            .unwrap();
+                    }
+                    let mut remaining = vec![];
+                    stream.read_to_end(&mut remaining).await.unwrap();
+                });
+                let started = Instant::now();
+                if cancel {
+                    let task = smol::spawn(async move {
+                        pair_async(&origin, "123456", "cancelled device").await
+                    });
+                    request_received.recv().await.unwrap();
+                    task.cancel().await;
+                } else {
+                    assert_eq!(
+                        http_request(&origin, "GET", "/auth/state", "")
+                            .await
+                            .unwrap_err(),
+                        "HTTP request timed out"
+                    );
+                    assert!(started.elapsed() >= Duration::from_secs(5));
+                    assert!(started.elapsed() < Duration::from_secs(8));
+                }
+                futures_lite::future::race(
+                    async {
+                        peer.await;
+                    },
+                    async {
+                        smol::Timer::after(Duration::from_secs(2)).await;
+                        panic!("cancelled HTTP stream remained open");
+                    },
+                )
+                .await;
+            }
+        });
+    }
 }

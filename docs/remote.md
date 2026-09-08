@@ -347,7 +347,7 @@ There is nothing new to configure in hosting settings.
 The listener admits at most 256 concurrent connections, including WebSockets.
 Proxy connection setup times out after 10 seconds, and traffic idle for 60 seconds
 is closed. Revoked proxy tokens are rechecked every five seconds; stopping hosting
-closes tunnels. Connection logs contain destination host/port and peer, never
+closes tunnels. Connection logs contain destination host/port, never
 request bodies or tokens. For headless diagnostics use `RUST_LOG=tcode_remote=info`.
 
 Android requires WebView's `PROXY_OVERRIDE` capability. It removes implicit
@@ -402,8 +402,12 @@ networking and its existing store.
 
 Windows uses WebView2's proxy configuration and proxy authentication callback, with implicit
 loopback bypass disabled. Unsupported proxy facilities fail closed; there is no
-unauthenticated IP allowlist or direct-network fallback. Desktop proxying currently
-requires a direct HTTP machine origin, typically over a trusted LAN or VPN.
+unauthenticated IP allowlist or direct-network fallback. Windows and Android use
+an attachment-owned loopback bridge to the paired HTTP(S) origin. It forwards
+the existing proxy bytes and authentication unchanged; closing the attachment
+cancels the listener and active connections. The native authentication callback
+uses this local proxy origin and the existing paired token. macOS keeps its
+per-browser URL mapping and uses the same native HTTP(S) connection establishment.
 HTTP reverse-proxy tunnels must support forward-proxy requests and CONNECT to
 carry preview traffic; ordinary website forwarding is insufficient.
 
@@ -627,3 +631,33 @@ accept it. A version-3 host ignores `key` and still works, but cannot deduplicat
 redelivery; a lost Ack can therefore repeat a mutation. Upgrade both ends for the
 bounded deduplication guarantee. Hosts older than version 3 remain incompatible
 with bounded history replay.
+
+### Native connection and imported stream ownership
+
+[`endpoint.rs`](../crates/remote/src/endpoint.rs) owns native origin validation,
+DNS, staggered address attempts and TCP/TLS establishment for pairing HTTP,
+the main WebSocket and paired Preview. WebSocket attempts race through hello,
+so a stalled handshake cannot hide a healthy address. NativeClientHost keeps
+pairing and attachment ownership; cancelling pairing drops its asynchronous
+request. HTTP requests retain bounded responses and a five-second request
+budget (60 seconds for password setup/login).
+
+[`RemoteServer::admit`](../crates/remote/src/server.rs) accepts a duplex async
+stream into the same HTTP/WS/CONNECT dispatch as the direct listener. Imported
+streams always have remote provenance; request headers, including
+X-Forwarded-For, cannot grant local administration. The direct listener derives
+local administration from its actual peer. Both entries share admission limits,
+authentication and shutdown. Stream adapters must implement write-half close
+through AsyncWrite while preserving reads; dispatch requires neither TCP nor
+clonable streams. Existing password initialization and pairing policy is unchanged.
+An external process forwarding to the ordinary loopback listener still appears
+local; it must use an explicitly remote admission integration to avoid that trust.
+
+This preparation adds no iroh transport. Integration still needs live endpoint
+ownership, dialing and admission adapters, route/identity and discovery decisions,
+and their cancellation/shutdown implementation. WebHost still uses browser fetch
+and WebSocket at the page origin; iroh WASM support does not make those browser
+interfaces consume a native Rust stream. Browser application transport integration
+and browser Preview delivery remain concrete platform work. iOS still has no
+embedded Preview backend. Native bridges do not publish arbitrary web pages or
+make ordinary HTTP reverse proxies support CONNECT.
