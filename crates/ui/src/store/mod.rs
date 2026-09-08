@@ -95,15 +95,11 @@ pub(crate) fn observe_store_topics<V: 'static>(
     })
 }
 
-/// Identity and network hints fixed for one workspace attachment.
+/// Identity fixed for one workspace attachment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceAttachment {
     Local,
-    Remote {
-        host_id: String,
-        host_name: String,
-        address: Option<String>,
-    },
+    Remote { host_id: String, host_name: String },
 }
 
 /// The client-facing projection and command boundary for workspace state.
@@ -126,7 +122,6 @@ pub struct WorkspaceStore {
         async_channel::Sender<EventEnvelope>,
         async_channel::Receiver<EventEnvelope>,
     ),
-    remote_address: Option<String>,
     /// Latest host-published import status per project, replicated from
     /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
     /// second events consumer.
@@ -289,10 +284,6 @@ impl WorkspaceStore {
             .map(|host| host.load_preferences())
             .unwrap_or_default();
         let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
-        let remote_address = match &attachment {
-            WorkspaceAttachment::Local => None,
-            WorkspaceAttachment::Remote { address, .. } => address.clone(),
-        };
         let store = Self {
             host: host.clone(),
             attachment,
@@ -302,7 +293,6 @@ impl WorkspaceStore {
             attachment_tasks: Vec::new(),
             terminals: HashMap::new(),
             remote_preview: async_channel::unbounded(),
-            remote_address,
             import_statuses: HashMap::new(),
             connection_state: if remote {
                 host.connection_state()
@@ -456,7 +446,6 @@ impl WorkspaceStore {
         self.attachment = WorkspaceAttachment::Remote {
             host_id: String::new(),
             host_name,
-            address: None,
         };
         self.connection_state = self.host.connection_state();
         let changes = self.host.connection_state_changes();
@@ -485,16 +474,6 @@ impl WorkspaceStore {
             request_id,
             response,
         });
-    }
-
-    pub fn set_remote_address(&mut self, address: String) {
-        self.remote_address = Some(address.clone());
-        if let WorkspaceAttachment::Remote {
-            address: current, ..
-        } = &mut self.attachment
-        {
-            *current = Some(address);
-        }
     }
 
     pub(crate) fn remote_preview_requests(&self) -> async_channel::Receiver<EventEnvelope> {
@@ -588,11 +567,6 @@ impl WorkspaceStore {
         self.address_refresh = Some(cx.spawn(async move |this, cx| {
             if let Some(origin) = client.refresh_origin(&host_id).await {
                 let _ = this.update(cx, |store, _| {
-                    if let Ok(url) = url::Url::parse(&origin)
-                        && let Some(address) = url.host_str()
-                    {
-                        store.set_remote_address(address.to_owned());
-                    }
                     store
                         .host
                         .wake(tcode_client::recovery::Wake::Origin(origin));
@@ -2579,7 +2553,6 @@ mod tests {
                 super::WorkspaceAttachment::Remote {
                     host_id: "test".into(),
                     host_name: "Test".into(),
-                    address: None,
                 },
                 None,
                 false,

@@ -107,9 +107,6 @@ impl Attachment {
                 WorkspaceAttachment::Remote {
                     host_id: host.host_id.clone(),
                     host_name: host.name.clone(),
-                    address: url::Url::parse(&host.origin)
-                        .ok()
-                        .and_then(|url| url.host_str().map(str::to_owned)),
                 },
             ),
         };

@@ -623,7 +623,6 @@ mod tests {
                 WorkspaceAttachment::Remote {
                     host_id: "build-box".into(),
                     host_name: "build-box".into(),
-                    address: None,
                 },
                 None,
                 true,
