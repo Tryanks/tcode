@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    rc::Rc,
 };
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
@@ -31,7 +32,7 @@ use tcode_core::{
 };
 
 use crate::shortcut::format_secondary_shortcut;
-use crate::store::{ForkAvailability, TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{ForkAvailability, StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
@@ -134,6 +135,7 @@ struct ThreadFlags {
     background: bool,
 }
 
+#[derive(Clone)]
 struct ThreadRowState {
     session_id: String,
     row_key: String,
@@ -501,6 +503,57 @@ struct RenameState {
     _sub: Subscription,
 }
 
+#[derive(Clone)]
+struct CompactThreadRow {
+    meta: SessionMeta,
+    state: ThreadRowState,
+    working: bool,
+    title: SharedString,
+    row_id: SharedString,
+    label: SharedString,
+    project_name: Option<SharedString>,
+    relative_time: SharedString,
+    children_id: SharedString,
+    children_label: SharedString,
+    children_count: SharedString,
+    separator: bool,
+}
+
+#[derive(Clone)]
+struct CompactProjectRow {
+    project_id: String,
+    row_id: SharedString,
+    name: SharedString,
+    label: SharedString,
+    count: SharedString,
+    collapsed: bool,
+}
+
+#[derive(Clone)]
+enum CompactListRow {
+    Project(CompactProjectRow),
+    Thread(Rc<CompactThreadRow>),
+    BottomInset,
+}
+
+impl CompactListRow {
+    fn key(&self) -> &str {
+        match self {
+            Self::Project(row) => &row.row_id,
+            Self::Thread(row) => &row.row_id,
+            Self::BottomInset => "compact-bottom-inset",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CompactListModel {
+    rows: Vec<CompactListRow>,
+    has_projects: bool,
+    locale: String,
+    minute: u64,
+}
+
 pub struct SessionsSidebar {
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
@@ -519,6 +572,11 @@ pub struct SessionsSidebar {
     /// which does not exist yet while the sidebar is constructed.
     startup_archive_dialog: Option<(usize, u32, usize)>,
     flat_list_state: ListState,
+    compact_list_state: ListState,
+    compact_model: Option<Rc<CompactListModel>>,
+    compact_model_dirty: bool,
+    #[cfg(test)]
+    compact_rows_rendered: std::cell::Cell<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -531,16 +589,18 @@ impl SessionsSidebar {
         window_state: Entity<WindowState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![observe_store_topics(
-            &store,
-            &[
-                TopicKind::Index,
-                TopicKind::Settings,
-                TopicKind::ActiveSession,
-                TopicKind::SessionStatus,
-            ],
-            cx,
-        )];
+        let subscriptions = vec![cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+            if matches!(
+                change.topic,
+                TopicKind::Index
+                    | TopicKind::Settings
+                    | TopicKind::ActiveSession
+                    | TopicKind::SessionStatus
+            ) {
+                this.compact_model_dirty = true;
+                cx.notify();
+            }
+        })];
         // Launch sweep: the same auto-archive pass expanding a thread list
         // runs, applied to every project up front so stale threads are gone
         // before the first paint (and before the fold state is seeded below).
@@ -593,6 +653,11 @@ impl SessionsSidebar {
             auto_archive_notice: None,
             startup_archive_dialog: None,
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            compact_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            compact_model: None,
+            compact_model_dirty: true,
+            #[cfg(test)]
+            compact_rows_rendered: std::cell::Cell::new(0),
             _subscriptions: subscriptions,
         }
     }
@@ -1727,6 +1792,7 @@ impl SessionsSidebar {
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
+            this.compact_model_dirty = true;
             toggle_parent_for_row_click(
                 &mut this.collapsed_parents,
                 &session_id,
@@ -2339,43 +2405,186 @@ const COMPACT_PAGE_PADDING: f32 = 16.;
 const COMPACT_SEARCH_HEIGHT: f32 = 40.;
 
 impl SessionsSidebar {
+    /// Store changes and local disclosures invalidate the model. Scroll and
+    /// navigation-animation frames only clone the shared snapshot; ListState
+    /// measures the visible rows, including project captions of different height.
+    fn compact_model(&mut self, cx: &mut Context<Self>) -> Rc<CompactListModel> {
+        let now = now_secs();
+        let locale = rust_i18n::locale();
+        if self.compact_model_dirty
+            || self
+                .compact_model
+                .as_ref()
+                .is_none_or(|model| model.locale.as_str() != &*locale)
+        {
+            let (groups, collapsed_projects, sessions, flags, layout) = {
+                let store = self.store.read(cx);
+                let sessions = store
+                    .sidebar_sessions()
+                    .into_iter()
+                    .filter(|meta| meta.archived_at.is_none())
+                    .collect::<Vec<_>>();
+                let flags = sessions
+                    .iter()
+                    .map(|meta| {
+                        (
+                            meta.id.clone(),
+                            ThreadFlags {
+                                unread: store.session_unread(&meta.id),
+                                waiting_for_approval: store.pending_approval_for(&meta.id),
+                                waiting_for_input: store.pending_user_input_for(&meta.id),
+                                working: store.turn_running_for(&meta.id),
+                                background: store.background_only_for(&meta.id),
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let groups = store.grouped_sessions();
+                let collapsed = groups
+                    .iter()
+                    .filter(|group| store.is_project_collapsed(&group.project.id))
+                    .map(|group| group.project.id.clone())
+                    .collect::<HashSet<_>>();
+                (groups, collapsed, sessions, flags, store.sidebar_layout())
+            };
+
+            let mut rows = Vec::new();
+            let thread_rows = |visible: Vec<&SessionMeta>, recent: bool| {
+                let mut rows = Vec::new();
+                let last = visible.len().saturating_sub(1);
+                for (index, meta) in visible.into_iter().enumerate() {
+                    let state = self.thread_row_state(
+                        meta,
+                        &sessions,
+                        &flags,
+                        format!("compact-thread-{}", meta.id),
+                    );
+                    let project_name = recent
+                        .then(|| {
+                            groups.iter().find(|group| {
+                                meta.project_id.as_deref() == Some(group.project.id.as_str())
+                            })
+                        })
+                        .flatten()
+                        .map(|group| SharedString::from(group.project.name.clone()));
+                    rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
+                        title: meta.title.clone().into(),
+                        row_id: format!("compact-thread-row-{}", meta.id).into(),
+                        label: crate::tr!("sidebar.thread", title = meta.title.clone())
+                            .into_owned()
+                            .into(),
+                        relative_time: humanize_ago(now.saturating_sub(meta.updated_at)).into(),
+                        children_id: format!("compact-children-{}", meta.id).into(),
+                        children_label: crate::tr!(
+                            "sidebar.child_threads",
+                            count = state.direct_children
+                        )
+                        .into_owned()
+                        .into(),
+                        children_count: state.direct_children.to_string().into(),
+                        working: flags.get(&meta.id).is_some_and(|flags| flags.working),
+                        state,
+                        meta: meta.clone(),
+                        project_name,
+                        separator: index != last,
+                    })));
+                }
+                rows
+            };
+            if layout == SidebarLayout::Flat {
+                rows.extend(thread_rows(
+                    compact_visible_threads(&sessions, &self.collapsed_parents, None),
+                    true,
+                ));
+            } else {
+                // Build the same family order for each project before adding captions.
+                for group in &groups {
+                    let visible = compact_visible_threads(
+                        &sessions,
+                        &self.collapsed_parents,
+                        Some(&group.project.id),
+                    );
+                    let count = visible.len();
+                    let collapsed =
+                        groups.len() > 1 && collapsed_projects.contains(&group.project.id);
+                    let start = rows.len();
+                    if !collapsed {
+                        rows.extend(thread_rows(visible, false));
+                    }
+                    if groups.len() > 1 {
+                        rows.insert(
+                            start,
+                            CompactListRow::Project(CompactProjectRow {
+                                project_id: group.project.id.clone(),
+                                row_id: format!("compact-group-{}", group.project.id).into(),
+                                name: group.project.name.clone().into(),
+                                label: crate::tr!(
+                                    "sidebar.project",
+                                    name = group.project.name.clone()
+                                )
+                                .into_owned()
+                                .into(),
+                                count: count.to_string().into(),
+                                collapsed,
+                            }),
+                        );
+                    }
+                }
+            }
+            rows.push(CompactListRow::BottomInset);
+            let mut anchor = self.compact_list_state.logical_scroll_top();
+            let anchor_key = self
+                .compact_model
+                .as_ref()
+                .and_then(|model| model.rows.get(anchor.item_ix))
+                // The loading/empty model contains only padding. Anchoring to
+                // it would open the first Index snapshot at the list's bottom.
+                .filter(|row| !matches!(row, CompactListRow::BottomInset))
+                .map(|row| row.key().to_owned());
+            self.compact_list_state
+                .splice(0..self.compact_list_state.item_count(), rows.len());
+            if let Some(index) =
+                anchor_key.and_then(|key| rows.iter().position(|row| row.key() == key))
+            {
+                anchor.item_ix = index;
+                self.compact_list_state.scroll_to(anchor);
+            }
+            self.compact_model = Some(Rc::new(CompactListModel {
+                rows,
+                has_projects: !groups.is_empty(),
+                locale: locale.to_string(),
+                minute: now / 60,
+            }));
+            self.compact_model_dirty = false;
+        }
+        let model = self
+            .compact_model
+            .as_mut()
+            .expect("compact model initialized");
+        if model.minute != now / 60 {
+            let model = Rc::make_mut(model);
+            model.minute = now / 60;
+            for row in &mut model.rows {
+                if let CompactListRow::Thread(row) = row {
+                    let row = Rc::make_mut(row);
+                    row.relative_time =
+                        humanize_ago(now.saturating_sub(row.meta.updated_at)).into();
+                }
+            }
+        }
+        model.clone()
+    }
+
     /// Compact thread list with shared layout preference. Navigation replaces
     /// persistent row selection; desktop-only controls stay in the desktop list.
     fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (groups, collapsed_projects, sessions, flags, layout) = {
-            let store = self.store.read(cx);
-            let sessions = store
-                .sidebar_sessions()
-                .into_iter()
-                .filter(|meta| meta.archived_at.is_none())
-                .collect::<Vec<_>>();
-            let flags = sessions
-                .iter()
-                .map(|meta| {
-                    (
-                        meta.id.clone(),
-                        ThreadFlags {
-                            unread: store.session_unread(&meta.id),
-                            waiting_for_approval: store.pending_approval_for(&meta.id),
-                            waiting_for_input: store.pending_user_input_for(&meta.id),
-                            working: store.turn_running_for(&meta.id),
-                            background: store.background_only_for(&meta.id),
-                        },
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            let groups = store.grouped_sessions();
-            let collapsed = groups
-                .iter()
-                .filter(|group| store.is_project_collapsed(&group.project.id))
-                .map(|group| group.project.id.clone())
-                .collect::<HashSet<_>>();
-            (groups, collapsed, sessions, flags, store.sidebar_layout())
-        };
-
+        #[cfg(test)]
+        self.compact_rows_rendered.set(0);
+        let model = self.compact_model(cx);
+        let layout = self.store.read(cx).sidebar_layout();
         let body = if self.store.read(cx).threads_loading() {
             crate::material::loading_skeleton(cx)
-        } else if groups.is_empty() {
+        } else if !model.has_projects {
             div()
                 .id("threads-empty")
                 .debug_selector(|| "threads-empty".into())
@@ -2388,54 +2597,40 @@ impl SessionsSidebar {
                 ))
                 .into_any_element()
         } else {
-            let mut list = v_flex().w_full().pb(px(24.));
-            if layout == SidebarLayout::Flat {
-                let recent = compact_visible_threads(&sessions, &self.collapsed_parents, None);
-                let rows = recent
-                    .into_iter()
-                    .map(|meta| {
-                        let project = groups.iter().find(|group| {
-                            meta.project_id.as_deref() == Some(group.project.id.as_str())
-                        });
-                        self.render_compact_thread(
-                            meta,
-                            &sessions,
-                            &flags,
-                            project.map(|group| group.project.name.clone()),
-                            cx,
-                        )
-                    })
-                    .collect();
-                list = list.child(crate::material::plain_list(rows, cx));
-            } else {
-                // A single project needs no separator or collapse affordance.
-                let grouped = groups.len() > 1;
-                for group in &groups {
-                    let collapsed = grouped && collapsed_projects.contains(&group.project.id);
-                    if grouped {
-                        list = list.child(self.render_compact_group_header(group, collapsed, cx));
-                    }
-                    if collapsed {
-                        continue;
-                    }
-                    let rows = compact_visible_threads(
-                        &sessions,
-                        &self.collapsed_parents,
-                        Some(&group.project.id),
-                    )
-                    .into_iter()
-                    .map(|meta| self.render_compact_thread(meta, &sessions, &flags, None, cx))
-                    .collect();
-                    list = list.child(crate::material::plain_list(rows, cx));
-                }
-            }
             div()
                 .id("compact-thread-list")
                 .debug_selector(|| "compact-thread-list".into())
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .child(list)
+                .child(
+                    list(
+                        self.compact_list_state.clone(),
+                        cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
+                            CompactListRow::Project(row) => {
+                                this.render_compact_group_header(row, cx).into_any_element()
+                            }
+                            CompactListRow::Thread(row) => v_flex()
+                                .w_full()
+                                .child(this.render_compact_thread(row, cx))
+                                .when(row.separator, |list| {
+                                    list.child(
+                                        div()
+                                            .w_full()
+                                            .pl(px(crate::material::COMPACT_PAGE_INSET))
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .h(px(1.))
+                                                    .bg(cx.theme().border.opacity(0.6)),
+                                            ),
+                                    )
+                                })
+                                .into_any_element(),
+                            CompactListRow::BottomInset => div().h(px(24.)).into_any_element(),
+                        }),
+                    )
+                    .size_full(),
+                )
                 .into_any_element()
         };
 
@@ -2524,22 +2719,16 @@ impl SessionsSidebar {
 
     fn render_compact_group_header(
         &self,
-        group: &ProjectGroup,
-        collapsed: bool,
+        row: &CompactProjectRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let project_id = group.project.id.clone();
-        let count = compact_visible_threads(
-            &self.store.read(cx).sidebar_sessions(),
-            &self.collapsed_parents,
-            Some(&group.project.id),
-        )
-        .len();
+        let project_id = row.project_id.clone();
+        let collapsed = row.collapsed;
         crate::material::accessible_clickable(
             h_flex(),
-            gpui::SharedString::from(format!("compact-group-{project_id}")),
+            row.row_id.clone(),
             Role::Button,
-            crate::tr!("sidebar.project", name = group.project.name.clone()).into_owned(),
+            row.label.clone(),
             cx,
         )
         .aria_expanded(!collapsed)
@@ -2567,9 +2756,9 @@ impl SessionsSidebar {
                 .min_w_0()
                 .truncate()
                 .font_medium()
-                .child(group.project.name.clone()),
+                .child(row.name.clone()),
         )
-        .child(div().flex_none().child(count.to_string()))
+        .child(div().flex_none().child(row.count.clone()))
         .child(
             Icon::new(if collapsed {
                 IconName::ChevronRight
@@ -2584,156 +2773,148 @@ impl SessionsSidebar {
     /// Long press opens the shared thread context menu.
     fn render_compact_thread(
         &self,
-        meta: &SessionMeta,
-        sessions: &[SessionMeta],
-        flags: &HashMap<String, ThreadFlags>,
-        project_name: Option<String>,
+        cached: &CompactThreadRow,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
-        let state =
-            self.thread_row_state(meta, sessions, flags, format!("compact-thread-{}", meta.id));
+        #[cfg(test)]
+        self.compact_rows_rendered
+            .set(self.compact_rows_rendered.get() + 1);
+        let meta = &cached.meta;
+        let state = &cached.state;
+        let working = cached.working;
+        let project_name = cached.project_name.clone();
         let session_id = state.session_id.clone();
-        let status = compact_status_line(&state, working, cx);
+        let status = compact_status_line(state, working, cx);
         let click_id = session_id.clone();
         let disclosure_id = session_id.clone();
         let unavailable = meta.parent_session_id.is_some() && !state.is_child;
 
-        let row = crate::material::list_row(
-            gpui::SharedString::from(format!("compact-thread-row-{session_id}")),
-            crate::tr!("sidebar.thread", title = meta.title.clone())
-                .into_owned()
-                .into(),
-            cx,
-        )
-        .debug_selector({
-            let id = session_id.clone();
-            move || format!("compact-row-{id}")
-        })
-        .when(state.is_child, |row| {
-            row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
-        })
-        .when(
-            self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
-            |row| row.bg(cx.theme().list_active).aria_selected(true),
-        )
-        // Rows needing the user carry a 6% semantic wash; everything else sits
-        // on the paper with only hover and pressed tints.
-        .when(state.waiting_for_approval, |row| {
-            row.bg(cx.theme().warning.opacity(0.06))
-        })
-        .when(
-            state.waiting_for_input && !state.waiting_for_approval,
-            |row| row.bg(cx.theme().primary.opacity(0.06)),
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            if this.store.read(cx).session_loading()
-                && this.store.read(cx).active_session_id().as_deref() == Some(click_id.as_str())
-            {
-                return;
-            }
-            this.store.update(cx, |store, cx| {
-                store.select_session(click_id.clone());
-                cx.notify();
-            });
-            this.window_state
-                .update(cx, |state, cx| state.open_thread(cx));
-        }))
-        .child(compact_status_glyph(&state, working, cx))
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(16.))
-                        .line_height(px(21.))
-                        .when(!state.is_child, |title| title.font_medium())
-                        .when(state.show_unread, |title| title.font_semibold())
-                        .debug_selector({
-                            let id = session_id.clone();
-                            move || format!("compact-title-{id}")
-                        })
-                        .child(meta.title.clone()),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap(px(4.))
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .text_color(cx.theme().muted_foreground)
-                        .when(unavailable, |line| {
-                            line.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .debug_selector(|| "compact-parent-unavailable".into())
-                                    .child(crate::tr!("sidebar.parent_unavailable")),
-                            )
-                            .child(div().flex_none().child("·"))
-                        })
-                        .when_some(project_name, |line, name| {
-                            line.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .debug_selector({
-                                        let name = name.clone();
-                                        move || format!("compact-project-{name}")
-                                    })
-                                    .child(name),
-                            )
-                            .child(div().flex_none().child("·"))
-                        })
-                        .when_some(status, |line, (label, color)| {
-                            line.child(div().flex_none().text_color(color).child(label))
-                                .child(div().flex_none().child("·"))
-                        })
-                        .child(
-                            div()
-                                .flex_none()
-                                .child(humanize_ago(now_secs().saturating_sub(meta.updated_at))),
-                        ),
-                ),
-        )
-        .when(state.has_direct_children(), |row| {
-            row.child(
-                crate::material::accessible_clickable(
-                    h_flex(),
-                    gpui::SharedString::from(format!("compact-children-{session_id}")),
-                    Role::Button,
-                    crate::tr!("sidebar.child_threads", count = state.direct_children).into_owned(),
-                    cx,
-                )
-                .debug_selector({
-                    let id = session_id.clone();
-                    move || format!("compact-children-{id}")
-                })
-                .aria_expanded(!state.children_collapsed)
-                .flex_none()
-                .min_w(px(44.))
-                .h(px(44.))
-                .justify_center()
-                .gap(px(2.))
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    if !this.collapsed_parents.remove(&disclosure_id) {
-                        this.collapsed_parents.insert(disclosure_id.clone());
-                    }
-                    cx.notify();
-                }))
-                .child(collapse_chevron(state.children_collapsed, cx))
-                .child(state.direct_children.to_string()),
+        let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
+            .debug_selector({
+                let id = session_id.clone();
+                move || format!("compact-row-{id}")
+            })
+            .when(state.is_child, |row| {
+                row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
+            })
+            .when(
+                self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
+                |row| row.bg(cx.theme().list_active).aria_selected(true),
             )
-        });
+            // Rows needing the user carry a 6% semantic wash; everything else sits
+            // on the paper with only hover and pressed tints.
+            .when(state.waiting_for_approval, |row| {
+                row.bg(cx.theme().warning.opacity(0.06))
+            })
+            .when(
+                state.waiting_for_input && !state.waiting_for_approval,
+                |row| row.bg(cx.theme().primary.opacity(0.06)),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.store.read(cx).session_loading()
+                    && this.store.read(cx).active_session_id().as_deref() == Some(click_id.as_str())
+                {
+                    return;
+                }
+                this.store.update(cx, |store, cx| {
+                    store.select_session(click_id.clone());
+                    cx.notify();
+                });
+                this.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
+            }))
+            .child(compact_status_glyph(state, working, cx))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(16.))
+                            .line_height(px(21.))
+                            .when(!state.is_child, |title| title.font_medium())
+                            .when(state.show_unread, |title| title.font_semibold())
+                            .debug_selector({
+                                let id = session_id.clone();
+                                move || format!("compact-title-{id}")
+                            })
+                            .child(cached.title.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(4.))
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .text_color(cx.theme().muted_foreground)
+                            .when(unavailable, |line| {
+                                line.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .debug_selector(|| "compact-parent-unavailable".into())
+                                        .child(crate::tr!("sidebar.parent_unavailable")),
+                                )
+                                .child(div().flex_none().child("·"))
+                            })
+                            .when_some(project_name, |line, name| {
+                                line.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .debug_selector({
+                                            let name = name.clone();
+                                            move || format!("compact-project-{name}")
+                                        })
+                                        .child(name),
+                                )
+                                .child(div().flex_none().child("·"))
+                            })
+                            .when_some(status, |line, (label, color)| {
+                                line.child(div().flex_none().text_color(color).child(label))
+                                    .child(div().flex_none().child("·"))
+                            })
+                            .child(div().flex_none().child(cached.relative_time.clone())),
+                    ),
+            )
+            .when(state.has_direct_children(), |row| {
+                row.child(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        cached.children_id.clone(),
+                        Role::Button,
+                        cached.children_label.clone(),
+                        cx,
+                    )
+                    .debug_selector({
+                        let id = session_id.clone();
+                        move || format!("compact-children-{id}")
+                    })
+                    .aria_expanded(!state.children_collapsed)
+                    .flex_none()
+                    .min_w(px(44.))
+                    .h(px(44.))
+                    .justify_center()
+                    .gap(px(2.))
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if !this.collapsed_parents.remove(&disclosure_id) {
+                            this.collapsed_parents.insert(disclosure_id.clone());
+                        }
+                        this.compact_model_dirty = true;
+                        cx.notify();
+                    }))
+                    .child(collapse_chevron(state.children_collapsed, cx))
+                    .child(cached.children_count.clone()),
+                )
+            });
         Self::thread_context_menu(
             row,
             session_id,
@@ -3361,6 +3542,109 @@ mod tests {
             compact_list_has_project_headers(cx, 2),
             "two projects need their headers back"
         );
+    }
+
+    #[gpui::test]
+    fn compact_scroll_reuses_model_and_renders_only_viewport(cx: &mut TestAppContext) {
+        struct SlidingPage {
+            sidebar: Entity<SessionsSidebar>,
+            offset: gpui::Pixels,
+        }
+        impl Render for SlidingPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().overflow_hidden().child(
+                    div()
+                        .absolute()
+                        .left(self.offset)
+                        .size_full()
+                        .child(self.sidebar.clone()),
+                )
+            }
+        }
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-virtual-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.join("project"));
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.sessions = (0..300)
+                .map(|index| {
+                    let mut meta = session(&format!("virtual-{index}"), None);
+                    meta.project_id = Some(project.id.clone());
+                    meta.updated_at = now_secs().saturating_sub(index);
+                    meta
+                })
+                .collect();
+            state.projects = vec![project];
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
+            sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
+            offset: px(0.),
+        });
+        let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
+        assert_eq!(model.rows.len(), 301);
+        for (index, selector) in [
+            (0, "compact-row-virtual-0"),
+            (100, "compact-row-virtual-100"),
+            (200, "compact-row-virtual-200"),
+        ] {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.compact_rows_rendered.set(0);
+                sidebar.compact_list_state.scroll_to(gpui::ListOffset {
+                    item_ix: index,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            });
+            page.update(cx, |page, cx| {
+                page.offset = px(index as f32);
+                cx.notify();
+            });
+            draw(cx);
+            sidebar.read_with(cx, |sidebar, _| {
+                assert!(
+                    Rc::ptr_eq(&model, sidebar.compact_model.as_ref().unwrap()),
+                    "scrolling must not rebuild families or labels"
+                );
+                assert!(
+                    sidebar.compact_rows_rendered.get() < 40,
+                    "one phone viewport must not construct 300 rows: rendered {} at index {index}",
+                    sidebar.compact_rows_rendered.get()
+                );
+            });
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        store.update(cx, |_, cx| {
+            cx.emit(StoreChange {
+                topic: TopicKind::Index,
+            })
+        });
+        draw(cx);
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(
+                !Rc::ptr_eq(&model, sidebar.compact_model.as_ref().unwrap()),
+                "Index updates invalidate cached row state"
+            );
+            assert_eq!(
+                sidebar.compact_list_state.logical_scroll_top().item_ix,
+                200,
+                "store changes retain the visible thread anchor"
+            );
+        });
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
