@@ -727,6 +727,7 @@ impl Composer {
         };
         // Keep the touch target larger than the visible circle.
         let button = crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+            .debug_selector(move || id.into())
             .size(px(44.))
             .flex()
             .items_center()
@@ -1003,19 +1004,27 @@ impl Render for Composer {
 
         let control_row = if self.compact {
             control_row_base
-                .flex_wrap()
-                .child(self.render_model_picker(cx))
-                .child(self.render_traits_picker(cx))
-                .child(div().flex_1())
-                .child(self.render_context_meter(cx))
-                .child(self.render_primary_action(turn_running, cx))
+                .flex_col()
                 .child(
                     h_flex()
                         .w_full()
-                        .flex_wrap()
+                        .min_w_0()
                         .gap_1()
+                        .items_center()
+                        .child(self.render_model_picker(cx))
+                        .child(div().flex_1())
+                        .child(self.render_primary_action(turn_running, cx)),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
                         .child(self.render_permission_picker(cx))
-                        .child(self.render_mode_chip(cx)),
+                        .child(self.render_mode_chip(cx))
+                        .child(div().flex_1())
+                        .child(self.render_context_meter(cx)),
                 )
         } else if compact {
             control_row_base

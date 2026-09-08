@@ -1413,6 +1413,7 @@ impl AppShell {
             .into_any_element(),
         ];
         v_flex()
+            .debug_selector(|| "compact-threads-page".into())
             .size_full()
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
@@ -1484,6 +1485,7 @@ impl AppShell {
             attachment.chat.clone().into_any_element()
         };
         v_flex()
+            .debug_selector(|| "compact-thread-page".into())
             .size_full()
             .bg(crate::material::content_surface(cx))
             .child(nav_bar(
@@ -2869,6 +2871,47 @@ mod tests {
     fn resize(cx: &mut VisualTestContext, width: f32) {
         cx.simulate_resize(size(px(width), px(800.)));
         draw(cx);
+    }
+
+    #[gpui::test]
+    fn compact_tap_push_and_back_pop_slide(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        resize(cx, 393.);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        draw(cx);
+        shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(100));
+        draw(cx);
+        let incoming = cx
+            .debug_bounds("compact-thread-page")
+            .expect("incoming thread");
+        let outgoing = cx
+            .debug_bounds("compact-threads-page")
+            .expect("outgoing list");
+        assert!(incoming.left() > px(0.) && incoming.left() < px(393.));
+        assert!(outgoing.left() < px(0.), "push moves the list left");
+        cx.executor().advance_clock(Duration::from_millis(150));
+        draw(cx);
+        assert_eq!(
+            cx.debug_bounds("compact-thread-page").unwrap().left(),
+            px(0.)
+        );
+        assert!(cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx))));
+        draw(cx);
+        cx.executor().advance_clock(Duration::from_millis(100));
+        draw(cx);
+        let outgoing = cx
+            .debug_bounds("compact-thread-page")
+            .expect("outgoing thread");
+        let incoming = cx
+            .debug_bounds("compact-threads-page")
+            .expect("incoming list");
+        assert!(outgoing.left() > px(0.) && outgoing.left() < px(393.));
+        assert!(
+            incoming.left() < px(0.),
+            "pop reveals the list from the left"
+        );
     }
 
     /// Every line the client has sent since the last drain.

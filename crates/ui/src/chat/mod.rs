@@ -3248,6 +3248,7 @@ mod tests {
     #[gpui::test]
     fn compact_composer_shows_context_usage(cx: &mut TestAppContext) {
         use gpui::px;
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let mut timeline = synthetic_markdown_timeline(1);
         timeline.usage = Some(agent::TokenUsage {
             used_tokens: Some(100_000),
@@ -3255,18 +3256,44 @@ mod tests {
             ..Default::default()
         });
         let (store, _, _) = seed_chat(cx, timeline);
-        let (_view, cx) = cx.add_window_view(|window, cx| {
+        let (view, cx) = cx.add_window_view(|window, cx| {
             crate::composer::Composer::new_with_layout(store, true, window, cx)
         });
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let meter = cx
-            .debug_bounds("context-meter")
-            .expect("compact context meter");
-        assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
-        assert!(meter.left() >= px(0.) && meter.right() <= px(393.));
+        for locale in ["en", "zh-CN"] {
+            crate::set_locale(locale);
+            view.update(cx, |_, cx| cx.notify());
+            for (width, height) in [(360., 780.), (393., 852.)] {
+                cx.simulate_resize(gpui::size(px(width), px(height)));
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let permission = cx.debug_bounds("permission-chip").expect("approval option");
+                let mode = cx.debug_bounds("mode-chip").expect("Build option");
+                let meter = cx
+                    .debug_bounds("context-meter")
+                    .expect("compact context meter");
+                let model = cx.debug_bounds("model-picker").expect("model picker");
+                let send = cx.debug_bounds("send-message").expect("send button");
+                assert_eq!(
+                    send.top(),
+                    model.top(),
+                    "Send shares the model row at {width}"
+                );
+                assert_eq!(permission.top(), meter.top());
+                assert_eq!(mode.top(), meter.top());
+                assert!(permission.right() <= mode.left() && mode.right() <= meter.left());
+                assert!(
+                    meter.top() >= send.bottom(),
+                    "meter belongs to the second row"
+                );
+                assert_eq!(
+                    meter.right(),
+                    send.right(),
+                    "meter aligns with trailing Send edge"
+                );
+                assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
+            }
+        }
     }
 
     #[gpui::test]

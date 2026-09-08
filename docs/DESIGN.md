@@ -595,8 +595,11 @@ platform pays that inset.
 The composer holds the draft plus removable attachment, terminal-context and
 review-comment chips. Its controls select the provider/model, model parameters,
 approval mode and Build/Plan mode, subject to provider capabilities. Context
-usage comes from the live session. The same context ring appears beside Send
-in the compact controls row, with a 44pt hit target opening its details sheet.
+usage comes from the live session. Compact controls use two non-wrapping rows:
+the model picker and Send above, approval mode and Build/Plan below, with the
+context ring at the trailing edge of the second row. The ring keeps a 44pt hit
+target opening its details sheet. Option labels truncate when space is tight;
+both rows fit at 360pt in English and Simplified Chinese.
 Sending during a turn queues the message;
 the secondary send action steers when the provider supports it. Stop interrupts
 the current turn. Queue/steer guidance belongs in the send tooltip.

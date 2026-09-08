@@ -199,6 +199,7 @@ impl Composer {
             .collect();
 
         let trigger = Button::new("model-picker")
+            .debug_selector(|| "model-picker".into())
             .when(self.compact, |button| button.max_w(px(200.)).min_w_0())
             .ghost()
             .compact()
@@ -365,6 +366,10 @@ impl Composer {
             ),
         };
         Button::new("mode-chip")
+            .debug_selector(|| "mode-chip".into())
+            .when(self.compact, |button| {
+                button.max_w(px(88.)).overflow_hidden()
+            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -374,12 +379,14 @@ impl Composer {
             .tooltip(tooltip)
             .child(
                 h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap_1p5()
                     .items_center()
                     .text_size(px(11.5))
                     .text_color(muted)
                     .child(Icon::empty().path(icon).small().text_color(muted))
-                    .child(label),
+                    .child(div().min_w_0().truncate().child(label)),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.workspace_store
@@ -443,6 +450,10 @@ impl Composer {
         let muted = cx.theme().muted_foreground;
 
         let trigger = Button::new("permission-chip")
+            .debug_selector(|| "permission-chip".into())
+            .when(self.compact, |button| {
+                button.max_w(px(152.)).overflow_hidden()
+            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -451,12 +462,14 @@ impl Composer {
             .rounded(crate::material::radius_input())
             .child(
                 h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
                     .child(Icon::empty().path(icon_path).small().text_color(muted))
-                    .child(label)
+                    .child(div().min_w_0().truncate().child(label))
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
 
