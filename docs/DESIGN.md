@@ -758,12 +758,14 @@ than dead back/reload/screenshot controls, agent automation requests are
 answered with an explicit "unsupported" instead of timing out, and such a client
 does not subscribe as an owner of the session's preview at all. Localhost port
 discovery scans the client, so it is offered only for a local desktop workspace; a host
-URL typed into the field is relative to the attached machine. Remote macOS,
-Windows and Android embedded previews route all HTTP(S) traffic through the
+URL typed into the field is relative to the attached machine. Remote Windows and Android embedded previews route all HTTP(S) traffic through the
 machine's token-authenticated forward proxy, including localhost; the URL bar
 never substitutes the machine's LAN address. Proxy setup completes before page
 navigation and follows attachment teardown. Unsupported proxy capabilities fail
-closed through the existing unavailable/load-error presentation. Local desktop
+closed through the existing unavailable/load-error presentation. macOS attached
+previews refuse WebView creation and explain that the machine proxy cannot be
+applied safely: WebKit bypasses it for client-local destinations, including
+subresources. URL entry, copy, and open externally remain available. Local desktop
 attachments use no preview proxy. Hosting enables the proxy automatically on the
 hosting port, without another setting. See [remote networking](remote.md#networking)
 for platform requirements and the token's network-access implications.

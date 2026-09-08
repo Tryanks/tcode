@@ -844,6 +844,7 @@ attach:
   too_large: "'%{name}' exceeds the 10MB attachment limit."
   too_many: "You can attach up to 8 images per message."
 preview:
+  machine_proxy_unavailable: "The machine proxy could not be applied safely on macOS. WebKit bypasses it for local destinations, so the attached preview is unavailable."
   load_error: "Could not load %{url}: %{message} (%{code})"
   title: "Preview"
   no_session: "Open a session to use the preview browser."

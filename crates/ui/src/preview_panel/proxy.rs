@@ -14,71 +14,31 @@ pub(super) fn builder<'a>(
     }
     #[cfg(target_os = "macos")]
     {
-        use objc2_foundation::{NSOperatingSystemVersion, NSProcessInfo};
-        if !NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
-            majorVersion: 14,
-            minorVersion: 0,
-            patchVersion: 0,
-        }) {
-            return Err("remote preview requires macOS 14 or later".into());
-        }
+        // WebKit applies NWProxyConfig to public destinations but silently
+        // bypasses destinations on the client's local interfaces, even with
+        // no excluded domains and failover disabled. A navigation-only guard
+        // cannot protect subresources or names resolving to those interfaces.
+        // Refuse creation until the backend can enforce the machine boundary.
+        Err(crate::tr!("preview.machine_proxy_unavailable").to_string())
     }
-    let builder = builder
-        .with_incognito(true)
-        .with_proxy_config(wry::ProxyConfig::Http(wry::ProxyEndpoint {
-            host: origin.host_str().ok_or("missing proxy host")?.into(),
-            port: origin
-                .port_or_known_default()
-                .ok_or("missing proxy port")?
-                .to_string(),
-        }));
     #[cfg(target_os = "windows")]
-    let builder = {
+    {
         use wry::WebViewBuilderExtWindows as _;
+        let builder = builder
+            .with_incognito(true)
+            .with_proxy_config(wry::ProxyConfig::Http(wry::ProxyEndpoint {
+                host: origin.host_str().ok_or("missing proxy host")?.into(),
+                port: origin
+                    .port_or_known_default()
+                    .ok_or("missing proxy port")?
+                    .to_string(),
+            }));
         // wry's additional arguments replace its generated proxy arguments.
-        builder.with_additional_browser_args(&format!(
+        Ok(builder.with_additional_browser_args(&format!(
             "--proxy-server={} --proxy-bypass-list=<-loopback>",
             host.origin
-        ))
-    };
-    Ok(builder)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn authenticate(raw: &wry::WebView, host: Option<&PairedHost>) -> Result<(), String> {
-    use objc2::{msg_send, rc::Retained};
-    use objc2_foundation::{NSArray, NSObject, ns_string};
-    use std::ffi::{CString, c_char};
-    use wry::WebViewExtMacOS as _;
-    let Some(host) = host else {
-        return Ok(());
-    };
-    #[link(name = "Network", kind = "framework")]
-    unsafe extern "C" {
-        fn nw_proxy_config_set_username_and_password(
-            config: *const NSObject,
-            username: *const c_char,
-            password: *const c_char,
-        );
+        )))
     }
-    let token = CString::new(host.token.as_str()).map_err(|e| e.to_string())?;
-    // SAFETY: wry installed an NWProxyConfig on this private data store. Access
-    // and mutate it only on the UI thread, before the first network navigation.
-    unsafe {
-        let config: Retained<NSObject> = msg_send![&*raw.webview(), configuration];
-        let store: Retained<NSObject> = msg_send![&*config, websiteDataStore];
-        let proxies: Option<Retained<NSArray<NSObject>>> =
-            msg_send![&*store, valueForKey: ns_string!("proxyConfigurations")];
-        let proxies = proxies.ok_or("WebKit did not install the preview proxy")?;
-        if proxies.count() != 1 {
-            return Err("WebKit did not install one preview proxy".into());
-        }
-        let proxy = proxies.objectAtIndex(0);
-        nw_proxy_config_set_username_and_password(&*proxy, c"tcode".as_ptr(), token.as_ptr());
-        let _: () =
-            msg_send![&*store, setValue: &*proxies, forKey: ns_string!("proxyConfigurations")];
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -126,4 +86,25 @@ pub(super) fn authenticate(raw: &wry::WebView, host: Option<&PairedHost>) -> Res
     // SAFETY: the webview retains the callback until its owning view is destroyed.
     unsafe { webview.add_BasicAuthenticationRequested(&handler, &mut token) }
         .map_err(|e| e.to_string())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attached_preview_fails_closed_before_webview_creation() {
+        let host = PairedHost {
+            host_id: "machine".into(),
+            name: "Machine".into(),
+            origin: "http://192.0.2.10:47420".into(),
+            token: "test-device-token".into(),
+            last_connected_unix: None,
+        };
+        assert!(builder(wry::WebViewBuilder::new(), None).is_ok());
+        let result = builder(wry::WebViewBuilder::new(), Some(&host));
+        assert!(
+            matches!(result, Err(error) if error == crate::tr!("preview.machine_proxy_unavailable"))
+        );
+    }
 }

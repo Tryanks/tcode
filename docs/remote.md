@@ -297,7 +297,7 @@ access.
 
 ### Preview browses from the machine
 
-Desktop and Android embedded previews use the connected machine's network for
+Windows and Android embedded previews use the connected machine's network for
 all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
 the machine, even when it listens only on loopback. The URL stays unchanged in
 the address bar, redirects, scripts and `preview_status`. No dev-server port
@@ -322,9 +322,17 @@ request bodies or tokens. For headless diagnostics use `RUST_LOG=tcode_remote=in
 Android requires WebView's `PROXY_OVERRIDE` capability. It removes implicit
 localhost bypasses, waits for the override before navigation, and clears it when
 the attachment's views are destroyed. The override is process-wide, so embedded
-preview views belong to one attachment. macOS requires 14+ and uses a private
-WebKit data store with an authenticated Network proxy configuration. Windows uses
-WebView2's proxy configuration and proxy authentication callback, with implicit
+preview views belong to one attachment.
+
+macOS attached previews are unavailable: WebKit bypasses its Network proxy
+configuration for destinations on the client’s local interfaces, including
+localhost and its own LAN addresses. Clearing excluded domains, explicit match
+domains, disabling failover, and installing the authenticated configuration before
+creating the WebView do not prevent this bypass. tcode refuses attached WebView
+creation through the existing error surface so navigations, redirects, and
+subresources cannot connect directly. Local macOS previews remain available.
+
+Windows uses WebView2's proxy configuration and proxy authentication callback, with implicit
 loopback bypass disabled. Unsupported proxy facilities fail closed; there is no
 unauthenticated IP allowlist or direct-network fallback. Desktop proxying currently
 requires a direct HTTP machine origin, typically over a trusted LAN or VPN.

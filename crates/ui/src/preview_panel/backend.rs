@@ -385,7 +385,13 @@ impl PreviewPanel {
                     .into_any_element(),
                 Availability::Unavailable => self.render_note(
                     crate::tr!("preview.unavailable").into_owned(),
-                    Some(crate::tr!("preview.unavailable_hint").into_owned()),
+                    Some(
+                        self.lifecycle_entity()
+                            .read(cx)
+                            .unavailable_error()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| crate::tr!("preview.unavailable_hint").into_owned()),
+                    ),
                     cx,
                 ),
             },

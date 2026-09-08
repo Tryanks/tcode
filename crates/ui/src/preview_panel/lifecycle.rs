@@ -609,10 +609,6 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
-        if let Err(error) = super::super::proxy::authenticate(&raw, lifecycle.proxy.as_ref()) {
-            lifecycle.record_unavailable(error, cx);
-            return Availability::Unavailable;
-        }
         load_error::install(&raw);
         let webview = cx.new(|cx| {
             let mut view = WebView::new(raw, window, cx);
