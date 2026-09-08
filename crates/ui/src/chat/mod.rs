@@ -1225,12 +1225,17 @@ impl ChatView {
             let served_model =
                 divergent_served_model(turn.served_model.as_deref(), requested_model.as_deref())
                     .map(str::to_owned);
-            column = column.child(components::indicator::turn_working_indicator(
-                index,
-                turn.start_ts,
-                served_model,
-                cx,
-            ));
+            column = column.child(
+                div()
+                    .id(("working-status", index))
+                    .debug_selector(move || format!("working-status-{index}"))
+                    .child(components::indicator::turn_working_indicator(
+                        index,
+                        turn.start_ts,
+                        served_model,
+                        cx,
+                    )),
+            );
         } else if let Some(ts) = turn.end_ts.or(entries.last().and_then(|e| e.ts)) {
             let requested_model = self.workspace_store.read(cx).chat_requested_model();
             column = column.child(components::indicator::finished_turn_time(
@@ -2773,7 +2778,14 @@ impl Render for ChatView {
                 el.child(crate::material::faded_hairline(cx))
                     .child(div().h(px(8.)).flex_none())
             })
-            .child(composer);
+            .child(
+                div()
+                    .id("chat-composer")
+                    .debug_selector(|| "chat-composer".into())
+                    .w_full()
+                    .flex_none()
+                    .child(composer),
+            );
 
         let body: AnyElement = if terminal_open {
             let drawer = self.terminal_drawer.clone();
@@ -3388,6 +3400,97 @@ mod tests {
                     "meter aligns with trailing Send edge"
                 );
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn compact_running_status_clears_composer_and_keyboard(cx: &mut TestAppContext) {
+        use gpui::{Context, IntoElement, ParentElement, Render, Styled, Window, div, px};
+        struct OccludedChat {
+            chat: Entity<ChatView>,
+            bottom: gpui::Pixels,
+        }
+        impl Render for OccludedChat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // Reserve the system-occluded area, as the shell's window seam does.
+                crate::touch_scroll::root(
+                    div().size_full().pb(self.bottom).child(self.chat.clone()),
+                )
+            }
+        }
+        let mut timeline = synthetic_markdown_timeline(30);
+        Arc::make_mut(timeline.entries.last_mut().unwrap()).content =
+            assistant(&"A long running reply keeps its final status visible.\n\n".repeat(40));
+        timeline.turn_running = true;
+        timeline.turns.last_mut().unwrap().running = true;
+        let (store, window_state, _) = seed_chat(cx, timeline);
+        window_state.update(cx, |state, _| state.compact = true);
+        let (root, cx) = cx.add_window_view(|window, cx| OccludedChat {
+            chat: cx.new(|cx| ChatView::new(store, window_state, window, cx)),
+            bottom: px(34.),
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        let list = root.read_with(cx, |root, cx| root.chat.read(cx).list_state.clone());
+        for bottom in [34., 320., 34.] {
+            root.update(cx, |root, cx| {
+                root.bottom = px(bottom);
+                cx.notify();
+            });
+            for following in [true, false] {
+                list.set_follow_mode(if following {
+                    gpui::FollowMode::Tail
+                } else {
+                    gpui::FollowMode::Normal
+                });
+                list.scroll_to_end();
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let status = cx
+                    .debug_bounds("working-status-29")
+                    .expect("running status after scroll_to_end");
+                let composer = cx.debug_bounds("chat-composer").expect("composer");
+                assert!(status.bottom() <= composer.top());
+                assert!(status.bottom() <= list.viewport_bounds().bottom());
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: list.viewport_bounds().center(),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(1200.))),
+                    touch_phase: gpui::TouchPhase::Started,
+                    ..Default::default()
+                });
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: list.viewport_bounds().center(),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-100000.))),
+                    touch_phase: gpui::TouchPhase::Moved,
+                    ..Default::default()
+                });
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let status = cx
+                    .debug_bounds("working-status-29")
+                    .expect("running status row");
+                let composer = cx.debug_bounds("chat-composer").expect("composer");
+                let meter = cx
+                    .debug_bounds("context-meter")
+                    .expect("second composer row");
+                let model = cx.debug_bounds("model-picker").expect("first composer row");
+                assert!(meter.top() >= model.bottom());
+                assert!(
+                    status.bottom() <= composer.top(),
+                    "status {status:?} overlaps composer {composer:?}, inset {bottom}, following {following}"
+                );
+                assert!(
+                    status.bottom() <= list.viewport_bounds().bottom(),
+                    "status is clipped by timeline"
+                );
+                assert!(status.top() >= list.viewport_bounds().top());
+                assert!(composer.bottom() <= px(852. - bottom));
             }
         }
     }

@@ -211,6 +211,13 @@ content and history paging preserve the reading anchor while paused. Following
 resumes only when the reader scrolls back to the bottom (within one pixel) or
 clicks the pill. Opening a conversation starts at the tail.
 
+The timeline uses the space above the composer's measured height; the two-row
+compact composer never overlays its last row. Vertical breathing room belongs
+to the timeline container, outside the list's scroll extent, so captured touch,
+wheel and tail following agree on the bottom. The shell reserves the window's
+safe-area/IME inset once. The running-status row remains fully visible above the
+composer at the end, including when the keyboard opens or closes.
+
 ## Scrolling contract
 
 Potentially unbounded content always has its own resolved-height viewport and a
