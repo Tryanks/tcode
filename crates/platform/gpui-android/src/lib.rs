@@ -43,3 +43,9 @@ static FIRST_FRAME_RENDERED: std::sync::atomic::AtomicBool =
 pub fn first_frame_rendered() -> bool {
     FIRST_FRAME_RENDERED.load(std::sync::atomic::Ordering::Acquire)
 }
+
+/// Reopen the software keyboard after an explicit tap, even when focus is unchanged.
+#[cfg(target_os = "android")]
+pub fn show_keyboard() {
+    android::show_keyboard();
+}

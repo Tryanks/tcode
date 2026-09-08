@@ -413,9 +413,12 @@ impl IosWindow {
         };
         let input = if down {
             PlatformInput::KeyDown(KeyDownEvent {
+                prefer_character_input: keystroke.key_char.is_some()
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform,
                 keystroke,
                 is_held: repeat,
-                prefer_character_input: true,
             })
         } else {
             PlatformInput::KeyUp(KeyUpEvent { keystroke })

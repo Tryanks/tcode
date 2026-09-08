@@ -340,7 +340,7 @@ impl AndroidWindow {
                 self.with_input_handler(PlatformInputHandler::unmark_text);
             }
             host::HostEvent::DeleteBackward => {
-                self.with_input_handler(crate::text_input::delete_backward);
+                self.delete_backward();
             }
             host::HostEvent::Key {
                 key_code,
@@ -358,6 +358,27 @@ impl AndroidWindow {
             host::HostEvent::Back => {
                 self.handle_back();
             }
+        }
+    }
+
+    fn delete_backward(&self) {
+        let mut handled = false;
+        self.with_input_handler(|handler| {
+            handled = crate::text_input::delete_backward(handler);
+        });
+        // Terminal handlers accept committed text but expose no editable buffer.
+        // Release the handler borrow before dispatching to the focused view.
+        if !handled {
+            let keystroke = Keystroke {
+                key: "backspace".into(),
+                key_char: None,
+                modifiers: Modifiers::default(),
+            };
+            self.dispatch_input(PlatformInput::KeyDown(crate::text_input::ime_key_down(
+                keystroke.clone(),
+                false,
+            )));
+            self.dispatch_input(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
         }
     }
 
@@ -491,7 +512,7 @@ impl AndroidWindow {
         let key_code = Keycode::from(key_code as u32);
         if key_code == Keycode::Del && meta_state & (0x2 | 0x1000 | 0x10000) == 0 {
             if down {
-                self.with_input_handler(crate::text_input::delete_backward);
+                self.delete_backward();
             }
             return;
         }
