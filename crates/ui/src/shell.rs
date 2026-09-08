@@ -1756,7 +1756,6 @@ impl AppShell {
             .size_full()
             .bg(crate::material::content_surface(cx))
             .text_color(cx.theme().foreground)
-            .font_family(cx.theme().font_family.clone())
             .when(cfg!(target_os = "android"), |mut element| {
                 // Android's cosmic-text fallback has no script preferences. These
                 // system sans families keep Han text out of arbitrary serif faces.
@@ -2329,6 +2328,9 @@ impl Render for AppShell {
         crate::touch_scroll::root(
             div()
                 .size_full()
+                // Both layouts must select UI text explicitly: GPUI's default
+                // fallback stack prefers Lilex once the terminal font is loaded.
+                .font_family(cx.theme().font_family.clone())
                 .children(
                     dismissal.map(|dismissal| dismissal.release_listener().into_any_element()),
                 )

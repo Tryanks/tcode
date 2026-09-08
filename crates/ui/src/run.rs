@@ -73,9 +73,10 @@ impl Default for ShellOptions {
     }
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(target_os = "android", target_os = "ios", target_family = "wasm"))]
 impl ShellOptions {
-    /// Register the bundled monospace family and select it anywhere the shared
+    /// Supply monospace on platforms without a system monospace font.
+    /// Register the bundled family and select it anywhere the shared
     /// theme asks for the desktop-only SF Mono family.
     pub fn with_bundled_monospace(mut self) -> Self {
         self.fonts.extend([
@@ -84,6 +85,9 @@ impl ShellOptions {
             Cow::Borrowed(crate::assets::LILEX_ITALIC),
             Cow::Borrowed(crate::assets::LILEX_BOLD_ITALIC),
         ]);
+        #[cfg(target_family = "wasm")]
+        self.fonts
+            .push(Cow::Borrowed(crate::assets::TERMINAL_SYMBOLS));
         self.theme_json = Cow::Owned(self.theme_json.replace("SF Mono", "Lilex"));
         self
     }

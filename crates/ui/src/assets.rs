@@ -14,6 +14,9 @@ pub const LILEX_ITALIC: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lile
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const LILEX_BOLD_ITALIC: &[u8] =
     include_bytes!("../../../assets/fonts/lilex/Lilex-BoldItalic.ttf");
+#[cfg(target_family = "wasm")]
+pub const TERMINAL_SYMBOLS: &[u8] =
+    include_bytes!("../../../assets/fonts/nerd-symbols/TcodeTerminalSymbols.ttf");
 const DM_SANS_PATH: &str = "fonts/DMSans[wght].ttf";
 
 /// Extra SVG icons bundled by tcode (not shipped by gpui-component).

@@ -2483,6 +2483,12 @@ fn drag_scroll_lines(y: Pixels, geometry: Option<GridGeometry>, cell_height: f32
 pub(crate) fn terminal_font() -> gpui::Font {
     let mut terminal_font = font(TERMINAL_FONT_FAMILY);
     terminal_font.features = FontFeatures::disable_ligatures();
+    #[cfg(target_family = "wasm")]
+    {
+        terminal_font.fallbacks = Some(gpui::FontFallbacks::from_fonts(vec![
+            "Tcode Terminal Symbols".into(),
+        ]));
+    }
     terminal_font
 }
 
