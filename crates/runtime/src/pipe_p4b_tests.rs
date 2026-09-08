@@ -394,6 +394,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
         .to_host
         .send_blocking(
             tcode_protocol::encode_line(&ClientMessage {
+                key: None,
                 id: 1,
                 payload: ClientPayload::Command(Command::StartExternalImport {
                     project_id: project_id.clone(),

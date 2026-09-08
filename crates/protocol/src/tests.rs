@@ -9,6 +9,7 @@ use super::*;
 #[test]
 fn client_ndjson_preserves_ids_text_and_record_boundaries() {
     let message = ClientMessage {
+        key: None,
         id: u64::MAX,
         payload: ClientPayload::Command(Command::SendTurn {
             session_id: "session-1".into(),
@@ -178,6 +179,7 @@ fn older_messages_default_new_optional_fields() {
 #[test]
 fn import_status_and_content_search_use_their_documented_wire_shapes() {
     let start = ClientMessage {
+        key: None,
         id: 3,
         payload: ClientPayload::Command(Command::StartExternalImport {
             project_id: "project-1".into(),
@@ -283,6 +285,7 @@ fn import_status_and_content_search_use_their_documented_wire_shapes() {
     }
 
     let search = ClientMessage {
+        key: None,
         id: 9,
         payload: ClientPayload::Query(Query::SearchSessionContent {
             query: "auth.rs".into(),
@@ -602,6 +605,7 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
     use crate::terminal::{TerminalCell, TerminalFrame, TerminalRow, TerminalStyle};
 
     let request = ClientMessage {
+        key: None,
         id: 11,
         payload: ClientPayload::Query(Query::RenderStoredOutput {
             session_id: "session-1".into(),
@@ -690,6 +694,7 @@ fn stored_output_rendering_uses_its_documented_wire_shape() {
 #[test]
 fn thread_export_and_project_creation_use_their_documented_wire_shapes() {
     let request = ClientMessage {
+        key: None,
         id: 7,
         payload: ClientPayload::Query(Query::RenderThreadExport {
             session_id: "session-1".into(),
@@ -816,4 +821,19 @@ fn history_paging_literal_json_contract() {
             ..
         }
     ));
+}
+
+#[test]
+fn command_key_is_optional_for_v3_and_preserved_for_v4() {
+    let legacy = decode_client_line(
+        r#"{"id":9,"payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.key, None);
+    let keyed = decode_client_line(r#"{"id":9,"key":"951925af-31f3-4f1c-a57b-dac199d82ad7","payload":{"type":"command","content":{"type":"cycle_project_sort"}}}"#).unwrap();
+    assert_eq!(
+        keyed.key.as_deref(),
+        Some("951925af-31f3-4f1c-a57b-dac199d82ad7")
+    );
+    assert_eq!(keyed.payload, legacy.payload);
 }

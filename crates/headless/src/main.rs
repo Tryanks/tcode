@@ -137,6 +137,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let shutdown_connection = mux.attach();
     let shutdown_id = 1_u64;
     let shutdown_line = serde_json::to_string(&tcode_protocol::ClientMessage {
+        key: None,
         id: shutdown_id,
         payload: tcode_protocol::ClientPayload::Command(
             tcode_protocol::Command::ShutdownAllAndFlush,

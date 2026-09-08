@@ -33,8 +33,8 @@ pub use wire::{
     decode_host_line, encode_line,
 };
 
-// Older clients interpret a nonzero fresh snapshot offset as a corrupt tail.
-pub const PROTOCOL_VERSION: u32 = 3;
+// Version 4 adds client-generated command deduplication keys.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[cfg(test)]
 mod tests;

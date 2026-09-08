@@ -176,6 +176,7 @@ impl TestEntity {
             &mut self.0.borrow_mut(),
             &mut host_cx,
             ClientMessage {
+                key: None,
                 id,
                 payload: ClientPayload::Command(command),
             },

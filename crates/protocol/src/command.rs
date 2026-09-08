@@ -385,3 +385,25 @@ pub enum CommandResponse {
     ArchivedCount(usize),
     ExternalImportStarted(bool),
 }
+
+impl Command {
+    /// Idempotent controls and reads do not need retained delivery.
+    /// All other variants are retained writes, including settings assignments:
+    /// repeating an old assignment after a newer one would undo user intent.
+    pub fn requires_delivery_key(&self) -> bool {
+        !matches!(
+            self,
+            Self::ResizeTerminal { .. }
+                | Self::PreviewReply { .. }
+                | Self::ShutdownAllAndFlush
+                | Self::OpenLatestSession
+                | Self::RefreshProviderStatus
+                | Self::RefreshProviderUsage
+                | Self::CheckProviderVersions
+                | Self::RefreshAcpRegistry
+                | Self::LoadBranches { .. }
+                | Self::CopyPlan { .. }
+                | Self::DownloadPlan { .. }
+        )
+    }
+}

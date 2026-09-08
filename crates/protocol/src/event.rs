@@ -300,6 +300,8 @@ pub struct TerminalContextStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessageStatus {
     pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_key: Option<String>,
     pub text: String,
     /// Unix timestamp for a scheduled row, or `None` for an ordinary queued
     /// message. Like the queue itself, this status is ephemeral.
