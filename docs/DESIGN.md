@@ -441,13 +441,17 @@ One inset, applied once, at the page:
   On iOS and Android, focusing the grid raises the software keyboard and adds one
   44pt special-key row at the bottom of that rect, directly above the keyboard.
   The row reserves its height before the grid is measured, so it never covers the
-  last terminal row. It contains Esc, Tab, sticky Ctrl and Alt, four arrows, the
-  one-tap `^C` and `^D` combos, then a horizontally scrolling symbol tail ordered
-  by how often a shell line needs the character: `- / | ~ : . _`. Sticky
+  last terminal row. Esc, Tab, sticky Ctrl and Alt stay pinned at the leading
+  edge. Four arrows, the one-tap `^C` and `^D` combos, and symbols `- / | ~ : . _`
+  share a horizontally scrolling strip with touch momentum, clipped to the row.
+  Keys retain 44pt targets; trailing padding gives the strip breathing room at
+  its end. The strip has no vertical scroll range. Sticky
   modifiers highlight until the next terminal key or committed character consumes
   them; a combo carries its own Control, encodes through the same key mapping a
   hardware Ctrl+C takes, and consumes any sticky modifier rather than doubling
-  it. Desktop and browser terminals never draw the row.
+  it. Tapping the grid or a key explicitly reopens the software keyboard even
+  when the terminal retained focus after keyboard dismissal, on both mobile
+  platforms. Desktop and browser terminals never draw the row.
 
 Prose inside the content (errors, notices, file headers) wraps against the page
 inset rather than running past it. Code and diff lines do not wrap: they scroll

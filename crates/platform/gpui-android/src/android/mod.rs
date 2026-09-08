@@ -66,3 +66,5 @@ pub fn insets() -> gpui::WindowInsets {
             .unwrap_or_default()
     })
 }
+
+pub(crate) use host::show_keyboard;

@@ -63,7 +63,9 @@ pub fn android_main(app: android_activity::AndroidApp) {
                 host.clone(),
                 // System bars, display cutout and the IME. Android schedules a
                 // frame whenever they change, so the shell never polls.
-                WindowSeam::new(gpui_android::insets).with_lifecycle(gpui_android::platform()),
+                WindowSeam::new(gpui_android::insets)
+                    .with_lifecycle(gpui_android::platform())
+                    .with_soft_keyboard(gpui_android::show_keyboard),
                 ShellOptions {
                     window: WindowOptions {
                         // The activity owns the geometry; the shell reads it back.

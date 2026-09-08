@@ -710,13 +710,11 @@ impl TerminalDrawer {
         }
         let mut handled = false;
         self.with_terminal(cx, |terminal| {
-            if let Some(bytes) = mappings::key_bytes(
-                &keystroke.key,
-                term_modifiers(keystroke.modifiers),
+            if let Some(bytes) = terminal_key_bytes(
+                keystroke,
                 terminal.mode(),
                 terminal.keyboard_mode(),
                 terminal.modify_other_keys(),
-                true,
             ) {
                 terminal.write_input(bytes);
                 handled = true;
@@ -941,6 +939,7 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
+        crate::window_seam::WindowSeam::request_soft_keyboard(cx);
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
@@ -2406,6 +2405,22 @@ fn prepare_terminal_paste(text: &str, bracketed_paste: bool) -> String {
     }
 }
 
+fn terminal_key_bytes(
+    keystroke: &gpui::Keystroke,
+    mode: Mode,
+    keyboard_mode: tcode_protocol::terminal::KeyboardModes,
+    modify_other_keys: Option<u8>,
+) -> Option<Vec<u8>> {
+    mappings::key_bytes(
+        &keystroke.key,
+        term_modifiers(keystroke.modifiers),
+        mode,
+        keyboard_mode,
+        modify_other_keys,
+        true,
+    )
+}
+
 fn term_modifiers(modifiers: gpui::Modifiers) -> TermModifiers {
     TermModifiers {
         shift: modifiers.shift,
@@ -2553,6 +2568,64 @@ mod tests {
             ..TerminalFrame::default()
         });
         model
+    }
+
+    #[gpui::test]
+    fn tapping_an_already_focused_terminal_requests_the_keyboard(cx: &mut gpui::TestAppContext) {
+        use crate::window_seam::WindowSeam;
+        use std::cell::Cell;
+        let requests = Rc::new(Cell::new(0));
+        let observed = requests.clone();
+        cx.update(|cx| {
+            crate::theme::init(cx);
+            cx.set_global(
+                WindowSeam::new(Default::default).with_soft_keyboard(move || {
+                    observed.set(observed.get() + 1);
+                }),
+            );
+        });
+        let (outgoing, _commands) = async_channel::unbounded();
+        let (_events, incoming) = async_channel::unbounded();
+        let store =
+            cx.new(|cx| WorkspaceStore::new(tcode_client::HostLink::new(outgoing, incoming), cx));
+        let (drawer, cx) = cx.add_window_view(|window, cx| TerminalDrawer::new(store, window, cx));
+        cx.update(|window, cx| {
+            drawer.update(cx, |drawer, cx| {
+                drawer.focus_handle.focus(window, cx);
+                assert!(drawer.focus_handle.is_focused(window));
+                drawer.terminal_mouse_down(
+                    1,
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: point(px(20.), px(20.)),
+                        modifiers: Default::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(drawer.focus_handle.is_focused(window));
+            })
+        });
+        assert_eq!(requests.get(), 1);
+    }
+
+    #[test]
+    fn backspace_keystroke_emits_delete_to_the_terminal_pipe() {
+        assert_eq!(
+            terminal_key_bytes(
+                &gpui::Keystroke {
+                    key: "backspace".into(),
+                    key_char: None,
+                    modifiers: Default::default()
+                },
+                Mode::empty(),
+                tcode_protocol::terminal::KeyboardModes::NO_MODE,
+                None,
+            ),
+            Some(vec![0x7f])
+        );
     }
 
     #[test]

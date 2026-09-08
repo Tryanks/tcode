@@ -29,7 +29,9 @@ pub extern "C" fn tcode_ios_start() {
                     host.clone(),
                     // UIKit's safe area and keyboard frame. The platform
                     // schedules a frame whenever either changes.
-                    WindowSeam::new(gpui_ios::insets).with_lifecycle(gpui_ios::platform()),
+                    WindowSeam::new(gpui_ios::insets)
+                        .with_lifecycle(gpui_ios::platform())
+                        .with_soft_keyboard(|| gpui_ios::set_keyboard_visible(true)),
                     ShellOptions {
                         window: WindowOptions {
                             // UIKit owns the geometry; the shell reads it back.

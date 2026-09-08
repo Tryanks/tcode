@@ -17,20 +17,34 @@ fn delete_from_composition(text: &str, range: Range<usize>) -> (String, Range<us
     (String::from_utf16_lossy(&units), cursor..cursor)
 }
 
-#[cfg(target_os = "android")]
-pub(crate) fn delete_backward(handler: &mut gpui::PlatformInputHandler) {
-    let Some(selection) = handler.selected_text_range(true) else {
-        return;
-    };
-    let mut range = selection.range;
+// None distinguishes a key-oriented handler from an empty editable field.
+fn backward_delete_range(
+    selection: Option<Range<usize>>,
+    mut text_before: impl FnMut(usize) -> Option<String>,
+) -> Option<Range<usize>> {
+    let range = selection?;
     if range.is_empty() {
-        let Some(text) = handler.text_for_range(0..range.start, &mut None) else {
-            return;
-        };
-        range = previous_grapheme_range(&text, range.start);
+        Some(previous_grapheme_range(
+            &text_before(range.start)?,
+            range.start,
+        ))
+    } else {
+        Some(range)
     }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn delete_backward(handler: &mut gpui::PlatformInputHandler) -> bool {
+    let selection = handler
+        .selected_text_range(true)
+        .map(|selection| selection.range);
+    let Some(range) = backward_delete_range(selection, |cursor| {
+        handler.text_for_range(0..cursor, &mut None)
+    }) else {
+        return false;
+    };
     if range.is_empty() {
-        return;
+        return true;
     }
     if let Some(marked) = handler.marked_text_range()
         && marked.start <= range.start
@@ -44,6 +58,7 @@ pub(crate) fn delete_backward(handler: &mut gpui::PlatformInputHandler) {
     } else {
         handler.replace_text_in_range(Some(range), "");
     }
+    true
 }
 
 /// Plain multiline Enter is text; other control keys must still reach bindings.
@@ -65,6 +80,29 @@ pub(crate) fn ime_key_down(mut keystroke: Keystroke, multi_line: bool) -> KeyDow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_and_absent_text_fields_fall_back_to_control_keystrokes() {
+        assert_eq!(backward_delete_range(None, |_| None), None);
+        assert_eq!(backward_delete_range(Some(0..0), |_| None), None);
+        // An empty editor consumes deletion; it must not receive a second key.
+        assert_eq!(
+            backward_delete_range(Some(0..0), |_| Some(String::new())),
+            Some(0..0)
+        );
+        for key in ["backspace", "enter", "left", "right", "up", "down"] {
+            let event = ime_key_down(
+                Keystroke {
+                    key: key.into(),
+                    key_char: None,
+                    modifiers: Default::default(),
+                },
+                false,
+            );
+            assert_eq!(event.keystroke.key, key);
+            assert!(!event.prefer_character_input);
+        }
+    }
 
     #[test]
     fn multiline_ime_enter_inserts_newline_while_single_line_runs_action() {

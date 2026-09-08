@@ -23,6 +23,7 @@ pub const COMPACT_BREAKPOINT: f32 = 900.;
 pub struct WindowSeam {
     insets: Rc<dyn Fn() -> WindowInsets>,
     lifecycle: Option<Rc<dyn gpui::Platform>>,
+    show_keyboard: Option<Rc<dyn Fn()>>,
 }
 
 impl Global for WindowSeam {}
@@ -34,6 +35,22 @@ impl WindowSeam {
         Self {
             insets: Rc::new(insets),
             lifecycle: None,
+            show_keyboard: None,
+        }
+    }
+
+    /// Explicit user taps can reopen an IME without changing GPUI focus.
+    pub fn with_soft_keyboard(mut self, show: impl Fn() + 'static) -> Self {
+        self.show_keyboard = Some(Rc::new(show));
+        self
+    }
+
+    pub(crate) fn request_soft_keyboard(cx: &App) {
+        if let Some(show) = cx
+            .try_global::<Self>()
+            .and_then(|seam| seam.show_keyboard.as_ref())
+        {
+            show();
         }
     }
 
