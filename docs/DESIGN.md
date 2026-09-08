@@ -932,7 +932,8 @@ and a browser fixes that origin to the page that served it, hides discovery,
 and hides camera scanning. Pairing confirmation shows the machine name and
 **Connect**. Rejected authentication offers **Pair again**.
 Protocol mismatch says **Update the app**. The shell banner and
-attached machine row show the connection failure reason; syncing and reconnecting
+attached machine row show the connection failure reason. The sidebar machine dot
+and Machines page share the same severity colors: syncing and reconnecting
 use a warning dot, terminal offline failures use a danger dot, and only a
 connection that has received its first host message uses a success dot. Syncing
 remains visible between hello acceptance and that first message. Connection loss

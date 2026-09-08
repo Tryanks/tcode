@@ -1247,10 +1247,7 @@ impl SessionsSidebar {
             .remote_host_name()
             .map(SharedString::from)
             .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into());
-        let connected = matches!(
-            store.connection_state(),
-            tcode_client::ConnectionState::Connected
-        );
+        let connection_color = cx.theme().connection_color(store.connection_state());
         div()
             .flex_none()
             .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
@@ -1306,11 +1303,7 @@ impl SessionsSidebar {
                         .flex_none()
                         .size(px(8.))
                         .rounded_full()
-                        .bg(if connected {
-                            cx.theme().success
-                        } else {
-                            cx.theme().muted_foreground.opacity(0.5)
-                        }),
+                        .bg(connection_color),
                 ),
             )
     }

@@ -312,18 +312,14 @@ impl RemotePanel {
 
     /// The dot that says how this window's link to the attached host is doing.
     fn status_glyph(&self, cx: &App) -> AnyElement {
-        let color = match self
+        let color = self
             .store
             .as_ref()
-            .map(|store| store.read(cx).connection_state())
-        {
-            Some(tcode_client::ConnectionState::Connected) | None => cx.theme().success,
-            Some(
-                tcode_client::ConnectionState::Syncing
-                | tcode_client::ConnectionState::Reconnecting { .. },
-            ) => cx.theme().warning,
-            Some(tcode_client::ConnectionState::Offline { .. }) => cx.theme().danger,
-        };
+            .map(|store| {
+                cx.theme()
+                    .connection_color(store.read(cx).connection_state())
+            })
+            .unwrap_or(cx.theme().success);
         div()
             .flex_none()
             .size(px(8.))
