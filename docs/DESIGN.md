@@ -119,6 +119,12 @@ not receive native Acrylic.
 
 ### Launch
 
+The Android adaptive launcher icon preserves the original desktop/iOS charcoal
+background gradient (#313131 to #141414) and muted salmon/orange folded T
+(#DD6660 / #E1955A, with a shaded stem), independent of system theme. Its
+foreground has about 25% padding on each side so launcher masks do not clip the glyph. The splash uses the transparent glyph drawable
+separately, without the launcher's charcoal background.
+
 Mobile launch screens show only the app icon glyph centered on the embedded
 theme’s opaque canvas, with system light/dark variants and matching system bars.
 Android uses the system splash through AndroidX and holds it until GPUI’s first
