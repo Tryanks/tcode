@@ -123,7 +123,8 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                         restore_navigation: false,
                     },
                     ..Default::default()
-                },
+                }
+                .with_bundled_monospace(),
             );
             if let Some(document) = window().document() {
                 if let Some(loading) = document.get_element_by_id("loading") {
