@@ -201,7 +201,7 @@ impl Composer {
 
         let trigger = Button::new("model-picker")
             .debug_selector(|| "model-picker".into())
-            .when(self.compact, |button| button.max_w(px(200.)).min_w_0())
+            .when(self.compact, |button| button.max_w(px(160.)).min_w_0())
             .ghost()
             .compact()
             .h(px(28.))
