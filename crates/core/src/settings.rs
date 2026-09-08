@@ -227,6 +227,53 @@ pub struct ResolvedProfile {
     pub settings: ProviderSettings,
 }
 
+impl ResolvedProfile {
+    /// Whether this endpoint/auth configuration can query native account limits.
+    pub fn supports_account_usage(&self) -> bool {
+        let (endpoint_key, native_endpoint, credentials, backends): (&str, &str, &[&str], &[&str]) =
+            match self.kind {
+                ProviderKind::ClaudeCode => (
+                    "ANTHROPIC_BASE_URL",
+                    "https://api.anthropic.com",
+                    &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+                    &[
+                        "CLAUDE_CODE_USE_BEDROCK",
+                        "CLAUDE_CODE_USE_VERTEX",
+                        "CLAUDE_CODE_USE_FOUNDRY",
+                    ],
+                ),
+                ProviderKind::Codex => (
+                    "OPENAI_BASE_URL",
+                    "https://api.openai.com/v1",
+                    &["OPENAI_API_KEY", "CODEX_API_KEY"],
+                    &[],
+                ),
+                _ => return false,
+            };
+        // Secret presence is enough to classify API-key auth; never inspect or
+        // replicate secret values. Missing native sign-in remains a probe error.
+        !self.settings.env.iter().enumerate().any(|(index, env)| {
+            // LaunchEnv uses the last occurrence of a repeated environment key.
+            if self.settings.env[index + 1..]
+                .iter()
+                .any(|later| later.name == env.name)
+            {
+                return false;
+            }
+            let configured = env.sensitive || !env.value.trim().is_empty();
+            configured
+                && (credentials.contains(&env.name.as_str())
+                    || (backends.contains(&env.name.as_str())
+                        && env.value != "0"
+                        && env.value != "false")
+                    || (env.name == endpoint_key
+                        && (env.sensitive
+                            || env.value.trim().trim_end_matches('/').to_ascii_lowercase()
+                                != native_endpoint)))
+        })
+    }
+}
+
 /// One configured model, unique by provider and model ID within its role.
 /// Reasoning effort is selected per tool call from the provider's capabilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1963,5 +2010,27 @@ mod tests {
             "an unknown field was dropped on save"
         );
         assert_eq!(back.get("another"), Some(&serde_json::json!("value")));
+    }
+}
+
+#[cfg(test)]
+mod account_usage_tests {
+    use super::*;
+
+    #[test]
+    fn resolved_custom_endpoint_is_not_a_native_account() {
+        let settings: Settings = serde_json::from_str(r#"{"profiles":{"custom":{"kind":"claude_code","display_name":"Kimi","env":[{"name":"ANTHROPIC_BASE_URL","value":"https://api.example.com/anthropic"},{"name":"ANTHROPIC_API_KEY","sensitive":true}]}}}"#).unwrap();
+        let mut custom = settings.resolved_profile("custom").unwrap();
+        assert!(
+            !custom.supports_account_usage(),
+            "custom protocol compatibility does not imply native subscription support"
+        );
+        custom.settings.display_name = Some("Claude".into());
+        assert!(!custom.supports_account_usage());
+        custom.settings.env.clear();
+        assert!(
+            custom.supports_account_usage(),
+            "a custom profile using native account auth remains eligible, even signed out"
+        );
     }
 }

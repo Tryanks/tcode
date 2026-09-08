@@ -1185,10 +1185,11 @@ pub(crate) struct Mapper {
     exit_plan_captured: bool,
     /// Control responses to write back (e.g. the auto-deny for `ExitPlanMode`).
     outgoing: Vec<Value>,
-    /// Cumulative tokens processed across every completed turn this session
-    /// (Claude reports only per-turn usage, so we accumulate it ourselves for
-    /// the "Total processed" display).
-    cumulative_processed: u64,
+    request_usage: Value,
+    latest_usage: TokenUsage,
+    usage_message_id: Option<String>,
+    usage_message_ids: HashSet<String>,
+    result_ids: HashSet<String>,
     /// Successfully written steers awaiting the CLI's next input checkpoint.
     pending_steers: VecDeque<String>,
     /// Once the CLI exposes request checkpoints, never use the legacy fallback.
@@ -1265,7 +1266,11 @@ impl Mapper {
             pending_permission_modes: HashMap::new(),
             exit_plan_captured: false,
             outgoing: Vec::new(),
-            cumulative_processed: 0,
+            request_usage: json!({}),
+            latest_usage: TokenUsage::default(),
+            usage_message_id: None,
+            usage_message_ids: HashSet::new(),
+            result_ids: HashSet::new(),
             pending_steers: VecDeque::new(),
             saw_requesting: false,
             background_tasks: HashSet::new(),
@@ -1293,6 +1298,12 @@ impl Mapper {
 
     /// Allocate the next synthesized turn id and mark it in-flight.
     fn start_turn(&mut self) -> String {
+        self.current_message_id = None;
+        self.usage_message_id = None;
+        self.request_usage = json!({});
+        if self.latest_usage.freshness == crate::ContextFreshness::Current {
+            self.latest_usage.freshness = crate::ContextFreshness::LastKnown;
+        }
         self.turn_counter += 1;
         let id = format!("turn-{}", self.turn_counter);
         self.current_turn_id = Some(id.clone());
@@ -1563,7 +1574,44 @@ impl Mapper {
             Some("init") => {}
             // Claude compacted its context window (verified shape:
             // `{type:"system", subtype:"compact_boundary", compact_metadata:{…}}`).
-            Some("compact_boundary") => return vec![AgentEvent::ContextCompacted],
+            Some("compact_boundary") => {
+                self.request_usage = json!({});
+                self.usage_message_id = None;
+                self.current_message_id = None;
+                self.latest_usage.used_tokens = None;
+                self.latest_usage.input_tokens = None;
+                self.latest_usage.cached_input_tokens = None;
+                self.latest_usage.output_tokens = None;
+                self.latest_usage.freshness = crate::ContextFreshness::AwaitingObservation;
+                return vec![AgentEvent::ContextCompacted(crate::Compaction {
+                    in_progress: false,
+                    trigger: msg
+                        .pointer("/compact_metadata/trigger")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    pre_tokens: msg
+                        .pointer("/compact_metadata/pre_tokens")
+                        .and_then(Value::as_u64),
+                    post_tokens: msg
+                        .pointer("/compact_metadata/post_tokens")
+                        .and_then(Value::as_u64),
+                    dropped_tokens: msg
+                        .pointer("/compact_metadata/cumulative_dropped_tokens")
+                        .and_then(Value::as_u64),
+                    duration_ms: msg
+                        .pointer("/compact_metadata/duration_ms")
+                        .and_then(Value::as_u64),
+                })];
+            }
+            Some("status") if msg.get("status").and_then(Value::as_str) == Some("compacting") => {
+                self.latest_usage.freshness = crate::ContextFreshness::Compacting;
+                return vec![AgentEvent::ContextCompacted(crate::Compaction {
+                    in_progress: true,
+                    trigger: None,
+                    pre_tokens: None,
+                    ..Default::default()
+                })];
+            }
             Some("task_started") => return self.on_task_started(msg),
             Some("task_updated") => return self.on_task_updated(msg),
             Some("task_notification") => return self.on_task_notification(msg),
@@ -1851,7 +1899,12 @@ impl Mapper {
                     .and_then(|m| m.get("id"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                Vec::new()
+                let message = &event["message"];
+                self.observe_request_usage(
+                    message.get("id").and_then(Value::as_str),
+                    message.get("usage"),
+                    true,
+                )
             }
             Some("content_block_delta") => {
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -1890,12 +1943,75 @@ impl Mapper {
                     event.pointer("/delta/stop_reason").and_then(Value::as_str),
                 );
                 if let Some(usage) = event.get("usage") {
-                    let tu = map_usage(usage, None);
-                    events.push(AgentEvent::TokenUsage(tu));
+                    let id = self.current_message_id.clone();
+                    events.extend(self.observe_request_usage(id.as_deref(), Some(usage), false));
                 }
                 events
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// Stream deltas are cumulative fields within one request, never increments.
+    /// Assistant messages can repeat an ID for parallel tool blocks.
+    fn observe_request_usage(
+        &mut self,
+        id: Option<&str>,
+        usage: Option<&Value>,
+        start: bool,
+    ) -> Vec<AgentEvent> {
+        let Some(id) = id else {
+            return Vec::new();
+        };
+        if self.usage_message_id.as_deref() != Some(id) {
+            if !self.usage_message_ids.insert(id.to_owned()) {
+                return Vec::new();
+            }
+            self.usage_message_id = Some(id.to_owned());
+            self.request_usage = json!({});
+        }
+        if let Some(fields) = usage.and_then(Value::as_object) {
+            for key in [
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+                "output_tokens",
+            ] {
+                if let Some(value) = fields.get(key).filter(|v| v.is_u64()) {
+                    // Non-streaming assistant output is a placeholder; never regress
+                    // the cumulative output already observed in the stream.
+                    if key != "output_tokens" || value.as_u64() >= self.request_usage[key].as_u64()
+                    {
+                        self.request_usage[key] = value.clone();
+                    }
+                }
+            }
+        }
+        self.latest_usage.turn_processed_tokens = None;
+        let mapped = map_usage(&self.request_usage, None);
+        self.latest_usage.input_tokens = mapped.input_tokens;
+        self.latest_usage.cached_input_tokens = mapped.cached_input_tokens;
+        self.latest_usage.output_tokens = mapped.output_tokens;
+        // Claude's context observation counts the latest request's input and caches.
+        // Output deltas describe generated traffic, not a new input observation.
+        self.latest_usage.used_tokens = mapped.input_tokens.map(|input| {
+            input
+                .saturating_add(mapped.cached_input_tokens.unwrap_or(0))
+                .saturating_add(
+                    self.request_usage["cache_creation_input_tokens"]
+                        .as_u64()
+                        .unwrap_or(0),
+                )
+        });
+        self.latest_usage.freshness = if self.latest_usage.used_tokens.is_some() {
+            crate::ContextFreshness::Current
+        } else {
+            crate::ContextFreshness::AwaitingObservation
+        };
+        if usage.is_some() || start {
+            vec![AgentEvent::TokenUsage(self.latest_usage)]
+        } else {
+            Vec::new()
         }
     }
 
@@ -1911,7 +2027,11 @@ impl Mapper {
             Some(m) => m,
             None => return Vec::new(),
         };
-        let mut out = Vec::new();
+        let mut out = self.observe_request_usage(
+            message.get("id").and_then(Value::as_str),
+            message.get("usage"),
+            false,
+        );
         if message
             .pointer("/stop_details/type")
             .and_then(Value::as_str)
@@ -2492,6 +2612,11 @@ impl Mapper {
     }
 
     fn on_result(&mut self, msg: &Value) -> Vec<AgentEvent> {
+        if let Some(id) = msg.get("uuid").and_then(Value::as_str)
+            && !self.result_ids.insert(id.to_owned())
+        {
+            return Vec::new();
+        }
         self.awaiting_turn_checkpoint = false;
         let mut events = self.observe_stop_reason(msg.get("stop_reason").and_then(Value::as_str));
         let turn_id = self
@@ -2505,12 +2630,50 @@ impl Mapper {
             status = TurnStatus::Interrupted;
         }
         let usage = msg.get("usage").map(|u| {
-            let mut usage = map_usage(u, msg.get("modelUsage"));
-            // Accumulate this turn's processed tokens into the session total.
-            self.cumulative_processed += crate::processed_tokens(usage);
-            usage.total_processed_tokens = Some(self.cumulative_processed);
+            let aggregate = map_usage(u, msg.get("modelUsage"));
+            let processed = [
+                "input_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+                "output_tokens",
+            ]
+            .into_iter()
+            .any(|key| u.get(key).and_then(Value::as_u64).is_some())
+            .then(|| crate::processed_tokens(aggregate));
+            let mut usage = self.latest_usage;
+            // Select capacity for the main model; a child's larger window is irrelevant.
+            usage.context_window = self
+                .last_served_model
+                .as_deref()
+                .and_then(|model| {
+                    msg.get("modelUsage")?
+                        .as_object()?
+                        .iter()
+                        .find(|(key, value)| {
+                            key.split('[').next() == Some(model)
+                                || value.get("canonicalModel").and_then(Value::as_str)
+                                    == Some(model)
+                        })?
+                        .1
+                        .get("contextWindow")?
+                        .as_u64()
+                })
+                .or_else(|| {
+                    msg.get("modelUsage")?
+                        .as_object()
+                        .filter(|m| m.len() == 1)?
+                        .values()
+                        .next()?
+                        .get("contextWindow")?
+                        .as_u64()
+                })
+                .or(usage.context_window);
+            usage.turn_processed_tokens = processed;
+            // The timeline owns lifetime accumulation, including restored history.
+            usage.total_processed_tokens = None;
             usage.cost_usd = msg.get("total_cost_usd").and_then(Value::as_f64);
             usage.duration_ms = msg.get("duration_ms").and_then(Value::as_u64);
+            self.latest_usage = usage;
             usage
         });
         if status == TurnStatus::Failed {
@@ -4024,17 +4187,156 @@ mod tests {
     }
 
     #[test]
+    fn usage_scope_fixture_deduplicates_results_and_excludes_child_context() {
+        let mut m = Mapper::new();
+        let mut observations = Vec::new();
+        let mut completions = 0;
+        for line in include_str!("../tests/fixtures/claude/usage_scope.jsonl").lines() {
+            for event in feed(&mut m, line) {
+                match event {
+                    AgentEvent::TokenUsage(u) => observations.push(u.used_tokens),
+                    AgentEvent::TurnCompleted { usage: Some(u), .. } => {
+                        completions += 1;
+                        assert_eq!(u.used_tokens, Some(500260));
+                        assert_eq!(u.turn_processed_tokens, Some(4001300));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(completions, 1);
+        assert_eq!(
+            observations,
+            vec![
+                Some(400150),
+                Some(400150),
+                Some(400150),
+                Some(500260),
+                Some(500260)
+            ]
+        );
+    }
+
+    #[test]
+    fn recorded_compaction_retains_metadata_without_claiming_post_context() {
+        let mut m = Mapper::new();
+        let mut events = Vec::new();
+        for line in include_str!("../tests/fixtures/claude/compaction_recorded.jsonl").lines() {
+            events.extend(feed(&mut m, line));
+        }
+        assert!(matches!(&events[0], AgentEvent::ContextCompacted(c) if c.in_progress));
+        assert!(
+            matches!(&events[1], AgentEvent::ContextCompacted(c) if !c.in_progress && c.pre_tokens == Some(19555) && c.post_tokens == Some(2948) && c.dropped_tokens == Some(16607) && c.duration_ms == Some(24455))
+        );
+        assert_eq!(m.latest_usage.used_tokens, None);
+        assert_eq!(
+            m.latest_usage.freshness,
+            crate::ContextFreshness::AwaitingObservation
+        );
+    }
+
+    #[test]
+    fn recorded_multi_request_usage_keeps_latest_context() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let mut observations = Vec::new();
+        let mut completion = None;
+        for line in include_str!("../tests/fixtures/claude/usage_recorded.jsonl").lines() {
+            for event in feed(&mut m, line) {
+                match event {
+                    AgentEvent::TokenUsage(u) => observations.push(u.used_tokens),
+                    AgentEvent::TurnCompleted { usage, .. } => completion = usage,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            observations,
+            vec![
+                Some(20250),
+                Some(20250),
+                Some(20250),
+                Some(20250),
+                Some(20635),
+                Some(20635),
+                Some(20635),
+                Some(20764),
+                Some(20764),
+                Some(20764)
+            ]
+        );
+        let usage = completion.unwrap();
+        assert_eq!(usage.used_tokens, Some(20764));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.turn_processed_tokens, Some(62084));
+        assert_eq!(usage.context_window, Some(1000000));
+    }
+
+    #[test]
+    fn streaming_usage_keeps_request_scope_at_completion() {
+        let mut m = Mapper::new();
+        m.start_turn();
+        let start = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"usage-1","usage":{"input_tokens":100,"cache_read_input_tokens":400,"cache_creation_input_tokens":50,"output_tokens":0}}}}"#,
+        );
+        assert!(
+            matches!(start.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens == Some(550)),
+            "message start must expose the measured request context: {start:?}"
+        );
+        let delta = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":20}}}"#,
+        );
+        assert!(
+            matches!(delta.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens == Some(550)),
+            "output-only delta must retain input and cache: {delta:?}"
+        );
+        let result = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":1000,"cache_read_input_tokens":4000000,"output_tokens":200},"modelUsage":{"claude":{"contextWindow":1000000}}}"#,
+        );
+        assert!(result.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { usage: Some(u), .. } if u.used_tokens == Some(550) && u.turn_processed_tokens == Some(4001200))), "result accounting must not replace occupancy: {result:?}");
+        m.start_turn();
+        let missing_start = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":1}}}"#,
+        );
+        assert!(
+            missing_start.is_empty(),
+            "a new turn cannot reuse the previous request identity: {missing_start:?}"
+        );
+        assert_eq!(m.latest_usage.freshness, crate::ContextFreshness::LastKnown);
+        let unknown = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"usage-2"}}}"#,
+        );
+        assert!(
+            matches!(unknown.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens.is_none())
+        );
+        let output_only = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":1}}}"#,
+        );
+        assert!(
+            matches!(output_only.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens.is_none())
+        );
+    }
+
+    #[test]
     fn compact_boundary_maps_to_context_compacted() {
         let mut m = Mapper::new();
         let evs = feed(
             &mut m,
             r#"{"type":"system","subtype":"compact_boundary","session_id":"s1","compact_metadata":{"trigger":"manual","pre_tokens":500,"post_tokens":10}}"#,
         );
-        assert!(matches!(evs.as_slice(), [AgentEvent::ContextCompacted]));
+        assert!(
+            matches!(evs.as_slice(), [AgentEvent::ContextCompacted(crate::Compaction { in_progress: false, trigger: Some(trigger), pre_tokens: Some(500), post_tokens: Some(10), .. })] if trigger == "manual")
+        );
     }
 
     #[test]
-    fn result_accumulates_total_processed_tokens() {
+    fn result_reports_each_turn_traffic_for_timeline_accumulation() {
         let mut m = Mapper::new();
         m.start_turn();
         let evs = feed(
@@ -4045,8 +4347,9 @@ mod tests {
             AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
             other => panic!("expected TurnCompleted, got {other:?}"),
         };
-        assert_eq!(first.total_processed_tokens, Some(120));
-        // A second turn accumulates on top of the first.
+        assert_eq!(first.turn_processed_tokens, Some(120));
+        assert_eq!(first.total_processed_tokens, None);
+        // Each result is a turn delta, independent of the mapper process lifetime.
         m.start_turn();
         let evs = feed(
             &mut m,
@@ -4056,7 +4359,8 @@ mod tests {
             AgentEvent::TurnCompleted { usage, .. } => usage.unwrap(),
             other => panic!("expected TurnCompleted, got {other:?}"),
         };
-        assert_eq!(second.total_processed_tokens, Some(155));
+        assert_eq!(second.turn_processed_tokens, Some(35));
+        assert_eq!(second.total_processed_tokens, None);
     }
 
     #[test]
@@ -4872,10 +5176,12 @@ mod tests {
                 assert_eq!(tid, &turn_id);
                 assert_eq!(*status, TurnStatus::Completed);
                 let usage = usage.as_ref().expect("usage present");
-                assert_eq!(usage.input_tokens, Some(100));
-                assert_eq!(usage.cached_input_tokens, Some(50));
-                assert_eq!(usage.output_tokens, Some(20));
-                assert_eq!(usage.used_tokens, Some(180));
+                assert_eq!(usage.input_tokens, None);
+                assert_eq!(usage.cached_input_tokens, None);
+                assert_eq!(usage.output_tokens, None);
+                assert_eq!(usage.used_tokens, None);
+                assert_eq!(usage.turn_processed_tokens, Some(180));
+                assert_eq!(usage.total_processed_tokens, None);
                 assert_eq!(usage.context_window, Some(1_000_000));
                 assert_eq!(usage.cost_usd, Some(0.125));
                 assert_eq!(usage.duration_ms, Some(4321));

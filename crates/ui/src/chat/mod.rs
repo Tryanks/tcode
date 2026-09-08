@@ -1015,7 +1015,12 @@ impl ChatView {
                 }
                 Segment::ContextCompacted(entry) => {
                     column = column.child(components::dividers::context_compacted_divider(
-                        &entry.id, cx,
+                        &entry.id,
+                        match &entry.content {
+                            EntryContent::ContextCompacted(c) => Some(c),
+                            _ => None,
+                        },
+                        cx,
                     ));
                 }
                 Segment::ContextWindowChanged(entry) => {

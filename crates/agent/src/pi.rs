@@ -866,7 +866,7 @@ impl PiMapper {
             }],
             "compaction_end" => {
                 if message.get("result").is_some_and(|value| !value.is_null()) {
-                    vec![AgentEvent::ContextCompacted]
+                    vec![AgentEvent::ContextCompacted(Default::default())]
                 } else {
                     vec![AgentEvent::Warning {
                         message: format!(
@@ -1086,6 +1086,7 @@ impl PiMapper {
                     let processed = crate::processed_tokens(usage);
                     self.cumulative_processed = self.cumulative_processed.saturating_add(processed);
                     let usage = TokenUsage {
+                        freshness: crate::ContextFreshness::Current,
                         total_processed_tokens: Some(self.cumulative_processed),
                         ..usage
                     };
@@ -1409,6 +1410,7 @@ fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
     let output = crate::json_u64(usage.get("output"));
     let cache_read = crate::json_u64(usage.get("cacheRead"));
     (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
+        freshness: crate::ContextFreshness::Current,
         input_tokens: input,
         cached_input_tokens: cache_read,
         output_tokens: output,

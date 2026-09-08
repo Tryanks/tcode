@@ -10,6 +10,7 @@ pub struct ProviderCatalog {
     pub provider_usage: HashMap<String, tcode_core::usage::ProviderUsage>,
     /// Profile ids with a usage fetch in flight.
     pub usage_checking: HashSet<String>,
+    usage_revisions: HashMap<String, u64>,
     pub(super) provider_secret_names: HashMap<String, HashSet<String>>,
 }
 
@@ -26,7 +27,29 @@ impl ProviderCatalog {
             provider_snapshots: HashMap::new(),
             provider_usage: HashMap::new(),
             usage_checking: HashSet::new(),
+            usage_revisions: HashMap::new(),
             provider_secret_names,
+        }
+    }
+
+    pub(super) fn invalidate_usage(&mut self, id: &str) {
+        self.provider_usage.remove(id);
+        self.usage_checking.remove(id);
+        *self.usage_revisions.entry(id.to_owned()).or_default() += 1;
+    }
+
+    fn complete_usage(
+        &mut self,
+        id: String,
+        revision: u64,
+        usage: Option<tcode_core::usage::ProviderUsage>,
+    ) {
+        if self.usage_revisions.get(&id).copied().unwrap_or(0) != revision {
+            return;
+        }
+        self.usage_checking.remove(&id);
+        if let Some(usage) = usage {
+            self.provider_usage.insert(id, usage);
         }
     }
 
@@ -212,6 +235,7 @@ impl AppState {
         value: Option<&str>,
         cx: &mut HostCx,
     ) {
+        self.providers.invalidate_usage(id);
         self.enqueue_store_write(
             StoreWrite::SetProfileSecret {
                 profile_id: id.to_string(),
@@ -399,9 +423,10 @@ impl AppState {
     fn refresh_provider_usage_inner(&mut self, cx: &mut HostCx, stale_only: bool) {
         let now = now_secs();
         for profile in self.all_profiles() {
-            let profile_id = profile.id;
+            let supported = profile.supports_account_usage();
+            let profile_id = profile.id.clone();
             let provider = profile.kind;
-            if !matches!(provider, ProviderKind::Codex | ProviderKind::ClaudeCode)
+            if !supported
                 || self
                     .providers
                     .provider_snapshots
@@ -418,6 +443,12 @@ impl AppState {
                 continue;
             }
             self.providers.usage_checking.insert(profile_id.clone());
+            let revision = self
+                .providers
+                .usage_revisions
+                .get(&profile_id)
+                .copied()
+                .unwrap_or(0);
             let binary = self.resolve_profile_binary(&profile_id);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
@@ -435,9 +466,8 @@ impl AppState {
                 )
                 .await;
                 host_cx.enqueue(move |state, _cx| {
-                    state.providers.usage_checking.remove(&profile_id);
-                    if let Some(usage) = usage {
-                        state.providers.provider_usage.insert(profile_id, usage);
+                    if state.settings.resolved_profile(&profile_id).as_ref() == Some(&profile) {
+                        state.providers.complete_usage(profile_id, revision, usage);
                     }
                 });
             });
@@ -829,5 +859,58 @@ pub(super) fn session_options(
             name: agent.name.clone(),
             launch: agent.launch.clone(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod usage_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn configuration_invalidation_rejects_old_probe_without_finishing_new_probe() {
+        let mut catalog = ProviderCatalog::new(HashMap::new(), HashMap::new());
+        let error = tcode_core::usage::ProviderUsage {
+            error: Some("temporarily unreachable".into()),
+            ..Default::default()
+        };
+        catalog.usage_checking.insert("claude".into());
+        catalog.complete_usage("claude".into(), 0, Some(error.clone()));
+        assert_eq!(
+            catalog.provider_usage["claude"], error,
+            "supported failures stay visible"
+        );
+        // Exercise secret replacement through its production entry point while
+        // a response with the previous revision is still outstanding.
+        use crate::app::test_support::*;
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-usage-secret-race");
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        state.update(cx, |state, cx| {
+            std::mem::swap(&mut state.providers, &mut catalog);
+            state.set_profile_secret(
+                "claude",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                Some("fixture-replacement"),
+                cx,
+            );
+            std::mem::swap(&mut state.providers, &mut catalog);
+        });
+        assert!(!catalog.provider_usage.contains_key("claude"));
+        catalog.usage_checking.insert("claude".into());
+        catalog.complete_usage("claude".into(), 0, Some(error));
+        assert!(catalog.usage_checking.contains("claude"));
+        assert!(!catalog.provider_usage.contains_key("claude"));
+        let windows = tcode_core::usage::ProviderUsage {
+            windows: vec![tcode_core::usage::UsageWindow {
+                kind: tcode_core::usage::UsageWindowKind::FiveHour,
+                scope: None,
+                used_percent: 42.,
+                resets_at: Some(1800000000),
+            }],
+            ..Default::default()
+        };
+        catalog.complete_usage("claude".into(), 1, Some(windows.clone()));
+        assert_eq!(catalog.provider_usage["claude"], windows);
+        assert!(!catalog.usage_checking.contains("claude"));
     }
 }

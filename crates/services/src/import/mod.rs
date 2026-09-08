@@ -218,7 +218,7 @@ pub fn import_thread(
                 }
             }
             ConvertedEntry::Compacted { ts } => {
-                events.push((ts, AgentEvent::ContextCompacted));
+                events.push((ts, AgentEvent::ContextCompacted(Default::default())));
             }
         }
     }

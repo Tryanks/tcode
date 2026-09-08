@@ -408,7 +408,7 @@ impl AppState {
             | AgentEvent::UserInputRequested { .. }
             | AgentEvent::UserInputResolved { .. }
             | AgentEvent::TokenUsage(_)
-            | AgentEvent::ContextCompacted
+            | AgentEvent::ContextCompacted(_)
             | AgentEvent::ContextWindowChanged { .. }
             | AgentEvent::PlanUpdated { .. }
             | AgentEvent::ProposedPlanDelta { .. }
