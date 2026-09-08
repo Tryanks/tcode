@@ -541,3 +541,52 @@ start at `after`; advancing the applied cursor obtains the next contiguous tail.
 A fresh subscription (no cursor) starts at the latest history window. Switching
 conversations retires its subscription request IDs, and stale replies cannot
 replace the currently selected conversation.
+
+## Weak networks
+
+Reads and writes have separate lifetimes. A transport-reported disconnect fails
+in-flight queries immediately with `disconnected`; the workspace refreshes its
+baseline during Syncing. A read issued without a connection fails the same way.
+While connected, a query without a result for 15 seconds fails with `timeout`.
+
+Retained commands use a client-generated UUID v4 key. They remain in an ordered
+outbox until Ack, including across reconnects, attachment changes and client
+relaunch. Native clients atomically replace an `outbox-<encoded-host-id>.json`
+file beside `hosts.json`, with private file permissions; browsers use the
+origin's `tcode.outbox.<host-id>` localStorage entry. Clearing client data clears
+these pending writes. An admission storage error is a real failure, not a
+successful send.
+
+After hello and subscription replay, the oldest write is sent first; the next
+waits for its Ack. The same key is used on every redelivery. The outbox is bounded
+at 256 entries and 8 MiB of serialized entries. The oldest surplus entry fails
+with `outbox_full`. A write already received by the host cannot be recalled by
+client-side eviction.
+
+The runtime retains the last 512 completed command keys and Ack results per
+authenticated device, including rejected commands. Cache hits refresh their LRU
+position and return the original Ack without executing again. This cache survives
+WebSocket replacement, but not a host-process restart or eviction from the 512-key
+window. Exactly-once redelivery applies within that window. Device identity is
+assigned by the authenticated server, never supplied by a client key prefix.
+
+If a connected retained command has no Ack for 30 seconds, the client logs a
+stalled acknowledgement and forces reconnect. The pending command remains in the
+outbox. The request deadlines and liveness constants live together in
+`crates/client/src/heartbeat.rs`: native idle probe at 10 seconds, browser idle
+probe at 15 seconds, and a 20-second liveness reply budget. Transport send and
+handshake budgets still apply independently.
+
+A pending user message is muted with **Sending…**, or **Waiting for connection…**
+when the workspace is reconnecting or syncing. It becomes normal only after Ack.
+A rejected send or outbox overflow shows an inline error with **Retry** and
+**Discard**. Retrying a terminal failure creates a new action and key. An approval
+decision in the outbox disables the approval buttons and keeps a pending caption.
+Transient reconnects belong in the connection banner, not failure toasts.
+
+Protocol 4 adds the optional `key` field. Hello advertises support for versions 3
+and 4 using the version-3 hello as its baseline, allowing a strict older host to
+accept it. A version-3 host ignores `key` and still works, but cannot deduplicate
+redelivery; a lost Ack can therefore repeat a mutation. Upgrade both ends for the
+bounded deduplication guarantee. Hosts older than version 3 remain incompatible
+with bounded history replay.

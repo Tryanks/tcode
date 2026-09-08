@@ -1082,3 +1082,12 @@ current code, expiry and QR use the desktop hosting presentation, stacking on
 narrow screens. Paired devices and Remove remain visible when pairing is off.
 The listener owns this state and returns it over the authenticated pipe. Native
 Add a machine continues to show an address and six-digit connection code.
+## Pending writes on weak networks
+
+User-authored sends remain muted with **Sending…** until the host acknowledges
+them. During Syncing or Reconnecting the caption is **Waiting for connection…**;
+reconnection does not turn a pending send into a delivered bubble. Terminal
+failure shows an inline error with **Retry** and **Discard**. Queued approval
+decisions keep their controls disabled with a pending caption. The connection
+banner owns transient transport failures. See [Weak networks](remote.md#weak-networks)
+for persistence, ordering, limits and protocol compatibility.
