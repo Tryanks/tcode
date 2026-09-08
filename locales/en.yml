@@ -156,6 +156,9 @@ sidebar:
   waiting_approval_tooltip: "Waiting for approval"
   waiting_input: "Question"
   waiting_input_tooltip: "Waiting for your answer"
+  settled: "Settled"
+  settle: "Settle"
+  make_active: "Make active"
   archive: "Archive thread"
   archive_title: "Archive thread?"
   archive_description: 'Archive "%{title}" and its saved conversation? This cannot be undone.'

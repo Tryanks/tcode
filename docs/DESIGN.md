@@ -1047,6 +1047,24 @@ threads appear in the sidebar before the dialog reports the run finished. A
 second import of the same project while one is running is refused rather than
 queued.
 
+### Settled threads
+
+The thread context menu offers **Settle / 标记为已完成** and, for settled threads,
+**Make active / 恢复为活跃**. Settling applies to a thread and its descendants and
+is refused while any affected thread has running work, pending input or approval,
+or queued messages. It preserves the selected conversation, provider session,
+terminals and worktree. Archive remains a separate, reversible action; automatic
+archiving exempts settled threads.
+
+At both widths, active threads precede a collapsible **Settled / 已完成** group.
+By project has one group inside each project; Recent has one group after active
+threads. Existing ordering and parent/child folds apply within each group. A
+settled parent cannot hide active descendants. Settled groups start collapsed,
+retain expansion while the UI is open, and expand when navigation selects a
+settled thread. Opening or searching does not reactivate it. Accepted messages,
+scheduled messages and orchestration input reactivate the recipient and settled
+ancestors. Make active restores the matching settle cascade and its ancestors.
+
 ### Session lifetime
 
 Navigating away from a thread must not cancel its running turn, queued messages

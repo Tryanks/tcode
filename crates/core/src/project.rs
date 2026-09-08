@@ -77,6 +77,9 @@ pub struct SessionMeta {
     /// legacy files (defaults to "not archived").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
+    /// Manually settled (unix secs), independently of archive state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
     /// Dedicated-worktree mode metadata, when the session runs in its own git
     /// worktree instead of the project checkout. Absent = local checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +148,7 @@ impl SessionMeta {
             project_id: None,
             model,
             archived_at: None,
+            settled_at: None,
             worktree: None,
             approval_mode: ApprovalMode::default(),
             resume_cursor: None,
@@ -218,7 +222,8 @@ pub fn auto_archive_candidates(
         }
         let found = children.get(session_id).is_some_and(|descendants| {
             descendants.iter().any(|child| {
-                exempt.working.contains(&child.id)
+                child.settled_at.is_some()
+                    || exempt.working.contains(&child.id)
                     || exempt.unread.contains(&child.id)
                     || exempt.active.contains(&child.id)
                     || has_exempt_descendant(&child.id, children, exempt, visiting)
@@ -264,7 +269,8 @@ pub fn auto_archive_candidates(
             if !state.visited.insert(session.id.clone()) || state.archived.contains(&session.id) {
                 continue;
             }
-            let directly_exempt = exempt.working.contains(&session.id)
+            let directly_exempt = session.settled_at.is_some()
+                || exempt.working.contains(&session.id)
                 || exempt.unread.contains(&session.id)
                 || exempt.active.contains(&session.id)
                 || parent_id.is_some_and(|parent| exempt.working.contains(parent));
@@ -646,6 +652,22 @@ mod tests {
         assert!(json.get("forked_from").is_none());
         assert!(json.get("checkpoints").is_none());
         assert_eq!(serde_json::from_value::<SessionMeta>(json).unwrap(), meta);
+    }
+
+    #[test]
+    fn auto_archive_keeps_settled_threads_and_ancestors_of_settled_children() {
+        let mut settled = archive_session("settled", 1, Some("parent"));
+        settled.settled_at = Some(2);
+        let sessions = [
+            archive_session("newest", 1000, None),
+            archive_session("parent", 2, None),
+            settled,
+            archive_session("old", 1, None),
+        ];
+        assert_eq!(
+            candidates(&sessions, 10000, 100, 1, &AutoArchiveExemptions::default()),
+            HashSet::from(["old".into()])
+        );
     }
 
     #[test]
