@@ -24,7 +24,7 @@ dirs = { version = "6", optional = true }
 async-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 base64 = { version = "0.23", optional = true }
 futures-lite = "2"
-futures-util = { version = "0.3", features = ["sink"] }
+futures-util = { version = "0.3", features = ["sink", "io"] }
 getrandom = { version = "0.3", optional = true }
 if-addrs = { version = "0.13", optional = true }
 log = "0.4"

@@ -19,9 +19,6 @@ pub(super) fn builder<'a>(
         use wry::WebViewBuilderExtWindows as _;
         let host = _host;
         let origin = url::Url::parse(&host.origin).map_err(|e| e.to_string())?;
-        if origin.scheme() != "http" {
-            return Err("remote desktop preview requires a direct HTTP machine origin".into());
-        }
         let builder = builder
             .with_incognito(true)
             .with_proxy_config(wry::ProxyConfig::Http(wry::ProxyEndpoint {

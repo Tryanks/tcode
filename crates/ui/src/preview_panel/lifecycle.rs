@@ -132,6 +132,8 @@ pub struct BrowserLifecycle {
     active_identity: Option<(String, String)>,
     creator: Creator,
     proxy: Option<tcode_client::pairing::PairedHost>,
+    #[cfg(any(target_os = "windows", target_os = "android"))]
+    _native_proxy: Option<tcode_remote::preview::NativeProxy>,
 }
 
 pub(super) struct KeyReconciliation {
@@ -144,6 +146,18 @@ impl BrowserLifecycle {
         owner: Weak<()>,
         proxy: Result<Option<tcode_client::pairing::PairedHost>, String>,
     ) -> Self {
+        #[cfg(any(target_os = "windows", target_os = "android"))]
+        let mut native_proxy = None;
+        #[cfg(any(target_os = "windows", target_os = "android"))]
+        let proxy = proxy.and_then(|host| {
+            host.map(|mut host| {
+                let bridge = tcode_remote::preview::NativeProxy::new(&host)?;
+                host.origin = bridge.origin().to_owned();
+                native_proxy = Some(bridge);
+                Ok(host)
+            })
+            .transpose()
+        });
         let creator = match proxy
             .as_ref()
             .map_err(Clone::clone)
@@ -161,6 +175,8 @@ impl BrowserLifecycle {
         Self {
             owner,
             proxy: proxy.ok().flatten(),
+            #[cfg(any(target_os = "windows", target_os = "android"))]
+            _native_proxy: native_proxy,
             slots: HashMap::new(),
             warm: HashSet::new(),
             active_identity: None,
@@ -711,7 +727,7 @@ mod platform {
     const SMOKE_CREATION_PAUSE: Duration = Duration::from_millis(50);
 
     pub(super) struct Adapter {
-        web_context: Rc<async_lock::Mutex<wry::WebContext>>,
+        web_context: Rc<async_lock::Mutex<(wry::WebContext, Option<tempfile::TempDir>)>>,
         next_creation_id: u64,
         smoke_creation_pause: bool,
     }
@@ -720,23 +736,25 @@ mod platform {
         pub(super) fn new(
             _proxy: Option<&tcode_client::pairing::PairedHost>,
         ) -> Result<Self, String> {
-            // WebView2 environments with different proxy arguments cannot share
-            // a user-data directory. Keep the existing local profile and isolate
-            // each remote machine's environment under the client-owned root.
-            let user_data_dir = crate::client_data_dir()
+            // Proxy arguments include an attachment-specific loopback port.
+            // WebView2 cannot share a user-data directory between environments
+            // with different arguments, even while an old creation is finishing.
+            let local_profile = crate::client_data_dir()
                 .ok_or_else(|| "client data directory was not set at startup".to_string())?
                 .join("WebView2");
-            let user_data_dir = if let Some(host) = _proxy {
-                user_data_dir.join(format!(
-                    "remote-{}",
-                    host.host_id
-                        .chars()
-                        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                        .collect::<String>()
-                ))
+            let temporary = if _proxy.is_some() {
+                Some(
+                    tempfile::Builder::new()
+                        .prefix("tcode-preview-")
+                        .tempdir()
+                        .map_err(|error| error.to_string())?,
+                )
             } else {
-                user_data_dir
+                None
             };
+            let user_data_dir = temporary
+                .as_ref()
+                .map_or(local_profile, |directory| directory.path().to_path_buf());
             std::fs::create_dir_all(&user_data_dir).map_err(|error| {
                 format!(
                     "failed to create WebView2 user-data directory {}: {error}",
@@ -748,9 +766,10 @@ mod platform {
                 user_data_dir.display()
             );
             Ok(Self {
-                web_context: Rc::new(async_lock::Mutex::new(wry::WebContext::new(Some(
-                    user_data_dir,
-                )))),
+                web_context: Rc::new(async_lock::Mutex::new((
+                    wry::WebContext::new(Some(user_data_dir)),
+                    temporary,
+                ))),
                 next_creation_id: 0,
                 // Preserve the harness's deterministic in-flight cancellation
                 // window without putting smoke routing state back in the panel.
@@ -826,7 +845,7 @@ mod platform {
             // discard unless the same window/panel/generation are still live.
             let parent = unsafe { raw_window_handle::WindowHandle::borrow_raw(parent) };
             let built = {
-                let builder = wry::WebViewBuilder::new_with_web_context(&mut web_context)
+                let builder = wry::WebViewBuilder::new_with_web_context(&mut web_context.0)
                     .with_devtools(true)
                     .with_url("about:blank");
                 let builder = match super::super::proxy::builder(builder, proxy.as_ref()) {

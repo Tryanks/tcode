@@ -112,10 +112,7 @@ impl PreviewRoutes {
         if !loopback(&url) {
             return Ok(intent.into());
         }
-        let proxy = Url::parse(&self.host.origin).map_err(|_| "Invalid paired host origin")?;
-        if proxy.scheme() != "http" {
-            return Err("Remote preview requires a direct HTTP paired host connection".into());
-        }
+        let endpoint = Arc::new(crate::endpoint::Endpoint::new(&self.host.origin)?);
         let destination = authority(&url).ok_or("Missing preview port")?;
         let port = if let Some(route) = self.routes.get(&destination) {
             route.port
@@ -131,6 +128,7 @@ impl PreviewRoutes {
                 let listener = TcpListener::try_from(listener)
                     .map_err(|_| "Could not start preview listener")?;
                 let host = self.host.clone();
+                let endpoint = endpoint.clone();
                 let destination = destination.clone();
                 let error = self.error.clone();
                 let changed = self.changed.clone();
@@ -139,12 +137,15 @@ impl PreviewRoutes {
                     while let Ok((socket, _)) = listener.accept().await {
                         connections.retain(|task: &smol::Task<()>| !task.is_finished());
                         let host = host.clone();
+                        let endpoint = endpoint.clone();
                         let destination = destination.clone();
                         let error = error.clone();
                         let changed = changed.clone();
                         connections.push(smol::spawn(async move {
                             let keepalive = socket.clone();
-                            if let Err(failure) = forward(socket, &host, &destination).await {
+                            if let Err(failure) =
+                                forward(socket, &endpoint, &host.token, &destination).await
+                            {
                                 *error.lock().unwrap() = Some((destination, failure.to_string()));
                                 let _ = changed.try_send(());
                             }
@@ -230,19 +231,16 @@ fn bind_loopback(url: &Url) -> io::Result<Vec<std::net::TcpListener>> {
     ))
 }
 
-async fn forward(socket: TcpStream, host: &PairedHost, destination: &str) -> io::Result<()> {
-    let mut remote = future::race(
+pub(crate) async fn forward(
+    socket: TcpStream,
+    endpoint: &crate::endpoint::Endpoint,
+    token: &str,
+    destination: &str,
+) -> io::Result<()> {
+    let remote = future::race(
         async {
-            let proxy = Url::parse(&host.origin).map_err(io::Error::other)?;
-            let address = proxy
-                .host_str()
-                .ok_or_else(|| io::Error::other("Missing paired host"))?
-                .trim_matches(['[', ']']);
-            let port = proxy.port_or_known_default().unwrap();
-            let mut remote = TcpStream::connect((address, port)).await.map_err(|_| {
-                io::Error::other("Cannot connect to the paired host preview service")
-            })?;
-            let auth = STANDARD.encode(format!("tcode:{}", host.token));
+            let mut remote = endpoint.connect().await?;
+            let auth = STANDARD.encode(format!("tcode:{token}"));
             let request = format!(
                 "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
             );
@@ -272,14 +270,14 @@ async fn forward(socket: TcpStream, host: &PairedHost, destination: &str) -> io:
     )
     .await?;
     let mut browser = socket.clone();
-    let mut outbound = remote.clone();
+    let (mut remote, mut outbound) = futures_util::io::AsyncReadExt::split(remote);
     // Once CONNECT succeeds, normal browser cancellation and peer shutdown
     // can return NotConnected/BrokenPipe. WebKit owns page-load errors; a
     // closed keepalive socket must not overwrite a successfully loaded page.
     let _ = future::try_zip(
         async {
             futures_lite::io::copy(&mut browser, &mut outbound).await?;
-            outbound.shutdown(Shutdown::Write)
+            outbound.close().await
         },
         async {
             futures_lite::io::copy(&mut remote, &mut socket.clone()).await?;
@@ -288,4 +286,57 @@ async fn forward(socket: TcpStream, host: &PairedHost, destination: &str) -> io:
     )
     .await;
     Ok(())
+}
+
+/// Attachment-owned bridge for native browser engines that require an OS proxy
+/// address. The browser's existing proxy protocol and authentication pass through
+/// unchanged to the same paired host entry as pairing and the main WebSocket.
+/// Dropping the bridge cancels its listener and all accepted connections.
+pub struct NativeProxy {
+    origin: String,
+    _listener: smol::Task<()>,
+}
+
+impl NativeProxy {
+    pub fn new(host: &PairedHost) -> Result<Self, String> {
+        let endpoint = Arc::new(crate::endpoint::Endpoint::new(&host.origin)?);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+        let origin = format!(
+            "http://{}",
+            listener.local_addr().map_err(|e| e.to_string())?
+        );
+        let listener = TcpListener::try_from(listener).map_err(|e| e.to_string())?;
+        let task = smol::spawn(async move {
+            let mut connections = Vec::new();
+            while let Ok((browser, _)) = listener.accept().await {
+                connections.retain(|task: &smol::Task<()>| !task.is_finished());
+                let endpoint = endpoint.clone();
+                connections.push(smol::spawn(async move {
+                    let Ok(remote) = endpoint.connect().await else {
+                        return;
+                    };
+                    let (mut reader, mut writer) = futures_util::io::AsyncReadExt::split(remote);
+                    let _ = future::try_zip(
+                        async {
+                            futures_lite::io::copy(&mut browser.clone(), &mut writer).await?;
+                            writer.close().await
+                        },
+                        async {
+                            futures_lite::io::copy(&mut reader, &mut browser.clone()).await?;
+                            browser.shutdown(Shutdown::Write)
+                        },
+                    )
+                    .await;
+                }));
+            }
+        });
+        Ok(Self {
+            origin,
+            _listener: task,
+        })
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
 }

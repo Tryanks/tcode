@@ -183,21 +183,8 @@ impl ClientHost for NativeClientHost {
 
     fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
         let device_name = self.device_name();
-        let (sender, receiver) = async_channel::bounded(1);
-        let spawn = std::thread::Builder::new()
-            .name("tcode-pair".into())
-            .spawn(move || {
-                let result = crate::client::pair(&request.origin, &request.code, &device_name);
-                let _ = sender.send_blocking(result);
-            });
         Box::pin(async move {
-            if let Err(error) = spawn {
-                return Err(format!("failed to start pairing: {error}"));
-            }
-            receiver
-                .recv()
-                .await
-                .unwrap_or_else(|error| Err(error.to_string()))
+            crate::client::pair_async(&request.origin, &request.code, &device_name).await
         })
     }
 
