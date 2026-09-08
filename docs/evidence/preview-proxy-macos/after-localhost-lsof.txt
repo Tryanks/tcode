@@ -1,2 +1,0 @@
-COMMAND   PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-Python  67810 tryanks    3u  IPv4 0x4a9e0d70b9279e39      0t0  TCP *:5181 (LISTEN)

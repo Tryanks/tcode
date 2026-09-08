@@ -1,5 +1,0 @@
-COMMAND     PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
-Python    67810 tryanks    3u  IPv4 0x4a9e0d70b9279e39      0t0  TCP *:5181 (LISTEN)
-Python    67810 tryanks    6u  IPv4 0xf7918cf23d154f33      0t0  TCP 127.0.0.1:5181->127.0.0.1:56656 (CLOSED)
-Python    67810 tryanks    7u  IPv4 0x218164f3e7ac3662      0t0  TCP 127.0.0.1:5181->127.0.0.1:57575 (ESTABLISHED)
-com.apple 78548 tryanks    5u  IPv4 0x5607ae1f27c33c8d      0t0  TCP 127.0.0.1:57575->127.0.0.1:5181 (ESTABLISHED)
