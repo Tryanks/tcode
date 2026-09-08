@@ -300,9 +300,19 @@ impl PreviewPanel {
     /// Hand the current URL to the OS browser. `cx.open_url` is gpui's
     /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`, and the
     /// browser's own `window.open`).
-    fn open_in_system_browser(&mut self, cx: &mut Context<Self>) {
-        if let Some(url) = self.active_url(cx) {
+    fn open_in_system_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(all(feature = "native-preview", target_os = "macos"))]
+        let url = self.external_preview_url(cx);
+        #[cfg(not(all(feature = "native-preview", target_os = "macos")))]
+        let url = self.active_url(cx);
+        if let Some(url) = url {
             cx.open_url(&url);
+        } else {
+            use crate::overlay::{Notification, OverlayExt as _};
+            window.push_notification(
+                Notification::error(crate::tr!("preview.external_unavailable")),
+                cx,
+            );
         }
     }
 
@@ -456,7 +466,9 @@ impl PreviewPanel {
                             crate::tr!("preview.open_external"),
                             false,
                         )
-                        .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_in_system_browser(window, cx)
+                        })),
                     )
             })
             .when(!compact, |chrome| {
@@ -482,7 +494,7 @@ impl PreviewPanel {
         match action {
             PreviewAction::Close => self.release_preview(cx),
             PreviewAction::CopyUrl => self.copy_url(cx),
-            PreviewAction::OpenExternal => self.open_in_system_browser(cx),
+            PreviewAction::OpenExternal => self.open_in_system_browser(_window, cx),
             PreviewAction::ScanPorts => self.rescan_ports(cx),
         }
     }
@@ -769,3 +781,6 @@ mod android_geometry;
     any(target_os = "macos", target_os = "windows")
 ))]
 mod proxy;
+
+#[cfg(all(feature = "native-preview", target_os = "macos"))]
+mod remote;

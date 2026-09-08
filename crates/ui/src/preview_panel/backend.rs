@@ -70,6 +70,19 @@ impl PreviewPanel {
         self.backend.lifecycle.clone()
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn external_preview_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let key = self.active_key(cx)?;
+        let logical = self
+            .lifecycle_entity()
+            .read(cx)
+            .remote_url(&key)
+            .or_else(|| self.store.read(cx).preview_url(&key))?;
+        self.lifecycle_entity()
+            .read(cx)
+            .external_url(&key, &logical)
+    }
+
     pub(super) fn observe_backend(&mut self, cx: &mut Context<Self>) {
         let lifecycle = self.lifecycle_entity();
         self._subscriptions
@@ -350,6 +363,16 @@ impl PreviewPanel {
                     .update(cx, |input, cx| input.set_value(url, window, cx));
             }
         }
+        #[cfg(target_os = "macos")]
+        if let Some(key) = active
+            && let Some(url) = self.lifecycle_entity().read(cx).remote_url(key)
+            && self.store.read(cx).preview_url(key).as_ref() != Some(&url)
+        {
+            self.store
+                .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
+            self.url_input
+                .update(cx, |input, cx| input.set_value(url, window, cx));
+        }
         let body: AnyElement = match active {
             Some(id) => match self.ensure_webview(id, window, cx) {
                 Availability::Ready(view) => {
@@ -400,7 +423,6 @@ impl PreviewPanel {
         // `ensure_webview` creates children hidden; make the owning
         // conversation visible only after the current layout owns it.
         self.sync_mounted_visibility(cx);
-        #[cfg(target_os = "android")]
         if let Some(error) =
             active.and_then(|key| self.lifecycle_entity().read(cx).load_error(key, cx))
         {
@@ -422,6 +444,22 @@ impl PreviewPanel {
                             )
                             .into_owned(),
                         ),
+                )
+                .child(body)
+                .into_any_element();
+        }
+        #[cfg(target_os = "macos")]
+        if self.store.read(cx).is_remote() {
+            return v_flex()
+                .size_full()
+                .child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!("preview.remote_forwarding").into_owned()),
                 )
                 .child(body)
                 .into_any_element();
@@ -619,11 +657,25 @@ impl PreviewPanel {
             .ready_view(key)
             .map(|view| view.read(cx).metadata());
         let (status_reply, status_result) = async_channel::bounded(1);
-        cx.spawn(async move |_, _| {
+        let lifecycle = self.lifecycle_entity().downgrade();
+        let status_key = key.to_owned();
+        cx.spawn(async move |_, cx| {
             let result = match status_result.recv().await {
                 Ok(Ok(PreviewResponse::Json(mut value))) => {
                     if let Some(object) = value.as_object_mut() {
                         object.insert("canvas".into(), canvas);
+                        if let Some(actual) = object
+                            .get("url")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            && let Ok(logical) = lifecycle.update(cx, |lifecycle, _| {
+                                lifecycle.logical_url(&status_key, &actual)
+                            })
+                            && logical != actual
+                        {
+                            object.insert("actual_url".into(), actual.into());
+                            object.insert("url".into(), logical.into());
+                        }
                         #[cfg(target_os = "android")]
                         if let Some((url, title)) = native_metadata {
                             object.insert("url".into(), url.into());
@@ -680,11 +732,7 @@ impl PreviewPanel {
         }
         let cold = !self.lifecycle_entity().read(cx).is_warm(key);
         let key = key.to_string();
-        let probe = js::wait_for_probe(
-            selector.as_deref(),
-            text.as_deref(),
-            url_includes.as_deref(),
-        );
+        let probe = js::wait_for_probe(selector.as_deref(), text.as_deref(), None);
         let mut pending = Vec::new();
         if selector.is_some() {
             pending.push("selector".to_string());
@@ -758,7 +806,7 @@ impl PreviewPanel {
                     })
                     .detach();
 
-                let value = match probe_result.recv().await {
+                let mut value = match probe_result.recv().await {
                     Ok(Ok(PreviewResponse::Json(value))) => value,
                     Ok(Ok(PreviewResponse::Image { .. })) => {
                         let _ = reply
@@ -777,6 +825,28 @@ impl PreviewPanel {
                         return;
                     }
                 };
+                if let Some(actual) = value
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    && let Ok(logical) = this.update(cx, |panel, cx| {
+                        panel.lifecycle_entity().read(cx).logical_url(&key, &actual)
+                    })
+                {
+                    if logical != actual {
+                        value["actual_url"] = actual.into();
+                    }
+                    value["url"] = logical.clone().into();
+                    if url_includes
+                        .as_ref()
+                        .is_some_and(|needle| !logical.contains(needle))
+                    {
+                        value["matched"] = false.into();
+                        if let Some(pending) = value["pending"].as_array_mut() {
+                            pending.push("urlIncludes".into());
+                        }
+                    }
+                }
                 if value.get("matched").and_then(serde_json::Value::as_bool) == Some(true) {
                     let _ = reply.send(Ok(PreviewResponse::Json(value))).await;
                     return;

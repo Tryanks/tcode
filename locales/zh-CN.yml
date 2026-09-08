@@ -851,7 +851,8 @@ attach:
   too_large: "'%{name}' 超过了 10MB 的附件大小限制。"
   too_many: "每条消息最多只能附加 8 张图片。"
 preview:
-  machine_proxy_unavailable: "无法在 macOS 上安全应用主机代理。WebKit 会绕过代理访问本机地址，因此连接主机时无法使用内嵌预览。"
+  external_unavailable: "请先在预览中打开远程页面。转发后的浏览器链接仅在此预览保持打开时有效。"
+  remote_forwarding: "远程回环地址通过转发访问，其他地址从此 Mac 直接访问。"
   load_error: "无法加载 %{url}：%{message}（%{code}）"
   title: "预览"
   no_session: "打开一个会话以使用预览浏览器。"

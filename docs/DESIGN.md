@@ -794,17 +794,34 @@ than dead back/reload/screenshot controls, agent automation requests are
 answered with an explicit "unsupported" instead of timing out, and such a client
 does not subscribe as an owner of the session's preview at all. Localhost port
 discovery scans the client, so it is offered only for a local desktop workspace; a host
-URL typed into the field is relative to the attached machine. Remote Windows and Android embedded previews route all HTTP(S) traffic through the
-machine's token-authenticated forward proxy, including localhost; the URL bar
-never substitutes the machine's LAN address. Proxy setup completes before page
-navigation and follows attachment teardown. Unsupported proxy capabilities fail
-closed through the existing unavailable/load-error presentation. macOS attached
-previews refuse WebView creation and explain that the machine proxy cannot be
-applied safely: WebKit bypasses it for client-local destinations, including
-subresources. URL entry, copy, and open externally remain available. Local desktop
-attachments use no preview proxy. Hosting enables the proxy automatically on the
-hosting port, without another setting. See [remote networking](remote.md#networking)
-for platform requirements and the token's network-access implications.
+URL typed into the field is relative to the attached machine for loopback Preview.
+Remote Windows and Android embedded previews route HTTP(S) through the machine's
+token-authenticated forward proxy, including localhost. Local desktop attachments
+use no preview proxy.
+
+On macOS, attached Preview forwards HTTP(S) loopback URLs (`localhost`, loopback
+IPv4 and `::1`) through a browser-owned local port to the paired host's CONNECT
+service. A short note below the toolbar states that other addresses use this Mac:
+public and LAN URLs use ordinary viewer networking. Each attached browser uses
+its own nonpersistent website store, separate from local Preview and other slots.
+The address bar, copy, stored URL and automation status `url` use the logical
+remote URL, including path/query. Status adds `actual_url` when forwarded;
+`wait_for` matches the logical URL. JavaScript, including `evaluate` and
+`window.location`, sees the actual local port and origin. Native back/forward and
+reload reuse live routes; top-level loopback links and redirects allocate new
+routes as needed. The navigation adapter preserves the native request when it
+changes its URL. Browser-side subresources are not generally rewritten.
+
+Open externally uses the live forwarded URL for a mapped page, so it cannot
+silently open an unrelated service at the viewer's original port. The link lasts
+only while its owning preview is open. If no suitable live route exists, the
+existing notification surface explains that the page must first be opened in
+Preview. Closing a slot, pruning its session, or changing attachment destroys its
+listeners, active tunnels and website store; hiding a retained slot does not.
+Transport and navigation failures appear in the existing load-error presentation
+and automation responses. Hosting enables CONNECT on the existing hosting port,
+without another setting. See [remote networking](remote.md#networking) for the
+origin/port compatibility tradeoffs and the token's network-access implications.
 
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the
