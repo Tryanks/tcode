@@ -97,16 +97,6 @@ The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.
 
-After a long paste or manual scroll, the next accepted composer edit reveals the
-caret fully in the viewport. Insertion, replacement, deletion and IME composition
-use the same behavior, even when an edit leaves the caret offset unchanged.
-Manual scrolling stays where the user places it until another edit.
-
-Chat text selection begins only on hit text. Sidebar controls, dialogs, popovers
-and notifications cannot start a selection underneath them. A released mouse
-button or window focus loss ends the drag while preserving already selected
-text for copying. Normal markdown links and copy actions retain their behavior.
-
 The material layers are:
 
 | Layer | Use | Treatment |
