@@ -408,10 +408,9 @@ fn main() {
                 });
             }
             #[cfg(target_os = "macos")]
-            cx.set_menus([gpui::Menu::new("tcode").items([gpui::MenuItem::action(
-                tcode_ui::tr!("quit.menu_item"),
-                Quit,
-            )])]);
+            cx.set_menus([gpui::Menu::new(tcode_ui::tr!("app.name")).items([
+                gpui::MenuItem::action(tcode_ui::tr!("quit.menu_item"), Quit),
+            ])]);
             // Process ownership, not the window's current attachment, grants
             // authority to stop the local kernel on application quit.
             let quit_subscription = cx.on_app_quit({
@@ -487,7 +486,7 @@ fn main() {
                 WindowSeam::flush(),
                 ShellOptions {
                     window: window_options,
-                    title: "tcode".into(),
+                    title: tcode_ui::tr!("app.name").into(),
                     fonts: application_fonts,
                     theme_json,
                     activate: true,

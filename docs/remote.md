@@ -1,16 +1,16 @@
-# Use tcode from other devices
+# Use Tcode from other devices
 
-tcode runs on the machine that holds your projects, provider tools and terminal
+Tcode runs on the machine that holds your projects, provider tools and terminal
 processes. You can open that machine from another desktop, a phone, a tablet or
 a browser over your LAN or overlay network. There is no relay service. For a
 shorter introduction, see
-[Use tcode from other devices in the README](../README.md#use-tcode-from-other-devices).
+[Use Tcode from other devices in the README](../README.md#use-tcode-from-other-devices).
 
 ## Concepts
 
 | Term | Meaning |
 | --- | --- |
-| Machine | The computer where tcode runs providers and terminals and stores projects and threads. You can use the desktop app or `tcode-headless` there. |
+| Machine | The computer where Tcode runs providers and terminals and stores projects and threads. You can use the desktop app or `tcode-headless` there. |
 | Device | A desktop, phone, tablet or browser that opens a machine and sends actions to it. |
 | Browser password | Protects the web page served by `tcode-headless`. Set it on first open, or preset it with `TCODE_PASSWORD`. A successful login issues a device token. |
 | Adding a machine | Exchanging a single-use, six-digit connection code for a device token. A code expires after five minutes; five wrong attempts invalidate it. Generating a new code replaces the previous code. |
@@ -42,7 +42,7 @@ machine** therefore remains available, and devices that already opened this
 machine continue working. The desktop app accepts native app connections; it
 does not serve the browser app.
 
-## Run tcode without the desktop app
+## Run Tcode without the desktop app
 
 ### Install and start
 
@@ -61,9 +61,9 @@ does not serve the browser app.
    ```
 
 3. Install and authenticate your agent CLIs under the account that will run
-   tcode. Ensure that account's `PATH` includes them and that it can access your
+   Tcode. Ensure that account's `PATH` includes them and that it can access your
    project directories.
-4. Start tcode with a persistent data directory:
+4. Start Tcode with a persistent data directory:
 
    ```sh
    "$HOME/.local/bin/tcode-headless" serve \
@@ -88,7 +88,7 @@ does not serve the browser app.
    "$HOME/.local/bin/tcode-headless" pair --listen 127.0.0.1:47420
    ```
 
-   `pair` contacts the running tcode process over loopback. Its `--listen`
+   `pair` contacts the running Tcode process over loopback. Its `--listen`
    selects the port and IPv4/IPv6 family; it does not contact the supplied
    address. Keep the listener reachable on loopback, as with the default
    wildcard bind. A listener bound only to a specific LAN address cannot answer
@@ -100,7 +100,7 @@ does not serve the browser app.
    already authorized devices. Use **Remove** to revoke their access.
 7. Open this machine from another device using the instructions below. To
    prepare projects with the local desktop UI, stop `tcode-headless` first and
-   open the desktop app with the same data directory. Do not run two local tcode
+   open the desktop app with the same data directory. Do not run two local Tcode
    processes against the same directory.
 
 On Unix, Ctrl-C requests shutdown and a store flush. The CLI reference is:
@@ -127,7 +127,7 @@ Do not run this command against a data directory used by a running process.
 ### Data directory
 
 The `tcode-headless --data-dir` option takes precedence over `TCODE_DATA_DIR`.
-Without the option, `TCODE_DATA_DIR` selects the store; otherwise tcode uses the
+Without the option, `TCODE_DATA_DIR` selects the store; otherwise Tcode uses the
 platform app-data directory with a `tcode` subdirectory. This includes settings,
 threads and connection records. It does not move project working directories
 into the store.
@@ -152,7 +152,7 @@ setup.
 
 ```ini
 [Unit]
-Description=tcode without the desktop app
+Description=Tcode without the desktop app
 
 [Service]
 Type=simple
@@ -169,7 +169,7 @@ TimeoutStopSec=60
 WantedBy=default.target
 ```
 
-`SIGINT` uses tcode's shutdown-and-flush path. Stop any foreground tcode process
+`SIGINT` uses Tcode's shutdown-and-flush path. Stop any foreground Tcode process
 using the same port or data directory, then load and start the service:
 
 ```sh
@@ -200,7 +200,7 @@ The script optionally uses `wasm-opt` if installed. Build the bundle before the
 option, not a `serve` flag. The resulting executable is
 `target/release/tcode-headless`.
 
-tcode serves the browser app at `/` over HTTP, on the same port as the
+Tcode serves the browser app at `/` over HTTP, on the same port as the
 connection-code exchange and WebSockets. Without `web`, static requests
 return 404 while native apps can still add and connect to the machine. The
 browser runs the same shell as the desktop app; it lays itself out from the
@@ -223,7 +223,7 @@ compact stack.
    Choose another machine under **Your machines** to switch again;
    **This machine** restores the local workspace, and a machine row's
    **⋯ → Disconnect** leaves without removing it. Switching closes only this
-   device's old link, not tcode on either machine. Opening **Machines** by itself
+   device's old link, not Tcode on either machine. Opening **Machines** by itself
    does not change the connection.
 
 You can also add a machine from the desktop executable. Replace the sample
@@ -320,7 +320,7 @@ name, Android from the device model.
 
 Connect the machine and your other devices to the same LAN or overlay, such as
 Tailscale or EasyTier. Allow the listener through the machine's firewall and any
-overlay access rules. tcode provides no relay or public discovery service. Treat
+overlay access rules. Tcode provides no relay or public discovery service. Treat
 nearby-machine search as LAN-only: it does not cross a normal overlay connection.
 Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
@@ -341,7 +341,7 @@ port as pairing and WebSockets (default `47420`). It requires
 as password. Plain HTTP is forwarded; HTTPS uses opaque CONNECT tunnels with
 certificate validation performed by the client webview, without TLS interception.
 The machine connects directly to destinations; OS routing and global TUNs apply.
-tcode does not read upstream-proxy environment variables or system proxy settings.
+Tcode does not read upstream-proxy environment variables or system proxy settings.
 There is nothing new to configure in hosting settings.
 
 The listener admits at most 256 concurrent connections, including WebSockets.
@@ -359,7 +359,7 @@ macOS attached previews are unavailable: WebKit bypasses its Network proxy
 configuration for destinations on the client’s local interfaces, including
 localhost and its own LAN addresses. Clearing excluded domains, explicit match
 domains, disabling failover, and installing the authenticated configuration before
-creating the WebView do not prevent this bypass. tcode refuses attached WebView
+creating the WebView do not prevent this bypass. Tcode refuses attached WebView
 creation through the existing error surface so navigations, redirects, and
 subresources cannot connect directly. Local macOS previews remain available.
 
@@ -378,7 +378,7 @@ attachment lifetime. The browser client cannot override its browser's proxy.
 
 The LAN transport is plain HTTP and `ws://`. Anyone on the LAN who captures
 traffic can read the device token and the work sent over the connection. Use a
-tunnel or VPN on untrusted networks. tcode never provisions or manages TLS.
+tunnel or VPN on untrusted networks. Tcode never provisions or manages TLS.
 
 Anyone holding a paired device token can browse through the machine, including
 its loopback and private-network services. Treat it as network access to that
@@ -395,7 +395,7 @@ tokens and origins in `hosts.json` in their own data directory.
 Phone records are in the app's private data directory; Android uses its
 `filesDir`. Browser records use `localStorage` as described above.
 
-On Unix, tcode writes `remote.json` and `hosts.json` with mode `0600`. These are filesystem permissions, not file
+On Unix, Tcode writes `remote.json` and `hosts.json` with mode `0600`. These are filesystem permissions, not file
 encryption. Protect this device's data directory and browser profile: possession
 of a device token grants that device's access. There are no per-device project
 permissions or read-only device roles.
@@ -410,22 +410,22 @@ the machine.
 There is no `tcode-headless` remove subcommand. To remove access without the
 desktop UI, stop `tcode-headless`, back up `remote.json`, remove the matching
 entry from its `devices` array, preserve its permissions, and restart. Do not
-edit that file while tcode is running: it holds the device list in memory.
+edit that file while Tcode is running: it holds the device list in memory.
 
 ## Reaching your machine from outside
 
 - **Tailscale / WireGuard:** once your machine and device are on the VPN, there
-  is nothing to configure in tcode. Save the machine's VPN address, such as
+  is nothing to configure in Tcode. Save the machine's VPN address, such as
   `http://100.64.0.10:47420`, and allow the listener in the VPN's access rules.
   Discovery usually stays on the LAN, so type the address when needed.
-- **Cloudflare Tunnel / frp:** forward your tunnel's HTTPS endpoint to tcode's
+- **Cloudflare Tunnel / frp:** forward your tunnel's HTTPS endpoint to Tcode's
   local HTTP listener, including WebSocket upgrades. Save the tunnel's HTTPS
   origin, such as `https://tunnel.example.com`. The tunnel manages TLS.
 - **Tailscale HTTPS:** save its HTTPS origin when using its HTTPS forwarding.
   Native clients use standard trusted roots and hostname validation.
 
 Browser password login, native six-digit pairing codes, and device-token
-authorization keep the same behavior through a tunnel or VPN. Protect tunnel access and your stored tokens. tcode does not
+authorization keep the same behavior through a tunnel or VPN. Protect tunnel access and your stored tokens. Tcode does not
 encrypt stored JSON or project files; preview servers and provider connections
 use their own transports.
 
@@ -436,7 +436,7 @@ use their own transports.
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if saved devices should lose access. |
 | Native pairing is disabled | Enable **Allow other devices** in the logged-in browser’s **Settings → Other devices**. Web login is independent. |
 | Connection code is wrong or expired | Generate **New code** on the machine, or run `tcode-headless pair`. Codes expire after five minutes, after use, after five wrong attempts, or when replaced. Get a separate code for each device. |
-| Cannot reach the machine | Check that tcode is running, that the address is reachable from this device, and that the TCP port is allowed. Use the overlay address if no nearby machine appears. This device's `127.0.0.1` points to itself. |
+| Cannot reach the machine | Check that Tcode is running, that the address is reachable from this device, and that the TCP port is allowed. Use the overlay address if no nearby machine appears. This device's `127.0.0.1` points to itself. |
 | `tcode-headless pair` cannot reach a running listener | Check its port and IPv4/IPv6 family. The listener must accept loopback connections; `pair` always uses loopback. |
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
 | Browser fails before adding the machine | Check the HTTP host or your HTTPS tunnel. Check that JavaScript and site storage are allowed. |

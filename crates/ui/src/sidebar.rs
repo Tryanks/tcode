@@ -1171,7 +1171,7 @@ impl SessionsSidebar {
                 .text_sm()
                 .font_bold()
                 .text_color(cx.theme().sidebar_foreground)
-                .child("tcode"),
+                .child(crate::tr!("app.name")),
         )
         .child(
             div()

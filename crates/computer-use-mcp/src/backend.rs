@@ -258,7 +258,7 @@ pub fn list_roots(filters: &RootFilters) -> Result<Vec<RootInfo>, BackendError> 
     if filters.pid == Some(own_pid) {
         return Err(BackendError::new(
             BackendErrorCode::RootNotFound,
-            "the tcode host process cannot observe itself; launch a separate instance to drive it",
+            "the Tcode host process cannot observe itself; launch a separate instance to drive it",
         ));
     }
     #[cfg(target_os = "macos")]

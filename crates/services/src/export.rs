@@ -134,7 +134,7 @@ pub(crate) fn read_tcode_export(path: &Path) -> Result<TcodeThreadExport, ReadEx
         .map_err(|error| ReadExportError::Invalid(error.to_string()))?;
     if header.version != EXPORT_VERSION {
         return Err(ReadExportError::Invalid(format!(
-            "unsupported tcode export version {}",
+            "unsupported Tcode export version {}",
             header.version
         )));
     }
@@ -161,7 +161,7 @@ fn parse_event_log(bytes: &[u8]) -> Result<Vec<StoredEvent>, String> {
 pub fn render_markdown(meta: &SessionMeta, timeline: &Timeline) -> String {
     let model = meta.model.as_deref().unwrap_or("provider default");
     let mut output = format!(
-        "# {}\n\n- Format: tcode Markdown export v1\n- Session ID: `{}`\n- Provider/model: {} / {}\n- Workspace: `{}`\n- Created: {} (Unix seconds)\n- Updated: {} (Unix seconds)\n- Attachments: referenced by recorded local path; file bytes are not embedded.\n- Privacy: no automatic redaction; recorded messages and tool summaries may contain sensitive data. Provider secrets and settings are not included.\n\n",
+        "# {}\n\n- Format: Tcode Markdown export v1\n- Session ID: `{}`\n- Provider/model: {} / {}\n- Workspace: `{}`\n- Created: {} (Unix seconds)\n- Updated: {} (Unix seconds)\n- Attachments: referenced by recorded local path; file bytes are not embedded.\n- Privacy: no automatic redaction; recorded messages and tool summaries may contain sensitive data. Provider secrets and settings are not included.\n\n",
         meta.title,
         meta.id,
         meta.provider.display_name(),
@@ -419,7 +419,7 @@ mod tests {
             String::from_utf8(rendered).unwrap(),
             concat!(
                 "# Export fixture\n\n",
-                "- Format: tcode Markdown export v1\n",
+                "- Format: Tcode Markdown export v1\n",
                 "- Session ID: `session-export-1`\n",
                 "- Provider/model: Claude Code / opus\n",
                 "- Workspace: `/work/project`\n",

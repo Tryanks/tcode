@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(s.headline, "Disabled");
         assert_eq!(
             s.detail,
-            "This provider is installed but disabled for new sessions in tcode."
+            "This provider is installed but disabled for new sessions in Tcode."
         );
 
         let missing = ProviderSnapshot {
