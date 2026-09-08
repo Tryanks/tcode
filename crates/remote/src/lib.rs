@@ -10,6 +10,8 @@ pub mod discovery;
 #[cfg(feature = "server")]
 pub mod mux;
 #[cfg(feature = "server")]
+mod proxy;
+#[cfg(feature = "server")]
 pub mod server;
 #[cfg(feature = "server")]
 mod wire;

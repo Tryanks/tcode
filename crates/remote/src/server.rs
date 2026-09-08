@@ -59,13 +59,14 @@ struct ActiveCode {
     failures: u8,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     mux: HostMux,
-    auth: Mutex<AuthStore>,
+    pub(crate) auth: Mutex<AuthStore>,
     pairing: Mutex<Option<ActiveCode>>,
     static_bundle: Option<StaticBundle>,
     local_addr: SocketAddr,
-    shutdown: async_channel::Receiver<()>,
+    pub(crate) shutdown: async_channel::Receiver<()>,
+    connections: std::sync::atomic::AtomicUsize,
 }
 
 pub struct RemoteServer {
@@ -134,6 +135,7 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
         static_bundle: config.static_bundle,
         local_addr,
         shutdown: shutdown_rx.clone(),
+        connections: std::sync::atomic::AtomicUsize::new(0),
     });
     let thread_shared = shared.clone();
     let thread = std::thread::Builder::new()
@@ -162,9 +164,16 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
                     .await;
                     match next {
                         Next::Accepted(Ok((stream, peer))) => {
+                            use std::sync::atomic::Ordering;
+                            if thread_shared.connections.fetch_add(1, Ordering::Relaxed) >= 256 {
+                                thread_shared.connections.fetch_sub(1, Ordering::Relaxed);
+                                continue;
+                            }
                             let shared = thread_shared.clone();
                             smol::spawn(async move {
-                                if let Err(error) = handle_connection(stream, peer, shared).await {
+                                let result = handle_connection(stream, peer, shared.clone()).await;
+                                shared.connections.fetch_sub(1, Ordering::Relaxed);
+                                if let Err(error) = result {
                                     log::debug!("remote connection ended: {error}");
                                 }
                             })
@@ -213,6 +222,9 @@ async fn handle_connection(
             return Err(error);
         }
     };
+    if request.method == "CONNECT" || request.path.starts_with("http://") {
+        return crate::proxy::handle(stream, request, peer, &shared).await;
+    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/ws") if is_websocket_upgrade(&request) => {
             websocket(stream, request, shared).await

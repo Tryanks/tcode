@@ -8741,6 +8741,7 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",

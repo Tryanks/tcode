@@ -25,7 +25,8 @@ where
                 "HTTP head exceeds 16 KiB",
             ));
         }
-        let mut chunk = [0_u8; 1024];
+        // Do not consume tunnel or streaming proxy bytes past the header.
+        let mut chunk = [0_u8; 1];
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
             return Err(io::Error::new(
@@ -69,9 +70,25 @@ where
         let (name, value) = line
             .split_once(':')
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed HTTP header"))?;
-        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+            || value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() && byte != b'\t')
+            || headers
+                .insert(name.to_ascii_lowercase(), value.trim().to_owned())
+                .is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or duplicate HTTP header",
+            ));
+        }
     }
-    let content_length = match headers.get("content-length") {
+    let proxy = method == "CONNECT" || target.starts_with("http://");
+    let content_length = match headers.get("content-length").filter(|_| !proxy) {
         Some(value) => value
             .parse::<usize>()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad Content-Length"))?,
@@ -102,7 +119,12 @@ where
         }
         body.extend_from_slice(&chunk[..read]);
     }
-    let path = target.split('?').next().unwrap_or(target).to_owned();
+    let path = if proxy {
+        target
+    } else {
+        target.split('?').next().unwrap_or(target)
+    }
+    .to_owned();
     Ok(Request {
         method: method.to_owned(),
         path,

@@ -29,6 +29,7 @@ const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = None;
 const DEFAULT_LISTEN: &str = "0.0.0.0:47420";
 
 fn main() {
+    env_logger::init();
     if let Err(error) = run(std::env::args().skip(1).collect()) {
         eprintln!("tcode-headless: {error}");
         std::process::exit(1);
