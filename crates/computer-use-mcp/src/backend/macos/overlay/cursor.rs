@@ -282,10 +282,11 @@ pub(super) fn verify_native() -> u32 {
     let mut cursor = CursorUi::new().expect("native cursor panel");
     cursor.show(OverlayActionKind::Click, (100.0, 100.0), display, true);
     pump();
+    let initial = super::ffi::native_panel_state(cursor.window).0;
     cursor.show(OverlayActionKind::Move, (300.0, 200.0), display, true);
     pump();
     let (frame, visible, passthrough, number) = super::ffi::native_panel_state(cursor.window);
-    let expected = window_origin(ax_screen_to_appkit((300.0, 200.0), display));
+    let expected = CGPoint::new(initial.origin.x + 200.0, initial.origin.y - 100.0);
     assert!(
         (frame.origin.x - expected.x).abs() < 1.0 && (frame.origin.y - expected.y).abs() < 1.0,
         "latest move must reach its endpoint: {frame:?}, expected {expected:?}"
@@ -294,10 +295,21 @@ pub(super) fn verify_native() -> u32 {
     cursor.show_drag((300.0, 200.0), (500.0, 300.0), display, display, true);
     pump();
     let (frame, _, _, _) = super::ffi::native_panel_state(cursor.window);
-    let expected = window_origin(ax_screen_to_appkit((500.0, 300.0), display));
+    let expected = CGPoint::new(initial.origin.x + 400.0, initial.origin.y - 200.0);
     assert!(
         (frame.origin.x - expected.x).abs() < 1.0 && (frame.origin.y - expected.y).abs() < 1.0,
         "drag must reach its final endpoint, not remain at its start"
+    );
+    cursor.show(OverlayActionKind::Move, (700.0, 100.0), display, true);
+    cursor.hide();
+    cursor.show(OverlayActionKind::Click, (200.0, 400.0), display, true);
+    pump();
+    let (frame, visible, _, _) = super::ffi::native_panel_state(cursor.window);
+    assert!(
+        visible
+            && (frame.origin.x - initial.origin.x - 100.0).abs() < 1.0
+            && (frame.origin.y - initial.origin.y + 300.0).abs() < 1.0,
+        "an older animation must not restore its endpoint after hide and new feedback"
     );
     assert!(super::ffi::window_exists(number));
     let _ = send_void(cursor.window, c"close");

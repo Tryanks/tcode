@@ -401,6 +401,38 @@ unsafe extern "C" fn poll_foreground(_context: *mut c_void) {
     }
 }
 
+#[cfg(all(test, target_arch = "aarch64"))]
+#[allow(dead_code)] // Entry point for the opt-in main-thread integration runner.
+pub(crate) fn verify_native() {
+    let _ = class(c"NSApplication").and_then(|app| send_id(app, c"sharedApplication"));
+    let foreground = super::ax::frontmost_application_pid();
+    let closed_window = cursor::verify_native();
+    let mut state = OverlayState {
+        cursor: None,
+        target: None,
+        poll_armed: true,
+    };
+    let target = Target {
+        pid: std::process::id(),
+        window_id: closed_window,
+        publication: Publication {
+            revision: 1,
+            expires_at: Instant::now() + ACTION_LIFETIME,
+            feedback: None,
+        },
+    };
+    state.show_action(target, OverlayActionKind::Move, (300.0, 200.0));
+    assert!(
+        state.target.is_none() && state.cursor.is_none(),
+        "a queued action reaching a closed native target must not recreate a marker"
+    );
+    assert_eq!(
+        super::ax::frontmost_application_pid(),
+        foreground,
+        "overlay must not activate an app"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,36 +578,4 @@ mod tests {
             "actual service teardown invalidates queued publication"
         );
     }
-}
-
-#[cfg(all(test, target_arch = "aarch64"))]
-#[allow(dead_code)] // Entry point for the opt-in main-thread integration runner.
-pub(crate) fn verify_native() {
-    let _ = class(c"NSApplication").and_then(|app| send_id(app, c"sharedApplication"));
-    let foreground = super::ax::frontmost_application_pid();
-    let closed_window = cursor::verify_native();
-    let mut state = OverlayState {
-        cursor: None,
-        target: None,
-        poll_armed: true,
-    };
-    let target = Target {
-        pid: std::process::id(),
-        window_id: closed_window,
-        publication: Publication {
-            revision: 1,
-            expires_at: Instant::now() + ACTION_LIFETIME,
-            feedback: None,
-        },
-    };
-    state.show_action(target, OverlayActionKind::Move, (300.0, 200.0));
-    assert!(
-        state.target.is_none() && state.cursor.is_none(),
-        "a queued action reaching a closed native target must not recreate a marker"
-    );
-    assert_eq!(
-        super::ax::frontmost_application_pid(),
-        foreground,
-        "overlay must not activate an app"
-    );
 }
