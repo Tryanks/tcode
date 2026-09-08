@@ -443,7 +443,9 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
     session.send(
         "saved=$(stty -g); stty raw -echo min 0 time 20; printf '\\033[c'; sleep 1; reply=$(dd bs=1 count=64 2>/dev/null); stty \"$saved\"; printf '\\n\\104\\101%s\\n' \"${#reply}\"\r",
     );
-    session.wait_for("DA");
+    // Wait for the sentinel with its length, so a slow runner cannot pass the
+    // host check on a partial line and then fail on the replica.
+    session.wait_for("DA16");
     first.settle(&session.terminal);
     let text = frame_text(&first.frame).join("\n");
     assert!(
