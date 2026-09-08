@@ -417,7 +417,6 @@ impl ChatView {
                 let _ = chat.update(cx, |chat, cx| {
                     if history_prefetch_due(&chat.list_state, visible_turns.start)
                         && !chat.list_state.is_following_tail()
-                        && chat.workspace_store.read(cx).history_error().is_none()
                     {
                         chat.workspace_store
                             .update(cx, |store, cx| store.load_earlier_messages(cx));
@@ -2648,41 +2647,22 @@ impl Render for ChatView {
                     .min_h_0()
                     .relative()
                     .when(
-                        self.workspace_store.read(cx).history_available(),
+                        self.workspace_store.read(cx).history_loading(),
                         |container| {
-                            let loading = self.workspace_store.read(cx).history_loading();
                             container.child(
                                 div()
-                                    .id("load-earlier-messages")
-                                    .role(Role::Button)
-                                    .aria_label(crate::tr!("chat.load_earlier").into_owned())
+                                    .id("history-activity")
                                     .flex_none()
-                                    .py_2()
-                                    .text_center()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.workspace_store.update(cx, |store, cx| {
-                                            store.load_earlier_messages(cx)
-                                        });
-                                    }))
-                                    .child(if loading {
-                                        crate::tr!("chat.history_loading")
-                                    } else {
-                                        crate::tr!("chat.load_earlier")
-                                    }),
+                                    .h(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        crate::widgets::spinner::Spinner::new()
+                                            .xsmall()
+                                            .color(cx.theme().muted_foreground),
+                                    ),
                             )
-                        },
-                    )
-                    .when_some(
-                        self.workspace_store
-                            .read(cx)
-                            .history_error()
-                            .map(str::to_owned),
-                        |container, error| {
-                            container
-                                .child(div().flex_none().px_4().text_size(px(12.)).child(error))
                         },
                     )
                     .child(timeline)
@@ -3315,6 +3295,11 @@ mod tests {
             &list,
             list.logical_scroll_top().item_ix
         ));
+        list.set_offset_from_scrollbar(gpui::point(px(0.), px(0.)));
+        assert!(
+            history_prefetch_due(&list, 0),
+            "the loaded boundary still prefetches without a button"
+        );
         let unmeasured = ListState::new(60, ListAlignment::Bottom, px(0.));
         assert!(history_prefetch_due(&unmeasured, 19));
         assert!(!history_prefetch_due(&unmeasured, 20));
@@ -3347,6 +3332,9 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+        let before_prepend = list.logical_scroll_top();
+        assert_eq!(before_prepend.item_ix, 10);
+        assert_eq!(before_prepend.offset_in_item, px(7.));
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, full, cx);
             cx.notify();
