@@ -58,7 +58,11 @@ tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false }
 gpui = { package = "gpui-pre", version = "0.3.1" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" } # 0.6.0 on crates.io pulls an unused gpui-pre-platform that breaks iOS/Android; switch back once 0.6.1 ships
+# Temporary fork until upstream accepts caret reveal and selection cancellation:
+# https://github.com/longbridge/gpui-kit/pull/3011
+# https://github.com/longbridge/gpui-kit/pull/3012
+# Retains the mobile dependency fix absent from crates.io 0.6.0.
+gpui-base = { git = "https://github.com/Tryanks/gpui-kit", rev = "e12d6962f8b5b8807b7539e362608e79f55d73e1" }
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }
 gpui-component-macros = "0.6.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
