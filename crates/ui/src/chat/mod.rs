@@ -332,6 +332,7 @@ pub struct ChatView {
     terminal_drawer: Entity<TerminalDrawer>,
     terminal_was_open: bool,
     list_state: ListState,
+    history_placeholder_height: gpui::Pixels,
     turn_items: Vec<TurnListItem>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
@@ -363,13 +364,12 @@ pub struct ChatView {
 
 // ListState retains measured row heights, so variable-height turns use the same
 // pixel geometry as scrolling rather than treating a long turn as one short row.
-fn history_prefetch_due(list: &ListState, first_visible: usize) -> bool {
+fn history_screens_covered(list: &ListState, placeholder: gpui::Pixels) -> Option<f32> {
     let height = list.viewport_bounds().size.height;
-    if height > px(0.) {
-        -list.scroll_px_offset_for_scrollbar().y <= height * 6.
-    } else {
-        first_visible < 20
-    }
+    (height > px(0.)).then(|| {
+        let above = -list.scroll_px_offset_for_scrollbar().y - placeholder;
+        f32::from(above.max(px(0.))) / f32::from(height)
+    })
 }
 
 fn jump_to_latest_visible(list: &ListState) -> bool {
@@ -415,7 +415,11 @@ impl ChatView {
                 Composer::new(workspace_store.clone(), window, cx)
             }
         });
-        let overdraw = timeline_overdraw(f32::from(window.bounds().size.height));
+        // Measure enough rows to establish the six-screen window even when
+        // distant rows still have unknown heights in ListState's summary.
+        let height = f32::from(window.bounds().size.height);
+        let overdraw =
+            timeline_overdraw(height).max(height * (crate::store::HISTORY_WINDOW_SCREENS + 1.));
         let list_state = ListState::new(0, ListAlignment::Bottom, px(overdraw));
         list_state.set_follow_mode(FollowMode::Tail);
         let chat = cx.entity().downgrade();
@@ -424,12 +428,6 @@ impl ChatView {
             let chat = chat.clone();
             window.defer(cx, move |_, cx| {
                 let _ = chat.update(cx, |chat, cx| {
-                    if history_prefetch_due(&chat.list_state, visible_turns.start)
-                        && !chat.list_state.is_following_tail()
-                    {
-                        chat.workspace_store
-                            .update(cx, |store, cx| store.prefetch_earlier_messages(cx));
-                    }
                     chat.set_markdown_visible_turns(visible_turns, cx);
                 });
             });
@@ -469,6 +467,7 @@ impl ChatView {
             terminal_drawer,
             terminal_was_open,
             list_state,
+            history_placeholder_height: px(0.),
             turn_items: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
@@ -564,7 +563,20 @@ impl ChatView {
         match list_sync {
             ListSync::None => {}
             ListSync::Prepend { count, remeasure } => {
+                let anchor = self.list_state.logical_scroll_top();
+                let following = self.list_state.is_following_tail();
                 self.list_state.splice(0..0, count);
+                if self.history_placeholder_height > px(0.) {
+                    // The reservation moves to the new first turn. Remove it
+                    // from the former first turn without moving its content.
+                    self.list_state.remeasure_items(count..count + 1);
+                    if anchor.item_ix == 0 && !following {
+                        self.list_state.scroll_to(ListOffset {
+                            item_ix: count,
+                            offset_in_item: anchor.offset_in_item - self.history_placeholder_height,
+                        });
+                    }
+                }
                 for index in remeasure {
                     self.list_state.remeasure_items(index..index + 1);
                 }
@@ -2499,16 +2511,38 @@ impl Render for ChatView {
             self.list_state.set_follow_mode(FollowMode::Normal);
         }
         self.sync_markdown_scroll_position(cx);
-        // Direct touch-handle scrolling bypasses ListState's wheel callback.
-        // Keep history prefetch tied to the resulting position on every frame.
-        if history_prefetch_due(
-            &self.list_state,
-            self.list_state.logical_scroll_top().item_ix,
-        ) && !self.list_state.is_following_tail()
-            && self.workspace_store.read(cx).history_error().is_none()
-        {
-            self.workspace_store
-                .update(cx, |store, cx| store.load_earlier_messages(cx));
+        // Measure after this frame's list layout, including the initial tail
+        // frame and frames caused by prepends. No scroll event is required.
+        let chat = cx.entity().downgrade();
+        window.on_next_frame(move |_, cx| {
+            let _ = chat.update(cx, |chat, cx| {
+                if let Some(screens) =
+                    history_screens_covered(&chat.list_state, chat.history_placeholder_height)
+                {
+                    chat.workspace_store.update(cx, |store, cx| {
+                        store.update_history_window(screens, cx);
+                    });
+                }
+            });
+        });
+        let placeholder = if self.workspace_store.read(cx).history_available() {
+            self.list_state.viewport_bounds().size.height.max(px(1.))
+        } else {
+            px(0.)
+        };
+        if placeholder != self.history_placeholder_height && !self.turn_items.is_empty() {
+            let anchor = self.list_state.logical_scroll_top();
+            let following = self.list_state.is_following_tail();
+            self.list_state.remeasure_items(0..1);
+            if anchor.item_ix == 0 && !following {
+                self.list_state.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: (anchor.offset_in_item + placeholder
+                        - self.history_placeholder_height)
+                        .max(px(0.)),
+                });
+            }
+            self.history_placeholder_height = placeholder;
         }
         let active = self.workspace_store.read(cx).chat_active_session();
 
@@ -2618,9 +2652,9 @@ impl Render for ChatView {
                     window,
                     cx,
                 );
-                h_flex()
+                v_flex()
                     .w_full()
-                    .justify_center()
+                    .items_center()
                     .px(px(if this.window_state.read(cx).compact {
                         16.
                     } else {
@@ -2635,6 +2669,39 @@ impl Render for ChatView {
                     // output). Without it this flex item grows to that content
                     // and the column runs past the page inset instead of
                     // scrolling inside it.
+                    .when(
+                        index == 0 && this.history_placeholder_height > px(0.),
+                        |item| {
+                            item.child(
+                                div()
+                                    .w_full()
+                                    .h(this.history_placeholder_height)
+                                    .flex_none()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_end()
+                                    .when(
+                                        this.workspace_store.read(cx).history_loading(),
+                                        |space| {
+                                            space.child(
+                                                div()
+                                                    .id("history-activity")
+                                                    .h(px(24.))
+                                                    .flex_none()
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(
+                                                        crate::widgets::spinner::Spinner::new()
+                                                            .xsmall()
+                                                            .color(cx.theme().muted_foreground),
+                                                    ),
+                                            )
+                                        },
+                                    ),
+                            )
+                        },
+                    )
                     .child(
                         div()
                             .w_full()
@@ -2684,25 +2751,6 @@ impl Render for ChatView {
                     .flex_1()
                     .min_h_0()
                     .relative()
-                    .when(
-                        self.workspace_store.read(cx).history_loading(),
-                        |container| {
-                            container.child(
-                                div()
-                                    .id("history-activity")
-                                    .flex_none()
-                                    .h(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(
-                                        crate::widgets::spinner::Spinner::new()
-                                            .xsmall()
-                                            .color(cx.theme().muted_foreground),
-                                    ),
-                            )
-                        },
-                    )
                     .child(timeline)
                     .child(
                         gpui::canvas(
@@ -3514,39 +3562,35 @@ mod tests {
     }
 
     #[gpui::test]
-    fn history_prefetch_starts_six_screens_before_the_top(cx: &mut TestAppContext) {
-        use super::history_prefetch_due;
-        use gpui::{FollowMode, ListAlignment, ListState, px};
-        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(60));
-        let (view, cx) =
-            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
-        cx.simulate_resize(gpui::size(px(393.), px(852.)));
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
-        let height = list.viewport_bounds().size.height;
-        assert!(height > px(0.));
-        list.set_follow_mode(FollowMode::Normal);
-        list.set_offset_from_scrollbar(gpui::point(px(0.), -(height * 6. + px(1.))));
-        assert!(!history_prefetch_due(
-            &list,
-            list.logical_scroll_top().item_ix
-        ));
-        list.set_offset_from_scrollbar(gpui::point(px(0.), -height * 6.));
-        assert!(list.logical_scroll_top().item_ix > 0);
-        assert!(history_prefetch_due(
-            &list,
-            list.logical_scroll_top().item_ix
-        ));
-        list.set_offset_from_scrollbar(gpui::point(px(0.), px(0.)));
-        assert!(
-            history_prefetch_due(&list, 0),
-            "the loaded boundary still prefetches without a button"
-        );
-        let unmeasured = ListState::new(60, ListAlignment::Bottom, px(0.));
-        assert!(history_prefetch_due(&unmeasured, 19));
-        assert!(!history_prefetch_due(&unmeasured, 20));
+    fn history_window_is_measured_on_open_while_following_tail(cx: &mut TestAppContext) {
+        use gpui::px;
+        for (turns, short) in [(1, true), (60, false)] {
+            let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(turns));
+            let (view, cx) =
+                cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+            cx.simulate_resize(gpui::size(px(393.), px(852.)));
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+            assert!(list.is_following_tail(), "no scroll has happened on open");
+            let screens = super::history_screens_covered(&list, px(0.)).expect("laid out viewport");
+            assert_eq!(
+                screens < 6.,
+                short,
+                "the initial window uses the scroll-ahead threshold"
+            );
+            list.set_follow_mode(gpui::FollowMode::Normal);
+            list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(100.),
+            });
+            assert_eq!(
+                super::history_screens_covered(&list, px(200.)),
+                Some(0.),
+                "reserved incoming space is not loaded history"
+            );
+        }
     }
 
     #[gpui::test]
@@ -3592,6 +3636,65 @@ mod tests {
             "the same turn must remain visible after 20 earlier turns"
         );
         assert_eq!(anchor.offset_in_item, px(7.));
+        assert!(!list.is_following_tail());
+    }
+
+    #[gpui::test]
+    fn incoming_page_replaces_scrollable_reservation_without_moving_content(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{FollowMode, ListOffset, px};
+        let full = synthetic_markdown_timeline(60);
+        let mut tail = synthetic_markdown_timeline(60);
+        tail.turns.drain(..20);
+        tail.entries.retain(|entry| entry.turn >= 20);
+        for entry in &mut tail.entries {
+            std::sync::Arc::make_mut(entry).turn -= 20;
+        }
+        let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        for _ in 0..2 {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let (list, placeholder) = view.read_with(cx, |chat, _| {
+            (chat.list_state.clone(), chat.history_placeholder_height)
+        });
+        assert!(placeholder > px(100.));
+        list.set_follow_mode(FollowMode::Normal);
+        // Scroll past the first content into the incoming page's reservation.
+        list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: placeholder - px(100.),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let content_top = list.bounds_for_item(0).unwrap().top() + placeholder;
+        assert!(
+            content_top > list.viewport_bounds().top(),
+            "scroll continues above loaded content"
+        );
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, full, cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let after = list
+            .bounds_for_item(20)
+            .expect("previous first turn remains on screen")
+            .top();
+        assert!(
+            (after - content_top).abs() < px(1.),
+            "incoming content replaces reserved space at the same pixel anchor: {content_top:?} -> {after:?}"
+        );
         assert!(!list.is_following_tail());
     }
 
@@ -3885,19 +3988,20 @@ This begins after the hard break."#;
         ));
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&id).expect("selected draft");
-            active.timeline = Timeline::default();
-            active.timeline.turns = vec![TurnMeta::default()];
-            active.timeline.entries = vec![
-                entry("user", user_item("render a long document")),
-                entry("assistant", assistant(DEMO_MARKDOWN)),
-            ];
-            active.draft = false;
-            (active.meta.id.clone(), active.timeline.clone())
-        }))
-        .expect("seed markdown host");
+        let (session_id, timeline) =
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                let id = state.start_draft("markdown-test".into(), std::env::temp_dir(), cx);
+                let active = state.residents.live.get_mut(&id).expect("selected draft");
+                active.timeline = Timeline::default();
+                active.timeline.turns = vec![TurnMeta::default()];
+                active.timeline.entries = vec![
+                    entry("user", user_item("render a long document")),
+                    entry("assistant", assistant(DEMO_MARKDOWN)),
+                ];
+                active.draft = false;
+                (active.meta.id.clone(), active.timeline.clone())
+            }))
+            .expect("seed markdown host");
         let workspace_store = cx.new(|cx| crate::store::WorkspaceStore::new(host.link(), cx));
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, timeline, cx);
@@ -4024,6 +4128,14 @@ This begins after the hard break."#;
         cx: &mut TestAppContext,
         timeline: Timeline,
     ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
+        seed_chat_with_history(cx, timeline, false)
+    }
+
+    fn seed_chat_with_history(
+        cx: &mut TestAppContext,
+        timeline: Timeline,
+        paged: bool,
+    ) -> (Entity<WorkspaceStore>, Entity<WindowState>, String) {
         use tcode_runtime::pipe::{HostServices, spawn_host};
         use tcode_services::store::SessionStore;
 
@@ -4037,14 +4149,28 @@ This begins after the hard break."#;
         ));
         let store = SessionStore::open_at(data_root).expect("test session store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
-            let id = state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
-            let active = state.residents.live.get_mut(&id).expect("selected draft");
-            active.timeline = timeline;
-            active.draft = false;
-            (active.meta.id.clone(), active.timeline.clone())
-        }))
-        .expect("seed markdown host");
+        let (session_id, timeline) =
+            smol::block_on(host.update_state_for_test(move |state, cx| {
+                let id =
+                    state.start_draft("markdown-residency-test".into(), std::env::temp_dir(), cx);
+                if paged {
+                    for ts in 0..2000 {
+                        state.record_event_for_replica_test(
+                            &id,
+                            ts,
+                            &agent::AgentEvent::Warning {
+                                message: "short".into(),
+                            },
+                            cx,
+                        );
+                    }
+                }
+                let active = state.residents.live.get_mut(&id).expect("selected draft");
+                active.timeline = timeline;
+                active.draft = false;
+                (active.meta.id.clone(), active.timeline.clone())
+            }))
+            .expect("seed markdown host");
         let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);

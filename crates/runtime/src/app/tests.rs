@@ -6640,6 +6640,12 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
             after: None,
         };
         let snapshot = state.subscription_snapshot(&subscription).unwrap();
+        assert!(
+            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
+                .unwrap()
+                .len()
+                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
+        );
         let ServerEvent::SessionSnapshot {
             from,
             records: tail,
@@ -6650,8 +6656,8 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
         else {
             panic!("snapshot")
         };
-        assert_eq!((from, total, truncated), (1800, 2000, false));
-        assert_eq!(tail, records[1800..]);
+        assert_eq!((from, total, truncated), (1600, 2000, false));
+        assert_eq!(tail, records[1600..]);
         let mut before = from;
         let mut loaded = tail;
         while before > 0 {

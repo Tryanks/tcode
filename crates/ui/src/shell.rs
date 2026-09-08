@@ -2534,6 +2534,59 @@ mod tests {
             subscriptions, 1,
             "baseline reconciliation must not select again"
         );
+        for (topic, event) in [
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                Topic::SessionEvents {
+                    session_id: "thread-a".into(),
+                },
+                ServerEvent::SessionSnapshot {
+                    from: 1800,
+                    records: (0..200)
+                        .map(|_| {
+                            agent::AgentEvent::Warning {
+                                message: "short".into(),
+                            }
+                            .into()
+                        })
+                        .collect(),
+                    total: 2000,
+                    total_turns: 1,
+                    truncated: false,
+                },
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        draw(cx);
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            sent(&host).into_iter().any(|payload| matches!(
+                payload,
+                ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+                    before: 1800,
+                    limit: 200,
+                    ..
+                })
+            )),
+            "restored short history must prefetch before any scroll"
+        );
         shell.read_with(cx, |shell, cx| {
             assert_eq!(
                 shell.window_state.read(cx).history().last(),

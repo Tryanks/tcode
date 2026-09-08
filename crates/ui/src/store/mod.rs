@@ -36,6 +36,7 @@ use terminal::TerminalWorkspace;
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
 mod history;
+pub(crate) use history::HISTORY_WINDOW_SCREENS;
 mod images;
 mod intents;
 pub(crate) use images::host_image;
@@ -150,6 +151,8 @@ pub struct WorkspaceStore {
     session_turn_offset: usize,
     history_task: Option<Task<()>>,
     history_error: Option<String>,
+    history_pages_fetched: usize,
+    history_logged_records: Option<usize>,
     session_catching_up: bool,
     session_statuses: HashMap<String, SessionStatus>,
     git_statuses: HashMap<String, GitStatusStatus>,
@@ -324,6 +327,8 @@ impl WorkspaceStore {
             session_turn_offset: 0,
             history_task: None,
             history_error: None,
+            history_pages_fetched: 0,
+            history_logged_records: None,
             session_catching_up: false,
             session_statuses: HashMap::new(),
             git_statuses: HashMap::new(),
@@ -2859,14 +2864,35 @@ mod tests {
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, false, cx)
         });
-        workspace.update(cx, |store, _| {
+        workspace.update(cx, |store, cx| {
             store.selected_session_id = Some("large".into());
-            store.session_from.insert("large".into(), 1800);
-            store.session_replica = Some(("large".into(), Default::default()));
             store.session_status_replica = Some(status);
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "large".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        from: 1800,
+                        records: (0..200)
+                            .map(|_| {
+                                agent::AgentEvent::Warning {
+                                    message: "short".into(),
+                                }
+                                .into()
+                            })
+                            .collect(),
+                        total: 2000,
+                        total_turns: 1,
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
         });
         while outgoing.try_recv().is_ok() {}
-        workspace.update(cx, |store, cx| store.prefetch_earlier_messages(cx));
+        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
         cx.run_until_parked();
         let mut request =
             tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
@@ -2888,7 +2914,7 @@ mod tests {
             "scrolling while loading must not queue another page"
         );
 
-        for page in 0..3 {
+        for page in 0..4 {
             let before = 1800 - page * 200;
             assert!(matches!(
                 request.payload,
@@ -2938,7 +2964,11 @@ mod tests {
             cx.executor()
                 .advance_clock(std::time::Duration::from_millis(250));
             cx.run_until_parked();
-            if page < 2 {
+            workspace.update(cx, |store, cx| {
+                store.update_history_window(if page < 3 { 2. + page as f32 } else { 6. }, cx);
+            });
+            cx.run_until_parked();
+            if page < 3 {
                 wait_until(cx, &workspace, "next prefetch request", |_| {
                     !outgoing.is_empty()
                 });
@@ -2948,11 +2978,11 @@ mod tests {
         }
         assert!(
             outgoing.try_recv().is_err(),
-            "stop after warming 600 events"
+            "stop when six screens are covered, without a scroll event"
         );
         workspace.read_with(cx, |store, _| {
-            assert_eq!(store.session_from["large"], 1200);
-            assert_eq!(store.session_records["large"].len(), 600);
+            assert_eq!(store.session_from["large"], 1000);
+            assert_eq!(store.session_records["large"].len(), 1000);
             assert!(!store.history_loading());
         });
     }

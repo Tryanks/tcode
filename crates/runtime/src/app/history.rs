@@ -80,10 +80,7 @@ impl AppState {
             |session| session.timeline.turns.len(),
         ) as u64;
         let after = subscription.after.filter(|after| *after <= total as u64);
-        let from = after.map_or_else(
-            || total.saturating_sub(SESSION_HISTORY_RECORDS),
-            |after| after as usize,
-        );
+        let from = after.map_or_else(|| total.saturating_sub(400), |after| after as usize);
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
             topic: subscription.topic.clone(),

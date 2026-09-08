@@ -15,7 +15,12 @@ pub fn android_main(app: android_activity::AndroidApp) {
 
     android_logger::init_once(
         android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
+            .with_max_level(log::LevelFilter::Debug)
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .parse("info,tcode_ui::store::history=debug")
+                    .build(),
+            )
             .with_tag("Tcode-GPUI"),
     );
     std::panic::set_hook(Box::new(|panic| {

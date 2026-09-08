@@ -220,6 +220,8 @@ impl WorkspaceStore {
         self.selection_generation = self.selection_generation.wrapping_add(1);
         self.history_task = None;
         self.history_error = None;
+        self.history_pages_fetched = 0;
+        self.history_logged_records = None;
         self.session_turn_offset = 0;
         self.session_catching_up = false;
         self.clear_terminal_topics();
