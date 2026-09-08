@@ -69,6 +69,10 @@ The embedded [theme](../themes/tcode.json) owns colors and font choices;
 geometry and radii. Use those definitions rather than maintaining a second
 palette in documentation.
 
+Browser shell icons are embedded from the same dependency-owned icon set that
+generates the shared icon names. Rendering navigation never requires a separate
+asset server or internet access.
+
 DM Sans is bundled for UI text and comes from the same font resource on every
 client. Desktop monospace text uses the configured system family; iOS and
 Android register the bundled Lilex in its place. Android uses the system
