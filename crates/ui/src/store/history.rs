@@ -1,5 +1,7 @@
 use super::*;
 
+pub(crate) const HISTORY_WINDOW_SCREENS: f32 = 6.;
+
 impl WorkspaceStore {
     pub(crate) fn history_available(&self) -> bool {
         self.selected_session_id
@@ -25,15 +27,37 @@ impl WorkspaceStore {
         }
     }
 
-    pub(crate) fn prefetch_earlier_messages(&mut self, cx: &mut Context<Self>) {
-        self.load_history_pages(600, false, cx);
+    /// Geometry is reported after layout, including the first frame on restore.
+    /// Event counts cannot predict the height of folded turns.
+    pub(crate) fn update_history_window(&mut self, screens: f32, cx: &mut Context<Self>) {
+        if self.session_loading() || !screens.is_finite() {
+            return;
+        }
+        let records = self
+            .selected_session_id
+            .as_ref()
+            .and_then(|id| self.session_records.get(id))
+            .map_or(0, Vec::len);
+        if self.history_logged_records != Some(records) {
+            log::debug!(
+                "history-window session={:?} records_loaded={} screens_covered={:.2} pages_fetched={}",
+                self.selected_session_id,
+                records,
+                screens.max(0.),
+                self.history_pages_fetched
+            );
+            self.history_logged_records = Some(records);
+        }
+        if screens < HISTORY_WINDOW_SCREENS && self.history_error.is_none() {
+            self.load_earlier_messages(cx);
+        }
     }
 
     pub(crate) fn load_earlier_messages(&mut self, cx: &mut Context<Self>) {
-        self.load_history_pages(0, false, cx);
+        self.load_history_pages(cx);
     }
 
-    fn load_history_pages(&mut self, remaining: usize, pause: bool, cx: &mut Context<Self>) {
+    fn load_history_pages(&mut self, cx: &mut Context<Self>) {
         if self.history_task.is_some() || !self.history_available() || self.session_loading() {
             return;
         }
@@ -43,11 +67,6 @@ impl WorkspaceStore {
         let host = self.host.clone();
         self.history_error = None;
         self.history_task = Some(cx.spawn(async move |this, cx| {
-            if pause {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
-                    .await;
-            }
             let result = host
                 .query(Query::SessionHistoryPage {
                     session_id: session_id.clone(),
@@ -59,14 +78,13 @@ impl WorkspaceStore {
                 if store.selection_generation != generation {
                     return false;
                 }
-                let mut remaining = remaining;
                 match result {
                     Ok(QueryResponse::SessionHistoryPage { records, from, .. })
                         if from < before
                             && from + records.len() as u64 == before
                             && store.session_from.get(&session_id) == Some(&before) =>
                     {
-                        remaining = remaining.saturating_sub(records.len());
+                        store.history_pages_fetched += 1;
                         let previous_turns = store
                             .session_replica
                             .as_ref()
@@ -97,28 +115,26 @@ impl WorkspaceStore {
                     }
                 }
                 let failed = store.history_error.is_some();
-                if !failed {
-                    store.history_task = None;
-                    if remaining > 0 {
-                        // Reserve the request gate while yielding between pages.
-                        store.load_history_pages(remaining, true, cx);
-                    }
-                    store.load_pending_chat_history(cx);
-                }
                 cx.notify();
                 failed
             }).unwrap_or(false);
-            if failed {
-                // Retain the task as the request gate during cooldown, but hide
-                // activity. Selection changes cancel both the request and cooldown.
-                cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
-                let _ = this.update(cx, |store, cx| {
-                    if store.selection_generation == generation {
-                        store.history_task = None;
-                        cx.notify();
+            // Keep the single request gate reserved while layout measures the
+            // prepended rows. The next request uses that fresh geometry.
+            cx.background_executor().timer(if failed {
+                std::time::Duration::from_secs(5)
+            } else {
+                std::time::Duration::from_millis(250)
+            }).await;
+            let _ = this.update(cx, |store, cx| {
+                if store.selection_generation == generation {
+                    store.history_task = None;
+                    if failed {
+                        store.history_error = None;
                     }
-                });
-            }
+                    store.load_pending_chat_history(cx);
+                    cx.notify();
+                }
+            });
         }));
         cx.notify();
     }

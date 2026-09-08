@@ -179,13 +179,17 @@ menu.
 
 ## Timeline history
 
-A newly opened conversation starts with the last 200 event records. Earlier
-history loads silently and automatically when the viewport top is within six
-viewport heights of the first loaded record (the first 20 rows before geometry
-is known). Only one page of at most 200 records loads at a time; automatic
-prefetch warms 600 events, yielding briefly between pages. Leaving the
-conversation cancels the sequence. While loading, a 24pt row above the loaded
-range shows only a small centered spinner. There is no load control,
+A newly opened conversation starts with up to the last 400 event records, within
+an 8 MiB envelope. On the first layout (including cold-start restore), and after
+every prepend, earlier history loads until the content above the viewport covers
+six viewport heights or history is exhausted. The same six-screen threshold
+triggers scroll-ahead loading. Only one page of at most 200 records loads at a
+time, with a 250ms yield between pages so layout can measure the new content.
+Leaving the conversation cancels the sequence. A one-viewport placeholder before
+the first loaded turn reserves scrollable space for incoming history; while
+loading, its bottom 24pt row shows a small centered spinner. The reservation is
+excluded from the loaded-window measurement and moves back as pages arrive,
+preserving the visible turn and pixel offset. There is no load control,
 end-of-history message, or page-error feedback. Failed pages are logged and
 retried when the prefetch condition is met again, with at most one retry per
 five seconds.
