@@ -914,6 +914,7 @@ toast:
   hide_details: "收起详情"
   copy_error: "复制错误"
 remote:
+  allow_devices: "允许其他设备连接"
   apply: "应用"
   host:
     section: "这台主机"
@@ -1013,3 +1014,15 @@ mobile:
   approval_mode: "审批模式"
   settings: "设置"
   more_actions: "更多操作"
+
+web_auth:
+  setup: "设置密码"
+  login: "登录"
+  description: "使用密码打开这台机器的 tcode。"
+  password: "密码"
+  confirm: "再次输入密码"
+  minimum: "至少 8 个字符"
+  mismatch: "两次输入的密码不一致"
+  failed: "密码错误或暂时锁定，请稍后重试。"
+  conflict: "密码已设置，请使用该密码登录。"
+  network: "无法连接，请重试。"

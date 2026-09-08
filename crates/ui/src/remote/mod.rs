@@ -9,8 +9,8 @@
 //!
 //! **Hosting** — the listener, discovery beacon, minted codes and paired
 //! devices — is a genuine setting of *this machine* and lives in
-//! [`hosting`], behind `remote-hosting`, inside Settings → Remote. A browser
-//! cannot listen or advertise, so that half simply does not exist there.
+//! `hosting`, behind `remote-hosting`, inside Settings → Remote. The browser
+//! uses `hosted` to control its headless listener over the authenticated pipe.
 
 use crate::touch_scroll::TouchScrollExt as _;
 use std::rc::Rc;
@@ -40,6 +40,11 @@ use crate::window_state::{Destination, WindowState};
 
 #[cfg(feature = "remote-hosting")]
 mod hosting;
+
+#[cfg(target_family = "wasm")]
+pub(crate) mod hosted;
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+mod qr;
 
 #[cfg(feature = "remote-hosting")]
 pub use hosting::{HostingPanel, RemoteController, machine_name};

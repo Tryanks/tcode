@@ -55,16 +55,16 @@ enum Section {
     Browser,
     ComputerUse,
     Orchestrate,
-    #[cfg(feature = "remote-hosting")]
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
     Remote,
     Archived,
 }
 
 /// Navigation order, shared by the desktop rail and the compact section list.
 /// Device-local settings come first; replicated settings for the attached
-/// machine follow. Remote is *hosting this device* and nothing else: choosing
-/// which host to talk to is a product surface (`crate::remote`), not a setting.
-#[cfg(feature = "remote-hosting")]
+/// machine follow. Other devices manages the local desktop listener, or the
+/// serving headless listener in a browser. Choosing a machine lives in `crate::remote`.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
 const SECTIONS: [Section; 8] = [
     Section::General,
     Section::Remote,
@@ -75,7 +75,7 @@ const SECTIONS: [Section; 8] = [
     Section::Browser,
     Section::Archived,
 ];
-#[cfg(not(feature = "remote-hosting"))]
+#[cfg(not(any(feature = "remote-hosting", target_family = "wasm")))]
 const SECTIONS: [Section; 7] = [
     Section::General,
     Section::Providers,
@@ -106,7 +106,7 @@ impl SettingsCapabilities {
     fn current(store: &WorkspaceStore) -> Self {
         Self {
             preview_backend: crate::preview_panel::PREVIEW_BACKEND,
-            hosting: cfg!(feature = "remote-hosting"),
+            hosting: cfg!(any(feature = "remote-hosting", target_family = "wasm")),
             local_permissions: cfg!(all(feature = "local-permissions", target_os = "macos")),
             remote_attachment: store.is_remote(),
         }
@@ -130,8 +130,14 @@ impl Section {
     fn group(self) -> SectionGroup {
         match self {
             Self::General => SectionGroup::Device,
-            #[cfg(feature = "remote-hosting")]
-            Self::Remote => SectionGroup::Device,
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+            Self::Remote => {
+                if cfg!(target_family = "wasm") {
+                    SectionGroup::Machine
+                } else {
+                    SectionGroup::Device
+                }
+            }
             Self::Providers
             | Self::Usage
             | Self::Browser
@@ -153,7 +159,7 @@ impl Section {
     fn applies(&self, cx: &SettingsCapabilities) -> bool {
         match self {
             Self::Browser => cx.preview_backend,
-            #[cfg(feature = "remote-hosting")]
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => cx.hosting,
             Self::General
             | Self::Providers
@@ -172,7 +178,7 @@ impl Section {
             Self::Browser => "settings-nav-browser",
             Self::ComputerUse => "settings-nav-computer-use",
             Self::Orchestrate => "settings-nav-orchestrate",
-            #[cfg(feature = "remote-hosting")]
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => "settings-nav-remote",
             Self::Archived => "settings-nav-archived",
         }
@@ -186,7 +192,7 @@ impl Section {
             Self::Browser => IconName::Globe,
             Self::ComputerUse => IconName::LayoutDashboard,
             Self::Orchestrate => IconName::Map,
-            #[cfg(feature = "remote-hosting")]
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => IconName::HardDrive,
             Self::Archived => IconName::Inbox,
         }
@@ -200,7 +206,7 @@ impl Section {
             Self::Browser => crate::tr!("settings.browser"),
             Self::ComputerUse => crate::tr!("settings.computer_use"),
             Self::Orchestrate => crate::tr!("settings.orchestrate"),
-            #[cfg(feature = "remote-hosting")]
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Self::Remote => crate::tr!("settings.remote"),
             Self::Archived => crate::tr!("settings.archived"),
         }
@@ -275,8 +281,11 @@ pub struct SettingsPage {
     /// Editable main-model identities and child-model routing matrix.
     orchestrate_panel: Entity<OrchestrateSettingsPanel>,
     /// Hosting this machine. Absent where the client cannot listen at all.
-    #[cfg(feature = "remote-hosting")]
+    #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+    #[cfg(not(target_family = "wasm"))]
     hosting_panel: Entity<crate::remote::HostingPanel>,
+    #[cfg(target_family = "wasm")]
+    hosting_panel: Entity<crate::remote::hosted::HostedPanel>,
     /// Shared provider/model picker configured for background thread titles.
     title_model_picker: Entity<ProviderModelPicker>,
     /// Shared provider/model picker configured for fallback reviews.
@@ -325,7 +334,7 @@ impl SettingsPage {
                 "browser" => Section::Browser,
                 "computer_use" => Section::ComputerUse,
                 "orchestrate" => Section::Orchestrate,
-                #[cfg(feature = "remote-hosting")]
+                #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
                 "remote" => Section::Remote,
                 "archived" => Section::Archived,
                 _ => Section::General,
@@ -444,8 +453,11 @@ impl SettingsPage {
         let acp_panel = cx.new(|cx| AcpPanel::new(store.clone(), window, cx));
         let orchestrate_panel =
             cx.new(|cx| OrchestrateSettingsPanel::new(store.clone(), window, cx));
-        #[cfg(feature = "remote-hosting")]
+        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+        #[cfg(not(target_family = "wasm"))]
         let hosting_panel = cx.new(|cx| crate::remote::HostingPanel::new(window, cx));
+        #[cfg(target_family = "wasm")]
+        let hosting_panel = cx.new(|cx| crate::remote::hosted::HostedPanel::new(store.clone(), cx));
         // Editable fields start empty and are seeded by `hydrate_inputs` once
         // the host's settings actually arrive, so a portable client never shows
         // its local defaults as if they were the host's configuration.
@@ -471,7 +483,7 @@ impl SettingsPage {
             provider_cards: Vec::new(),
             acp_panel,
             orchestrate_panel,
-            #[cfg(feature = "remote-hosting")]
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             hosting_panel,
             title_model_picker,
             fallback_review_model_picker,
@@ -1156,7 +1168,7 @@ impl SettingsPage {
             Section::Browser => self.render_browser(cx),
             Section::ComputerUse => self.render_computer_use(cx),
             Section::Orchestrate => v_flex().child(self.orchestrate_panel.clone()),
-            #[cfg(feature = "remote-hosting")]
+            #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
             Section::Remote => v_flex().child(self.hosting_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
@@ -2806,7 +2818,7 @@ mod tests {
         assert!(Section::Browser.applies(&local_desktop));
         assert!(local_desktop.can_manage_local_permissions());
         assert!(!local_desktop.folds_advanced());
-        #[cfg(feature = "remote-hosting")]
+        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         assert!(Section::Remote.applies(&local_desktop));
 
         let remote_desktop = capabilities(true, true, true, true);
@@ -2814,7 +2826,7 @@ mod tests {
         assert!(Section::Browser.applies(&remote_desktop));
         assert!(!remote_desktop.can_manage_local_permissions());
         assert!(!remote_desktop.folds_advanced());
-        #[cfg(feature = "remote-hosting")]
+        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         assert!(Section::Remote.applies(&remote_desktop));
 
         let remote_phone = capabilities(false, false, false, true);
@@ -2822,7 +2834,7 @@ mod tests {
         assert!(!Section::Browser.applies(&remote_phone));
         assert!(!remote_phone.can_manage_local_permissions());
         assert!(remote_phone.folds_advanced());
-        #[cfg(feature = "remote-hosting")]
+        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         assert!(!Section::Remote.applies(&remote_phone));
     }
 
@@ -2872,7 +2884,7 @@ mod tests {
         assert!(cx.debug_bounds("settings-machine-caption").is_some());
         assert!(cx.debug_bounds("settings-nav-general").is_some());
         assert!(cx.debug_bounds("settings-nav-browser").is_none());
-        #[cfg(feature = "remote-hosting")]
+        #[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
         assert!(cx.debug_bounds("settings-nav-remote").is_none());
 
         // This client drives no screen of its own and is attached elsewhere, so

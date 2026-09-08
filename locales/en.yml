@@ -920,6 +920,7 @@ toast:
   hide_details: "Hide details"
   copy_error: "Copy error"
 remote:
+  allow_devices: "Allow other devices"
   apply: "Apply"
   host:
     section: "THIS MACHINE"
@@ -1019,3 +1020,15 @@ mobile:
   approval_mode: "Approval mode"
   settings: "Settings"
   more_actions: "More actions"
+
+web_auth:
+  setup: "Set a password"
+  login: "Log in"
+  description: "Open tcode on this machine with its password."
+  password: "Password"
+  confirm: "Confirm password"
+  minimum: "At least 8 characters"
+  mismatch: "Passwords do not match"
+  failed: "Wrong password or temporarily locked. Try again later."
+  conflict: "A password is already set. Log in with that password."
+  network: "Could not connect. Try again."

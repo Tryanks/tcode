@@ -9,7 +9,7 @@ default = ["remote", "desktop"]
 # device revocation. Off for wasm targets, which cannot listen or advertise.
 # Client pairing (saved hosts, the pair form, authentication repair) is *not* here:
 # it is shared UI over `tcode_client` and compiles everywhere.
-remote-hosting = ["dep:tcode-remote", "tcode-remote/server", "tcode-remote/client", "dep:qrcode"]
+remote-hosting = ["dep:tcode-remote", "tcode-remote/server", "tcode-remote/client"]
 # Transitional alias for the pre-split feature name.
 remote = ["remote-hosting"]
 # Aggregate of the narrow native capabilities the desktop binary ships. It gates
@@ -56,7 +56,7 @@ agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
-qrcode = { version = "0.14", default-features = false, optional = true }
+qrcode = { version = "0.14", default-features = false }
 gpui = { package = "gpui-pre", version = "0.3.1" }
 gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" } # 0.6.0 on crates.io pulls an unused gpui-pre-platform that breaks iOS/Android; switch back once 0.6.1 ships
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }

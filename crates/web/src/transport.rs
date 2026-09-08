@@ -268,6 +268,19 @@ async fn connection_loop(
                             None
                         };
                         if let Some(failure) = failure {
+                            if failure == ConnectionFailure::AuthenticationRejected
+                                && crate::host::window()
+                                    .document()
+                                    .and_then(|document| document.document_element())
+                                    .and_then(|root| root.get_attribute("data-auth-mode"))
+                                    .as_deref()
+                                    == Some("password")
+                            {
+                                if let Ok(Some(storage)) = crate::host::window().local_storage() {
+                                    let _ = storage.remove_item("tcode.last_host");
+                                }
+                                let _ = crate::host::window().location().reload();
+                            }
                             if failure.is_terminal() {
                                 let _ =
                                     state.try_send(ConnectionState::Offline { reason: failure });

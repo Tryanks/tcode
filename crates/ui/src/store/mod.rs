@@ -2206,6 +2206,22 @@ impl WorkspaceStore {
         })
     }
 
+    #[cfg(target_family = "wasm")]
+    pub fn hosting(
+        &self,
+        action: tcode_protocol::HostingAction,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::HostingState, String>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::Hosting { action }).await {
+                Ok(QueryResponse::Hosting(state)) => Ok(state),
+                Ok(_) => Err("unexpected hosting response".into()),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     pub fn read_file_bytes(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
         let host = self.host.clone();
         cx.spawn(

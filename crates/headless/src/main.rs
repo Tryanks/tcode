@@ -14,6 +14,7 @@ use tcode_services::store::SessionStore;
 #[cfg(feature = "web")]
 const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = Some(&[
     ("/index.html", include_bytes!("../../web/dist/index.html")),
+    ("/auth.mjs", include_bytes!("../../web/dist/auth.mjs")),
     (
         "/tcode_web.js",
         include_bytes!("../../web/dist/tcode_web.js"),
