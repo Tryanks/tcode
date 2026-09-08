@@ -1298,6 +1298,9 @@ impl Mapper {
 
     /// Allocate the next synthesized turn id and mark it in-flight.
     fn start_turn(&mut self) -> String {
+        self.current_message_id = None;
+        self.usage_message_id = None;
+        self.request_usage = json!({});
         if self.latest_usage.freshness == crate::ContextFreshness::Current {
             self.latest_usage.freshness = crate::ContextFreshness::LastKnown;
         }
@@ -4294,6 +4297,30 @@ mod tests {
             r#"{"type":"result","subtype":"success","usage":{"input_tokens":1000,"cache_read_input_tokens":4000000,"output_tokens":200},"modelUsage":{"claude":{"contextWindow":1000000}}}"#,
         );
         assert!(result.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { usage: Some(u), .. } if u.used_tokens == Some(550) && u.turn_processed_tokens == Some(4001200))), "result accounting must not replace occupancy: {result:?}");
+        m.start_turn();
+        let missing_start = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":1}}}"#,
+        );
+        assert!(
+            missing_start.is_empty(),
+            "a new turn cannot reuse the previous request identity: {missing_start:?}"
+        );
+        assert_eq!(m.latest_usage.freshness, crate::ContextFreshness::LastKnown);
+        let unknown = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"usage-2"}}}"#,
+        );
+        assert!(
+            matches!(unknown.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens.is_none())
+        );
+        let output_only = feed(
+            &mut m,
+            r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"output_tokens":1}}}"#,
+        );
+        assert!(
+            matches!(output_only.last(), Some(AgentEvent::TokenUsage(u)) if u.used_tokens.is_none())
+        );
     }
 
     #[test]
