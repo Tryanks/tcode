@@ -366,12 +366,11 @@ async fn race_addresses(
         .port_or_known_default()
         .ok_or(ConnectionFailure::Unreachable)?;
     let addresses = futures_lite::future::race(
-        smol::unblock(move || {
-            (name.as_str(), port)
-                .to_socket_addrs()
-                .map(|a| a.collect::<Vec<_>>())
+        async {
+            smol::net::resolve((name.as_str(), port))
+                .await
                 .map_err(|e| connection_failure(e.to_string()))
-        }),
+        },
         async {
             smol::Timer::after(Duration::from_secs(5)).await;
             Err(ConnectionFailure::Timeout)

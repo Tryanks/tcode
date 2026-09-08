@@ -34,7 +34,7 @@ pub(super) fn builder<'a>(
                     .to_string(),
             }));
         // wry's additional arguments replace its generated proxy arguments.
-        Ok(builder.with_additional_browser_args(&format!(
+        Ok(builder.with_additional_browser_args(format!(
             "--proxy-server={} --proxy-bypass-list=<-loopback>",
             host.origin
         )))

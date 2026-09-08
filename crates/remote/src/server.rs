@@ -400,7 +400,12 @@ where
         )
         .await;
     }
-    let (status, value) = smol::unblock(move || -> io::Result<_> {
+    // PBKDF2 takes a few hundred milliseconds; a dedicated thread keeps the
+    // executor free without the runtime's unblock helper, which this crate
+    // cannot depend on.
+    let (done, wait) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = done.send_blocking((move || -> io::Result<_> {
         let mut auth = shared.auth.lock().unwrap();
         if setup {
             if auth.password_configured() {
@@ -417,7 +422,12 @@ where
         } else {
             Ok(("403 Forbidden", serde_json::json!({"error":"invalid password or temporarily locked"})))
         }
-    }).await?;
+        })());
+    });
+    let (status, value) = wait
+        .recv()
+        .await
+        .map_err(|_| io::Error::other("password worker exited"))??;
     json_response(stream, status, &value).await
 }
 
