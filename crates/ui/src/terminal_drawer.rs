@@ -710,13 +710,11 @@ impl TerminalDrawer {
         }
         let mut handled = false;
         self.with_terminal(cx, |terminal| {
-            if let Some(bytes) = mappings::key_bytes(
-                &keystroke.key,
-                term_modifiers(keystroke.modifiers),
+            if let Some(bytes) = terminal_key_bytes(
+                keystroke,
                 terminal.mode(),
                 terminal.keyboard_mode(),
                 terminal.modify_other_keys(),
-                true,
             ) {
                 terminal.write_input(bytes);
                 handled = true;
@@ -2406,6 +2404,22 @@ fn prepare_terminal_paste(text: &str, bracketed_paste: bool) -> String {
     }
 }
 
+fn terminal_key_bytes(
+    keystroke: &gpui::Keystroke,
+    mode: Mode,
+    keyboard_mode: tcode_protocol::terminal::KeyboardModes,
+    modify_other_keys: Option<u8>,
+) -> Option<Vec<u8>> {
+    mappings::key_bytes(
+        &keystroke.key,
+        term_modifiers(keystroke.modifiers),
+        mode,
+        keyboard_mode,
+        modify_other_keys,
+        true,
+    )
+}
+
 fn term_modifiers(modifiers: gpui::Modifiers) -> TermModifiers {
     TermModifiers {
         shift: modifiers.shift,
@@ -2553,6 +2567,23 @@ mod tests {
             ..TerminalFrame::default()
         });
         model
+    }
+
+    #[test]
+    fn backspace_keystroke_emits_delete_to_the_terminal_pipe() {
+        assert_eq!(
+            terminal_key_bytes(
+                &gpui::Keystroke {
+                    key: "backspace".into(),
+                    key_char: None,
+                    modifiers: Default::default()
+                },
+                Mode::empty(),
+                tcode_protocol::terminal::KeyboardModes::NO_MODE,
+                None,
+            ),
+            Some(vec![0x7f])
+        );
     }
 
     #[test]
