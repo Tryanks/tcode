@@ -82,7 +82,7 @@ pub fn radius_composer() -> Pixels {
 }
 /// The phone's bottom sheet, top corners only.
 pub fn radius_overlay_sheet() -> Pixels {
-    px(14.)
+    px(16.)
 }
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the

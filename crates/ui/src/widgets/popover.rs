@@ -226,7 +226,7 @@ impl Popover {
         let toggle = state.clone();
         let mut root = div()
             .id(self.id)
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            .on_click(move |_, window, cx| {
                 cx.stop_propagation();
                 toggle.update(cx, |state, cx| state.toggle_open(window, cx));
                 cx.notify(parent);
@@ -235,7 +235,12 @@ impl Popover {
                 el.child(trigger(open, window, cx))
             })
             .child(dismissal.release_listener());
-        if presence.should_render() {
+        // Presence initially samples a closed sheet as a zero-opacity exit.
+        // Do not mount invisible hit targets over the trigger.
+        if presence.should_render() && (open || progress > 0.) {
+            let viewport = window.viewport_size();
+            let insets = crate::window_seam::WindowSeam::current(cx).content_insets();
+            let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
             let close = state.clone();
             let backdrop = state.clone();
             let focus = state.read(cx).focus_handle(cx);
@@ -244,6 +249,7 @@ impl Popover {
                 .map(|content| state.update(cx, |state, cx| content(state, window, cx)));
             let surface = gpui_base::v_flex()
                 .id("touch-picker-sheet")
+                .debug_selector(|| "touch-picker-sheet".into())
                 .role(Role::Group)
                 .aria_label(self.sheet_title.clone().unwrap_or_default())
                 .occlude()
@@ -260,8 +266,10 @@ impl Popover {
                 // Offset animation would move the hit targets, so fade with the
                 // backdrop while keeping the sheet in its final position.
                 .opacity(progress)
-                .w_full()
-                .max_h(window.viewport_size().height - px(64.))
+                .w(viewport.width)
+                .max_w(viewport.width)
+                .flex_none()
+                .max_h(max_height)
                 .rounded_t(crate::material::radius_overlay_sheet())
                 .bg(cx.theme().popover)
                 .border_t_1()
@@ -273,7 +281,7 @@ impl Popover {
                     gpui_base::h_flex()
                         .h(px(48.))
                         .flex_none()
-                        .px(px(16.))
+                        .px(px(crate::material::COMPACT_PAGE_INSET))
                         .items_center()
                         .child(
                             div()
@@ -308,10 +316,11 @@ impl Popover {
                 .child(
                     div()
                         .id("touch-picker-content")
+                        .debug_selector(|| "touch-picker-content".into())
                         .min_h_0()
                         .touch_overflow_y_scroll()
-                        .p(px(16.))
-                        .pb(px(32.))
+                        .w_full()
+                        .p(px(crate::material::COMPACT_PAGE_INSET))
                         .children(content)
                         .children(self.children),
                 );
@@ -320,9 +329,11 @@ impl Popover {
                     anchored().position(point(px(0.), px(0.))).child(
                         div()
                             .id("touch-picker-backdrop")
+                            .debug_selector(|| "touch-picker-backdrop".into())
                             .occlude()
-                            .w(window.viewport_size().width)
-                            .h(window.viewport_size().height)
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .pb(insets.bottom)
                             .bg(crate::material::scrim(progress, cx))
                             .flex()
                             .flex_col()
@@ -369,6 +380,55 @@ mod tests {
                 ),
             )
         }
+    }
+
+    struct TallSheet;
+    impl Render for TallSheet {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            Popover::new("tall-sheet")
+                .bottom_sheet("Options")
+                .default_open(true)
+                .content(|_, _, _| {
+                    div()
+                        .h(px(2000.))
+                        .w_full()
+                        .debug_selector(|| "tall-content".into())
+                })
+        }
+    }
+
+    #[gpui::test]
+    fn tall_sheet_scrolls_below_navigation_and_above_keyboard(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(|cx| {
+            cx.set_global(crate::window_seam::WindowSeam::new(|| {
+                let mut insets = gpui::WindowInsets::default();
+                insets.safe_area.top = px(47.);
+                insets.safe_area.bottom = px(34.);
+                insets.ime.bottom = px(300.);
+                insets
+            }))
+        });
+        let (_, cx) = cx.add_window_view(|_, _| TallSheet);
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
+        assert_eq!(sheet.top(), px(99.));
+        assert_eq!(sheet.bottom(), px(552.));
+        let content = cx.debug_bounds("tall-content").unwrap();
+        let viewport = cx.debug_bounds("touch-picker-content").unwrap();
+        assert!(viewport.bottom() <= sheet.bottom());
+        assert!(viewport.size.height < content.size.height);
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-200.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("tall-content").unwrap().top() < content.top());
+        assert_eq!(cx.debug_bounds("touch-picker-sheet").unwrap(), sheet);
     }
 
     #[derive(Clone, Copy)]
@@ -491,6 +551,11 @@ mod tests {
         // resting position before the option is hit-tested.
         window.update(|window, cx| window.draw(cx).clear(cx));
         window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            selected.get(),
+            0,
+            "opening must not select an overlapping option"
+        );
         let bounds = window
             .debug_bounds("sheet-option")
             .expect("sheet option is laid out");
