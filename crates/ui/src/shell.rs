@@ -329,6 +329,17 @@ impl AppShell {
                 snapshot.without_host();
             }
         }
+        if let Some(host) = setup.client_host.as_ref().and_then(|client| {
+            client.load_hosts().into_iter().find(|host| {
+                client
+                    .outbox_storage(&host.host_id)
+                    .and_then(|storage| storage.load().ok())
+                    .is_some_and(|entries| !entries.is_empty())
+            })
+        }) {
+            setup.initial = Some(AttachmentTarget::Remote(host));
+            restored = None;
+        }
         // Seed the layout from the window before any child view exists, so the
         // first frame is already the right one rather than a wide split that
         // reflows on the second.
@@ -627,6 +638,14 @@ impl AppShell {
         }
 
         let store = link.store.clone();
+        let pending_session = store
+            .read(cx)
+            .pending_sessions()
+            .first()
+            .map(|(id, _)| id.clone());
+        if let Some(id) = &pending_session {
+            store.update(cx, |store, _| store.select_session(id.clone()));
+        }
         window.set_window_title(&store.read(cx).shell_window_title());
         let preview =
             cx.new(|cx| PreviewPanel::new(store.clone(), self.window_state.clone(), window, cx));
@@ -736,6 +755,10 @@ impl AppShell {
         // The previous host's pages are not this host's: land on its threads.
         self.window_state
             .update(cx, |state, cx| state.enter_workspace(cx));
+        if pending_session.is_some() {
+            self.window_state
+                .update(cx, |state, cx| state.open_thread(cx));
+        }
         cx.notify();
     }
 
@@ -1895,6 +1918,22 @@ impl AppShell {
             } => format!("{text} · {}", crate::remote::failure_label(*reason)),
             _ => text,
         };
+        let count = store.pending_write_count();
+        let text = if count > 0 {
+            format!(
+                "{text} · {}",
+                crate::tr!(
+                    if count == 1 {
+                        "remote.banner.pending_write"
+                    } else {
+                        "remote.banner.pending_writes"
+                    },
+                    count = count
+                )
+            )
+        } else {
+            text
+        };
         let reconnecting = matches!(
             store.connection_state(),
             tcode_client::ConnectionState::Reconnecting { .. }
@@ -1903,7 +1942,8 @@ impl AppShell {
             h_flex()
                 .flex_none()
                 .w_full()
-                .h(px(28.))
+                .min_h(px(28.))
+                .py_1()
                 .px_3()
                 .gap_2()
                 .items_center()
@@ -1918,7 +1958,7 @@ impl AppShell {
                         crate::widgets::spinner::Spinner::new().xsmall()
                     })
                 })
-                .child(text)
+                .child(div().flex_1().min_w_0().child(text))
                 .into_any_element(),
         )
     }
@@ -2365,9 +2405,16 @@ mod tests {
         preferences: RefCell<tcode_client::host::ClientPreferences>,
         machine_exists: bool,
         saves: Cell<usize>,
+        outbox: Option<std::sync::Arc<dyn tcode_client::outbox::Storage>>,
     }
 
     impl ClientHost for ReturningClient {
+        fn outbox_storage(
+            &self,
+            _: &str,
+        ) -> Option<std::sync::Arc<dyn tcode_client::outbox::Storage>> {
+            self.outbox.clone()
+        }
         fn device_name(&self) -> String {
             "returning phone".into()
         }
@@ -2451,6 +2498,7 @@ mod tests {
             }),
             machine_exists,
             saves: Cell::new(0),
+            outbox: None,
         });
         let setup_client = client.clone();
         let window = cx.open_window(size(px(393.), px(852.)), move |window, cx| {
@@ -2471,6 +2519,96 @@ mod tests {
         let cx = VisualTestContext::from_window(window.into(), cx).into_mut();
         draw(cx);
         (shell, MountedShell { outgoing, incoming }, client, cx)
+    }
+
+    #[gpui::test]
+    fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppContext) {
+        struct SavedOutbox;
+        impl tcode_client::outbox::Storage for SavedOutbox {
+            fn load(
+                &self,
+            ) -> Result<Vec<tcode_client::outbox::Entry>, tcode_protocol::ProtocolError>
+            {
+                Ok(vec![tcode_client::outbox::Entry {
+                    key: "saved-send".into(),
+                    command: Command::SendTurn {
+                        session_id: "pending-thread".into(),
+                        text: "survives relaunch".into(),
+                        attachment_paths: Vec::new(),
+                    },
+                }])
+            }
+            fn save(
+                &self,
+                _: &[tcode_client::outbox::Entry],
+            ) -> Result<(), tcode_protocol::ProtocolError> {
+                Ok(())
+            }
+        }
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let (_state_tx, state) = async_channel::unbounded();
+        let client = Rc::new(ReturningClient {
+            saved: tcode_client::pairing::PairedHost {
+                host_id: "pending-host".into(),
+                name: "Pending host".into(),
+                origin: "http://127.0.0.1:48442".into(),
+                token: "fixture".into(),
+                last_connected_unix: None,
+            },
+            transport: RefCell::new(Some(Transport {
+                to_host: to_host.into(),
+                from_host,
+                state,
+            })),
+            preferences: RefCell::new(Default::default()),
+            machine_exists: true,
+            saves: Cell::new(0),
+            outbox: Some(std::sync::Arc::new(SavedOutbox)),
+        });
+        let (shell, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|_| WindowState::new(false));
+            AppShell::new(
+                state,
+                ShellSetup {
+                    initial: Some(AttachmentTarget::Local),
+                    client_host: Some(client),
+                    restore_navigation: false,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+        });
+        cx.simulate_resize(size(px(1024.), px(700.)));
+        draw(cx);
+        let store = store_of(&shell, cx);
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.remote_host_name(), Some("Pending host"));
+            assert_eq!(store.active_session_id().as_deref(), Some("pending-thread"));
+            assert_eq!(store.pending_write_count(), 1);
+            assert!(!store.chat_loading());
+            assert_eq!(store.delivery_messages()[0].1, "survives relaunch");
+            assert!(store.sidebar_sessions().is_empty());
+        });
+        assert!(cx.debug_bounds("pending-delivery-bubble").is_some());
+        assert!(cx.debug_bounds("pending-thread-row").is_some());
+        cx.simulate_resize(size(px(393.), px(852.)));
+        let navigation = shell.read_with(cx, |shell, _| shell.window_state());
+        navigation.update(cx, |state, cx| state.enter_workspace(cx));
+        cx.update(|window, cx| {
+            crate::settings_page::apply_theme(tcode_core::settings::ThemeMode::Dark, window, cx)
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds("pending-thread-row").is_some(),
+            "compact Threads exposes the outbox without a cached index"
+        );
+        navigation.update(cx, |state, cx| state.open_thread(cx));
+        draw(cx);
+        assert!(cx.debug_bounds("pending-delivery-bubble").is_some());
     }
 
     fn await_restore_update(

@@ -1091,3 +1091,16 @@ failure shows an inline error with **Retry** and **Discard**. Queued approval
 decisions keep their controls disabled with a pending caption. The connection
 banner owns transient transport failures. See [Weak networks](remote.md#weak-networks)
 for persistence, ordering, limits and protocol compatibility.
+
+Pending writes also own launch recovery: a saved machine with a non-empty outbox
+wins over normal launch navigation (saved-machine order breaks ties). With no
+pending writes desktop still starts locally and mobile restores its last machine.
+Attachment opens the first pending thread. This derives only IDs and message
+previews from the existing outbox; it adds no offline cache or synthetic host
+metadata. Before a snapshot exists, the existing pending-message timeline remains
+visible. The snapshot adopts those messages through the normal Ack/replica merge.
+The disconnected banner appends the pending write count after its failure reason.
+Threads marks cached rows **Pending** and provides one **Waiting for connection…**
+row per uncached pending session, with its first message preview, at both widths.
+A host deletion arriving before the rejected Ack does not navigate away from an
+unresolved send: its inline error and Retry/Discard controls remain on screen.

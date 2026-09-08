@@ -513,7 +513,10 @@ fn main() {
             // relaunch, reopen the recorded session and Settings page. Only
             // meaningful for a host in this process: the marker lives in this
             // machine's data dir, and a remote host's marker is its own.
-            if matches!(initial_target, AttachmentTarget::Local)
+            if shell
+                .read(cx)
+                .store()
+                .is_some_and(|store| !store.read(cx).is_remote())
                 && let Ok(CommandResponse::PendingRelaunchSection {
                     section: Some(section),
                     session_id,

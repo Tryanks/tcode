@@ -95,6 +95,7 @@ markdown:
   link_copy_text: "Copy link text"
   path_copy_relative: "Copy relative path"
 sidebar:
+  pending_write: "Pending"
   parent_unavailable: "(parent unavailable)"
   collapse: "Collapse sidebar"
   expand: "Expand sidebar"
@@ -956,6 +957,8 @@ remote:
     protocol_mismatch: "Protocol mismatch · Update the app"
     host_closed: "Host closed the connection"
   banner:
+    pending_writes: "%{count} messages waiting to send"
+    pending_write: "1 message waiting to send"
     syncing: "Syncing with %{host}…"
     reconnecting: "Reconnecting to %{host}… (attempt %{attempt})"
     offline: "Offline — %{host}"

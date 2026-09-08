@@ -621,6 +621,38 @@ impl WorkspaceStore {
         }
     }
 
+    /// Outbox-derived navigation only; no host metadata is invented or cached.
+    pub(crate) fn pending_sessions(&self) -> Vec<(String, String)> {
+        let mut sessions = Vec::new();
+        for (_, command) in self.host.pending_commands() {
+            let Some(id) = command.session_id().map(str::to_owned) else {
+                continue;
+            };
+            let preview = match command {
+                Command::SendTurn { text, .. }
+                | Command::ScheduleTurn { text, .. }
+                | Command::Steer { text, .. }
+                | Command::ConfirmRelayAndSend { text, .. }
+                | Command::OrchestrateTurn { text, .. } => text,
+                _ => String::new(),
+            };
+            if !sessions.iter().any(|(existing, _)| existing == &id) {
+                sessions.push((id, preview));
+            }
+        }
+        sessions
+    }
+
+    pub(crate) fn pending_write_count(&self) -> usize {
+        self.host.pending_commands().len()
+    }
+
+    pub(crate) fn session_has_pending_writes(&self, id: &str) -> bool {
+        self.pending_sessions()
+            .iter()
+            .any(|(session, _)| session == id)
+    }
+
     pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
         let active = self.active_session_id().unwrap_or_default();
         let message = |command: &Command| match command {
@@ -712,6 +744,9 @@ impl WorkspaceStore {
     }
 
     pub fn chat_loading(&self) -> bool {
+        if !self.delivery_messages().is_empty() {
+            return false;
+        }
         if !self.index_hydrated || !self.settings_hydrated {
             return true;
         }
@@ -1082,6 +1117,11 @@ impl WorkspaceStore {
     /// the last interacted project's draft, which is also what an empty
     /// workspace opens.
     fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
+        // A deletion can arrive before the rejected Ack. Keep the authored
+        // write on screen so its failure still has Retry and Discard controls.
+        if !self.delivery_messages().is_empty() {
+            return;
+        }
         match &self.session_status_replica {
             // A draft has no index entry of its own; it stays until the user
             // navigates away. Its project leaving the index is the exception:
@@ -2512,6 +2552,15 @@ impl WorkspaceStore {
                     .find(|meta| &meta.id == selected)
                     .map(|meta| (meta.title.clone(), meta.cwd.clone(), false))
             })
+            .or_else(|| {
+                (!self.delivery_messages().is_empty()).then(|| {
+                    (
+                        crate::tr!("chat.waiting_connection").into_owned(),
+                        PathBuf::new(),
+                        false,
+                    )
+                })
+            })
     }
 
     pub fn chat_requested_model(&self) -> Option<String> {
@@ -2649,6 +2698,8 @@ mod tests {
 
     #[gpui::test]
     fn scripted_host_send_waits_for_ack_and_rejection_offers_retry(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
         let (replies, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
@@ -2699,6 +2750,20 @@ mod tests {
                 false,
             )]
         );
+        assert!(
+            !store.read_with(cx, |store, _| store.chat_loading()),
+            "a rejected write must be visible without a snapshot"
+        );
+        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let (_chat, visual) = cx.add_window_view(|window, cx| {
+            crate::chat::ChatView::new(store.clone(), window_state, window, cx)
+        });
+        visual.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(visual.debug_bounds("retry-delivery").is_some());
+        assert!(visual.debug_bounds("discard-delivery").is_some());
         store.update(cx, |store, _| store.retry_delivery(&key));
         let retry = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
         assert_ne!(retry.key, request.key);
@@ -2717,6 +2782,29 @@ mod tests {
             store.read_with(cx, |store, _| store.delivery_messages()),
             vec![(retry.key.unwrap(), "hello".into(), None, true)]
         );
+        store.update(cx, |store, _| {
+            store.send_turn("discard me".into(), Vec::new())
+        });
+        let request =
+            tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: request.id,
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "unknown_session".into(),
+                        message: "gone".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        store.update(cx, |store, _| {
+            store.discard_delivery(request.key.as_ref().unwrap())
+        });
+        assert!(link.failed_commands().is_empty());
+        assert!(link.pending_commands().is_empty());
         link.close();
     }
 
@@ -2787,6 +2875,71 @@ mod tests {
             cx.debug_bounds("threads-empty").is_some(),
             "An applied empty baseline must render the empty message"
         );
+    }
+
+    #[gpui::test]
+    fn deleted_thread_keeps_its_pending_and_rejected_send_visible(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-deleted-pending-{}",
+            tcode_services::store::now_millis()
+        ));
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project_at("p", &root)).unwrap();
+        disk.upsert_meta(&thread(&root, "deleted", "p", None))
+            .unwrap();
+        let host = test_host(disk);
+        let link = host.link();
+        let workspace = cx.new(|cx| WorkspaceStore::new(link.clone(), cx));
+        workspace.update(cx, |store, _| store.select_session("deleted".into()));
+        wait_until(cx, &workspace, "selected thread", |cx| {
+            selected_status(cx, &workspace, "deleted")
+        });
+        link.set_connection_state(tcode_client::ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        workspace.update(cx, |store, _| {
+            store.send_turn("keep my failed send".into(), Vec::new())
+        });
+        smol::block_on(
+            host.update_state_for_test(|state, cx| state.delete_session("deleted", false, cx)),
+        )
+        .unwrap();
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexRemoveSession {
+                        session_id: "deleted".into(),
+                    },
+                },
+                cx,
+            )
+        });
+        assert_eq!(
+            workspace.read_with(cx, |store, _| store.active_session_id()),
+            Some("deleted".into())
+        );
+        link.set_connection_state(tcode_client::ConnectionState::Connected);
+        wait_until(cx, &workspace, "rejected send", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .delivery_messages()
+                    .iter()
+                    .any(|(_, _, error, _)| error.is_some())
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("deleted"));
+            assert_eq!(store.delivery_messages()[0].1, "keep my failed send");
+            assert!(!store.chat_loading());
+        });
+        let key = link.failed_commands()[0].0.key.clone();
+        workspace.update(cx, |store, _| store.discard_delivery(&key));
+        assert!(link.pending_commands().is_empty() && link.failed_commands().is_empty());
+        shutdown_test_host(&host);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

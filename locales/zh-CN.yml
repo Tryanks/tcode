@@ -95,6 +95,7 @@ markdown:
   link_copy_text: "复制链接文字"
   path_copy_relative: "复制相对路径"
 sidebar:
+  pending_write: "待发送"
   parent_unavailable: "（父对话不可用）"
   collapse: "折叠侧边栏"
   expand: "展开侧边栏"
@@ -950,6 +951,8 @@ remote:
     protocol_mismatch: "协议版本不匹配 · 更新应用"
     host_closed: "主机已关闭连接"
   banner:
+    pending_writes: "%{count} 条消息等待发送"
+    pending_write: "1 条消息等待发送"
     syncing: "正在与 %{host} 同步…"
     reconnecting: "正在重新连接 %{host}…（第 %{attempt} 次）"
     offline: "离线 —— %{host}"

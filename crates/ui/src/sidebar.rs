@@ -1840,6 +1840,17 @@ impl SessionsSidebar {
                     title.font_semibold()
                 })
                 .child(meta.title.clone())
+                .when(
+                    self.store.read(cx).session_has_pending_writes(&meta.id),
+                    |row| {
+                        row.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().warning)
+                                .child(crate::tr!("sidebar.pending_write")),
+                        )
+                    },
+                )
                 .into_any_element()
         }
     }
@@ -2570,13 +2581,67 @@ impl SessionsSidebar {
 
     /// Compact thread list with shared layout preference. Navigation replaces
     /// persistent row selection; desktop-only controls stay in the desktop list.
+    fn pending_thread_rows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let cached = self.store.read(cx).sidebar_sessions();
+        let loading = self.store.read(cx).threads_loading();
+        v_flex()
+            .w_full()
+            .children(
+                self.store
+                    .read(cx)
+                    .pending_sessions()
+                    .into_iter()
+                    .filter(|(id, _)| loading || !cached.iter().any(|meta| &meta.id == id))
+                    .map(|(id, preview)| {
+                        v_flex()
+                            .id(SharedString::from(format!("pending-thread-{id}")))
+                            .debug_selector(|| "pending-thread-row".into())
+                            .px_4()
+                            .py_2()
+                            .gap_1()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .child(crate::tr!("chat.waiting_connection")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(preview),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().warning)
+                                    .child(crate::tr!("sidebar.pending_write")),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.store.update(cx, |store, cx| {
+                                    store.select_session(id.clone());
+                                    cx.notify();
+                                });
+                                this.window_state
+                                    .update(cx, |state, cx| state.open_thread(cx));
+                            }))
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         #[cfg(test)]
         self.compact_rows_rendered.set(0);
         let model = self.compact_model(cx);
         let layout = self.store.read(cx).sidebar_layout();
         let body = if self.store.read(cx).threads_loading() {
-            crate::material::loading_skeleton(cx)
+            if self.store.read(cx).pending_sessions().is_empty() {
+                crate::material::loading_skeleton(cx)
+            } else {
+                self.pending_thread_rows(cx)
+            }
         } else if !model.has_projects {
             div()
                 .id("threads-empty")
@@ -2664,6 +2729,9 @@ impl SessionsSidebar {
                             .child(self.render_layout_toggle(layout, cx)),
                     ),
             )
+            .when(!self.store.read(cx).threads_loading(), |list| {
+                list.child(self.pending_thread_rows(cx))
+            })
             .child(body)
             .into_any_element()
     }
@@ -2847,6 +2915,10 @@ impl SessionsSidebar {
                             .text_size(px(13.))
                             .line_height(px(18.))
                             .text_color(cx.theme().muted_foreground)
+                            .when(
+                                self.store.read(cx).session_has_pending_writes(&session_id),
+                                |line| line.child(crate::tr!("sidebar.pending_write")),
+                            )
                             .when(unavailable, |line| {
                                 line.child(
                                     div()
@@ -3199,9 +3271,18 @@ impl Render for SessionsSidebar {
             .child(self.render_feature_rows(cx))
             .child(header)
             .child(if self.store.read(cx).threads_loading() {
-                crate::material::loading_skeleton(cx)
+                if self.store.read(cx).pending_sessions().is_empty() {
+                    crate::material::loading_skeleton(cx)
+                } else {
+                    self.pending_thread_rows(cx)
+                }
             } else {
-                thread_list
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.pending_thread_rows(cx))
+                    .child(thread_list)
+                    .into_any_element()
             })
             .child(self.render_footer(cx))
             .into_any_element()

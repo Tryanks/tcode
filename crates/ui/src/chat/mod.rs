@@ -2760,6 +2760,7 @@ impl Render for ChatView {
                 let discard_store = self.workspace_store.clone();
                 v_flex()
                     .id(SharedString::from(format!("delivery-{key}")))
+                    .debug_selector(|| "pending-delivery-bubble".into())
                     .w_full()
                     .max_w(px(CONTENT_MAX_WIDTH))
                     .items_end()
@@ -2807,6 +2808,7 @@ impl Render for ChatView {
                                     Button::new(SharedString::from(format!("retry-{key}")))
                                         .ghost()
                                         .small()
+                                        .debug_selector(|| "retry-delivery".into())
                                         .label(crate::tr!("chat.retry_delivery"))
                                         .on_click(move |_, _, cx| {
                                             retry_store.update(cx, |store, _| {
@@ -2818,6 +2820,7 @@ impl Render for ChatView {
                                     Button::new(SharedString::from(format!("discard-{key}")))
                                         .ghost()
                                         .small()
+                                        .debug_selector(|| "discard-delivery".into())
                                         .label(crate::tr!("chat.discard_delivery"))
                                         .on_click(move |_, _, cx| {
                                             discard_store.update(cx, |store, _| {
