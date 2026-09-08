@@ -853,6 +853,7 @@ preview:
   reload: "Reload"
   scan_ports: "Scan localhost dev ports"
   open_external: "Open in system browser"
+  close_compact: "Close preview"
   close: "Close preview and release the page"
   copy_url: "Copy URL"
   starting: "Preview is starting…"

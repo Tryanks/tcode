@@ -71,6 +71,8 @@ impl Availability {
 }
 
 enum WebViewSlot {
+    #[cfg(test)]
+    Stub,
     #[cfg(any(target_os = "windows", target_os = "android"))]
     Creating {
         id: u64,
@@ -85,6 +87,8 @@ impl WebViewSlot {
         match self {
             #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Creating { .. } => None,
+            #[cfg(test)]
+            Self::Stub => None,
             Self::Ready(view) => Some(view),
         }
     }
@@ -97,6 +101,8 @@ impl WebViewSlot {
         match self {
             #[cfg(any(target_os = "windows", target_os = "android"))]
             Self::Creating { phase, .. } => Availability::Starting(*phase),
+            #[cfg(test)]
+            Self::Stub => Availability::Unavailable,
             Self::Ready(view) => Availability::Ready(view.clone()),
         }
     }
@@ -156,6 +162,20 @@ impl BrowserLifecycle {
             active_identity: None,
             creator,
         }
+    }
+
+    pub(super) fn active_identity(&self) -> Option<&(String, String)> {
+        self.active_identity.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_stub(&mut self, key: &str) {
+        self.slots.insert(key.to_owned(), WebViewSlot::Stub);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_view(&self, key: &str) -> bool {
+        self.slots.contains_key(key)
     }
 
     fn owner_is_live(&self) -> bool {

@@ -149,7 +149,8 @@ fn unavailable_message(err: &str) -> String {
 /// callback.
 #[derive(gpui::Action, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[action(namespace = tcode_preview, no_json)]
-enum PreviewAction {
+pub(crate) enum PreviewAction {
+    Close,
     CopyUrl,
     OpenExternal,
     ScanPorts,
@@ -175,6 +176,7 @@ pub struct PreviewPanel {
     /// The last URL copied into the editor; preserve an unsent edit until the
     /// actual page URL or conversation changes.
     mirrored_url: Option<String>,
+    compact_overflow_open: bool,
     #[cfg(all(
         feature = "native-preview",
         any(target_os = "macos", target_os = "windows", target_os = "android")
@@ -226,6 +228,7 @@ impl PreviewPanel {
             url_input,
             mirrored: None,
             mirrored_url: None,
+            compact_overflow_open: false,
             #[cfg(all(
                 feature = "native-preview",
                 any(target_os = "macos", target_os = "windows", target_os = "android")
@@ -280,6 +283,11 @@ impl PreviewPanel {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn url_field(&self, cx: &gpui::App) -> String {
+        self.url_input.read(cx).value().to_string()
+    }
+
     fn active_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let key = self.active_key(cx)?;
         self.store.read(cx).preview_url(&key)
@@ -300,11 +308,9 @@ impl PreviewPanel {
         }
     }
 
-    /// The chrome's X: close the Preview tab *and* drop this conversation's
-    /// WebView, so the page is torn down (scripts, media, sockets) rather
-    /// than kept running behind a closed panel. The next open or agent op
-    /// recreates a fresh webview on demand.
-    fn close_panel(&mut self, cx: &mut Context<Self>) {
+    /// Release the conversation's browser and chrome without changing layout.
+    /// Desktop close additionally collapses the panel; compact close stays at URL entry.
+    pub(crate) fn release_preview(&mut self, cx: &mut Context<Self>) {
         if let Some(key) = self.active_key(cx) {
             self.drop_webview(&key, cx);
             self.store
@@ -313,6 +319,11 @@ impl PreviewPanel {
         // Un-mirror so a later reopen refreshes the address bar from the
         // (now empty) URL map instead of showing the stale address.
         self.mirrored = None;
+        cx.notify();
+    }
+
+    fn close_panel(&mut self, cx: &mut Context<Self>) {
+        self.release_preview(cx);
         self.store
             .update(cx, |store, cx| store.close_preview_panel(cx));
         cx.notify();
@@ -370,6 +381,7 @@ impl PreviewPanel {
             // the current URL goes into one overflow menu rather than squeezing
             // the field down to a word.
             .when(compact, |chrome| {
+                let panel = cx.entity().downgrade();
                 chrome.child(
                     material::toolbar_icon_button(
                         "preview-overflow",
@@ -377,8 +389,25 @@ impl PreviewPanel {
                         crate::tr!("mobile.more_actions"),
                         true,
                     )
-                    .dropdown_menu(move |menu, _, _| {
+                    .dropdown_menu(move |menu, _, cx| {
+                        let _ = panel.update(cx, |panel, cx| {
+                            panel.compact_overflow_open = true;
+                            panel.sync_visibility(cx);
+                            cx.notify();
+                        });
+                        let panel = panel.clone();
+                        cx.on_release(move |_, cx| {
+                            let _ = panel.update(cx, |panel, cx| {
+                                panel.compact_overflow_open = false;
+                                cx.notify();
+                            });
+                        })
+                        .detach();
                         menu.menu(
+                            crate::tr!("preview.close_compact").into_owned(),
+                            Box::new(PreviewAction::Close),
+                        )
+                        .menu(
                             crate::tr!("preview.copy_url").into_owned(),
                             Box::new(PreviewAction::CopyUrl),
                         )
@@ -440,13 +469,14 @@ impl PreviewPanel {
             .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
     }
 
-    fn on_preview_action(
+    pub(crate) fn on_preview_action(
         &mut self,
         action: &PreviewAction,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match action {
+            PreviewAction::Close => self.release_preview(cx),
             PreviewAction::CopyUrl => self.copy_url(cx),
             PreviewAction::OpenExternal => self.open_in_system_browser(cx),
             PreviewAction::ScanPorts => self.rescan_ports(cx),

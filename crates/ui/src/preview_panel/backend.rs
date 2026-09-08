@@ -88,6 +88,16 @@ impl PreviewPanel {
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let lifecycle = self.lifecycle_entity();
+        if self.window_state.read(cx).compact {
+            let previous = lifecycle.read(cx).active_identity().cloned();
+            if let Some((session, key)) = previous
+                && current.as_ref().map(|(id, _)| id) != Some(&session)
+            {
+                self.drop_webview(&key, cx);
+                self.store
+                    .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
+            }
+        }
         let reconciliation = lifecycle.update(cx, |lifecycle, _| lifecycle.reconcile_key(current));
         if let Some(old_key) = reconciliation.migrated_from.as_deref()
             && self.mirrored.as_deref() == Some(old_key)
@@ -135,7 +145,8 @@ impl PreviewPanel {
             self.store.read(cx).preview_panel_showing()
                 && self.store.read(cx).preview_browser_settings().enabled
                 && (!window_state.compact
-                    || (self.backend.compact_panel_selected
+                    || (!self.compact_overflow_open
+                        && self.backend.compact_panel_selected
                         && window_state.destination() == crate::window_state::Destination::Panel)),
         )
         .map(str::to_string);
@@ -315,6 +326,13 @@ impl PreviewPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.window_state.read(cx).compact
+            && let Some(key) = active
+            && self.store.read(cx).preview_url(key).is_none()
+            && self.lifecycle_entity().read(cx).ready_view(key).is_none()
+        {
+            return self.render_note(crate::tr!("preview.url_placeholder").into_owned(), None, cx);
+        }
         #[cfg(target_os = "android")]
         if let Some(key) = active {
             let url = self

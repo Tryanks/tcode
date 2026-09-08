@@ -296,6 +296,12 @@ launch behavior is unchanged.
   row on the page inset with 44pt touch targets: the diff's source and base
   pickers, the terminal's tab strip and a new-terminal target, the preview's
   address field. Everything else moves into that row's overflow menu.
+  Preview's overflow includes **Close preview**, which destroys the conversation's
+  browser and clears its URL and history, leaving URL entry in the same panel.
+  The next navigation creates a fresh browser. Compact previews are also released
+  when leaving Thread for Threads, switching conversations or machines, or deleting
+  the conversation. Switching panel segments or moving Panels ↔ Thread only hides
+  the browser and preserves the page. Wide-layout preview behavior is unchanged.
 - **Settings** and **Settings section** — the section list, then one section's
   detail (see **Settings** below).
 
@@ -740,6 +746,7 @@ context. Because WebViews are native child overlays rather than GPUI scene
 nodes, their visibility is synchronized directly from app state: closing
 Preview, selecting Diff/Plan, switching conversations, opening the command
 palette, or leaving Chat hides every WebView that no longer owns the panel.
+Compact conversation-exit teardown follows the **Panel** rule above.
 
 ### Settings (wide route)
 

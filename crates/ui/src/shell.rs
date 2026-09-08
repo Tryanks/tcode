@@ -933,7 +933,19 @@ impl AppShell {
         // Everything below is one history: settings detail, settings root, a
         // Hosts visit, Pair, and the workspace pages all pop the same way.
         // Leaving a page never touches the attachment.
-        self.window_state.update(cx, |state, cx| state.back(cx))
+        let leaving_thread =
+            self.window_state.read(cx).compact && self.destination(cx) == Destination::Thread;
+        let consumed = self.window_state.update(cx, |state, cx| state.back(cx));
+        if consumed
+            && leaving_thread
+            && self.destination(cx) == Destination::Threads
+            && let Some(attachment) = &self.attachment
+        {
+            attachment
+                .preview
+                .update(cx, |preview, cx| preview.release_preview(cx));
+        }
+        consumed
     }
 }
 
@@ -3256,6 +3268,88 @@ mod tests {
     /// The one Back chain: overlays first, then one step of the window's
     /// history, and `false` only at the root — where the platform closes the
     /// app. Leaving a page never touches the attachment.
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    #[gpui::test]
+    fn compact_preview_release_and_navigation(cx: &mut TestAppContext) {
+        let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
+        let store = store_of(&shell, cx);
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        await_restore_update(&shell, cx, |store| {
+            store.preview_active_identity().is_some()
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        let (preview, state) = shell.read_with(cx, |shell, _| {
+            (
+                shell.attachment.as_ref().unwrap().preview.clone(),
+                shell.window_state(),
+            )
+        });
+        let lifecycle = preview.read_with(cx, |preview, _| preview.lifecycle());
+        let key = store.read_with(cx, |store, _| store.preview_active_identity().unwrap().1);
+        store.update(cx, |store, cx| {
+            store.toggle_preview_panel(cx);
+            store.set_preview_url(&key, "https://example.com/".into(), cx);
+        });
+        lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
+        state.update(cx, |state, cx| state.go(Destination::Panel, cx));
+        draw(cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+        });
+        draw(cx);
+        assert!(lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.preview_url(&key))
+                .as_deref(),
+            Some("https://example.com/")
+        );
+        state.update(cx, |state, cx| state.go(Destination::Panel, cx));
+        draw(cx);
+        // Dispatch the same action as the compact overflow menu.
+        cx.update(|window, cx| {
+            preview.update(cx, |preview, cx| {
+                preview.on_preview_action(&crate::preview_panel::PreviewAction::Close, window, cx)
+            });
+        });
+        draw(cx);
+        assert!(!lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.preview_url(&key)),
+            None
+        );
+        assert_eq!(
+            preview.read_with(cx, |preview, cx| preview.url_field(cx)),
+            ""
+        );
+        assert_eq!(
+            state.read_with(cx, |state, _| state.destination()),
+            Destination::Panel
+        );
+        store.update(cx, |store, cx| {
+            store.set_preview_url(&key, "https://example.com/again".into(), cx)
+        });
+        lifecycle.update(cx, |lifecycle, _| lifecycle.seed_stub(&key));
+        cx.update(|window, cx| shell.update(cx, |shell, cx| assert!(shell.back(window, cx))));
+        draw(cx);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| assert!(shell.back(window, cx))));
+        draw(cx);
+        assert_eq!(
+            state.read_with(cx, |state, _| state.destination()),
+            Destination::Threads
+        );
+        assert!(!lifecycle.read_with(cx, |lifecycle, _| lifecycle.has_view(&key)));
+        assert_eq!(
+            store.read_with(cx, |store, _| store.preview_url(&key)),
+            None
+        );
+    }
+
     #[gpui::test]
     fn back_unwinds_overlays_then_the_history_and_stops_at_the_root(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);

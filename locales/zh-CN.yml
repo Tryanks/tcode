@@ -847,6 +847,7 @@ preview:
   reload: "重新加载"
   scan_ports: "扫描本地开发端口"
   open_external: "在系统浏览器中打开"
+  close_compact: "关闭预览"
   close: "关闭预览并释放页面"
   copy_url: "复制网址"
   starting: "预览正在启动…"
