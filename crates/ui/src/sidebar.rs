@@ -667,6 +667,16 @@ impl SessionsSidebar {
         crate::add_project_dialog::open(self.store.clone(), window, cx);
     }
 
+    fn toggle_project(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if !self.store.read(cx).is_project_collapsed(project_id) {
+            self.expanded_groups.remove(project_id);
+        }
+        self.store.update(cx, |store, _| {
+            store.toggle_project_collapsed(project_id.to_string());
+        });
+        cx.notify();
+    }
+
     fn toggle_group(&mut self, project_id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.expanded_groups.remove(project_id) {
             if self
@@ -1549,6 +1559,10 @@ impl SessionsSidebar {
             cx,
         )
         .aria_expanded(!collapsed)
+        .debug_selector({
+            let project_id = project_id.clone();
+            move || format!("project-header-{project_id}")
+        })
         .group(group_key.clone())
         .h(px(30.))
         .items_center()
@@ -1558,9 +1572,7 @@ impl SessionsSidebar {
         .cursor_pointer()
         .hover(|s| s.bg(cx.theme().sidebar_accent))
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.store.update(cx, |store, _cx| {
-                store.toggle_project_collapsed(header_toggle_id.clone());
-            });
+            this.toggle_project(&header_toggle_id, cx);
         }))
         .child(
             Icon::new(if collapsed {
@@ -1676,6 +1688,10 @@ impl SessionsSidebar {
                         cx,
                     )
                     .aria_expanded(expanded)
+                    .debug_selector({
+                        let project_id = project_id.clone();
+                        move || format!("show-more-{project_id}")
+                    })
                     .pl(px(30.))
                     .py_1()
                     .text_size(px(12.))
@@ -2806,9 +2822,7 @@ impl SessionsSidebar {
         .gap(px(8.))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| {
-            this.store.update(cx, |store, _cx| {
-                store.toggle_project_collapsed(project_id.clone());
-            });
+            this.toggle_project(&project_id, cx);
         }))
         .text_size(px(13.))
         .text_color(cx.theme().muted_foreground)
@@ -3438,6 +3452,150 @@ mod tests {
 
         let callbacks = cx.update(|window, cx| window.simulate_next_frame(cx));
         assert!(callbacks > 0, "spring did not request an animation frame");
+    }
+
+    #[gpui::test]
+    fn project_header_resets_only_its_own_thread_expansion(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-project-collapse-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let projects = ["a", "b"].map(|id| {
+            let mut project = Project::from_root(root.join(id));
+            project.id = id.into();
+            project
+        });
+        let ids = projects.each_ref().map(|project| project.id.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.settings.sidebar_layout = SidebarLayout::Grouped;
+            state.settings.auto_archive_disabled = true;
+            for project in &projects {
+                for index in 0..8 {
+                    let parent = format!("{}-0", project.id);
+                    let mut meta = session(
+                        &format!("{}-{index}", project.id),
+                        (index == 7).then_some(parent.as_str()),
+                    );
+                    meta.project_id = Some(project.id.clone());
+                    state.sessions.push(meta);
+                }
+            }
+            state.projects = projects.to_vec();
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(320.), px(1400.)));
+        draw(cx);
+        let folds = sidebar.read_with(cx, |sidebar, _| sidebar.collapsed_parents.clone());
+        assert_eq!(folds.len(), 2);
+        for compact in [false, true] {
+            // Expand both lists through their production controls before testing
+            // either layout's project-header action.
+            window_state.update(cx, |state, _| state.compact = false);
+            sidebar.update(cx, |_, cx| cx.notify());
+            draw(cx);
+            for id in &ids {
+                if !sidebar.read_with(cx, |sidebar, _| sidebar.expanded_groups.contains(id)) {
+                    let toggle = cx
+                        .debug_bounds(if id == "a" {
+                            "show-more-a"
+                        } else {
+                            "show-more-b"
+                        })
+                        .unwrap();
+                    cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+                    draw(cx);
+                }
+            }
+            window_state.update(cx, |state, _| state.compact = compact);
+            sidebar.update(cx, |_, cx| cx.notify());
+            draw(cx);
+            let selector = if compact {
+                "compact-group-header"
+            } else {
+                "project-header-a"
+            };
+            let header = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw(cx);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let collapsed_id = loop {
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+                if let Some(id) = ids
+                    .iter()
+                    .find(|id| store.read_with(cx, |store, _| store.is_project_collapsed(id)))
+                {
+                    break id.clone();
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "folder collapse reaches replica"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            sidebar.read_with(cx, |sidebar, _| {
+                assert!(
+                    !sidebar.expanded_groups.contains(&collapsed_id),
+                    "collapsing a folder must reset its expanded thread list"
+                );
+                assert!(
+                    ids.iter()
+                        .filter(|id| **id != collapsed_id)
+                        .all(|id| sidebar.expanded_groups.contains(id)),
+                    "other project expansions survive"
+                );
+                assert_eq!(sidebar.collapsed_parents, folds, "child folds survive");
+            });
+            let header = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+                if !store.read_with(cx, |store, _| store.is_project_collapsed(&collapsed_id)) {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(!sidebar.read_with(cx, |sidebar, _| {
+                sidebar.expanded_groups.contains(&collapsed_id)
+            }));
+        }
+        window_state.update(cx, |state, _| state.compact = false);
+        sidebar.update(cx, |_, cx| cx.notify());
+        draw(cx);
+        // The other project remains expanded; its direct Show less control
+        // still collapses the list without folding the project or its children.
+        let expanded_id = sidebar.read_with(cx, |sidebar, _| {
+            sidebar.expanded_groups.iter().next().unwrap().clone()
+        });
+        let selector = if expanded_id == "a" {
+            "show-more-a"
+        } else {
+            "show-more-b"
+        };
+        let toggle = cx.debug_bounds(selector).unwrap();
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        draw(cx);
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(!sidebar.expanded_groups.contains(&expanded_id));
+            assert_eq!(sidebar.collapsed_parents, folds);
+        });
+        assert!(!store.read_with(cx, |store, _| store.is_project_collapsed(&expanded_id)));
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]

@@ -543,7 +543,12 @@ in both states.
    On hover, time swaps to the archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
-   expansion so the list can be collapsed again).
+   expansion so the list can be collapsed again). Collapsing a project folder
+   resets only that project's expanded thread list, including when collapsed
+   in compact layout; reopening in wide layout shows at most six visible threads.
+   Compact layout keeps its existing full thread list. Other
+   projects' expansions and parent/child folds stay unchanged. Children hidden
+   by a parent fold do not consume the six-thread limit.
 6. Footer: gear + "Settings" → settings route.
 
 In wide layout, the sidebar switches the content route directly: Machines
