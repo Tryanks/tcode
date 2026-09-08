@@ -16,6 +16,44 @@ use crate::theme::ActiveTheme as _;
 use dialog::ActiveDialog;
 use notification::NotificationList;
 
+/// Retains the dismissed pointer sequence after its popup content unmounts.
+/// Mount `release_listener` with the trigger, not the transient surface.
+#[derive(Clone, Default)]
+pub(crate) struct OutsideDismissal(Rc<std::cell::Cell<Option<gpui::MouseButton>>>);
+
+impl OutsideDismissal {
+    pub(crate) fn new(id: ElementId, window: &mut Window, cx: &mut App) -> Self {
+        window
+            .use_keyed_state((id, "outside-dismissal"), cx, |_, _| Self::default())
+            .read(cx)
+            .clone()
+    }
+
+    pub(crate) fn consume(&self, event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App) {
+        self.0.set(Some(event.button));
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    pub(crate) fn release_listener(&self) -> impl IntoElement {
+        let pending = self.0.clone();
+        gpui::canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                    if phase.capture() && pending.get() == Some(event.button) {
+                        pending.set(None);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+}
+
 /// Window root that owns tcode's modal and toast layers.
 pub struct OverlayHost {
     view: AnyView,

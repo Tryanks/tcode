@@ -3410,6 +3410,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[gpui::test]
+    fn compact_menu_dismissal_preserves_selection_and_clears_row_surface(cx: &mut TestAppContext) {
+        use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-menu-selection-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.clone());
+        let sessions = (0..12)
+            .map(|index| {
+                let mut meta = session(&format!("menu-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 1000 - index;
+                meta
+            })
+            .collect();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = sessions;
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let navigation = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (_, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        // A remote host may not have sent status yet. Selection must repaint
+        // from the client notification without waiting for a host event.
+        host.shutdown_blocking().unwrap();
+        draw(cx);
+        let a = cx.debug_bounds("compact-row-menu-0").unwrap();
+        let b = cx.debug_bounds("compact-row-menu-10").unwrap();
+        let send = |cx: &mut VisualTestContext, id, phase, position| {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase,
+                        position,
+                        predicted_position: None,
+                        force: None,
+                    }),
+                    cx,
+                );
+            })
+        };
+        send(cx, 1, TouchPhase::Started, a.center());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(801));
+        cx.run_until_parked();
+        send(cx, 1, TouchPhase::Ended, a.center());
+        draw(cx);
+        let menu = cx
+            .debug_bounds("tcode-popup-menu")
+            .expect("long press opens menu");
+        assert!(!menu.contains(&b.center()));
+        let selected = store.read_with(cx, |store, _| store.active_session_id());
+        let destination = navigation.read_with(cx, |state, _| state.destination());
+        send(cx, 2, TouchPhase::Started, b.center());
+        send(cx, 2, TouchPhase::Ended, b.center());
+        draw(cx);
+        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            selected
+        );
+        assert_eq!(
+            navigation.read_with(cx, |state, _| state.destination()),
+            destination
+        );
+        let selected_surface = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
+            cx.update(|window, cx| {
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == bounds.scale(window.scale_factor())
+                        && quad.background == gpui::Background::from(cx.theme().list_active)
+                })
+            })
+        };
+        assert!(
+            !selected_surface(cx, a),
+            "dismissed A has no pressed or selected fill"
+        );
+        send(cx, 3, TouchPhase::Started, b.center());
+        send(cx, 3, TouchPhase::Ended, b.center());
+        draw(cx);
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.active_session_id())
+                .as_deref(),
+            Some("menu-10")
+        );
+        assert!(!selected_surface(cx, a));
+        assert!(selected_surface(cx, b), "selected surface follows B");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Exercise Recent and its persisted layout toggle at phone geometry,
     /// returning whether By project draws a section header.
     fn compact_list_has_project_headers(cx: &mut TestAppContext, projects: usize) -> bool {

@@ -106,6 +106,13 @@ impl Popover {
         }));
         self
     }
+    pub(crate) fn trigger_with(
+        mut self,
+        trigger: impl FnOnce(bool, &Window, &App) -> AnyElement + 'static,
+    ) -> Self {
+        self.trigger = Some(Box::new(trigger));
+        self
+    }
     pub fn content<F, E>(mut self, builder: F) -> Self
     where
         F: FnOnce(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> E + 'static,
@@ -135,6 +142,9 @@ impl RenderOnce for Popover {
             return self.render_sheet(window, cx);
         }
 
+        let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
+        let release = dismissal.clone();
+        let closable = self.overlay_closable;
         let appearance = self.appearance;
         let content = self.content;
         let children = self.children;
@@ -143,16 +153,32 @@ impl RenderOnce for Popover {
             .anchor(self.anchor)
             .mouse_button(self.mouse_button)
             .default_open(self.default_open)
-            .overlay_closable(self.overlay_closable)
+            .overlay_closable(false)
             .when_some(self.open, |base, open| base.open(open))
             .when_some(self.tracked_focus, |base, focus| base.track_focus(&focus))
-            .when_some(self.trigger, |base, trigger| base.trigger_with(trigger))
+            .when_some(self.trigger, |base, trigger| {
+                base.trigger_with(move |open, window, cx| {
+                    div()
+                        .child(trigger(open, window, cx))
+                        .child(release.release_listener())
+                        .into_any_element()
+                })
+            })
             .when_some(self.on_open_change, |base, callback| {
                 base.on_open_change(move |open, window, cx| callback(open, window, cx))
             })
             .content(move |state, window, cx| {
+                let popover = cx.entity();
+                let parent = window.current_view();
                 gpui_base::v_flex()
                     .id("tcode-popover-content")
+                    .when(closable, |el| {
+                        el.on_mouse_down_out(move |event, window, cx| {
+                            dismissal.consume(event, window, cx);
+                            popover.update(cx, |state, cx| state.dismiss(window, cx));
+                            cx.notify(parent);
+                        })
+                    })
                     .occlude()
                     .when(appearance, |el| {
                         el.p_1()
@@ -182,6 +208,9 @@ impl Popover {
                 state.sync_open(open, window, cx);
             }
         });
+        let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
+        let outside = dismissal.clone();
+        let closable = self.overlay_closable;
         let open = state.read(cx).is_open();
         // Keep the sheet mounted through its fade-out before dismissal.
         let presence = gpui_base::motion::Presence::new(
@@ -204,7 +233,8 @@ impl Popover {
             })
             .when_some(self.trigger, |el, trigger| {
                 el.child(trigger(open, window, cx))
-            });
+            })
+            .child(dismissal.release_listener());
         if presence.should_render() {
             let close = state.clone();
             let backdrop = state.clone();
@@ -220,9 +250,12 @@ impl Popover {
                 .track_focus(&focus)
                 .key_context("Popover")
                 .on_action(window.listener_for(&state, PopoverState::on_action_cancel))
-                .on_mouse_down_out(move |_, window, cx| {
-                    backdrop.update(cx, |state, cx| state.dismiss(window, cx));
-                    cx.notify(parent);
+                .when(closable, |surface| {
+                    surface.on_mouse_down_out(move |event, window, cx| {
+                        outside.consume(event, window, cx);
+                        backdrop.update(cx, |state, cx| state.dismiss(window, cx));
+                        cx.notify(parent);
+                    })
                 })
                 // Offset animation would move the hit targets, so fade with the
                 // backdrop while keeping the sheet in its final position.
@@ -335,6 +368,110 @@ mod tests {
                         }),
                 ),
             )
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Popover,
+        Sheet,
+        Dropdown,
+    }
+    struct OutsideHarness {
+        kind: Kind,
+        clicks: Rc<Cell<usize>>,
+        releases: Rc<Cell<usize>>,
+    }
+    impl Render for OutsideHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use crate::widgets::menu::DropdownMenu as _;
+            let button = crate::widgets::Button::new("open")
+                .label("Open")
+                .debug_selector(|| "outside-trigger".into());
+            let trigger = match self.kind {
+                Kind::Dropdown => button
+                    .dropdown_menu(|menu, _, _| {
+                        menu.menu("Choose", Box::new(gpui_base::actions::Cancel))
+                    })
+                    .into_any_element(),
+                kind => Popover::new("outside-popover")
+                    .when(matches!(kind, Kind::Sheet), |popover| {
+                        popover.bottom_sheet("Choose")
+                    })
+                    .trigger(button)
+                    .content(|_, _, _| div().size(px(60.)).child("Option"))
+                    .into_any_element(),
+            };
+            let clicks = self.clicks.clone();
+            let releases = self.releases.clone();
+            div().size_full().child(trigger).child(
+                div()
+                    .id("outside-target")
+                    .absolute()
+                    .top(px(300.))
+                    .left(px(280.))
+                    .size(px(60.))
+                    .debug_selector(|| "outside-target".into())
+                    .on_mouse_up(MouseButton::Left, move |_, _, _| {
+                        releases.set(releases.get() + 1)
+                    })
+                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn all_popovers_consume_dismissal_release_even_after_redraw(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        for kind in [Kind::Popover, Kind::Sheet, Kind::Dropdown] {
+            for redraw in [false, true] {
+                let clicks = Rc::new(Cell::new(0));
+                let releases = Rc::new(Cell::new(0));
+                let (_, cx) = cx.add_window_view({
+                    let clicks = clicks.clone();
+                    let releases = releases.clone();
+                    move |_, _| OutsideHarness {
+                        kind,
+                        clicks,
+                        releases,
+                    }
+                });
+                cx.simulate_resize(gpui::size(px(393.), px(852.)));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let trigger = cx.debug_bounds("outside-trigger").unwrap().center();
+                cx.simulate_click(trigger, Default::default());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let position = cx.debug_bounds("outside-target").unwrap().center();
+                cx.simulate_event(gpui::MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                });
+                if redraw {
+                    cx.update(|window, cx| window.draw(cx).clear(cx));
+                }
+                cx.simulate_event(gpui::MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                });
+                assert_eq!(clicks.get(), 0);
+                assert_eq!(
+                    releases.get(),
+                    0,
+                    "dismissed popup must retain its release guard"
+                );
+                cx.run_until_parked();
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(200));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.simulate_click(position, Default::default());
+                assert_eq!(clicks.get(), 1);
+                assert_eq!(releases.get(), 1);
+            }
         }
     }
 

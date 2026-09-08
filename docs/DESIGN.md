@@ -171,6 +171,12 @@ skeleton. Selecting that conversation again sends no requests. Changing selectio
 retires the old subscription generation; its late snapshot cannot replace the new
 conversation.
 
+Menus and dismissible popovers consume the outside pointer sequence that closes
+them, including its release. The underlying row or control acts only on a second
+tap or click. Closing or choosing a menu clears its transient state; thread-row
+selection follows the selected conversation, independently of which row opened a
+menu.
+
 ## Timeline history
 
 A newly opened conversation starts with the last 200 event records. Earlier
