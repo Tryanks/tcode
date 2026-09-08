@@ -1165,6 +1165,7 @@ impl Render for Composer {
         // fixed: focus never changes border width, radius, or layout.
         let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
+            .debug_selector(|| "composer-card".into())
             .w_full()
             .gap_1p5()
             .p(px(6.))
@@ -1271,7 +1272,6 @@ impl Render for Composer {
             } else {
                 crate::chat::CONTENT_MIN_PADDING
             }))
-            .pt_1()
             .pb_2()
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {

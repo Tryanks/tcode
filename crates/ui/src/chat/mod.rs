@@ -2642,6 +2642,7 @@ impl Render for ChatView {
                     cx,
                 );
                 v_flex()
+                    .debug_selector(move || format!("timeline-row-{index}"))
                     .w_full()
                     .items_center()
                     .px(px(if this.window_state.read(cx).compact {
@@ -2772,12 +2773,6 @@ impl Render for ChatView {
                         this.child(self.render_scroll_pill(cx))
                     }),
             )
-            // A faded hairline plus 8pt of air separates the phone's timeline
-            // from its composer; the desktop separates by rhythm alone.
-            .when(compact, |el| {
-                el.child(crate::material::faded_hairline(cx))
-                    .child(div().h(px(8.)).flex_none())
-            })
             .child(
                 div()
                     .id("chat-composer")
@@ -3400,6 +3395,60 @@ mod tests {
                     "meter aligns with trailing Send edge"
                 );
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn timeline_tail_has_one_composer_gap(cx: &mut TestAppContext) {
+        use gpui::{Context, IntoElement, Render, Window, px};
+        struct ChatRoot(Entity<ChatView>);
+        impl Render for ChatRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::touch_scroll::root(self.0.clone())
+            }
+        }
+
+        for running in [false, true] {
+            for (width, height) in [(393., 852.), (1024., 768.)] {
+                let mut timeline = synthetic_markdown_timeline(30);
+                timeline.turn_running = running;
+                timeline.turns.last_mut().unwrap().running = running;
+                let (store, window_state, _) = seed_chat(cx, timeline);
+                window_state.update(cx, |state, _| state.compact = width < 900.);
+                let (view, cx) = cx.add_window_view(|window, cx| {
+                    ChatRoot(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+                });
+                cx.simulate_resize(gpui::size(px(width), px(height)));
+                let list = view.read_with(cx, |view, cx| view.0.read(cx).list_state.clone());
+                list.scroll_to_end();
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                let last = cx
+                    .debug_bounds("timeline-row-29")
+                    .expect("last timeline row");
+                assert!(
+                    f32::from(last.bottom() - list.viewport_bounds().bottom()).abs() <= 1.,
+                    "the gap must stay outside the list's viewport"
+                );
+                let composer = cx.debug_bounds("chat-composer").expect("composer");
+                let gap = f32::from(composer.top() - last.bottom());
+                assert!(
+                    (gap - 16.).abs() <= 1.,
+                    "{width}×{height}, running={running}: expected 16px gap, got {gap}px"
+                );
+                let card = cx
+                    .debug_bounds("composer-card")
+                    .expect("visible composer card");
+                assert_eq!(card.top(), composer.top(), "no extra composer top inset");
+                if running {
+                    let status = cx
+                        .debug_bounds("working-status-29")
+                        .expect("running status");
+                    assert_eq!(status.bottom(), last.bottom());
+                }
             }
         }
     }

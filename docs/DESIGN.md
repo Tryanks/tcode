@@ -146,6 +146,10 @@ so startup never exposes a default white/black window or decorative backdrop.
   (must reflow, never clip, when the diff panel narrows the chat region).
 - Composer: floating opaque card with the shared composer radius, a hairline
   border and subtle shadow. Focus changes the border color without resizing it.
+- Timeline-to-composer spacing: **16px** from the last timeline row's bottom
+  edge to the composer card's top edge when scrolled to the end, in both compact
+  and wide layouts, including when the last row has a running status. The timeline
+  wrapper owns this gap outside the `List`; the composer adds no top inset.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
@@ -411,6 +415,8 @@ One inset, applied once, at the page:
   denser padding when it becomes a page.
 - **Card inset 12pt.** A card, notice, chip or row *inside* that content pads a
   further 12pt; it never re-applies the page inset.
+- **Timeline-to-composer gap 16pt**, once, as in wide layout. No additional
+  separator spacer or composer top padding is added to the timeline's bottom inset.
 - **Terminal exception.** The terminal grid stays edge to edge horizontally —
   it is measured in columns, and narrowing it drops columns — but it still sits
   inside the window's safe rect and keeps 8pt of air below the segmented control.
