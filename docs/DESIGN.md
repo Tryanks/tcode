@@ -359,6 +359,16 @@ canvas.
 Insets change without a timer: the platform schedules a frame when they move, so
 the layout follows the keyboard immediately.
 
+### Bottom sheets
+
+Compact pickers and details use the shared bottom sheet: an opaque T3 surface
+spanning the full window width, independent of the wide popover’s desktop width.
+Only its top corners are rounded, at 16pt; content is inset 16pt. The full-page
+scrim includes the window seam, while bottom padding on that layer places the
+sheet above `max(safe.bottom, ime.bottom)`. Its height is capped below the 52pt
+nav bar plus the top safe area; taller content scrolls inside the sheet. Tapping
+the scrim dismisses and consumes the whole pointer sequence, including release.
+
 ### Toasts
 
 Compact notifications are system-style pills centered horizontally in the safe
