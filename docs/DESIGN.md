@@ -682,7 +682,7 @@ both rows fit at 360pt in English and Simplified Chinese.
 The context details distinguish the latest main-conversation request from
 processed traffic. Claude occupancy is the latest input plus cache-read and
 cache-creation tokens; generated output and repeated requests do not inflate it.
-Capacity is separate and respects the selected model limit. Unknown observations
+Capacity stays visible independently and respects the selected model limit. Unknown observations
 say **Unknown**, with no measured percentage or empty progress bar. During a new
 turn the previous observation says **Last known context · updating** until replaced.
 Older saved events without provenance stay unverified until a new observation;

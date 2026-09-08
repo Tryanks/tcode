@@ -1545,14 +1545,13 @@ fn render_context_meter_pane(
     let used = usage.as_ref().and_then(context_meter::used_tokens);
     let max = usage.and_then(|u| u.context_window);
     let pct_label = context_meter::format_percentage(pct);
-    let stat: AnyElement = match (max, pct_label.clone()) {
-        (Some(max), Some(pct_label)) => h_flex()
+    let stat: AnyElement = match max {
+        Some(max) => h_flex()
             .gap_1()
             .text_size(px(11.))
             .font_family(cx.theme().mono_font_family.clone())
             .text_color(muted)
-            .child(pct_label)
-            .child("·")
+            .when_some(pct_label, |row, label| row.child(label).child("·"))
             .child(format!(
                 "{}/{}",
                 context_meter::format_tokens(used),
@@ -1614,7 +1613,7 @@ fn render_context_meter_pane(
     );
 
     // "Total processed" — the session-cumulative token count, when the provider
-    // reports it (a native running total or adapter-side accumulation).
+    // reports it (a native running total or timeline accumulation).
     if let Some(total) = usage.and_then(|u| u.total_processed_tokens) {
         pane = pane.child(
             h_flex()
