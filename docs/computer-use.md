@@ -46,8 +46,8 @@ WebView; this server exposes desktop windows, not CDP browser roots.
 
 [crates/computer-use-mcp](../crates/computer-use-mcp/src/lib.rs) owns the outline,
 immutable state store, tool router, platform backends and permission facade.
-Providers receive its streamable-HTTP MCP registration when computer use is
-enabled. Claude, Codex and OpenCode use their native MCP configuration; ACP
+Providers receive a per-session authenticated streamable-HTTP MCP registration
+when computer use is enabled. Claude, Codex and OpenCode use their native MCP configuration; ACP
 registration is gated on the agent's HTTP MCP capability. The Settings UI
 consumes the same permission facade.
 
@@ -90,6 +90,24 @@ and `keypress` may retry through foreground activation and HID delivery after a
 background failure. Pointer actions do not take that fallback. `show_agent_cursor`
 defaults to `true` and controls a separate macOS action overlay; it is visible
 only while the target app is frontmost and does not move the system cursor.
+The overlay uses an animatable window frame for consecutive moves and the final
+drag endpoint. Typing/key chords without an element or coordinate anchor use the
+current root window's center.
+
+Successful action feedback expires one second after submission (queue delay
+counts); the next 200ms visibility poll removes it. Foreground changes never
+renew that deadline. Runtime Stop and turn completion cancel only the issuing
+session's feedback. MCP request cancellation/failure clears only that request's
+current marker; cancellation tokens are checked by queued publication and the
+visibility poll even while a synchronous native action has not returned.
+An already-posted native input event cannot be recalled by this visual cleanup.
+
+Disabling Computer Use or its cursor invalidates queued publications immediately.
+Closing/hiding a target window clears feedback on the next visibility poll,
+including when the app process remains alive. Revoking a provider registration
+stops its retained handlers from publishing again. Feedback belongs to the actual
+mounted service/handler lifetime, not the URL/token-issuer metadata; dropping one
+server cannot disable another server's newer marker.
 
 Before walking Chromium/Electron windows, the backend best-effort enables their
 accessibility exposure. It also retries activation for processes whose earlier
@@ -173,3 +191,17 @@ state on the target platform. For macOS permission changes, also check denial,
 return from System Settings, grant, restart continuity and revocation. Use an
 isolated test environment when changing permission state would disrupt the
 working desktop; keep evidence in the PR rather than a machine-specific run log.
+
+
+The opt-in macOS arm64 native regression runs AppKit on the process main thread:
+
+```sh
+cargo test -p computer-use-mcp --test macos_overlay --locked -- --ignored
+```
+
+It opens a temporary passthrough panel to check successive movement, drag
+completion, foreground preservation, and the real CoreGraphics query after
+closing a retained window. Ordinary Cargo tests explicitly report this test as
+ignored because it requires a desktop slot. Run it only when the shared GUI is
+available. Automated lifecycle tests separately exercise delayed publication,
+session/request cancellation, disable/re-enable, and mounted-service teardown.

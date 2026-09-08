@@ -1138,3 +1138,19 @@ Threads marks cached rows **Pending** and provides one **Waiting for connectionâ
 row per uncached pending session, with its first message preview, at both widths.
 A host deletion arriving before the rejected Ack does not navigate away from an
 unresolved send: its inline error and Retry/Discard controls remain on screen.
+
+## macOS Computer Use feedback
+
+The agent cursor is a nonactivating, pointer-passthrough panel, visible only
+while its target application is frontmost. Consecutive actions animate to the
+latest point; a drag ends at its final point. Untargeted typing and key chords
+show keyboard feedback at the current target window's center.
+
+A successful action's marker lasts one second from submission, including queue
+delay, and is removed on the next 200ms visibility tick. Switching applications
+does not restart this lifetime. Stop, turn completion, a cancelled/failed MCP
+request, disabling the cursor or Computer Use, and session/backend teardown
+invalidate pending feedback and clear the current marker on the main queue.
+Cancellation is session-scoped: it cannot clear another session's newer marker.
+Closing or hiding the target window retires its marker even when its process
+stays open. See [Computer use](computer-use.md) for the native verification path.

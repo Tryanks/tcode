@@ -15,7 +15,9 @@ static CONFIG: RwLock<ComputerUseSettings> = RwLock::new(ComputerUseSettings {
 });
 
 pub fn set(config: ComputerUseSettings) {
-    *CONFIG.write().unwrap() = config;
+    let mut current = CONFIG.write().unwrap();
+    crate::backend::set_feedback_enabled(config.enabled && config.show_agent_cursor);
+    *current = config;
 }
 
 pub fn get() -> ComputerUseSettings {
