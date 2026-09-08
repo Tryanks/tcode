@@ -1171,3 +1171,16 @@ invalidate pending feedback and clear the current marker on the main queue.
 Cancellation is session-scoped: it cannot clear another session's newer marker.
 Closing or hiding the target window retires its marker even when its process
 stays open. See [Computer use](computer-use.md) for the native verification path.
+
+## Native paired Preview connection ownership
+
+Windows and Android retain native proxy routing and logical URLs, with an
+attachment-owned loopback bridge carrying their existing authenticated proxy
+bytes to the paired HTTP(S) entry. Native proxy authentication uses that local
+bridge origin; attachment teardown cancels its listener and connections.
+Windows remote WebView2 environments use temporary directories owned with the
+environment, since each attachment has different proxy arguments. Local Preview
+retains its existing directory.
+macOS retains its per-browser URL mappings and route lifetimes, now using the
+same HTTP(S) establishment owner. No new controls or transport selections are
+introduced. See [Remote Preview routing](remote.md#remote-preview-routing).

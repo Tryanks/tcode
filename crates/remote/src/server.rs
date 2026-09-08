@@ -12,7 +12,6 @@ use futures_lite::io::AsyncWriteExt as _;
 use futures_util::{FutureExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
-use smol::Async;
 use tungstenite::Message;
 use tungstenite::protocol::Role;
 
@@ -79,7 +78,33 @@ pub struct RemoteServer {
     thread: Option<JoinHandle<()>>,
 }
 
+/// Ingress provenance is established by the listener, never by request headers.
+#[derive(Clone, Copy, Debug)]
+enum Ingress {
+    Direct(SocketAddr),
+    Imported,
+}
+
+impl Ingress {
+    fn local_admin(self) -> bool {
+        matches!(self, Self::Direct(peer) if peer.ip().is_loopback())
+    }
+}
+
 impl RemoteServer {
+    /// Admit a remotely supplied duplex stream into the existing host dispatch.
+    /// Dropping this future cancels the connection. Imported streams never gain
+    /// local administration rights, including streams forwarded over loopback.
+    pub fn admit<S>(
+        &self,
+        stream: S,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send + use<S>
+    where
+        S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
+    {
+        admit(stream, Ingress::Imported, self.shared.clone())
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
@@ -136,7 +161,6 @@ impl Drop for RemoteServer {
 pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
     let auth = AuthStore::open(&config.data_dir, &config.host_name)?;
     let listener = TcpListener::bind(config.listen)?;
-    listener.set_nonblocking(true)?;
     let local_addr = listener.local_addr()?;
     let (shutdown, shutdown_rx) = async_channel::bounded::<()>(1);
     let shared = Arc::new(Shared {
@@ -154,7 +178,7 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
         .name("tcode-remote-server".into())
         .spawn(move || {
             smol::block_on(async move {
-                let listener = match Async::new(listener) {
+                let listener = match smol::net::TcpListener::try_from(listener) {
                     Ok(listener) => listener,
                     Err(error) => {
                         log::error!("remote listener initialization failed: {error}");
@@ -163,7 +187,7 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
                 };
                 loop {
                     enum Next {
-                        Accepted(io::Result<(Async<std::net::TcpStream>, SocketAddr)>),
+                        Accepted(io::Result<(smol::net::TcpStream, SocketAddr)>),
                         Shutdown,
                     }
                     let next = futures_lite::future::race(
@@ -176,15 +200,9 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
                     .await;
                     match next {
                         Next::Accepted(Ok((stream, peer))) => {
-                            use std::sync::atomic::Ordering;
-                            if thread_shared.connections.fetch_add(1, Ordering::Relaxed) >= 256 {
-                                thread_shared.connections.fetch_sub(1, Ordering::Relaxed);
-                                continue;
-                            }
                             let shared = thread_shared.clone();
                             smol::spawn(async move {
-                                let result = handle_connection(stream, peer, shared.clone()).await;
-                                shared.connections.fetch_sub(1, Ordering::Relaxed);
+                                let result = admit(stream, Ingress::Direct(peer), shared).await;
                                 if let Err(error) = result {
                                     log::debug!("remote connection ended: {error}");
                                 }
@@ -207,14 +225,40 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
     })
 }
 
-async fn handle_connection(
-    stream: Async<std::net::TcpStream>,
-    peer: SocketAddr,
-    shared: Arc<Shared>,
-) -> io::Result<()> {
+async fn admit<S>(stream: S, ingress: Ingress, shared: Arc<Shared>) -> io::Result<()>
+where
+    S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
+{
+    use std::sync::atomic::Ordering;
+    struct Permit(Arc<Shared>);
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            self.0.connections.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    let previous = shared.connections.fetch_add(1, Ordering::Relaxed);
+    let _permit = Permit(shared.clone());
+    if previous >= 256 || shared.shutdown.is_closed() {
+        return Err(io::Error::other("server unavailable"));
+    }
+    handle_connection(stream, ingress, shared).await
+}
+
+async fn handle_connection<S>(stream: S, ingress: Ingress, shared: Arc<Shared>) -> io::Result<()>
+where
+    S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
+{
     let mut stream = stream;
     let request = match futures_lite::future::race(read_request(&mut stream), async {
-        smol::Timer::after(Duration::from_secs(5)).await;
+        futures_lite::future::race(
+            async {
+                smol::Timer::after(Duration::from_secs(5)).await;
+            },
+            async {
+                let _ = shared.shutdown.recv().await;
+            },
+        )
+        .await;
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "HTTP request timed out",
@@ -224,6 +268,9 @@ async fn handle_connection(
     {
         Ok(request) => request,
         Err(error) => {
+            if shared.shutdown.is_closed() {
+                return Ok(());
+            }
             let _ = response(
                 &mut stream,
                 "400 Bad Request",
@@ -234,13 +281,36 @@ async fn handle_connection(
             return Err(error);
         }
     };
+    if request.method == "GET" && request.path == "/ws" && is_websocket_upgrade(&request) {
+        // The WS loop sends its existing close frame. Bound teardown as well
+        // when an admitted stream is blocked writing to an unresponsive peer.
+        return futures_lite::future::race(websocket(stream, request, shared.clone()), async {
+            let _ = shared.shutdown.recv().await;
+            smol::Timer::after(Duration::from_secs(1)).await;
+            Ok(())
+        })
+        .await;
+    }
+    futures_lite::future::race(dispatch(stream, request, ingress, &shared), async {
+        let _ = shared.shutdown.recv().await;
+        Ok(())
+    })
+    .await
+}
+
+async fn dispatch<S>(
+    mut stream: S,
+    request: Request,
+    ingress: Ingress,
+    shared: &Arc<Shared>,
+) -> io::Result<()>
+where
+    S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
+{
     if request.method == "CONNECT" || request.path.starts_with("http://") {
-        return crate::proxy::handle(stream, request, peer, &shared).await;
+        return crate::proxy::handle(stream, request, shared).await;
     }
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/ws") if is_websocket_upgrade(&request) => {
-            websocket(stream, request, shared).await
-        }
         ("GET", "/auth/state") => {
             let state = if shared.browser_password {
                 serde_json::json!({"mode": "password", "configured": shared.auth.lock().unwrap().password_configured()})
@@ -250,11 +320,11 @@ async fn handle_connection(
             json_response(&mut stream, "200 OK", &state).await
         }
         ("POST", "/auth/setup" | "/auth/login") if shared.browser_password => {
-            password_auth(&mut stream, request, shared).await
+            password_auth(&mut stream, request, shared.clone()).await
         }
-        ("POST", "/pair") => pair(&mut stream, request, &shared).await,
+        ("POST", "/pair") => pair(&mut stream, request, shared).await,
         ("GET", "/admin/pair")
-            if peer.ip().is_loopback()
+            if ingress.local_admin()
                 && shared.browser_password
                 && !shared.auth.lock().unwrap().pairing_enabled =>
         {
@@ -265,8 +335,8 @@ async fn handle_connection(
             )
             .await
         }
-        ("GET", "/admin/pair") if peer.ip().is_loopback() => {
-            json_response(&mut stream, "200 OK", &mint_pairing_code(&shared)).await
+        ("GET", "/admin/pair") if ingress.local_admin() => {
+            json_response(&mut stream, "200 OK", &mint_pairing_code(shared)).await
         }
         ("GET", "/admin/pair") => {
             response(
@@ -278,7 +348,7 @@ async fn handle_connection(
             .await
         }
         ("GET" | "HEAD", path) => {
-            serve_static(&mut stream, path, &shared, request.method == "HEAD").await
+            serve_static(&mut stream, path, shared, request.method == "HEAD").await
         }
         _ => {
             response(
@@ -591,11 +661,10 @@ struct Hello {
     token: String,
 }
 
-async fn websocket(
-    mut stream: Async<std::net::TcpStream>,
-    request: Request,
-    shared: Arc<Shared>,
-) -> io::Result<()> {
+async fn websocket<S>(mut stream: S, request: Request, shared: Arc<Shared>) -> io::Result<()>
+where
+    S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
+{
     let key = request
         .headers
         .get("sec-websocket-key")
