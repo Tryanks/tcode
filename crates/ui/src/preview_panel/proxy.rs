@@ -5,25 +5,23 @@ pub(super) fn builder<'a>(
     builder: wry::WebViewBuilder<'a>,
     host: Option<&PairedHost>,
 ) -> Result<wry::WebViewBuilder<'a>, String> {
-    let Some(host) = host else {
+    let Some(_host) = host else {
         return Ok(builder);
     };
-    let origin = url::Url::parse(&host.origin).map_err(|e| e.to_string())?;
-    if origin.scheme() != "http" {
-        return Err("remote desktop preview requires a direct HTTP machine origin".into());
-    }
     #[cfg(target_os = "macos")]
     {
-        // WebKit applies NWProxyConfig to public destinations but silently
-        // bypasses destinations on the client's local interfaces, even with
-        // no excluded domains and failover disabled. A navigation-only guard
-        // cannot protect subresources or names resolving to those interfaces.
-        // Refuse creation until the backend can enforce the machine boundary.
-        Err(crate::tr!("preview.machine_proxy_unavailable").to_string())
+        // Every attached browser gets a separate nonpersistent WK store.
+        // Cookies are scoped by hostname, not by our allocated viewing ports.
+        Ok(builder.with_incognito(true))
     }
     #[cfg(target_os = "windows")]
     {
         use wry::WebViewBuilderExtWindows as _;
+        let host = _host;
+        let origin = url::Url::parse(&host.origin).map_err(|e| e.to_string())?;
+        if origin.scheme() != "http" {
+            return Err("remote desktop preview requires a direct HTTP machine origin".into());
+        }
         let builder = builder
             .with_incognito(true)
             .with_proxy_config(wry::ProxyConfig::Http(wry::ProxyEndpoint {
@@ -86,25 +84,4 @@ pub(super) fn authenticate(raw: &wry::WebView, host: Option<&PairedHost>) -> Res
     // SAFETY: the webview retains the callback until its owning view is destroyed.
     unsafe { webview.add_BasicAuthenticationRequested(&handler, &mut token) }
         .map_err(|e| e.to_string())
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn attached_preview_fails_closed_before_webview_creation() {
-        let host = PairedHost {
-            host_id: "machine".into(),
-            name: "Machine".into(),
-            origin: "http://192.0.2.10:47420".into(),
-            token: "test-device-token".into(),
-            last_connected_unix: None,
-        };
-        assert!(builder(wry::WebViewBuilder::new(), None).is_ok());
-        let result = builder(wry::WebViewBuilder::new(), Some(&host));
-        assert!(
-            matches!(result, Err(error) if error == crate::tr!("preview.machine_proxy_unavailable"))
-        );
-    }
 }

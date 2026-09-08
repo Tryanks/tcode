@@ -14,7 +14,7 @@ server = [
     "dep:uuid",
     "dep:pbkdf2",
 ]
-client = ["dep:tcode-protocol", "dep:dirs"]
+client = ["dep:tcode-protocol", "dep:dirs", "dep:base64"]
 
 [dependencies]
 tcode-client = { path = "../client" }

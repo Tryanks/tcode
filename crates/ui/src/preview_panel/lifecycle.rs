@@ -79,7 +79,11 @@ enum WebViewSlot {
         phase: CreationPhase,
         pending_url: Option<String>,
     },
-    Ready(Entity<WebView>),
+    Ready {
+        view: Entity<WebView>,
+        #[cfg(target_os = "macos")]
+        remote: Option<super::remote::RemoteBrowser>,
+    },
 }
 
 impl WebViewSlot {
@@ -89,7 +93,7 @@ impl WebViewSlot {
             Self::Creating { .. } => None,
             #[cfg(test)]
             Self::Stub => None,
-            Self::Ready(view) => Some(view),
+            Self::Ready { view, .. } => Some(view),
         }
     }
 
@@ -103,7 +107,7 @@ impl WebViewSlot {
             Self::Creating { phase, .. } => Availability::Starting(*phase),
             #[cfg(test)]
             Self::Stub => Availability::Unavailable,
-            Self::Ready(view) => Availability::Ready(view.clone()),
+            Self::Ready { view, .. } => Availability::Ready(view.clone()),
         }
     }
 }
@@ -219,6 +223,20 @@ impl BrowserLifecycle {
                 // asynchronous didStart, so a wait_for issued right after
                 // this navigation cannot fail on the old record.
                 load_error::forget(raw);
+                #[cfg(target_os = "macos")]
+                let mapped = match self
+                    .remote_browser(key)
+                    .map(|remote| remote.navigate(url))
+                    .transpose()
+                {
+                    Ok(mapped) => mapped,
+                    Err(_) => {
+                        cx.notify();
+                        return availability;
+                    }
+                };
+                #[cfg(target_os = "macos")]
+                let url = mapped.as_deref().unwrap_or(url);
                 match raw.load_url(url) {
                     Ok(()) => {
                         self.warm.insert(key.to_string());
@@ -331,7 +349,55 @@ impl BrowserLifecycle {
     /// The last navigation failure the platform reported for this browser, if
     /// the current page is still the one it left behind.
     pub(super) fn load_error(&self, key: &str, cx: &App) -> Option<LoadError> {
-        load_error::get(self.ready_view(key)?.read(cx).raw())
+        #[cfg(target_os = "macos")]
+        if let Some(remote) = self.remote_browser(key) {
+            let routes = remote.routes.borrow();
+            if let Some(message) = routes.error() {
+                return Some(LoadError {
+                    url: routes.current_url().unwrap_or_default().into(),
+                    code: "RemotePreview".into(),
+                    message,
+                });
+            }
+        }
+        let mut error = load_error::get(self.ready_view(key)?.read(cx).raw())?;
+        error.url = self.logical_url(key, &error.url);
+        Some(error)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn remote_browser(&self, key: &str) -> Option<&super::remote::RemoteBrowser> {
+        match self.slots.get(key)? {
+            WebViewSlot::Ready { remote, .. } => remote.as_ref(),
+            #[cfg(test)]
+            WebViewSlot::Stub => None,
+        }
+    }
+
+    pub(super) fn logical_url(&self, _key: &str, actual: &str) -> String {
+        #[cfg(target_os = "macos")]
+        if let Some(remote) = self.remote_browser(_key) {
+            return remote.routes.borrow().logical_url(actual);
+        }
+        actual.into()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn remote_url(&self, key: &str) -> Option<String> {
+        self.remote_browser(key)?
+            .routes
+            .borrow()
+            .current_url()
+            .map(str::to_owned)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn external_url(&self, key: &str, logical: &str) -> Option<String> {
+        match self.remote_browser(key) {
+            Some(remote) => remote.routes.borrow().external_url(logical),
+            None if self.proxy.is_some() => None,
+            None => Some(logical.into()),
+        }
     }
 
     fn forget_load_error(&self, key: &str, cx: &App) {
@@ -530,7 +596,8 @@ impl BrowserLifecycle {
             set_webview_visible(&mut view, false);
             view
         });
-        self.slots.insert(key.clone(), WebViewSlot::Ready(webview));
+        self.slots
+            .insert(key.clone(), WebViewSlot::Ready { view: webview });
         if warm {
             self.warm.insert(key);
         }
@@ -615,9 +682,19 @@ mod platform {
             set_webview_visible(&mut view, false);
             view
         });
-        lifecycle
-            .slots
-            .insert(key.to_string(), WebViewSlot::Ready(webview.clone()));
+        #[cfg(target_os = "macos")]
+        let remote = lifecycle
+            .proxy
+            .clone()
+            .map(|host| super::super::remote::RemoteBrowser::install(&webview, host, cx));
+        lifecycle.slots.insert(
+            key.to_string(),
+            WebViewSlot::Ready {
+                view: webview.clone(),
+                #[cfg(target_os = "macos")]
+                remote,
+            },
+        );
         Availability::Ready(webview)
     }
 }
@@ -926,7 +1003,7 @@ mod platform {
                         }
                         let view = cx.new(|cx| WebView::new(raw, events, cx));
                         cx.observe(&view, |_, _, cx| cx.notify()).detach();
-                        lifecycle.slots.insert(key, WebViewSlot::Ready(view));
+                        lifecycle.slots.insert(key, WebViewSlot::Ready { view });
                         cx.notify();
                     }
                 }

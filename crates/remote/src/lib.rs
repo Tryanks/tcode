@@ -22,3 +22,6 @@ pub use client_host::NativeClientHost;
 pub use mux::{Connection, HostMux};
 #[cfg(feature = "server")]
 pub use server::{DeviceInfo, PairingCode, RemoteConfig, RemoteServer, StaticBundle, serve};
+
+#[cfg(feature = "client")]
+pub mod preview;

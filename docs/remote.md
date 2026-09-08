@@ -326,7 +326,7 @@ Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
 access.
 
-### Preview browses from the machine
+### Remote Preview routing
 
 Windows and Android embedded previews use the connected machine's network for
 all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
@@ -355,13 +355,50 @@ localhost bypasses, waits for the override before navigation, and clears it when
 the attachment's views are destroyed. The override is process-wide, so embedded
 preview views belong to one attachment.
 
-macOS attached previews are unavailable: WebKit bypasses its Network proxy
-configuration for destinations on the client’s local interfaces, including
-localhost and its own LAN addresses. Clearing excluded domains, explicit match
-domains, disabling failover, and installing the authenticated configuration before
-creating the WebView do not prevent this bypass. Tcode refuses attached WebView
-creation through the existing error surface so navigations, redirects, and
-subresources cannot connect directly. Local macOS previews remain available.
+macOS attached Preview uses per-port forwarding for HTTP(S) loopback URLs:
+`localhost`, IPv4 loopback addresses and `::1`. The requested host and port are
+sent unchanged to the paired host's existing CONNECT service. The viewing Mac
+allocates its own loopback port, so a viewer service at the remote port cannot
+collide with it. `localhost` reserves both IPv4 and IPv6 listeners at that port.
+Numeric loopback URLs need that same address to be bindable on the viewing Mac;
+unassigned addresses such as `127.0.0.2` can report an allocation error. Tcode does
+not add loopback aliases to the OS. No OS DNS, hosts file or proxy settings are changed. Public/LAN destinations are
+**direct from the viewer**, as the Preview note explains; this is a remote dev
+server workflow, not arbitrary remote browsing.
+
+Each browser slot owns its forwarding table and a separate nonpersistent WebKit
+website store. Relative assets and WebSockets derived from the page's actual
+location use the same forwarded port. Top-level loopback links/redirects pass
+through the same mapper, including redirects to another port. The native request
+is retained when changing its URL; HTTP bodies, site authorization, WebSocket
+frames and TLS records are not interpreted by the forwarding transport. Closing
+the preview or changing attachment drops listeners and accepted tunnels; merely
+hiding a retained preview keeps them alive. A new attachment receives new routes
+and a fresh store, including when its paired credential changes.
+
+The address bar, copy and stored URL retain logical remote intent. Native
+back/forward/reload reuse the live mappings. `preview_status.url` and
+`preview_wait_for` use the logical remote URL; `actual_url` is added when it differs.
+`preview_evaluate`, page scripts and `window.location` see the **actual local URL**.
+Open externally uses that live mapped URL and stops working when the owning slot
+closes. Without a suitable live route, it reports that Preview must open the page
+first, rather than opening the viewer's unrelated original-port service.
+
+Mapping preserves the requested hostname but changes its port. The HTTP Host
+header and browser Origin therefore contain the viewing port. HTTPS retains the
+hostname/SNI and normal WebKit certificate validation; a development certificate
+must already be trusted and cover that hostname. Port-sensitive host/origin
+allowlists, CORS, CSP and OAuth callbacks can need app configuration. Cookies are
+not isolated by port, which is why attached slots use separate website stores.
+There is no blanket certificate bypass or credential injection into site auth.
+
+Absolute subresource URLs, hardcoded API/HMR ports and worker-owned endpoints are
+not automatically rewritten. Configure them to derive their endpoint from the
+actual page location or an explicitly resolved live forward; entering an
+additional page URL creates its mapping but does not rewrite application code.
+Navigation, transport and authentication failures use Preview's existing error
+surface and automation errors. Local macOS Preview retains ordinary direct
+networking and its existing store.
 
 Windows uses WebView2's proxy configuration and proxy authentication callback, with implicit
 loopback bypass disabled. Unsupported proxy facilities fail closed; there is no
