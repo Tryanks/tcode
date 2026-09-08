@@ -284,9 +284,8 @@ name, Android from the device model.
 
 | Port | Purpose |
 | --- | --- |
-| `47420/TCP` by default | HTTP listener: adding devices, WebSockets, and the optional browser app. Use your configured port if you change it. |
+| `47420/TCP` by default | HTTP listener: adding devices, WebSockets, authenticated preview proxy, and the optional browser app. Use your configured port if you change it. |
 | `5353/UDP` on the LAN | Bonjour / mDNS search for `_tcode._tcp.local.` machines. Optional when you enter an address yourself. |
-| Your dev server's TCP port | Direct access from another desktop's preview browser. Separate from the tcode listener. |
 
 Connect the machine and your other devices to the same LAN or overlay, such as
 Tailscale or EasyTier. Allow the listener through the machine's firewall and any
@@ -296,19 +295,56 @@ Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
 access.
 
-For desktop and Android preview, tcode rewrites `localhost`, `127.0.0.1` and `0.0.0.0` in
-HTTP(S) preview URLs to the hostname in the added machine's origin, preserving the
-port, path, query and fragment. For example, `http://localhost:5173/app` becomes
-`http://192.168.1.10:5173/app` for that machine. Configure the dev server to
-listen on all interfaces (`0.0.0.0` or `::`) and allow its port from your LAN or
-overlay. URL rewriting does not tunnel the connection or make a loopback-only
-server reachable.
+### Preview browses from the machine
+
+Desktop and Android embedded previews use the connected machine's network for
+all HTTP and HTTPS traffic. `http://localhost:5173/app` opens the dev server on
+the machine, even when it listens only on loopback. The URL stays unchanged in
+the address bar, redirects, scripts and `preview_status`. No dev-server port
+needs to be exposed to the LAN. Open-in-system-browser still opens on this
+device and cannot use the embedded preview's routing.
+
+The forward proxy runs whenever hosting is enabled, on the same configured TCP
+port as pairing and WebSockets (default `47420`). It requires
+`Proxy-Authorization: Basic` with username `tcode` and the paired device token
+as password. Plain HTTP is forwarded; HTTPS uses opaque CONNECT tunnels with
+certificate validation performed by the client webview, without TLS interception.
+The machine connects directly to destinations; OS routing and global TUNs apply.
+tcode does not read upstream-proxy environment variables or system proxy settings.
+There is nothing new to configure in hosting settings.
+
+The listener admits at most 256 concurrent connections, including WebSockets.
+Proxy connection setup times out after 10 seconds, and traffic idle for 60 seconds
+is closed. Revoked proxy tokens are rechecked every five seconds; stopping hosting
+closes tunnels. Connection logs contain destination host/port and peer, never
+request bodies or tokens. For headless diagnostics use `RUST_LOG=tcode_remote=info`.
+
+Android requires WebView's `PROXY_OVERRIDE` capability. It removes implicit
+localhost bypasses, waits for the override before navigation, and clears it when
+the attachment's views are destroyed. The override is process-wide, so embedded
+preview views belong to one attachment. macOS requires 14+ and uses a private
+WebKit data store with an authenticated Network proxy configuration. Windows uses
+WebView2's proxy configuration and proxy authentication callback, with implicit
+loopback bypass disabled. Unsupported proxy facilities fail closed; there is no
+unauthenticated IP allowlist or direct-network fallback. Desktop proxying currently
+requires a direct HTTP machine origin, typically over a trusted LAN or VPN.
+HTTP reverse-proxy tunnels must support forward-proxy requests and CONNECT to
+carry preview traffic; ordinary website forwarding is insufficient.
+
+The iOS embedded preview remains unsupported. A future backend can use
+WKWebView `proxyConfigurations` on iOS 17+ with the same paired credential and
+attachment lifetime. The browser client cannot override its browser's proxy.
 
 ## Security
 
 The LAN transport is plain HTTP and `ws://`. Anyone on the LAN who captures
 traffic can read the device token and the work sent over the connection. Use a
 tunnel or VPN on untrusted networks. tcode never provisions or manages TLS.
+
+Anyone holding a paired device token can browse through the machine, including
+its loopback and private-network services. Treat it as network access to that
+machine. Proxy Basic authentication is not encryption; protect the connection
+with a trusted LAN or VPN. Removing a connected device revokes its proxy access.
 
 ### Device tokens and storage
 
@@ -362,7 +398,7 @@ use their own transports.
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
 | Browser fails before adding the machine | Check the HTTP host or your HTTPS tunnel. Check that JavaScript and site storage are allowed. |
 | Connection rejected after adding the machine | Check whether the device was removed. Add the machine again with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
-| Preview cannot load a dev server | Make the dev server listen on all interfaces, open its own port and check the first address saved for the added machine. The tcode port does not carry the preview page connection. |
+| Preview cannot load a dev server | Check that the dev server runs on the machine, hosting is on, the device is still paired, and its WebView supports proxy routing. Use `localhost` for a machine-loopback server. |
 
 **Syncing… / 同步中** means the workspace is waiting for its baseline: applied
 Index and Settings snapshots, plus SessionStatus and SessionEvents for the
@@ -417,13 +453,10 @@ reported as unreachable.
   scroll further back than that.
 - The terminal renders text. In-grid images (sixel, iTerm2, kitty graphics) are
   not supported on any device, including the machine's own desktop window.
-- Desktop and Android preview need LAN- or overlay-reachable dev servers. There is no TCP
-  tunnel for preview pages. Preview rewriting uses the first saved machine
-  address, which may differ from an address chosen by transport reconnection.
 - Android has an embedded WebView preview with history, JavaScript automation,
   navigation errors and visible-page PNG capture. iOS and the browser client
   retain URL/open/copy actions without an embedded preview backend. Android
-  does not scan local development ports; enter a reachable host URL.
+  does not scan local development ports; enter a machine-relative URL.
 - Phones, tablets and browsers do not run providers, terminals or project files
   locally; the machine does. Every product view is present on them — threads,
   chat, approvals, the terminal, diff, plan, preview, search, import and export —
