@@ -44,9 +44,12 @@ pub(super) struct Backend {
 }
 
 impl Backend {
-    pub(super) fn new(cx: &mut Context<PreviewPanel>) -> Self {
+    pub(super) fn new(
+        proxy: Result<Option<tcode_client::pairing::PairedHost>, String>,
+        cx: &mut Context<PreviewPanel>,
+    ) -> Self {
         let owner = Rc::new(());
-        let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner)));
+        let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&owner), proxy));
         Self {
             lifecycle,
             _owner: owner,
@@ -557,7 +560,7 @@ impl PreviewPanel {
                 &key,
                 selector,
                 text,
-                url_includes.map(|url| self.store.read(cx).rewrite_preview_url(&url)),
+                url_includes,
                 timeout_ms,
                 reply,
                 window,

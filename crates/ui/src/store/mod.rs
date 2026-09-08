@@ -501,13 +501,26 @@ impl WorkspaceStore {
         self.remote_preview.1.clone()
     }
 
-    /// Rewrite a host-local preview URL so it reaches the host from here. Pure
-    /// string work over the attachment address; no client filesystem or network.
-    pub(crate) fn rewrite_preview_url(&self, url: &str) -> String {
-        self.remote_address.as_deref().map_or_else(
-            || url.to_string(),
-            |host| tcode_client::rewrite_preview_url(url, host),
-        )
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    pub(crate) fn preview_proxy(
+        &self,
+    ) -> Result<Option<tcode_client::pairing::PairedHost>, String> {
+        if !self.is_remote() {
+            return Ok(None);
+        }
+        self.client_host
+            .as_ref()
+            .and_then(|client| {
+                client
+                    .load_hosts()
+                    .into_iter()
+                    .find(|host| Some(host.host_id.as_str()) == self.remote_host_id())
+            })
+            .map(Some)
+            .ok_or_else(|| "remote preview requires a paired machine credential".into())
     }
 
     pub fn is_remote(&self) -> bool {

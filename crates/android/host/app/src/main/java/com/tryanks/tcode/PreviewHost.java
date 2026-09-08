@@ -7,6 +7,11 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.net.http.SslError;
 import android.webkit.*;
+import androidx.webkit.ProxyConfig;
+import androidx.webkit.ProxyController;
+import androidx.webkit.WebViewFeature;
+import org.json.JSONObject;
+import java.net.URI;
 import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 
@@ -37,12 +42,26 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
         try {
             if (operation.equals("create")) {
                 if (views.containsKey(id)) throw new IllegalStateException("duplicate preview");
+                JSONObject creation = new JSONObject(value);
+                String initialUrl = creation.optString("url", "about:blank");
+                JSONObject proxy = creation.optJSONObject("proxy");
+                String proxyOrigin = proxy == null ? null : proxy.getString("origin");
+                String proxyToken = proxy == null ? null : proxy.getString("token");
+                String proxyHost = proxyOrigin == null ? null : URI.create(proxyOrigin).getHost();
+                if (proxy != null && !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))
+                    throw new IllegalStateException("This Android WebView does not support authenticated remote preview proxying");
                 TcodeWebView view = new TcodeWebView(activity);
                 view.getSettings().setJavaScriptEnabled(true);
                 view.getSettings().setDomStorageEnabled(true);
                 view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
                 view.getSettings().setAllowFileAccess(false);
                 view.setWebViewClient(new WebViewClient() {
+                    @Override public void onReceivedHttpAuthRequest(WebView v, HttpAuthHandler handler,
+                            String host, String realm) {
+                        if (proxyHost != null && proxyHost.equalsIgnoreCase(host)
+                                && "tcode-preview".equals(realm)) handler.proceed("tcode", proxyToken);
+                        else handler.cancel();
+                    }
                     @Override public void onPageStarted(WebView v, String url, Bitmap icon) {
                         event(id, 0, url, 0, "");
                     }
@@ -71,8 +90,18 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                     }
                 });
                 views.put(id, view);
-                event(id, 7, value.isEmpty() ? "about:blank" : value, 0, "");
-                view.loadUrl(value.isEmpty() ? "about:blank" : value);
+                Runnable ready = () -> {
+                    if (views.get(id) != view) return;
+                    event(id, 7, initialUrl, 0, "");
+                    view.loadUrl(initialUrl);
+                };
+                if (proxy != null) {
+                    ProxyConfig config = new ProxyConfig.Builder().addProxyRule(proxyOrigin)
+                            .removeImplicitRules().build();
+                    ProxyController.getInstance().setProxyOverride(config, activity::runOnUiThread, ready);
+                } else if (WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+                    ProxyController.getInstance().clearProxyOverride(activity::runOnUiThread, ready);
+                } else ready.run();
                 return;
             }
             TcodeWebView view = views.get(id);
@@ -82,6 +111,8 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                     blur(view);
                     views.remove(id);
                     view.destroyPreview();
+                    if (views.isEmpty() && WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))
+                        ProxyController.getInstance().clearProxyOverride(activity::runOnUiThread, () -> {});
                     break;
                 case "bounds":
                     view.setPreviewBounds(x, y, width, height);
@@ -113,7 +144,7 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                     break;
                 default: throw new IllegalArgumentException("unknown preview operation " + operation);
             }
-        } catch (RuntimeException error) {
+        } catch (Exception error) {
             String message = error.toString();
             if (request != 0) nativeResult(request, null, null, message);
             else nativeEvent(id, 6, "", "", 0, message);

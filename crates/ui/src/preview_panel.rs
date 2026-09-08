@@ -221,7 +221,7 @@ impl PreviewPanel {
             cx.subscribe_in(&url_input, window, Self::on_url_event),
         ];
         let mut panel = Self {
-            store,
+            store: store.clone(),
             window_state,
             url_input,
             mirrored: None,
@@ -240,7 +240,7 @@ impl PreviewPanel {
                 feature = "native-preview",
                 any(target_os = "macos", target_os = "windows", target_os = "android")
             ))]
-            backend: backend::Backend::new(cx),
+            backend: backend::Backend::new(store.read(cx).preview_proxy(), cx),
             _subscriptions: subscriptions,
         };
         panel.observe_backend(cx);
@@ -255,7 +255,7 @@ impl PreviewPanel {
 
     /// Mirror a URL into the store, then navigate whatever backend exists.
     fn navigate(&mut self, key: &str, url: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let url = normalize_url(&self.store.read(cx).rewrite_preview_url(url));
+        let url = normalize_url(url);
         self.store
             .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
         self.navigate_backend(key, &url, window, cx);
@@ -729,3 +729,9 @@ mod tests {
 mod android;
 #[cfg(any(test, all(feature = "native-preview", target_os = "android")))]
 mod android_geometry;
+
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows")
+))]
+mod proxy;

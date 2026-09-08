@@ -121,6 +121,7 @@ pub struct BrowserLifecycle {
     warm: HashSet<String>,
     active_identity: Option<(String, String)>,
     creator: Creator,
+    proxy: Option<tcode_client::pairing::PairedHost>,
 }
 
 pub(super) struct KeyReconciliation {
@@ -129,8 +130,15 @@ pub(super) struct KeyReconciliation {
 }
 
 impl BrowserLifecycle {
-    pub(super) fn new(owner: Weak<()>) -> Self {
-        let creator = match platform::Adapter::new() {
+    pub(super) fn new(
+        owner: Weak<()>,
+        proxy: Result<Option<tcode_client::pairing::PairedHost>, String>,
+    ) -> Self {
+        let creator = match proxy
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|proxy| platform::Adapter::new(proxy.as_ref()))
+        {
             Ok(adapter) => Creator::Available(adapter),
             Err(error) => {
                 log::warn!("preview: no webview ({error})");
@@ -142,6 +150,7 @@ impl BrowserLifecycle {
         };
         Self {
             owner,
+            proxy: proxy.ok().flatten(),
             slots: HashMap::new(),
             warm: HashSet::new(),
             active_identity: None,
@@ -474,6 +483,10 @@ impl BrowserLifecycle {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Err(error) = super::proxy::authenticate(&raw, self.proxy.as_ref()) {
+            self.record_unavailable(error, cx);
+            return;
+        }
         load_error::install(&raw);
         let warm = if let Some(url) = &pending_url {
             match raw.load_url(url) {
@@ -535,7 +548,9 @@ mod platform {
     pub(super) struct Adapter;
 
     impl Adapter {
-        pub(super) fn new() -> Result<Self, String> {
+        pub(super) fn new(
+            _proxy: Option<&tcode_client::pairing::PairedHost>,
+        ) -> Result<Self, String> {
             Ok(Self)
         }
     }
@@ -552,6 +567,13 @@ mod platform {
         let builder = wry::WebViewBuilder::new()
             .with_devtools(true)
             .with_url("about:blank");
+        let builder = match super::super::proxy::builder(builder, lifecycle.proxy.as_ref()) {
+            Ok(builder) => builder,
+            Err(error) => {
+                lifecycle.record_unavailable(error, cx);
+                return Availability::Unavailable;
+            }
+        };
         let built = window
             .window_handle()
             .map_err(|error| error.to_string())
@@ -567,6 +589,10 @@ mod platform {
                 return Availability::Unavailable;
             }
         };
+        if let Err(error) = super::super::proxy::authenticate(&raw, lifecycle.proxy.as_ref()) {
+            lifecycle.record_unavailable(error, cx);
+            return Availability::Unavailable;
+        }
         load_error::install(&raw);
         let webview = cx.new(|cx| {
             let mut view = WebView::new(raw, window, cx);
@@ -598,13 +624,26 @@ mod platform {
     }
 
     impl Adapter {
-        pub(super) fn new() -> Result<Self, String> {
-            // WebView2's profile belongs to *this client*, not to whichever host
-            // it is attached to, so the location comes from bootstrap rather
-            // than from opening the session store the host owns.
+        pub(super) fn new(
+            _proxy: Option<&tcode_client::pairing::PairedHost>,
+        ) -> Result<Self, String> {
+            // WebView2 environments with different proxy arguments cannot share
+            // a user-data directory. Keep the existing local profile and isolate
+            // each remote machine's environment under the client-owned root.
             let user_data_dir = crate::client_data_dir()
                 .ok_or_else(|| "client data directory was not set at startup".to_string())?
                 .join("WebView2");
+            let user_data_dir = if let Some(host) = _proxy {
+                user_data_dir.join(format!(
+                    "remote-{}",
+                    host.host_id
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                        .collect::<String>()
+                ))
+            } else {
+                user_data_dir
+            };
             std::fs::create_dir_all(&user_data_dir).map_err(|error| {
                 format!(
                     "failed to create WebView2 user-data directory {}: {error}",
@@ -653,6 +692,7 @@ mod platform {
             }
         };
 
+        let proxy = lifecycle.proxy.clone();
         let creation_key = key.to_string();
         lifecycle.slots.insert(
             creation_key.clone(),
@@ -696,6 +736,10 @@ mod platform {
                 let builder = wry::WebViewBuilder::new_with_web_context(&mut web_context)
                     .with_devtools(true)
                     .with_url("about:blank");
+                let builder = match super::super::proxy::builder(builder, proxy.as_ref()) {
+                    Ok(builder) => builder,
+                    Err(error) => { let _ = lifecycle.update(cx, |lifecycle, cx| lifecycle.record_unavailable(error, cx)); return; }
+                };
                 let mut build = Box::pin(builder.build_as_child_async(&parent));
                 let first_poll = std::future::poll_fn(|task_cx| {
                     std::task::Poll::Ready(match build.as_mut().poll(task_cx) {
@@ -801,7 +845,9 @@ mod platform {
         next_creation_id: u64,
     }
     impl Adapter {
-        pub(super) fn new() -> Result<Self, String> {
+        pub(super) fn new(
+            _proxy: Option<&tcode_client::pairing::PairedHost>,
+        ) -> Result<Self, String> {
             Ok(Self {
                 next_creation_id: 0,
             })
@@ -815,13 +861,14 @@ mod platform {
         cx: &mut Context<BrowserLifecycle>,
     ) -> Availability {
         let initial_url = initial_url.unwrap_or("about:blank").to_owned();
-        let (raw, mut events) = match super::super::android::RawWebView::new(&initial_url) {
-            Ok(created) => created,
-            Err(error) => {
-                lifecycle.record_unavailable(error, cx);
-                return Availability::Unavailable;
-            }
-        };
+        let (raw, mut events) =
+            match super::super::android::RawWebView::new(&initial_url, lifecycle.proxy.as_ref()) {
+                Ok(created) => created,
+                Err(error) => {
+                    lifecycle.record_unavailable(error, cx);
+                    return Availability::Unavailable;
+                }
+            };
         let Creator::Available(adapter) = &mut lifecycle.creator else {
             return Availability::Unavailable;
         };

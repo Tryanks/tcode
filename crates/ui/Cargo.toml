@@ -88,7 +88,7 @@ tcode-remote = { path = "../remote", default-features = false, optional = true }
 # child of the GPUI window, so its whole dependency set is target-scoped.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 gpui-wry = { version = "0.6.0", optional = true }
-wry = { version = "0.53.3", package = "lb-wry", optional = true }
+wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
 raw-window-handle = { version = "0.6", features = ["std"], optional = true }
 # Only the Windows WebContext needs it, but Cargo has no per-feature target
 # narrower than this.
