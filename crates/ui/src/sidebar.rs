@@ -3666,6 +3666,7 @@ mod tests {
 
     #[gpui::test]
     fn compact_scroll_reuses_model_and_renders_only_viewport(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         struct SlidingPage {
             sidebar: Entity<SessionsSidebar>,
             offset: gpui::Pixels,
