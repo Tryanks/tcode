@@ -1,6 +1,6 @@
 # Computer use
 
-tcode gives MCP-capable providers (Claude Code, Codex, OpenCode, and ACP agents that
+Tcode gives MCP-capable providers (Claude Code, Codex, OpenCode, and ACP agents that
 advertise `mcpCapabilities.http`) a set of desktop computer-use tools, served by the
 in-process `tcode_computer_use` MCP server. pi has no MCP client, so its provider card
 and model-picker rows identify computer use, preview, and orchestrate as unavailable
@@ -51,7 +51,7 @@ enabled. Claude, Codex and OpenCode use their native MCP configuration; ACP
 registration is gated on the agent's HTTP MCP capability. The Settings UI
 consumes the same permission facade.
 
-The server runs inside tcode, so macOS permissions apply to the running app;
+The server runs inside Tcode, so macOS permissions apply to the running app;
 there is no separately installed helper app.
 
 ## Text-sparse image fallback
@@ -139,7 +139,7 @@ The relevant Settings pages are:
   live status, a primary action, and **Recheck**. The primary action starts as
   **Request Access** and fires only the native TCC request. If the permission is still missing,
   the next explicit action becomes **Open System Settings** and deep-links the matching
-  `x-apple.systempreferences` pane. Returning to tcode also triggers a recheck.
+  `x-apple.systempreferences` pane. Returning to Tcode also triggers a recheck.
 
 The persisted computer-use block additionally accepts `allow_foreground_fallback` (default
 `false`) and `show_agent_cursor` (default `true`). Both use serde defaults, so settings files from
@@ -148,9 +148,9 @@ before background delivery continue to load without migration.
 ### Restart continuity
 
 macOS applies some grants (notably Screen Recording) only after the app restarts, and shows its
-own "Quit & Reopen" dialog. tcode therefore preserves Screen Recording flows across a restart:
+own "Quit & Reopen" dialog. Tcode therefore preserves Screen Recording flows across a restart:
 
-1. Before a Screen Recording request, tcode writes a temporary `relaunch.json` marker into the
+1. Before a Screen Recording request, Tcode writes a temporary `relaunch.json` marker into the
    data dir: `{ reopen_settings: "computer_use", active_session: <id> }`. Accessibility does not
    need this marker. Returning without a grant clears it.
 2. Session events and resume cursors are persisted continuously. The marker
@@ -159,7 +159,7 @@ own "Quit & Reopen" dialog. tcode therefore preserves Screen Recording flows acr
    status. After a real grant, the previous active session is reopened, Settings is
    reopened on the recorded page, and permissions are rechecked automatically. A denied or stale
    marker is discarded without changing the launch route.
-4. The Computer Use page also offers an explicit **Relaunch tcode** button (shown when a grant
+4. The Computer Use page also offers an explicit **Relaunch Tcode** button (shown when a grant
    was detected as pending-restart) that writes the same marker and relaunches via
    `open -n <bundle>`.
 

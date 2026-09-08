@@ -63,7 +63,7 @@ impl Default for ShellOptions {
     fn default() -> Self {
         Self {
             window: WindowOptions::default(),
-            title: "tcode".into(),
+            title: crate::tr!("app.name").into(),
             fonts: vec![Cow::Borrowed(crate::assets::DM_SANS)],
             theme_json: Cow::Borrowed(THEME_JSON),
             activate: false,

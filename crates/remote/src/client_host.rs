@@ -346,7 +346,7 @@ fn resolve_device_name(
             clean_name(host_name).and_then(|name| clean_name(Some(strip_local_suffix(name))))
         })
         .or_else(|| clean_name(etc_hostname))
-        .unwrap_or_else(|| "tcode".into())
+        .unwrap_or_else(|| "Tcode".into())
 }
 
 fn clean_name(name: Option<String>) -> Option<String> {

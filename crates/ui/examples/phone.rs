@@ -43,7 +43,7 @@ fn main() {
                         window_background: WindowBackgroundAppearance::Opaque,
                         ..Default::default()
                     },
-                    title: "tcode phone".into(),
+                    title: "Tcode phone".into(),
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
                     setup: ShellSetup {

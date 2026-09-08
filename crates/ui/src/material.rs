@@ -211,7 +211,7 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
                 .text_size(px(14.))
                 .font_bold()
                 .text_color(cx.theme().sidebar_foreground)
-                .child("tcode"),
+                .child(crate::tr!("app.name")),
         )
         .child(
             div()

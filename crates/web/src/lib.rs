@@ -53,7 +53,7 @@ fn prepare_canvas(canvas_id: &str) -> Result<(), JsValue> {
                     .and_then(|node| node.dyn_into::<web_sys::HtmlCanvasElement>().ok())
                 {
                     canvas.set_id(&canvas_id);
-                    let _ = canvas.set_attribute("aria-label", "tcode remote client");
+                    let _ = canvas.set_attribute("aria-label", "Tcode remote client");
                 }
             }
         }

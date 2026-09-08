@@ -1,5 +1,5 @@
 app:
-  name: "tcode"
+  name: "Tcode"
 chat:
   sending: "正在发送…"
   waiting_connection: "等待连接…"
@@ -64,7 +64,7 @@ chat:
   open_zed: "在 Zed 中打开"
   empty_title: "选择一个对话以继续"
   no_projects_title: "添加一个项目以开始"
-  no_projects_description: "tcode 在项目文件夹中工作。添加一个项目即可开始第一个对话。"
+  no_projects_description: "Tcode 在项目文件夹中工作。添加一个项目即可开始第一个对话。"
   start_hub_title: "开始新对话"
   palette_hint: "或按 %{shortcut} 搜索"
   scroll_end: "滚动到底部"
@@ -142,7 +142,7 @@ sidebar:
   auto_archived: "已自动归档 %{count} 个不活跃对话 — 查看"
   auto_archive_dialog:
     title: "对话已自动归档"
-    body: "tcode 已自动归档 %{count} 个超过 %{days} 天未活动且排在最近 %{keep} 条之外的对话。你可以在 设置 → 已归档对话 中恢复它们，或在设置中关闭自动归档。"
+    body: "Tcode 已自动归档 %{count} 个超过 %{days} 天未活动且排在最近 %{keep} 条之外的对话。你可以在 设置 → 已归档对话 中恢复它们，或在设置中关闭自动归档。"
     got_it: "知道了"
     open_settings: "打开设置"
   working: "工作中"
@@ -162,7 +162,7 @@ sidebar:
   archive_all_action: "归档全部"
   remove_project: "删除项目"
   remove_project_title: "删除项目“%{project}”？"
-  remove_project_description: "这将从 tcode 中删除此项目及其 %{count} 个对话，但不会改动磁盘上的文件。"
+  remove_project_description: "这将从 Tcode 中删除此项目及其 %{count} 个对话，但不会改动磁盘上的文件。"
   remove_project_action: "删除项目"
   reveal_project: "在访达中显示"
   ctx_rename: "重命名对话"
@@ -175,7 +175,7 @@ sidebar:
   ctx_mark_unread: "标记为未读"
   ctx_copy_path: "复制工作区路径"
   ctx_copy_id: "复制对话 ID"
-  ctx_export_jsonl: "导出为 tcode JSONL"
+  ctx_export_jsonl: "导出为 Tcode JSONL"
   ctx_export_markdown: "导出为 Markdown"
   ctx_delete: "删除"
   delete_title: "删除对话“%{title}”？"
@@ -187,8 +187,8 @@ sidebar:
   worktree_cleanup_keep: "保留工作树"
   empty: "还没有项目，请添加一个项目以开始。"
 quit:
-  menu_item: "退出 tcode"
-  title: "退出 tcode？"
+  menu_item: "退出 Tcode"
+  title: "退出 Tcode？"
   description: "仍有 %{count} 个会话正在工作。退出将停止这些会话。"
   confirm: "退出"
 settings:
@@ -238,13 +238,13 @@ settings:
   reset_section: "重置"
   language:
     title: "语言"
-    description: "选择 tcode 的界面语言。"
+    description: "选择 Tcode 的界面语言。"
     system: "跟随系统"
     english: "English"
     chinese: "简体中文"
   theme:
     title: "主题"
-    description: "选择 tcode 的界面外观。"
+    description: "选择 Tcode 的界面外观。"
     system: "跟随系统"
     light: "浅色"
     dark: "深色"
@@ -266,16 +266,16 @@ settings:
     description: "命令执行时自动展开其面板并实时显示输出，完成后自动收起。"
   provider_updates:
     title: "提供方更新检查"
-    description: "启动时检查 tcode 和提供方 CLI 的新版本。"
+    description: "启动时检查 Tcode 和提供方 CLI 的新版本。"
   inactive_frame_throttle:
     title: "后台帧率限制"
     description: "窗口失焦时将刷新率降至约 2 FPS 以节省能耗。重启后生效。"
   abort_on_model_fallback:
     title: "模型回退时中止"
-    description: "开启后，tcode 会监控 Claude Code 的流，在检测到安全分类器回退或标记时从对话层面停止当前轮次，并将控制权交还给你。子代理不受影响。"
+    description: "开启后，Tcode 会监控 Claude Code 的流，在检测到安全分类器回退或标记时从对话层面停止当前轮次，并将控制权交还给你。子代理不受影响。"
   resume_on_limit_reset:
     title: "额度重置后继续任务"
-    description: "当 Claude Code 因 5 小时用量窗口耗尽而停止本轮时，tcode 会在窗口重置的时刻自动继续任务。关闭后，错误卡片上会提供一个按钮供手动安排。"
+    description: "当 Claude Code 因 5 小时用量窗口耗尽而停止本轮时，Tcode 会在窗口重置的时刻自动继续任务。关闭后，错误卡片上会提供一个按钮供手动安排。"
   fallback_review_advisor:
     title: "回退审查顾问"
     description: "使用独立模型审查被 Claude Code 回退防护中断的请求。"
@@ -335,8 +335,8 @@ permissions:
   recheck: "重新检查"
   unsupported: "仅在 macOS 上可用。"
   manage_on_host: "请在 %{host} 上管理系统权限。"
-  restart_banner: "屏幕录制授权需重新启动 tcode 后才会生效。"
-  relaunch: "重新启动 tcode"
+  restart_banner: "屏幕录制授权需重新启动 Tcode 后才会生效。"
+  relaunch: "重新启动 Tcode"
   accessibility:
     name: "辅助功能"
     why: "读取屏幕上的辅助功能树，并发送键盘和鼠标事件。"
@@ -358,7 +358,7 @@ orchestrate:
     description: "派发目录为 Git 仓库根目录时，为子线程创建专用的 tcode/<thread-id> 分支和工作树。每次派发可通过 worktree 单独覆盖。"
   all_models:
     title: "Orchestrate 工作流程"
-    description: "主线程负责形成决策、与同级模型协作、将具体工作派发给执行模型并验收结果。优先使用 tcode Orchestrate，综合所有提供方的模型特点选择协作方和执行者。所有主模型均可使用 /orchestrate；内置决策模型为 Astra 和 Fable 5.1。"
+    description: "主线程负责形成决策、与同级模型协作、将具体工作派发给执行模型并验收结果。优先使用 Tcode Orchestrate，综合所有提供方的模型特点选择协作方和执行者。所有主模型均可使用 /orchestrate；内置决策模型为 Astra 和 Fable 5.1。"
   decisions:
     title: "协作模型"
     description: "Astra 与 Fable 5.1 通过 collaborate 提供独立视角。启用电脑操作后，Astra 可收集聚焦的应用界面证据；实现与批量检查仍属于执行任务。开关仅控制是否可被邀请协作，不影响作为主决策模型使用；协作仅支持 medium 和 high。"
@@ -401,7 +401,7 @@ providers:
     checking: "正在检查提供方状态"
     checking_detail: "正在等待服务返回安装与认证详情。"
     disabled: "已禁用"
-    disabled_detail: "该提供方已安装，但在 tcode 中已被禁用，不会用于新会话。"
+    disabled_detail: "该提供方已安装，但在 Tcode 中已被禁用，不会用于新会话。"
     not_found: "未找到"
     not_found_detail: "未在 PATH 中检测到该 CLI。"
     authenticated: "已认证"
@@ -433,9 +433,9 @@ providers:
   updating: "更新中"
   update_manual: "或者手动更新："
   copy_command: "复制命令"
-  tcode_update_available: "tcode %{version} 可用"
-  tcode_update_aria: "tcode 有可用更新 — 查看详情"
-  tcode_update_title: "tcode 有可用更新"
+  tcode_update_available: "Tcode %{version} 可用"
+  tcode_update_aria: "Tcode 有可用更新 — 查看详情"
+  tcode_update_title: "Tcode 有可用更新"
   tcode_update_message: "从 GitHub 下载最新版本。"
   view_release: "查看发布版本"
   # 单个配置的设置对话框（点击提供方行的齿轮图标打开）。
@@ -492,7 +492,7 @@ providers:
   pi_trust_project_extensions: "信任项目扩展"
   pi_trust_project_extensions_help: "以 --approve 启动 pi，加载项目 .pi 目录中的扩展、设置与技能。"
   pi_native_approvals: "原生审批"
-  pi_native_approvals_help: "向 pi 注入 tcode 权限扩展，使监督类模式可对命令、编辑与扩展工具进行原生确认。关闭则保持 pi 会话零注入（完全访问）。"
+  pi_native_approvals_help: "向 pi 注入 Tcode 权限扩展，使监督类模式可对命令、编辑与扩展工具进行原生确认。关闭则保持 pi 会话零注入（完全访问）。"
   models:
     title: "模型"
     count: "有 %{count} 个可用模型。"
@@ -543,7 +543,7 @@ palette:
   open_preview: "打开预览"
   check_updates: "检查提供方更新"
   merge_worktree: "将当前工作树合并回主检出目录"
-  export_jsonl: "将当前对话导出为 tcode JSONL"
+  export_jsonl: "将当前对话导出为 Tcode JSONL"
   export_markdown: "将当前对话导出为 Markdown"
   actions: "操作"
   results: "命令面板结果"
@@ -555,7 +555,7 @@ palette:
   close: "Esc 关闭"
 composer:
   relay_title: "会话接力"
-  relay_description: "%{to} 无法原生恢复此 %{from} 会话。tcode 会先移交累积的上下文，再发送你的消息。"
+  relay_description: "%{to} 无法原生恢复此 %{from} 会话。Tcode 会先移交累积的上下文，再发送你的消息。"
   relay_confirm: "确认并发送"
   relay_cancel: "取消"
   placeholder: "提问、@引用文件/文件夹、$使用技能，或输入 / 执行命令"
@@ -620,7 +620,7 @@ composer:
   cmd_plan_desc: "将此会话切换到计划模式"
   cmd_default_desc: "将此会话切换回普通构建模式"
   cmd_orchestrate_label: "orchestrate"
-  cmd_orchestrate_desc: "通过 tcode 子会话协调工作"
+  cmd_orchestrate_desc: "通过 Tcode 子会话协调工作"
   group_builtin: "内置"
   group_provider: "提供方"
   group_skills: "技能"
@@ -722,11 +722,11 @@ userinput:
   done: "完成"
 fallback:
   title: "本轮已被安全分类器中止"
-  reason_cyber: "Claude Code 的安全分类器认为本轮可能涉及网络安全内容。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
-  reason_bio: "Claude Code 的安全分类器认为本轮可能涉及生物学内容。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
-  reason_generic: "Claude Code 的安全分类器标记了本轮对话。tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_cyber: "Claude Code 的安全分类器认为本轮可能涉及网络安全内容。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_bio: "Claude Code 的安全分类器认为本轮可能涉及生物学内容。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
+  reason_generic: "Claude Code 的安全分类器标记了本轮对话。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
   blocked: "%{model} 拒绝了该请求。"
-  rerouted: "Claude 已改用 %{model}，tcode 中断了本轮。"
+  rerouted: "Claude 已改用 %{model}，Tcode 中断了本轮。"
   retry_on: "换用 %{model} 重试"
   edit_retry: "修改后重试"
   dismiss: "关闭"
@@ -835,7 +835,7 @@ notice:
   worktree_merge_git_error: "无法合并工作树分支：%{error}"
   dirty_tree: "工作树中有未提交的更改"
   update_available: "有可用更新：%{provider} v%{version}"
-  tcode_update_available: "tcode %{version} 可用"
+  tcode_update_available: "Tcode %{version} 可用"
   updating_provider: "正在更新 %{provider}…"
   update_done: "%{provider} 已更新"
 attach:
@@ -861,7 +861,7 @@ preview:
   no_backend_hint: "请在系统浏览器中打开该页面，或复制其网址。"
   unsupported_client: "这台设备没有内嵌浏览器，预览工具在这里不可用"
   unavailable: "预览浏览器无法启动。"
-  unavailable_hint: "它需要系统的 webview 组件。tcode 的其他功能不受影响。"
+  unavailable_hint: "它需要系统的 webview 组件。Tcode 的其他功能不受影响。"
 git:
   action:
     commit: "提交"
@@ -984,7 +984,7 @@ hosts:
     address_placeholder: "192.168.1.10:47420"
     code_placeholder: "123456"
     scan: "扫描二维码"
-    bad_invite: "这不是有效的 tcode 连接链接。"
+    bad_invite: "这不是有效的 Tcode 连接链接。"
     filled: "已从连接链接填入。"
     connect_host: "连接到 %{name}"
     bad_code: "连接码必须为六位数字。"
@@ -1025,7 +1025,7 @@ mobile:
 web_auth:
   setup: "设置密码"
   login: "登录"
-  description: "输入密码以使用这台主机上的 tcode。"
+  description: "输入密码以使用这台主机上的 Tcode。"
   password: "密码"
   confirm: "再次输入密码"
   minimum: "至少 8 个字符"

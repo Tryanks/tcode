@@ -1,5 +1,5 @@
 app:
-  name: "tcode"
+  name: "Tcode"
 chat:
   sending: "Sending…"
   waiting_connection: "Waiting for connection…"
@@ -64,7 +64,7 @@ chat:
   open_zed: "Open in Zed"
   empty_title: "Pick a thread to continue"
   no_projects_title: "Add a project to get started"
-  no_projects_description: "tcode works inside a project folder. Add one to open its first thread."
+  no_projects_description: "Tcode works inside a project folder. Add one to open its first thread."
   start_hub_title: "Start a new thread in"
   palette_hint: "or press %{shortcut} to search"
   scroll_end: "Scroll to end"
@@ -142,7 +142,7 @@ sidebar:
   auto_archived: "Auto-archived %{count} inactive threads — view"
   auto_archive_dialog:
     title: "Threads auto-archived"
-    body: "tcode auto-archived %{count} threads idle for over %{days} days and beyond your %{keep} most recent. Restore them anytime in Settings → Archived Threads, or turn auto-archive off in Settings."
+    body: "Tcode auto-archived %{count} threads idle for over %{days} days and beyond your %{keep} most recent. Restore them anytime in Settings → Archived Threads, or turn auto-archive off in Settings."
     got_it: "Got it"
     open_settings: "Open Settings"
   working: "Working"
@@ -162,7 +162,7 @@ sidebar:
   archive_all_action: "Archive all"
   remove_project: "Remove project"
   remove_project_title: 'Remove project "%{project}"?'
-  remove_project_description: "This removes the project and its %{count} threads from tcode. Files on disk are not touched."
+  remove_project_description: "This removes the project and its %{count} threads from Tcode. Files on disk are not touched."
   remove_project_action: "Remove project"
   reveal_project: "Reveal in Finder"
   ctx_rename: "Rename thread"
@@ -175,7 +175,7 @@ sidebar:
   ctx_mark_unread: "Mark unread"
   ctx_copy_path: "Copy workspace path"
   ctx_copy_id: "Copy thread ID"
-  ctx_export_jsonl: "Export as tcode JSONL"
+  ctx_export_jsonl: "Export as Tcode JSONL"
   ctx_export_markdown: "Export as Markdown"
   ctx_delete: "Delete"
   delete_title: 'Delete thread "%{title}"?'
@@ -187,8 +187,8 @@ sidebar:
   worktree_cleanup_keep: "Keep worktree"
   empty: "No projects yet. Add one to start."
 quit:
-  menu_item: "Quit tcode"
-  title: "Quit tcode?"
+  menu_item: "Quit Tcode"
+  title: "Quit Tcode?"
   description: "%{count} session(s) are still working. Quitting will stop them."
   confirm: "Quit"
 settings:
@@ -238,13 +238,13 @@ settings:
   reset_section: "RESET"
   language:
     title: "Language"
-    description: "Choose the language used across tcode."
+    description: "Choose the language used across Tcode."
     system: "System"
     english: "English"
     chinese: "简体中文"
   theme:
     title: "Theme"
-    description: "Choose how tcode looks across the app."
+    description: "Choose how Tcode looks across the app."
     system: "System default"
     light: "Light"
     dark: "Dark"
@@ -266,16 +266,16 @@ settings:
     description: "Automatically show command output while it runs, then hide the panel when it finishes."
   provider_updates:
     title: "Provider update checks"
-    description: "Check for newer tcode and provider CLI versions on launch."
+    description: "Check for newer Tcode and provider CLI versions on launch."
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
   abort_on_model_fallback:
     title: "Abort on model fallback"
-    description: "When on, tcode watches Claude Code's stream for safety-classifier fallbacks or flags and stops the turn at the conversation level, handing control back to you. Subagents are unaffected."
+    description: "When on, Tcode watches Claude Code's stream for safety-classifier fallbacks or flags and stops the turn at the conversation level, handing control back to you. Subagents are unaffected."
   resume_on_limit_reset:
     title: "Resume when the usage limit resets"
-    description: "When Claude Code stops a turn because the 5-hour usage window is exhausted, tcode schedules a resume for the moment the window resets. Off: the error card offers a button to schedule it by hand."
+    description: "When Claude Code stops a turn because the 5-hour usage window is exhausted, Tcode schedules a resume for the moment the window resets. Off: the error card offers a button to schedule it by hand."
   fallback_review_advisor:
     title: "Fallback review advisor"
     description: "Use a separate model to review requests interrupted by Claude Code's fallback guard."
@@ -335,8 +335,8 @@ permissions:
   recheck: "Recheck"
   unsupported: "Only available on macOS."
   manage_on_host: "Manage these system permissions on %{host}."
-  restart_banner: "Screen Recording grants take effect only after tcode restarts."
-  relaunch: "Relaunch tcode"
+  restart_banner: "Screen Recording grants take effect only after Tcode restarts."
+  relaunch: "Relaunch Tcode"
   accessibility:
     name: "Accessibility"
     why: "Read the on-screen accessibility tree and post keyboard and mouse events."
@@ -358,7 +358,7 @@ orchestrate:
     description: "When a dispatch cwd is a Git repository root, create a dedicated tcode/<thread-id> branch and worktree for the child. A dispatch can override this with worktree."
   all_models:
     title: "Orchestrate workflow"
-    description: "The main thread frames decisions, collaborates with peers, routes concrete work to execution models, and verifies the outcome. Prefer tcode Orchestrate over provider-native subagents and compare profiles across all providers. Every main model may use /orchestrate; bundled decision peers are Astra and Fable 5.1."
+    description: "The main thread frames decisions, collaborates with peers, routes concrete work to execution models, and verifies the outcome. Prefer Tcode Orchestrate over provider-native subagents and compare profiles across all providers. Every main model may use /orchestrate; bundled decision peers are Astra and Fable 5.1."
   decisions:
     title: "Collaboration models"
     description: "Astra and Fable 5.1 provide independent perspectives through collaborate. Astra may gather focused app-UI evidence with Computer Use when enabled; implementation and bulk sweeps remain execution work. Switches only control consultation, not use as the main decision model. Collaboration supports medium and high only."
@@ -403,7 +403,7 @@ providers:
     checking: "Checking provider status"
     checking_detail: "Waiting for the server to report installation and authentication details."
     disabled: "Disabled"
-    disabled_detail: "This provider is installed but disabled for new sessions in tcode."
+    disabled_detail: "This provider is installed but disabled for new sessions in Tcode."
     not_found: "Not found"
     not_found_detail: "CLI not detected on PATH."
     authenticated: "Authenticated"
@@ -437,9 +437,9 @@ providers:
   updating: "Updating"
   update_manual: "or, update manually using"
   copy_command: "Copy command"
-  tcode_update_available: "tcode %{version} available"
-  tcode_update_aria: "tcode update available — view details"
-  tcode_update_title: "tcode update available"
+  tcode_update_available: "Tcode %{version} available"
+  tcode_update_aria: "Tcode update available — view details"
+  tcode_update_title: "Tcode update available"
   tcode_update_message: "Download the latest release from GitHub."
   view_release: "View release"
   # Per-profile settings dialog (opened from a provider row's gear).
@@ -496,7 +496,7 @@ providers:
   pi_trust_project_extensions: "Trust project extensions"
   pi_trust_project_extensions_help: "Launch pi with --approve so extensions, settings, and skills in the project's .pi directory are loaded."
   pi_native_approvals: "Native approvals"
-  pi_native_approvals_help: "Inject a tcode permission extension into pi so supervised modes can confirm commands, edits, and extension tools natively. Off keeps pi sessions injection-free (full access)."
+  pi_native_approvals_help: "Inject a Tcode permission extension into pi so supervised modes can confirm commands, edits, and extension tools natively. Off keeps pi sessions injection-free (full access)."
   models:
     title: "Models"
     count: "%{count} models available."
@@ -549,7 +549,7 @@ palette:
   open_preview: "Open preview"
   check_updates: "Check for provider updates"
   merge_worktree: "Merge active worktree back"
-  export_jsonl: "Export active thread as tcode JSONL"
+  export_jsonl: "Export active thread as Tcode JSONL"
   export_markdown: "Export active thread as Markdown"
   actions: "Actions"
   results: "Command palette results"
@@ -561,7 +561,7 @@ palette:
   close: "Esc Close"
 composer:
   relay_title: "Conversation relay"
-  relay_description: "%{to} cannot natively resume this %{from} conversation. tcode will hand off the accumulated context before sending your message."
+  relay_description: "%{to} cannot natively resume this %{from} conversation. Tcode will hand off the accumulated context before sending your message."
   relay_confirm: "Confirm & send"
   relay_cancel: "Cancel"
   placeholder: "Ask anything, @tag files/folders, $use skills, or / for commands"
@@ -626,7 +626,7 @@ composer:
   cmd_plan_desc: "Switch this thread into plan mode"
   cmd_default_desc: "Switch this thread back to normal build mode"
   cmd_orchestrate_label: "orchestrate"
-  cmd_orchestrate_desc: "Coordinate work through child tcode threads"
+  cmd_orchestrate_desc: "Coordinate work through child Tcode threads"
   group_builtin: "Built-in"
   group_provider: "Provider"
   group_skills: "Skills"
@@ -728,11 +728,11 @@ userinput:
   done: "Done"
 fallback:
   title: "Turn stopped by the safety classifier"
-  reason_cyber: "Claude Code's safety classifier flagged this turn as potentially cyber-related. tcode stopped it instead of letting Claude silently switch models."
-  reason_bio: "Claude Code's safety classifier flagged this turn as potentially biology-related. tcode stopped it instead of letting Claude silently switch models."
-  reason_generic: "Claude Code's safety classifier flagged this turn. tcode stopped it instead of letting Claude silently switch models."
+  reason_cyber: "Claude Code's safety classifier flagged this turn as potentially cyber-related. Tcode stopped it instead of letting Claude silently switch models."
+  reason_bio: "Claude Code's safety classifier flagged this turn as potentially biology-related. Tcode stopped it instead of letting Claude silently switch models."
+  reason_generic: "Claude Code's safety classifier flagged this turn. Tcode stopped it instead of letting Claude silently switch models."
   blocked: "%{model} refused the request."
-  rerouted: "Claude rerouted to %{model}; tcode interrupted the turn."
+  rerouted: "Claude rerouted to %{model}; Tcode interrupted the turn."
   retry_on: "Retry on %{model}"
   edit_retry: "Edit & retry"
   dismiss: "Dismiss"
@@ -841,7 +841,7 @@ notice:
   worktree_merge_git_error: "Could not merge the worktree branch: %{error}"
   dirty_tree: "Working tree has uncommitted changes"
   update_available: "Update Available: %{provider} v%{version}"
-  tcode_update_available: "tcode %{version} available"
+  tcode_update_available: "Tcode %{version} available"
   updating_provider: "Updating %{provider}…"
   update_done: "%{provider} updated"
 attach:
@@ -867,7 +867,7 @@ preview:
   no_backend_hint: "Open the page in your system browser, or copy its URL."
   unsupported_client: "this device has no embedded browser, so the preview tools are unavailable here"
   unavailable: "The preview browser could not start."
-  unavailable_hint: "It needs the system webview component. Everything else in tcode works without it."
+  unavailable_hint: "It needs the system webview component. Everything else in Tcode works without it."
 git:
   action:
     commit: "Commit"
@@ -990,7 +990,7 @@ hosts:
     address_placeholder: "192.168.1.10:47420"
     code_placeholder: "123456"
     scan: "Scan a QR code"
-    bad_invite: "That is not a tcode connection link."
+    bad_invite: "That is not a Tcode connection link."
     filled: "Connection details filled in."
     connect_host: "Connect to %{name}"
     bad_code: "A connection code is six digits."
@@ -1031,7 +1031,7 @@ mobile:
 web_auth:
   setup: "Set a password"
   login: "Log in"
-  description: "Open tcode on this machine with its password."
+  description: "Open Tcode on this machine with its password."
   password: "Password"
   confirm: "Confirm password"
   minimum: "At least 8 characters"
