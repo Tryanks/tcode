@@ -517,6 +517,7 @@ mod tests {
             let snapshot = composer_state(Some(&status), Some(&timeline), &settings, &providers);
             let usage = snapshot.token_usage.unwrap();
             assert_eq!(usage.used_tokens, Some([500260, 60, 20764][index]));
+            assert_eq!(usage.context_window, Some(300000));
             assert_eq!(
                 usage.total_processed_tokens,
                 Some([4001300, 4001365, 4063449][index])
@@ -538,6 +539,8 @@ mod tests {
             replay.apply_at(Some(1 + index as u64), event);
         }
         assert_eq!(replay.usage, timeline.usage);
+        let untimed = Timeline::fold_events(recorded_events.clone());
+        assert_eq!(untimed.usage, timeline.usage);
         let old: agent::AgentEvent = serde_json::from_str(r#"{"type":"token_usage","used_tokens":4100000,"input_tokens":1000000,"context_window":1000000,"total_processed_tokens":4100000}"#).unwrap();
         replay.apply_at(None, &old);
         let old = composer_state(Some(&status), Some(&replay), &settings, &providers)

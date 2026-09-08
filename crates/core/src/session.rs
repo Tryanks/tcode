@@ -624,7 +624,7 @@ impl Timeline {
                 // Reuse the open turn (typically opened by the user message);
                 // otherwise begin a fresh one.
                 let turn = match self.current_turn {
-                    Some(t) if self.turns[t].end_ts.is_none() => t,
+                    Some(t) if self.turn_is_open() => t,
                     _ => self.push_turn(ts),
                 };
                 // TurnStarted is the authoritative turn start; prefer it over
@@ -690,6 +690,9 @@ impl Timeline {
                     .current_turn
                     .is_none_or(|turn| self.turns[turn].status.is_none());
                 let usage = usage.map(|mut usage| {
+                    usage.context_window = usage
+                        .context_window
+                        .or(self.usage.and_then(|u| u.context_window));
                     if let Some(processed) = usage.turn_processed_tokens {
                         let previous = self
                             .usage
@@ -957,7 +960,6 @@ impl Timeline {
     /// a `TurnCompleted` has been folded, which records a status even when the
     /// event carried no timestamp to store as `end_ts`; both must be checked or
     /// a stray later transition would leak into the next turn's accounting
-    /// (`TurnStarted` reuses a turn whose `end_ts` is unset).
     fn turn_is_open(&self) -> bool {
         self.current_turn.is_some_and(|turn| {
             let turn = &self.turns[turn];
@@ -1475,6 +1477,43 @@ mod tests {
                 attachments: Vec::new(),
             },
         })
+    }
+
+    #[test]
+    fn usage_replay_without_timestamps_keeps_turn_totals_and_known_capacity() {
+        let usage = |processed| TokenUsage {
+            freshness: agent::ContextFreshness::Current,
+            used_tokens: Some(550),
+            turn_processed_tokens: processed,
+            ..Default::default()
+        };
+        let timeline = Timeline::fold_events([
+            AgentEvent::TurnStarted {
+                turn_id: "one".into(),
+            },
+            AgentEvent::TokenUsage(TokenUsage {
+                context_window: Some(1000000),
+                ..usage(None)
+            }),
+            AgentEvent::TurnCompleted {
+                turn_id: "one".into(),
+                status: TurnStatus::Completed,
+                usage: Some(usage(Some(100))),
+            },
+            AgentEvent::TurnStarted {
+                turn_id: "two".into(),
+            },
+            AgentEvent::TokenUsage(usage(None)),
+            AgentEvent::TurnCompleted {
+                turn_id: "two".into(),
+                status: TurnStatus::Interrupted,
+                usage: Some(usage(Some(20))),
+            },
+        ]);
+        let usage = timeline.usage.unwrap();
+        assert_eq!(usage.total_processed_tokens, Some(120));
+        assert_eq!(usage.context_window, Some(1000000));
+        assert_eq!(timeline.turns.len(), 2);
     }
 
     #[test]
@@ -3270,11 +3309,8 @@ mod tests {
 
     #[test]
     fn a_turn_finalized_without_a_timestamp_rejects_later_tool_transitions() {
-        // An untimestamped TurnCompleted records a status but no end_ts, and a
-        // following TurnStarted therefore *reuses* that turn. A stray tool
-        // transition in between must not survive into the reopened turn's
-        // accounting — otherwise the ghost item stays open and eats the whole
-        // next turn.
+        // A terminal status closes the turn even without an end timestamp.
+        // A stray transition between turns must not enter the next turn's clock.
         let timeline = Timeline::fold_events(vec![
             at(1_000, turn_started()),
             turn_completed().into(),
@@ -3283,9 +3319,11 @@ mod tests {
             at(10_000, turn_completed()),
         ]);
 
-        let timing = timeline.turns[0]
+        assert_eq!(timeline.turns.len(), 2);
+        assert_eq!(timeline.turns[0].timing, None);
+        let timing = timeline.turns[1]
             .timing
-            .expect("the reopened turn is fully timestamped");
+            .expect("the new turn is fully timestamped");
         assert_eq!(timing.total_ms, 6_000);
         assert_eq!(timing.tool_ms, 0);
     }
