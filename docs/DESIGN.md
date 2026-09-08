@@ -191,6 +191,14 @@ remain absolute event positions, independent of how much earlier history is
 currently visible. Snapshots and pages fit within 8 MiB including their serialized
 envelope; a single record that cannot fit produces an explicit error.
 
+The jump-to-latest pill appears when more than one timeline viewport remains
+below the reading position. Its visibility follows the list's pixel geometry
+on wheel, captured touch, and programmatic scrolling, and after history or
+layout changes; unmeasured offscreen history does not suppress it. New content
+follows the tail only while the reader is within that one-screen threshold.
+Scrolling farther away preserves the reading anchor during streaming and
+history paging. Clicking the pill or submitting a message returns to the tail.
+
 ## Scrolling contract
 
 Potentially unbounded content always has its own resolved-height viewport and a

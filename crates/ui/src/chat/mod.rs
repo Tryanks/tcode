@@ -372,6 +372,15 @@ fn history_prefetch_due(list: &ListState, first_visible: usize) -> bool {
     }
 }
 
+fn jump_to_latest_visible(list: &ListState) -> bool {
+    let height = list.viewport_bounds().size.height;
+    // The scrollbar geometry retains size hints for invalidated rows. Unlike
+    // is_scrolled_to_end(), it does not require every offscreen row to have
+    // been measured. Prepending shifts the extent and offset together.
+    height > px(0.)
+        && list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y > height
+}
+
 impl ChatView {
     pub fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.window_state.read(cx).compact {
@@ -487,6 +496,10 @@ impl ChatView {
 
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
+        // Decide against the old content before appending or invalidating it.
+        // Do not re-engage during a scroll frame: snapping within the threshold
+        // there would prevent small wheel/touch deltas from ever leaving it.
+        let follow_tail = !jump_to_latest_visible(&self.list_state);
         let session_key = self.workspace_store.read(cx).active_session_id();
         let session_changed = session_key != self.session_key;
         if session_changed {
@@ -565,6 +578,11 @@ impl ChatView {
                 }
             }
             ListSync::Incremental { append, remeasure } => {
+                self.list_state.set_follow_mode(if follow_tail {
+                    FollowMode::Tail
+                } else {
+                    FollowMode::Normal
+                });
                 if let Some(range) = append {
                     let count = range.len();
                     self.list_state.splice(range.start..range.start, count);
@@ -2406,6 +2424,7 @@ impl ChatView {
                     .shadow_md()
                     .child(
                         Button::new("scroll-to-end")
+                            .debug_selector(|| "scroll-to-end".into())
                             .outline()
                             .small()
                             .icon(IconName::ChevronDown)
@@ -2475,6 +2494,10 @@ fn markdown_entries_for_residency(
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
+        if show_jump_to_latest {
+            self.list_state.set_follow_mode(FollowMode::Normal);
+        }
         self.sync_markdown_scroll_position(cx);
         // Direct touch-handle scrolling bypasses ListState's wheel callback.
         // Keep history prefetch tied to the resulting position on every frame.
@@ -2681,10 +2704,30 @@ impl Render for ChatView {
                         },
                     )
                     .child(timeline)
-                    .when(
-                        self.list_state.is_scrolled_to_end() == Some(false),
-                        |this| this.child(self.render_scroll_pill(cx)),
-                    ),
+                    .child(
+                        gpui::canvas(
+                            {
+                                let list = self.list_state.clone();
+                                let view = cx.entity().downgrade();
+                                move |_, window, cx| {
+                                    // List prepaint may change geometry after render
+                                    // (resize, splice, or markdown remeasurement).
+                                    // Reconcile the sibling control after that layout.
+                                    if jump_to_latest_visible(&list) != show_jump_to_latest {
+                                        window.defer(cx, move |_, cx| {
+                                            let _ = view.update(cx, |_, cx| cx.notify());
+                                        });
+                                    }
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
+                    .when(show_jump_to_latest, |this| {
+                        this.child(self.render_scroll_pill(cx))
+                    }),
             )
             // A faded hairline plus 8pt of air separates the phone's timeline
             // from its composer; the desktop separates by rhythm alone.
@@ -3309,6 +3352,165 @@ mod tests {
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
             }
         }
+    }
+
+    #[gpui::test]
+    fn jump_to_latest_survives_unmeasured_history(cx: &mut TestAppContext) {
+        use gpui::{Context, IntoElement, Render, VisualTestContext, Window, point, px};
+
+        struct TouchChat(Entity<ChatView>);
+        impl Render for TouchChat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::touch_scroll::root(self.0.clone())
+            }
+        }
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        let full = synthetic_markdown_timeline(120);
+        let mut tail = full.clone();
+        tail.turns.drain(..20);
+        tail.entries.retain(|entry| entry.turn >= 20);
+        for entry in &mut tail.entries {
+            Arc::make_mut(entry).turn -= 20;
+        }
+        assert_eq!(tail.entries.len(), 300);
+        let (store, window_state, session_id) = seed_chat(cx, tail);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
+        });
+        let view = root.read_with(cx, |root, _| root.0.clone());
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        draw(cx);
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let height = list.viewport_bounds().size.height;
+        assert!(height > px(0.));
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        let scroll = |distance, phase, cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: list.viewport_bounds().center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
+                touch_phase: phase,
+                ..Default::default()
+            });
+            draw(cx);
+        };
+        // Small wheel deltas must accumulate, rather than snapping back while
+        // the viewport is still inside the one-screen follow threshold.
+        for _ in 0..12 {
+            scroll(height / 4., gpui::TouchPhase::Moved, cx);
+        }
+        assert!(
+            cx.debug_bounds("scroll-to-end").is_some(),
+            "jump to latest must appear three screens above the tail (position {:?}, end {:?})",
+            list.logical_scroll_top(),
+            list.is_scrolled_to_end()
+        );
+        assert!(!list.is_following_tail());
+        let before = list.logical_scroll_top();
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id.clone(), full, cx);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds("scroll-to-end").is_some(),
+            "prepend hides jump"
+        );
+        assert_eq!(list.logical_scroll_top().item_ix, before.item_ix + 20);
+        assert_eq!(
+            list.logical_scroll_top().offset_in_item,
+            before.offset_in_item
+        );
+
+        let button = cx.debug_bounds("scroll-to-end").unwrap();
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        assert!(list.is_following_tail());
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(
+                session_id.clone(),
+                synthetic_markdown_timeline(121),
+                cx,
+            );
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        assert!(list.is_following_tail());
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            list.item_count(),
+            "new turn did not move the tail anchor"
+        );
+
+        // Started is captured by touch_scroll::root and applies ListState::scroll_by,
+        // bypassing the list's wheel callback. No store notification drives this UI.
+        scroll(height * 3., gpui::TouchPhase::Started, cx);
+        assert!(
+            cx.debug_bounds("scroll-to-end").is_some(),
+            "touch capture hides jump"
+        );
+        assert!(!list.is_following_tail());
+        let before = list.logical_scroll_top();
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(
+                session_id.clone(),
+                synthetic_markdown_timeline(122),
+                cx,
+            );
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("scroll-to-end").is_some());
+        assert_eq!(
+            list.logical_scroll_top().item_ix,
+            before.item_ix,
+            "new turn steals reading position"
+        );
+        assert_eq!(
+            list.logical_scroll_top().offset_in_item,
+            before.offset_in_item
+        );
+        assert!(!list.is_following_tail());
+
+        let mut streaming = synthetic_markdown_timeline(122);
+        let tail = Arc::make_mut(streaming.entries.last_mut().unwrap());
+        tail.content = assistant(&"Streaming paragraph.\n\n".repeat(20));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id.clone(), streaming, cx);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("scroll-to-end").is_some());
+        assert_eq!(list.logical_scroll_top().item_ix, before.item_ix);
+        assert_eq!(
+            list.logical_scroll_top().offset_in_item,
+            before.offset_in_item
+        );
+        assert!(
+            !list.is_following_tail(),
+            "streaming steals reading position"
+        );
+
+        scroll(-height * 100., gpui::TouchPhase::Moved, cx);
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        // Returning within one screen permits the next live update to follow.
+        list.scroll_by(-height / 2.);
+        cx.update(|window, _| window.refresh());
+        draw(cx);
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, synthetic_markdown_timeline(123), cx);
+            cx.notify();
+        });
+        draw(cx);
+        assert!(list.is_following_tail());
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
     }
 
     #[gpui::test]
