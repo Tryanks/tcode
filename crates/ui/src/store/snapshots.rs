@@ -158,6 +158,9 @@ pub(crate) fn composer_state(
             .requested_profile_id
             .clone()
             .unwrap_or_else(|| Settings::builtin_profile_id(status.provider).to_owned());
+        settings
+            .resolved_profile(&profile_id)
+            .filter(|profile| profile.supports_account_usage())?;
         providers.provider_usage.get(&profile_id).cloned()
     });
 
@@ -340,5 +343,212 @@ mod tests {
             state.token_usage.and_then(|usage| usage.context_window),
             Some(500_000)
         );
+    }
+    #[test]
+    fn account_usage_eligibility_does_not_hide_session_context_or_supported_errors() {
+        let mut settings: Settings = serde_json::from_str(r#"{"profiles":{"custom":{"kind":"claude_code","env":[{"name":"ANTHROPIC_BASE_URL","value":"https://api.example.com/anthropic"}]}}}"#).unwrap();
+        let mut status = session_status();
+        status.provider = agent::ProviderKind::ClaudeCode;
+        status.requested_profile_id = Some("custom".into());
+        let mut timeline = Timeline::default();
+        timeline.apply_at(
+            None,
+            &agent::AgentEvent::TokenUsage(agent::TokenUsage {
+                freshness: agent::ContextFreshness::Current,
+                used_tokens: Some(1234),
+                ..Default::default()
+            }),
+        );
+        let mut providers = ProvidersStatus::default();
+        providers.provider_usage.insert(
+            "custom".into(),
+            tcode_core::usage::ProviderUsage {
+                error: Some("temporarily unreachable".into()),
+                ..Default::default()
+            },
+        );
+        let custom = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+        assert_eq!(custom.token_usage.unwrap().used_tokens, Some(1234));
+        assert!(custom.usage.is_none());
+        settings
+            .profiles
+            .get_mut("custom")
+            .unwrap()
+            .settings
+            .env
+            .clear();
+        let native = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+        assert_eq!(
+            native.usage.unwrap().error.as_deref(),
+            Some("temporarily unreachable")
+        );
+        assert_eq!(native.token_usage.unwrap().used_tokens, Some(1234));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn claude_usage_replays_adapter_timeline_and_composer_across_resume() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "tcode-usage-replay-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("claude-fixture");
+        std::fs::write(&binary, "#!/bin/sh\ncase \"$*\" in *--version*) echo '2.1.200'; exit;; esac\nIFS= read -r request\nif [ \"$TCODE_USAGE_INTERRUPTED\" = 1 ]; then IFS= read -r request; fi\ncat \"$TCODE_USAGE_FIXTURE\"\nwhile IFS= read -r request; do :; done\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut timeline = Timeline::default();
+        let mut replay = Timeline::default();
+        let mut status = session_status();
+        status.provider = agent::ProviderKind::ClaudeCode;
+        status.requested_model = Some("claude-opus-5".into());
+        status.provider_option_selections = vec![agent::OptionSelection {
+            id: "contextWindow".into(),
+            value: serde_json::json!(300000),
+        }];
+        let settings = Settings::default();
+        let providers = ProvidersStatus::default();
+        let mut recorded_events = Vec::new();
+        for (index, fixture) in [
+            include_str!("../../../agent/tests/fixtures/claude/usage_scope.jsonl"),
+            include_str!("../../../agent/tests/fixtures/claude/usage_resume.jsonl"),
+            include_str!("../../../agent/tests/fixtures/claude/usage_recorded.jsonl"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = root.join(format!("fixture-{index}.jsonl"));
+            std::fs::write(&path, fixture).unwrap();
+            smol::block_on(async {
+                let handle = agent::claude::start(agent::SessionOptions {
+                    cwd: root.clone(),
+                    model: Some("claude-opus-5".into()),
+                    resume: (index > 0).then(|| {
+                        agent::ResumeCursor(serde_json::json!({"session_id":"fixture-session"}))
+                    }),
+                    fork: false,
+                    binary_path: Some(binary.clone()),
+                    approval_mode: agent::ApprovalMode::Supervised,
+                    option_selections: vec![],
+                    interaction_mode: agent::InteractionMode::Build,
+                    mcp_servers: vec![],
+                    launch_env: agent::LaunchEnv {
+                        home: Some(root.clone()),
+                        env: vec![
+                            (
+                                "TCODE_USAGE_FIXTURE".into(),
+                                path.to_string_lossy().into_owned(),
+                            ),
+                            (
+                                "TCODE_USAGE_INTERRUPTED".into(),
+                                if index == 1 { "1" } else { "0" }.into(),
+                            ),
+                        ],
+                    },
+                    extra_args: vec![],
+                    acp: None,
+                })
+                .await
+                .unwrap();
+                handle
+                    .commands
+                    .send(agent::SessionCommand::SendTurn {
+                        delivery_id: 1,
+                        text: "fixture".into(),
+                        options: None,
+                        attachments: vec![],
+                    })
+                    .await
+                    .unwrap();
+                if index == 1 {
+                    handle
+                        .commands
+                        .send(agent::SessionCommand::Interrupt)
+                        .await
+                        .unwrap();
+                }
+                loop {
+                    let event =
+                        smol::future::race(async { handle.events.recv().await.unwrap() }, async {
+                            smol::Timer::after(std::time::Duration::from_secs(10)).await;
+                            panic!("fixture adapter timed out")
+                        })
+                        .await;
+                    timeline.apply_at(Some(1 + recorded_events.len() as u64), &event);
+                    let snapshot =
+                        composer_state(Some(&status), Some(&timeline), &settings, &providers);
+                    if let agent::AgentEvent::ContextCompacted(c) = &event {
+                        let u = snapshot.token_usage.unwrap();
+                        if c.in_progress {
+                            assert_eq!(u.freshness, agent::ContextFreshness::Compacting);
+                        } else {
+                            assert_eq!(u.used_tokens, None);
+                            assert_eq!(c.pre_tokens, Some(500260));
+                            assert_eq!(c.trigger.as_deref(), Some("manual"));
+                            assert_eq!(crate::context_meter::used_tokens(&u), None);
+                        }
+                    }
+                    if let agent::AgentEvent::TokenUsage(u) = &event {
+                        assert_ne!(
+                            u.used_tokens,
+                            Some(900000),
+                            "subagent context must not enter main usage"
+                        );
+                        if u.output_tokens == Some(20) {
+                            assert_eq!(u.used_tokens, Some(400150));
+                        }
+                    }
+                    let completed = matches!(event, agent::AgentEvent::TurnCompleted { .. });
+                    recorded_events.push(event);
+                    if completed {
+                        break;
+                    }
+                }
+                handle
+                    .commands
+                    .send(agent::SessionCommand::Shutdown)
+                    .await
+                    .unwrap();
+            });
+            let snapshot = composer_state(Some(&status), Some(&timeline), &settings, &providers);
+            let usage = snapshot.token_usage.unwrap();
+            assert_eq!(usage.used_tokens, Some([500260, 60, 20764][index]));
+            assert_eq!(
+                usage.total_processed_tokens,
+                Some([4001300, 4001365, 4063449][index])
+            );
+            if index == 1 {
+                assert_eq!(
+                    timeline.last_turn_status,
+                    Some(agent::TurnStatus::Interrupted)
+                );
+            }
+            // A repeated persisted completion is idempotent, including a cancelled result.
+            timeline.apply_at(Some(99), recorded_events.last().unwrap());
+            assert_eq!(
+                timeline.usage.unwrap().total_processed_tokens,
+                usage.total_processed_tokens
+            );
+        }
+        for (index, event) in recorded_events.iter().enumerate() {
+            replay.apply_at(Some(1 + index as u64), event);
+        }
+        assert_eq!(replay.usage, timeline.usage);
+        let old: agent::AgentEvent = serde_json::from_str(r#"{"type":"token_usage","used_tokens":4100000,"input_tokens":1000000,"context_window":1000000,"total_processed_tokens":4100000}"#).unwrap();
+        replay.apply_at(None, &old);
+        let old = composer_state(Some(&status), Some(&replay), &settings, &providers)
+            .token_usage
+            .unwrap();
+        assert_eq!(old.freshness, agent::ContextFreshness::Unknown);
+        assert_eq!(
+            crate::context_meter::used_tokens(&old),
+            None,
+            "legacy aggregate has no occupancy provenance"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

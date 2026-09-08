@@ -679,6 +679,27 @@ Send above; approval mode and Build/Plan below, with the
 context ring at the trailing edge of the second row. The ring keeps a 44pt hit
 target opening its details sheet. Option labels truncate when space is tight;
 both rows fit at 360pt in English and Simplified Chinese.
+The context details distinguish the latest main-conversation request from
+processed traffic. Claude occupancy is the latest input plus cache-read and
+cache-creation tokens; generated output and repeated requests do not inflate it.
+Capacity is separate and respects the selected model limit. Unknown observations
+say **Unknown**, with no measured percentage or empty progress bar. During a new
+turn the previous observation says **Last known context · updating** until replaced.
+Older saved events without provenance stay unverified until a new observation;
+their aggregate counts are never relabeled as measured occupancy. **Total processed**
+is a separate lifetime main-loop total, reconstructed from completed turn traffic.
+Compaction has separate in-progress and completed dividers, with supplied trigger
+and pre-compaction count. Labels wrap at narrow widths. Completion invalidates
+occupancy until another request observation, even when the harness reports a
+post-compaction size. Warning color is not a claim about the harness's trigger.
+
+Settings → Usage and the composer's account limits use the resolved profile's
+account-usage capability. Unsupported custom endpoints/API-key configurations
+are omitted independently of session context usage. Native account profiles,
+including custom-named profiles, retain sign-in/network errors and retry.
+Changing profile configuration or secrets invalidates cached limits and rejects
+older in-flight results.
+
 Sending during a turn queues the message;
 the secondary send action steers when the provider supports it. Stop interrupts
 the current turn. Queue/steer guidance belongs in the send tooltip.

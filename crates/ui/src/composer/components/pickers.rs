@@ -1582,8 +1582,8 @@ fn render_context_meter_pane(
             .child(stat),
     );
 
-    if max.is_some() {
-        let fraction = pct.unwrap_or(0.0).clamp(0.0, 100.0) / 100.0;
+    if let Some(pct) = pct {
+        let fraction = pct.clamp(0.0, 100.0) / 100.0;
         pane = pane.child(
             div()
                 .w_full()
@@ -1599,6 +1599,19 @@ fn render_context_meter_pane(
                 ),
         );
     }
+
+    let freshness = match usage.map(|u| u.freshness) {
+        Some(agent::ContextFreshness::Current) if used.is_some() => "composer.context_latest",
+        Some(agent::ContextFreshness::LastKnown) => "composer.context_last_known",
+        Some(agent::ContextFreshness::Compacting) => "chat.context_compacting",
+        _ => "composer.context_updating",
+    };
+    pane = pane.child(
+        div()
+            .text_size(px(11.))
+            .text_color(muted)
+            .child(crate::tr!(freshness)),
+    );
 
     // "Total processed" — the session-cumulative token count, when the provider
     // reports it (a native running total or adapter-side accumulation).

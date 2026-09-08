@@ -233,9 +233,21 @@ fn render_turn(number: usize, entries: &[&TimelineEntry], timeline: &Timeline) -
                     to_provider.display_name()
                 ));
             }
-            EntryContent::ContextCompacted => {
-                activity(&mut body, "context", "provider", "compacted")
-            }
+            EntryContent::ContextCompacted(c) => activity(
+                &mut body,
+                "context",
+                "provider",
+                &format!(
+                    "{}; trigger={:?}; pre_tokens={:?}",
+                    if c.in_progress {
+                        "compacting"
+                    } else {
+                        "compacted"
+                    },
+                    c.trigger,
+                    c.pre_tokens
+                ),
+            ),
             EntryContent::ContextWindowChanged { window } => activity(
                 &mut body,
                 "context",

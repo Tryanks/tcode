@@ -5,6 +5,12 @@ use agent::TokenUsage;
 /// The used tokens a meter reflects: the provider's reported total-in-use, else
 /// the input-token count.
 pub fn used_tokens(usage: &TokenUsage) -> Option<u64> {
+    if matches!(
+        usage.freshness,
+        agent::ContextFreshness::Unknown | agent::ContextFreshness::AwaitingObservation
+    ) {
+        return None;
+    }
     usage.used_tokens.or(usage.input_tokens)
 }
 
@@ -44,7 +50,7 @@ pub fn format_percentage(percentage: Option<f32>) -> Option<String> {
 /// `<1_000_000` as `Nk`, otherwise `x.ym`; trailing `.0` is omitted.
 pub fn format_tokens(value: Option<u64>) -> String {
     let Some(v) = value else {
-        return "0".to_string();
+        return crate::tr!("composer.context_unknown").into_owned();
     };
     let v = v as f64;
     if v < 1_000.0 {
@@ -66,6 +72,7 @@ mod tests {
 
     fn usage(used: Option<u64>, window: Option<u64>) -> TokenUsage {
         TokenUsage {
+            freshness: agent::ContextFreshness::Current,
             used_tokens: used,
             context_window: window,
             ..Default::default()
@@ -90,6 +97,7 @@ mod tests {
     #[test]
     fn used_falls_back_to_input_tokens() {
         let u = TokenUsage {
+            freshness: agent::ContextFreshness::Current,
             input_tokens: Some(1_234),
             ..Default::default()
         };
@@ -115,6 +123,6 @@ mod tests {
         assert_eq!(format_tokens(Some(200_000)), "200k");
         assert_eq!(format_tokens(Some(1_000_000)), "1m");
         assert_eq!(format_tokens(Some(1_250_000)), "1.2m");
-        assert_eq!(format_tokens(None), "0");
+        assert_eq!(format_tokens(None), crate::tr!("composer.context_unknown"));
     }
 }

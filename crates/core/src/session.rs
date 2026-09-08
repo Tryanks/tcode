@@ -433,7 +433,7 @@ pub enum EntryContent {
         reason: Option<String>,
     },
     /// The provider compacted its context window (a "Context compacted" work-log row).
-    ContextCompacted,
+    ContextCompacted(agent::Compaction),
     /// The user changed the context window for the next provider turn.
     ContextWindowChanged {
         window: u64,
@@ -616,6 +616,11 @@ impl Timeline {
                 }
             }
             AgentEvent::TurnStarted { turn_id } => {
+                if let Some(usage) = self.usage.as_mut()
+                    && usage.freshness == agent::ContextFreshness::Current
+                {
+                    usage.freshness = agent::ContextFreshness::LastKnown;
+                }
                 // Reuse the open turn (typically opened by the user message);
                 // otherwise begin a fresh one.
                 let turn = match self.current_turn {
@@ -681,6 +686,24 @@ impl Timeline {
             }
             AgentEvent::RewindFailed { .. } => {}
             AgentEvent::TurnCompleted { status, usage, .. } => {
+                let newly_completed = self
+                    .current_turn
+                    .is_none_or(|turn| self.turns[turn].status.is_none());
+                let usage = usage.map(|mut usage| {
+                    if let Some(processed) = usage.turn_processed_tokens {
+                        let previous = self
+                            .usage
+                            .and_then(|u| u.total_processed_tokens)
+                            .unwrap_or(0);
+                        usage.total_processed_tokens =
+                            Some(previous.saturating_add(if newly_completed {
+                                processed
+                            } else {
+                                0
+                            }));
+                    }
+                    usage
+                });
                 self.turn_running = false;
                 self.last_turn_status = Some(*status);
                 if let Some(turn) = self.current_turn {
@@ -701,7 +724,7 @@ impl Timeline {
                     }
                 }
                 if usage.is_some() {
-                    self.usage = *usage;
+                    self.usage = usage;
                 }
                 // A finished turn can no longer be waiting on approvals or input.
                 self.pending_approvals.clear();
@@ -766,7 +789,19 @@ impl Timeline {
                     self.pending_user_input = None;
                 }
             }
-            AgentEvent::TokenUsage(usage) => self.usage = Some(*usage),
+            AgentEvent::TokenUsage(usage) => {
+                let mut usage = *usage;
+                usage.context_window = usage
+                    .context_window
+                    .or(self.usage.and_then(|u| u.context_window));
+                if usage.turn_processed_tokens.is_some() || usage.total_processed_tokens.is_none() {
+                    usage.total_processed_tokens = self
+                        .usage
+                        .and_then(|u| u.total_processed_tokens)
+                        .or(usage.total_processed_tokens);
+                }
+                self.usage = Some(usage);
+            }
             AgentEvent::Warning { message } => log::warn!("provider warning: {message}"),
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn(ts);
@@ -880,12 +915,25 @@ impl Timeline {
                     turn,
                 });
             }
-            AgentEvent::ContextCompacted => {
+            AgentEvent::ContextCompacted(compaction) => {
+                let in_progress = compaction.in_progress;
+                let usage = self.usage.get_or_insert_with(Default::default);
+                usage.freshness = if in_progress {
+                    agent::ContextFreshness::Compacting
+                } else {
+                    agent::ContextFreshness::AwaitingObservation
+                };
+                if !in_progress {
+                    usage.used_tokens = None;
+                    usage.input_tokens = None;
+                    usage.cached_input_tokens = None;
+                    usage.output_tokens = None;
+                }
                 let turn = self.ensure_turn(ts);
                 let id = self.synthetic_id("compacted");
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
-                    content: EntryContent::ContextCompacted,
+                    content: EntryContent::ContextCompacted(compaction.clone()),
                     ts,
                     turn,
                 }));

@@ -159,7 +159,7 @@ pub(crate) fn segment_entries<'a>(
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::ModelChange(entry));
             }
-            EntryContent::ContextCompacted => {
+            EntryContent::ContextCompacted(_) => {
                 flush_activities(&mut segments, &mut activities);
                 segments.push(Segment::ContextCompacted(entry));
             }
@@ -219,7 +219,7 @@ pub(crate) fn work_log_counts(entries: &[&TimelineEntry]) -> WorkLogCounts {
             | EntryContent::Item(ItemContent::WebSearch { .. })
             | EntryContent::Item(ItemContent::Other { .. }) => counts.tools += 1,
             EntryContent::Item(ItemContent::Subagent { .. }) => counts.subagents += 1,
-            EntryContent::ContextCompacted
+            EntryContent::ContextCompacted(_)
             | EntryContent::ContextWindowChanged { .. }
             | EntryContent::Steer { .. }
             | EntryContent::Item(ItemContent::UserMessage { .. })
@@ -1116,7 +1116,7 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
             to.hash(hash);
             reason.hash(hash);
         }
-        EntryContent::ContextCompacted => {}
+        EntryContent::ContextCompacted(_) => {}
         EntryContent::ContextWindowChanged { window } => window.hash(hash),
         EntryContent::Item(ItemContent::WebSearch { query }) => {
             "web_search".len().hash(hash);
