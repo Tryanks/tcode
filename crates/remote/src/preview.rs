@@ -82,7 +82,9 @@ impl PreviewRoutes {
             return actual.into();
         };
         let mut url = Url::parse(actual).unwrap();
-        let _ = url.set_port(route.remote.port());
+        // A TCP route can be reused under another scheme, whose default port
+        // need not match the scheme that first allocated it.
+        let _ = url.set_port(route.remote.port_or_known_default());
         url.into()
     }
 
@@ -229,25 +231,46 @@ fn bind_loopback(url: &Url) -> io::Result<Vec<std::net::TcpListener>> {
 }
 
 async fn forward(socket: TcpStream, host: &PairedHost, destination: &str) -> io::Result<()> {
-    let mut remote = future::race(async {
-        let proxy = Url::parse(&host.origin).map_err(io::Error::other)?;
-        let mut remote = TcpStream::connect((proxy.host_str().ok_or_else(|| io::Error::other("Missing paired host"))?.trim_matches(['[', ']']), proxy.port_or_known_default().unwrap())).await.map_err(|_| io::Error::other("Cannot connect to the paired host preview service"))?;
-        let auth = STANDARD.encode(format!("tcode:{}", host.token));
-        remote.write_all(format!("CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Authorization: Basic {auth}\r\n\r\n").as_bytes()).await?;
-        let mut head = Vec::new();
-        while !head.ends_with(b"\r\n\r\n") && head.len() < 16384 {
-            let mut byte = [0];
-            remote.read_exact(&mut byte).await?;
-            head.push(byte[0]);
-        }
-        if !head.starts_with(b"HTTP/1.1 200 ") || !head.ends_with(b"\r\n\r\n") {
-            return Err(io::Error::other(if head.starts_with(b"HTTP/1.1 407 ") { "Paired host rejected preview authentication; reconnect or pair again" } else { "Paired host could not connect to the remote preview destination" }));
-        }
-        Ok(remote)
-    }, async {
-        smol::Timer::after(Duration::from_secs(12)).await;
-        Err(io::Error::other("Timed out connecting to the remote preview destination"))
-    }).await?;
+    let mut remote = future::race(
+        async {
+            let proxy = Url::parse(&host.origin).map_err(io::Error::other)?;
+            let address = proxy
+                .host_str()
+                .ok_or_else(|| io::Error::other("Missing paired host"))?
+                .trim_matches(['[', ']']);
+            let port = proxy.port_or_known_default().unwrap();
+            let mut remote = TcpStream::connect((address, port)).await.map_err(|_| {
+                io::Error::other("Cannot connect to the paired host preview service")
+            })?;
+            let auth = STANDARD.encode(format!("tcode:{}", host.token));
+            let request = format!(
+                "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
+            );
+            remote.write_all(request.as_bytes()).await?;
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") && head.len() < 16384 {
+                let mut byte = [0];
+                remote.read_exact(&mut byte).await?;
+                head.push(byte[0]);
+            }
+            if !head.starts_with(b"HTTP/1.1 200 ") || !head.ends_with(b"\r\n\r\n") {
+                let message = if head.starts_with(b"HTTP/1.1 407 ") {
+                    "Paired host rejected preview authentication; reconnect or pair again"
+                } else {
+                    "Paired host could not connect to the remote preview destination"
+                };
+                return Err(io::Error::other(message));
+            }
+            Ok(remote)
+        },
+        async {
+            smol::Timer::after(Duration::from_secs(12)).await;
+            Err(io::Error::other(
+                "Timed out connecting to the remote preview destination",
+            ))
+        },
+    )
+    .await?;
     let mut browser = socket.clone();
     let mut outbound = remote.clone();
     // Once CONNECT succeeds, normal browser cancellation and peer shutdown

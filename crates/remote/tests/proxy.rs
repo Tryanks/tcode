@@ -322,6 +322,29 @@ fn paired_preview(machine: &Machine) -> tcode_remote::preview::PreviewRoutes {
 #[test]
 fn browser_forward_routes_bytes_and_navigation_then_disposes_connections() {
     let machine = Machine::new();
+    for (first, next) in [
+        (
+            "http://localhost/",
+            "https://localhost:80/page?scheme=https",
+        ),
+        (
+            "https://localhost/",
+            "http://localhost:443/page?scheme=http",
+        ),
+    ] {
+        let mut routes = paired_preview(&machine);
+        let initial = url::Url::parse(&routes.navigate(first).unwrap()).unwrap();
+        let actual = routes.navigate(next).unwrap();
+        assert_eq!(
+            url::Url::parse(&actual).unwrap().port(),
+            initial.port(),
+            "changing scheme retains the same TCP route"
+        );
+        assert_eq!(routes.logical_url(&actual), next);
+        assert_eq!(routes.navigation(&actual).unwrap(), actual);
+        assert_eq!(routes.current_url(), Some(next));
+        assert_eq!(routes.external_url(next).as_deref(), Some(actual.as_str()));
+    }
     // The viewing machine already occupies the remote port. The mapped socket
     // must be allocated elsewhere, including when a second browser opens it.
     let destination = TcpListener::bind("127.0.0.1:0").unwrap();
