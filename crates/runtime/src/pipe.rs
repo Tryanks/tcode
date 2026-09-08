@@ -534,6 +534,12 @@ fn dispatch_query(
             let result = app.session_history_page(&session_id, before, limit);
             cx.spawn_background(async move { result })
         }
+        Query::Hosting { .. } => cx.spawn_background(async {
+            Err(ProtocolError {
+                code: "unsupported".into(),
+                message: "this host has no remote hosting controls".into(),
+            })
+        }),
         Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app

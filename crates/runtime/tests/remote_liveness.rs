@@ -34,6 +34,7 @@ fn server(data: &TestDir) -> tcode_remote::RemoteServer {
             host_name: "liveness test".into(),
             data_dir: data.0.clone(),
             static_bundle: None,
+            browser_password: false,
         },
     )
     .unwrap()

@@ -16,6 +16,9 @@ struct Machine {
 }
 impl Machine {
     fn new() -> Self {
+        Self::with_password(false)
+    }
+    fn with_password(password: bool) -> Self {
         let root = std::env::temp_dir().join(format!("tcode-proxy-{}", uuid::Uuid::new_v4()));
         let (to_host, _) = async_channel::unbounded();
         let (_, from_host) = async_channel::unbounded();
@@ -26,21 +29,31 @@ impl Machine {
                 host_name: "proxy test".into(),
                 data_dir: root.clone(),
                 static_bundle: None,
+                browser_password: password,
             },
         )
         .unwrap();
-        let host = tcode_remote::client::pair(
-            &format!("http://{}", server.local_addr()),
-            &server.new_pairing_code().code,
-            "test device",
-        )
-        .unwrap();
+        let origin = format!("http://{}", server.local_addr());
+        let token = if password {
+            let body = serde_json::json!({"password":"proxy password","device_name":"browser"})
+                .to_string();
+            tcode_remote::client::http(&origin, "POST", "/auth/setup", &body).unwrap();
+            let bytes = tcode_remote::client::http(&origin, "POST", "/auth/login", &body).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["token"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            tcode_remote::client::pair(&origin, &server.new_pairing_code().code, "test device")
+                .unwrap()
+                .token
+        };
         Self {
             server: Some(server),
             root,
             auth: format!(
                 "Proxy-Authorization: Basic {}\r\n",
-                STANDARD.encode(format!("tcode:{}", host.token))
+                STANDARD.encode(format!("tcode:{}", token))
             ),
         }
     }
@@ -75,8 +88,8 @@ fn head(stream: &mut impl Read) -> String {
 }
 
 #[test]
-fn http_get_resolves_loopback_on_machine_and_preserves_query_without_leaking_credentials() {
-    let machine = Machine::new();
+fn password_token_proxies_loopback_and_preserves_query_without_leaking_credentials() {
+    let machine = Machine::with_password(true);
     let origin = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = origin.local_addr().unwrap().port();
     let origin = std::thread::spawn(move || {

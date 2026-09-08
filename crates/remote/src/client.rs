@@ -60,7 +60,9 @@ pub fn http(origin: &str, method: &str, path: &str, body: &str) -> Result<Vec<u8
     use std::io::{Read as _, Write as _};
     if !matches!(
         (method, path),
-        ("POST", "/pair") | ("GET", "/admin/pair") | ("GET", "/") | ("HEAD", "/")
+        ("POST", "/pair" | "/auth/setup" | "/auth/login")
+            | ("GET", "/auth/state" | "/admin/pair" | "/")
+            | ("HEAD", "/")
     ) || body.len() > 4096
     {
         return Err("invalid HTTP request".into());
@@ -74,7 +76,13 @@ pub fn http(origin: &str, method: &str, path: &str, body: &str) -> Result<Vec<u8
     let socket = TcpStream::connect_timeout(&socket_addr(addr, port)?, Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(
+            if matches!(path, "/auth/setup" | "/auth/login") {
+                60
+            } else {
+                5
+            },
+        )))
         .map_err(|e| e.to_string())?;
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))

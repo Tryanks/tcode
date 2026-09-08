@@ -136,6 +136,7 @@ impl RemoteController {
                 host_name,
                 data_dir: self.data_dir.clone(),
                 static_bundle: None,
+                browser_password: false,
             },
         )
         .map_err(|error| error.to_string())?;

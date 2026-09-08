@@ -86,6 +86,7 @@ fn config(data_dir: PathBuf, port: u16) -> RemoteConfig {
         host_name: "Test Host".into(),
         data_dir,
         static_bundle: None,
+        browser_password: false,
     }
 }
 
@@ -422,5 +423,139 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
     client.to_host.close();
     release.close();
     fixture.join().unwrap();
+    server.shutdown();
+}
+
+#[test]
+fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens() {
+    use tcode_remote::client::http;
+    let root = TestDir::new();
+    let (mux, _) = fake_host();
+    let mut config = config(root.0.clone(), 0);
+    config.browser_password = true;
+    let server = serve(mux, config).unwrap();
+    let origin = format!("http://{}", server.local_addr());
+    let state: Value =
+        serde_json::from_slice(&http(&origin, "GET", "/auth/state", "").unwrap()).unwrap();
+    assert_eq!(state, json!({"mode":"password","configured":false}));
+    assert!(
+        http(&origin, "POST", "/auth/setup", r#"{"password":"short"}"#)
+            .unwrap_err()
+            .contains("400")
+    );
+    let password = json!({"password":"secret password"}).to_string();
+    http(&origin, "POST", "/auth/setup", &password).unwrap();
+    assert!(
+        http(&origin, "POST", "/auth/setup", &password)
+            .unwrap_err()
+            .contains("409")
+    );
+    let state: Value =
+        serde_json::from_slice(&http(&origin, "GET", "/auth/state", "").unwrap()).unwrap();
+    assert_eq!(state, json!({"mode":"password","configured":true}));
+    let login = json!({"password":"secret password","device_name":"Browser"}).to_string();
+    let paired: Value =
+        serde_json::from_slice(&http(&origin, "POST", "/auth/login", &login).unwrap()).unwrap();
+    let host = tcode_remote::client::PairedHost {
+        host_id: paired["host_id"].as_str().unwrap().into(),
+        name: "Test Host".into(),
+        origin: origin.clone(),
+        token: paired["token"].as_str().unwrap().into(),
+        last_connected_unix: None,
+    };
+    let client = connect(host, "Browser".into());
+    wait_state(&client, ConnectionState::Syncing);
+    let phone = pair(&origin, &server.new_pairing_code().code, "phone").unwrap();
+    let hosting = |action| {
+        client
+            .to_host
+            .send_blocking(
+                serde_json::to_string(&tcode_protocol::ClientMessage {
+                    id: 900,
+                    payload: tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting {
+                        action,
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let reply = recv_type(&client, "query_result", Some(900));
+        reply["content"]["result"]["Ok"]["content"].clone()
+    };
+    let state = hosting(tcode_protocol::HostingAction::State);
+    assert_eq!(state["enabled"], true);
+    assert_eq!(state["devices"].as_array().unwrap().len(), 2);
+    let phone_id = state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|device| device["name"] == "phone")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hosting(tcode_protocol::HostingAction::RevokeDevice(phone_id));
+    let revoked = connect(phone, "phone".into());
+    wait_state(
+        &revoked,
+        ConnectionState::Offline {
+            reason: ConnectionFailure::AuthenticationRejected,
+        },
+    );
+    revoked.to_host.close();
+    let state = hosting(tcode_protocol::HostingAction::SetEnabled(false));
+    assert_eq!(state["enabled"], false);
+    assert!(state["code"].is_null());
+    assert!(pair(&origin, &server.new_pairing_code().code, "disabled phone").is_err());
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(root.0.join("remote.json")).unwrap()).unwrap();
+    assert_eq!(stored["pairing_enabled"], false);
+    // Disabling native pairing must not disable web login.
+    http(&origin, "POST", "/auth/login", &login).unwrap();
+    let state = hosting(tcode_protocol::HostingAction::SetEnabled(true));
+    assert_eq!(state["enabled"], true);
+    assert_eq!(state["code"].as_str().unwrap().len(), 6);
+    let renewed = hosting(tcode_protocol::HostingAction::NewCode);
+    assert!(pair(&origin, renewed["code"].as_str().unwrap(), "renewed phone").is_ok());
+    for _ in 0..5 {
+        assert!(
+            http(
+                &origin,
+                "POST",
+                "/auth/login",
+                &json!({"password":"incorrect","device_name":"Browser"}).to_string()
+            )
+            .unwrap_err()
+            .contains("403")
+        );
+    }
+    assert!(
+        http(&origin, "POST", "/auth/login", &login)
+            .unwrap_err()
+            .contains("403")
+    );
+    // Browser lockout does not lock out code-based phone pairing.
+    assert!(pair(&origin, &server.new_pairing_code().code, "second phone").is_ok());
+    let state = hosting(tcode_protocol::HostingAction::State);
+    let browser_id = state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|device| device["name"] == "Browser")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    hosting(tcode_protocol::HostingAction::RevokeDevice(browser_id));
+    // A continuously polling settings page must lose access too, without
+    // waiting for an idle keepalive timer that traffic continually resets.
+    client.to_host.send_blocking(json!({"id":901,"payload":{"type":"query","content":{"type":"hosting","content":{"action":{"type":"state"}}}}}).to_string()).unwrap();
+    wait_state(
+        &client,
+        ConnectionState::Offline {
+            reason: ConnectionFailure::AuthenticationRejected,
+        },
+    );
+    client.to_host.close();
     server.shutdown();
 }

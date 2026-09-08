@@ -44,13 +44,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         Some("serve") => serve_command(&args[1..]),
         Some("pair") => pair_command(&args[1..]),
+        Some("set-password") => set_password_command(&args[1..]),
         Some(command) => Err(format!("unknown command {command:?}; use --help")),
     }
 }
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--listen ADDR:PORT] [--name NAME] [--data-dir DIR]\n  tcode-headless pair [--listen ADDR:PORT]\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--listen ADDR:PORT] [--name NAME] [--data-dir DIR] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--listen ADDR:PORT]\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -61,13 +62,19 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("invalid --listen address: {error}"))?;
     let name = option_value(args, "--name").unwrap_or_else(default_device_name);
     let data_dir = option_value(args, "--data-dir").map(PathBuf::from);
-    reject_unknown_options(args, &["--listen", "--name", "--data-dir"])?;
+    reject_unknown_options(args, &["--listen", "--name", "--data-dir", "--password"])?;
     let store = match data_dir {
         Some(path) => SessionStore::open_at(path),
         None => SessionStore::open_default(),
     }
     .map_err(|error| format!("could not open session store: {error}"))?;
     let remote_data_dir = store.root().clone();
+    if let Some(password) =
+        option_value(args, "--password").or_else(|| std::env::var("TCODE_PASSWORD").ok())
+    {
+        tcode_remote::server::set_password(&remote_data_dir, &password, false)
+            .map_err(|error| error.to_string())?;
+    }
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -94,11 +101,27 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             host_name: name,
             data_dir: remote_data_dir,
             static_bundle: STATIC_BUNDLE,
+            browser_password: true,
         },
     )
     .map_err(|error| format!("could not listen for other devices: {error}"))?;
     let pairing = server.new_pairing_code();
-    print_pairing(&pairing, server.local_addr())?;
+    if server.pairing_enabled() {
+        print_pairing(&pairing, server.local_addr())?;
+    } else {
+        println!("Native pairing disabled; enable Allow other devices in the browser");
+        for url in browser_urls(&pairing, server.local_addr()) {
+            println!("Browser: {url}");
+        }
+    }
+    println!(
+        "{}",
+        if server.password_configured() {
+            "Password protected"
+        } else {
+            "Set a password on first open"
+        }
+    );
     let beacon = start_beacon(
         pairing.host_id.clone(),
         pairing.host_name.clone(),
@@ -136,6 +159,35 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     server.shutdown();
     host.to_host.close();
     let _ = host.stopped.recv_blocking();
+    Ok(())
+}
+
+fn set_password_command(args: &[String]) -> Result<(), String> {
+    let revoke = args.iter().any(|arg| arg == "--revoke-tokens");
+    let values: Vec<_> = args
+        .iter()
+        .filter(|arg| arg.as_str() != "--revoke-tokens")
+        .cloned()
+        .collect();
+    reject_unknown_options(&values, &["--data-dir", "--password"])?;
+    let password = option_value(&values, "--password")
+        .or_else(|| std::env::var("TCODE_PASSWORD").ok())
+        .ok_or("supply --password or TCODE_PASSWORD")?;
+    let store = match option_value(&values, "--data-dir") {
+        Some(path) => SessionStore::open_at(PathBuf::from(path)),
+        None => SessionStore::open_default(),
+    }
+    .map_err(|error| error.to_string())?;
+    tcode_remote::server::set_password(store.root(), &password, revoke)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "Password changed. {}",
+        if revoke {
+            "Existing tokens revoked."
+        } else {
+            "Existing tokens kept."
+        }
+    );
     Ok(())
 }
 
@@ -177,16 +229,12 @@ fn print_pairing(pairing: &PairingCode, bound: SocketAddr) -> Result<(), String>
     println!("Expires in: {} seconds", pairing.expires_in_secs);
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
-    #[cfg(feature = "web")]
     for url in browser_urls(pairing, bound) {
         println!("Browser: {url}");
     }
-    #[cfg(not(feature = "web"))]
-    let _ = bound;
     Ok(())
 }
 
-#[cfg(any(feature = "web", test))]
 fn browser_urls(pairing: &PairingCode, bound: SocketAddr) -> Vec<String> {
     let ips = if bound.ip().is_unspecified() {
         pairing
@@ -204,13 +252,7 @@ fn browser_urls(pairing: &PairingCode, bound: SocketAddr) -> Vec<String> {
         vec![bound.ip()]
     };
     ips.into_iter()
-        .map(|ip| {
-            format!(
-                "http://{}/#code={}",
-                SocketAddr::new(ip, bound.port()),
-                pairing.code
-            )
-        })
+        .map(|ip| format!("http://{}/", SocketAddr::new(ip, bound.port())))
         .collect()
 }
 
@@ -271,7 +313,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn browser_links_and_admin_json_carry_the_pairing_code_in_the_fragment() {
+    fn browser_links_omit_codes_while_native_admin_json_keeps_them() {
         let pairing = PairingCode {
             code: "123456".into(),
             browser_url: "http://192.168.1.4:47420/#code=123456".into(),
@@ -284,10 +326,7 @@ mod tests {
 
         assert_eq!(
             browser_urls(&pairing, "0.0.0.0:47420".parse().unwrap()),
-            [
-                "http://192.168.1.4:47420/#code=123456",
-                "http://127.0.0.1:47420/#code=123456",
-            ]
+            ["http://192.168.1.4:47420/", "http://127.0.0.1:47420/",]
         );
         assert_eq!(
             serde_json::to_value(pairing).unwrap()["browser_url"],

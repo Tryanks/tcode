@@ -8795,6 +8795,7 @@ dependencies = [
  "libc",
  "log",
  "mdns-sd",
+ "pbkdf2",
  "rustls",
  "serde",
  "serde_json",

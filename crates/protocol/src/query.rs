@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Query {
+    /// Listener-owned operations, handled by the authenticated remote pipe.
+    Hosting {
+        action: HostingAction,
+    },
     Ping,
     /// Records strictly before the absolute event cursor, oldest first.
     SessionHistoryPage {
@@ -82,6 +86,7 @@ pub const MAX_THREAD_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum QueryResponse {
+    Hosting(HostingState),
     Pong,
     SessionHistoryPage {
         records: Vec<crate::SessionEventRecord>,
@@ -221,3 +226,29 @@ pub struct RecentDir {
 /// Fresh history and backwards pages are bounded independently of live cursors.
 pub const SESSION_HISTORY_RECORDS: usize = 200;
 pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum HostingAction {
+    State,
+    SetEnabled(bool),
+    NewCode,
+    RevokeDevice(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostingState {
+    pub enabled: bool,
+    pub code: Option<String>,
+    pub expires_in_secs: u64,
+    pub host_id: String,
+    pub host_name: String,
+    pub devices: Vec<HostedDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedDevice {
+    pub id: String,
+    pub name: String,
+    pub created_unix: u64,
+}
