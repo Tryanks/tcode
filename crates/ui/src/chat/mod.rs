@@ -1285,6 +1285,18 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let (turn, entry_id, text, cwd, context_len, attachments, steering, pinned) = args;
+        if self
+            .workspace_store
+            .read(cx)
+            .delivery_messages()
+            .iter()
+            .any(|(key, _, _, _)| {
+                entry_id == format!("local-user-{key}") || entry_id == format!("local-steer-{key}")
+            })
+        {
+            return div().into_any_element();
+        }
+
         let context = context_len
             .filter(|len| *len <= text.len() && text.is_char_boundary(*len))
             .map(|len| &text[..len]);
@@ -2736,6 +2748,88 @@ impl Render for ChatView {
         } else {
             self.composer.clone().into_any_element()
         };
+        let deliveries = self.workspace_store.read(cx).delivery_messages();
+        let waiting = *self.workspace_store.read(cx).connection_state()
+            != tcode_client::ConnectionState::Connected;
+        let delivery_rows = deliveries
+            .into_iter()
+            .map(|(key, text, failure, acknowledged)| {
+                let retry_key = key.clone();
+                let discard_key = key.clone();
+                let retry_store = self.workspace_store.clone();
+                let discard_store = self.workspace_store.clone();
+                v_flex()
+                    .id(SharedString::from(format!("delivery-{key}")))
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_WIDTH))
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            .max_w_3_4()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .text_size(px(15.))
+                            .rounded(px(12.))
+                            .bg(cx.theme().foreground.opacity(0.08))
+                            .text_color(if acknowledged {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(text),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(if failure.is_some() {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(failure.clone().unwrap_or_else(|| {
+                                if acknowledged {
+                                    return String::new();
+                                }
+                                crate::tr!(if waiting {
+                                    "chat.waiting_connection"
+                                } else {
+                                    "chat.sending"
+                                })
+                                .into_owned()
+                            })),
+                    )
+                    .when(failure.is_some(), |row| {
+                        row.child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(SharedString::from(format!("retry-{key}")))
+                                        .ghost()
+                                        .small()
+                                        .label(crate::tr!("chat.retry_delivery"))
+                                        .on_click(move |_, _, cx| {
+                                            retry_store.update(cx, |store, _| {
+                                                store.retry_delivery(&retry_key)
+                                            })
+                                        }),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("discard-{key}")))
+                                        .ghost()
+                                        .small()
+                                        .label(crate::tr!("chat.discard_delivery"))
+                                        .on_click(move |_, _, cx| {
+                                            discard_store.update(cx, |store, _| {
+                                                store.discard_delivery(&discard_key)
+                                            })
+                                        }),
+                                ),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+
         let main = v_flex()
             .size_full()
             .min_h_0()
@@ -2772,6 +2866,17 @@ impl Render for ChatView {
                     .when(show_jump_to_latest, |this| {
                         this.child(self.render_scroll_pill(cx))
                     }),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_h(px(200.))
+                    .id("pending-deliveries")
+                    .items_center()
+                    .overflow_y_scroll()
+                    .px_4()
+                    .gap_2()
+                    .children(delivery_rows),
             )
             .child(
                 div()

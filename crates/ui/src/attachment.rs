@@ -36,17 +36,27 @@ struct AttachmentRuntime {
 }
 
 impl AttachmentRuntime {
+    #[cfg(test)]
     fn start(transport: Transport, cx: &mut App) -> Self {
         let link = HostLink::new(transport.to_host, transport.from_host);
+        Self::start_link(link, transport.state, cx)
+    }
+
+    fn start_link(
+        link: HostLink,
+        states: async_channel::Receiver<tcode_client::ConnectionState>,
+        cx: &mut App,
+    ) -> Self {
         let (finished, pump_finished) = async_channel::bounded(1);
         let pump = link.clone();
-        let states = transport.state;
         let state_link = link.clone();
+        let executor = cx.background_executor().clone();
         Self {
             finished: pump_finished,
             tasks: vec![
                 cx.background_spawn(async move {
-                    pump.pump().await;
+                    pump.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                        .await;
                     let _ = finished.try_send(());
                 }),
                 // A local transport has no state channel behind it; the closed
@@ -110,10 +120,44 @@ impl Attachment {
                 },
             ),
         };
-        let runtime = AttachmentRuntime::start(transport, cx);
-        let link = runtime.link.clone();
-        let store = cx
-            .new(|cx| WorkspaceStore::new_attached(link, identity, client_host, seed_blocking, cx));
+        let storage = match &target {
+            AttachmentTarget::Remote(host) => client_host
+                .as_ref()
+                .and_then(|client| client.outbox_storage(&host.host_id)),
+            AttachmentTarget::Local => client_host
+                .as_ref()
+                .and_then(|client| client.outbox_storage("local")),
+        };
+        let link = HostLink::new(transport.to_host, transport.from_host);
+        if let Some(storage) = storage {
+            if matches!(target, AttachmentTarget::Remote(_)) {
+                link.set_connection_state(tcode_client::ConnectionState::Reconnecting {
+                    attempt: 1,
+                    reason: None,
+                });
+            }
+            if let Err(error) = link.restore_outbox(storage) {
+                log::error!("could not restore outbox: {}", error.message);
+                link.close();
+                return None;
+            }
+        }
+        let local = matches!(target, AttachmentTarget::Local);
+        // Local construction may seed synchronously; remote construction must
+        // register its subscriptions before a restored write can be replayed.
+        let runtime =
+            local.then(|| AttachmentRuntime::start_link(link.clone(), transport.state.clone(), cx));
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                identity,
+                client_host,
+                seed_blocking && local,
+                cx,
+            )
+        });
+        let runtime =
+            runtime.unwrap_or_else(|| AttachmentRuntime::start_link(link, transport.state, cx));
         Some(Self {
             target,
             store,

@@ -28,7 +28,19 @@ impl Composer {
             self.scheduled_countdown_tick = None;
             return None;
         };
-        let queued = queue.messages;
+        let deliveries = self.workspace_store.read(cx).delivery_messages();
+        let queued: Vec<_> = queue
+            .messages
+            .into_iter()
+            .filter(|message| {
+                !deliveries.iter().any(|(key, text, failure, acknowledged)| {
+                    !acknowledged
+                        && failure.is_none()
+                        && (message.delivery_key.as_deref() == Some(key.as_str())
+                            || (message.delivery_key.is_none() && message.text == *text))
+                })
+            })
+            .collect();
         let can_steer = queue.can_steer;
         let agent = queue.agent;
         let has_scheduled = queued

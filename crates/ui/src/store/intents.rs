@@ -391,6 +391,9 @@ impl WorkspaceStore {
         });
     }
     pub fn respond_approval(&mut self, request_id: String, decision: ApprovalDecision) {
+        if self.approval_delivery_pending(&request_id) {
+            return;
+        }
         self.dispatch(Command::RespondApproval {
             session_id: self.active_session_id().unwrap_or_default(),
             request_id,

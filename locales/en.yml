@@ -1,6 +1,10 @@
 app:
   name: "tcode"
 chat:
+  sending: "Sending…"
+  waiting_connection: "Waiting for connection…"
+  retry_delivery: "Retry"
+  discard_delivery: "Discard"
   history_record_too_large: A history record exceeds the 8 MiB response limit.
   relayed: "Relayed from %{from} to %{to}"
   model_changed: "Model changed: %{from} → %{to}"

@@ -83,6 +83,10 @@ impl Composer {
                 .into_any_element(),
         };
 
+        let pending = self
+            .workspace_store
+            .read(cx)
+            .approval_delivery_pending(&request.id);
         let expanded = self.approval_expanded;
         let approve_id = request.id.clone();
         let always_id = request.id.clone();
@@ -98,6 +102,17 @@ impl Composer {
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
             .shadow_sm()
+            .when(pending, |card| {
+                card.child(div().text_size(px(11.)).text_color(muted).child(crate::tr!(
+                    if *self.workspace_store.read(cx).connection_state()
+                        == tcode_client::ConnectionState::Connected
+                    {
+                        "chat.sending"
+                    } else {
+                        "chat.waiting_connection"
+                    }
+                )))
+            })
             .when(self.compact && !self.interactive(cx), |card| {
                 card.child(
                     div()
@@ -200,7 +215,7 @@ impl Composer {
                             .w(gpui::relative(0.48))
                             .flex_none()
                     })
-                    .disabled(!self.interactive(cx))
+                    .disabled(!self.interactive(cx) || pending)
                     .rounded(crate::material::radius_input())
                     .label(option.label.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -229,7 +244,7 @@ impl Composer {
                 // Keep long localized approval labels on separate compact rows
                 // so they cannot overlap the Deny/Allow controls.
                 let compact = self.compact;
-                let interactive = self.interactive(cx);
+                let interactive = self.interactive(cx) && !pending;
                 let half = |button: Button| {
                     if compact {
                         button
@@ -339,7 +354,6 @@ impl Composer {
         decision: ApprovalDecision,
         cx: &mut Context<Self>,
     ) {
-        self.approval_expanded = false;
         self.workspace_store.update(cx, |store, _cx| {
             store.respond_approval(request_id, decision)
         });

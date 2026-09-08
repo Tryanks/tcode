@@ -24,7 +24,7 @@ use tcode_core::{
 };
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
-    CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
+    Command, CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
     GitDiffScope, GitStatusStatus, PathEntry, ProtocolError, ProviderVersionStatus,
     ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
     Subscription, TerminalFrame, Topic,
@@ -418,6 +418,26 @@ impl WorkspaceStore {
             }));
         }
 
+        #[cfg(not(test))]
+        {
+            let delivery_changes = host.delivery_changes();
+            store.attachment_tasks.push(cx.spawn(async move |this, cx| {
+                while delivery_changes.recv().await.is_ok() {
+                    if this
+                        .update(cx, |_, cx| {
+                            cx.emit(StoreChange {
+                                topic: TopicKind::SessionEvents,
+                            });
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+
         if remote {
             let changes = host.connection_state_changes();
             store.attachment_tasks.push(cx.spawn(async move |this, cx| {
@@ -599,6 +619,71 @@ impl WorkspaceStore {
                 let _ = self.host.subscribe(subscription);
             }
         }
+    }
+
+    pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
+        let active = self.active_session_id().unwrap_or_default();
+        let message = |command: &Command| match command {
+            Command::SendTurn {
+                session_id, text, ..
+            }
+            | Command::ScheduleTurn {
+                session_id, text, ..
+            }
+            | Command::Steer {
+                session_id, text, ..
+            }
+            | Command::ConfirmRelayAndSend {
+                session_id, text, ..
+            }
+            | Command::OrchestrateTurn {
+                session_id, text, ..
+            } if session_id == &active => Some(text.clone()),
+            _ => None,
+        };
+        self.host
+            .pending_commands()
+            .into_iter()
+            .filter_map(|(key, command)| message(&command).map(|text| (key, text, None, false)))
+            .chain(
+                self.host
+                    .failed_commands()
+                    .into_iter()
+                    .filter_map(|(entry, error)| {
+                        message(&entry.command).map(|text| (entry.key, text, Some(error.message), false))
+                    }),
+            )
+            .chain(self.host.acknowledged_messages().into_iter().filter_map(|entry| {
+                let text = message(&entry.command)?;
+                let queued = self.session_status_replica.as_ref().is_some_and(|status| status.queued_messages.iter().any(|message| message.delivery_key.as_deref() == Some(entry.key.as_str()) || (message.delivery_key.is_none() && message.text == text)));
+                let recorded = self.with_active_timeline(|timeline| timeline.entries.iter().any(|record| {
+                    record.id == format!("local-user-{}", entry.key) || record.id == format!("local-steer-{}", entry.key)
+                        || matches!(&record.content, EntryContent::Item(agent::ItemContent::UserMessage { text: recorded, .. }) if recorded == &text)
+                })).unwrap_or(false);
+                if queued || recorded {
+                    // Once adopted by the host replica, a later rewind must not
+                    // resurrect the acknowledged placeholder.
+                    self.host.retire_acknowledged_message(&entry.key);
+                    None
+                } else { Some((entry.key, text, None, true)) }
+            }))
+            .collect()
+    }
+
+    pub(crate) fn approval_delivery_pending(&self, request: &str) -> bool {
+        self.host.pending_commands().iter().any(|(_, command)| matches!(command,
+            Command::RespondApproval { request_id, session_id, .. }
+            if request_id == request && Some(session_id.as_str()) == self.active_session_id().as_deref()))
+    }
+
+    pub(crate) fn retry_delivery(&self, key: &str) {
+        if let Err(error) = self.host.retry_failed(key) {
+            log::error!("retry failed: {}", error.message);
+        }
+    }
+
+    pub(crate) fn discard_delivery(&self, key: &str) {
+        self.host.discard_failed(key);
     }
 
     pub fn queued_outgoing(&self) -> usize {
@@ -2563,6 +2648,79 @@ mod tests {
     };
 
     #[gpui::test]
+    fn scripted_host_send_waits_for_ack_and_rejection_offers_retry(cx: &mut TestAppContext) {
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        store.update(cx, |store, _| {
+            store.selected_session_id = Some("scripted".into());
+            store.send_turn("hello".into(), Vec::new());
+        });
+        let request = loop {
+            let request =
+                tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+            if matches!(
+                request.payload,
+                tcode_protocol::ClientPayload::Command(Command::SendTurn { .. })
+            ) {
+                break request;
+            }
+        };
+        let key = request.key.clone().unwrap();
+        assert_eq!(
+            store.read_with(cx, |store, _| store.delivery_messages()),
+            vec![(key.clone(), "hello".into(), None, false)]
+        );
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: request.id,
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "rejected".into(),
+                        message: "Host refused this send".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        // Drive the production pump on the test thread; no mocked HostLink.
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        assert_eq!(
+            store.read_with(cx, |store, _| store.delivery_messages()),
+            vec![(
+                key.clone(),
+                "hello".into(),
+                Some("Host refused this send".into()),
+                false,
+            )]
+        );
+        store.update(cx, |store, _| store.retry_delivery(&key));
+        let retry = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        assert_ne!(retry.key, request.key);
+        assert_eq!(retry.payload, request.payload);
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: retry.id,
+                    result: Ok(tcode_protocol::CommandResponse::Unit),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        assert_eq!(
+            store.read_with(cx, |store, _| store.delivery_messages()),
+            vec![(retry.key.unwrap(), "hello".into(), None, true)]
+        );
+        link.close();
+    }
+
+    #[gpui::test]
     fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
         use gpui::{px, size};
         cx.update(crate::theme::init);
@@ -2860,9 +3018,12 @@ mod tests {
         let (incoming, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let pump_link = link.clone();
-        let _pump = cx
-            .background_executor
-            .spawn(async move { pump_link.pump().await });
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
         let workspace = cx.new(|cx| {
             WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, false, cx)
         });

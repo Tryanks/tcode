@@ -189,9 +189,8 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     fn interactive(&self, cx: &App) -> bool {
-        !self.compact
-            || *self.workspace_store.read(cx).connection_state()
-                == tcode_client::ConnectionState::Connected
+        !matches!(self.workspace_store.read(cx).connection_state(),
+            tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
