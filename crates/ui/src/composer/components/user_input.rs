@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::touch_scroll::TouchScrollExt as _;
 
 impl Composer {
     /// The active session's pending user-input request, if any.
@@ -163,7 +164,7 @@ impl Composer {
             .id("user-input-options-scroll")
             .w_full()
             .max_h(px(240.))
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .child(options_content);
 
         let custom_input = self.user_input_custom.clone();

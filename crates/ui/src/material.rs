@@ -4,6 +4,7 @@
 
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::touch_scroll::TouchScrollExt as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::prelude::FluentBuilder as _;
@@ -292,7 +293,10 @@ pub fn empty_state(
 
 /// Track for [`segment`] controls. Long labels scroll horizontally instead
 /// of clipping; shorter groups divide the available width.
-pub fn segmented_track(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+pub(crate) fn segmented_track(
+    id: impl Into<ElementId>,
+    cx: &App,
+) -> crate::touch_scroll::Registered<Stateful<Div>> {
     gpui_base::h_flex()
         .id(id)
         .h(px(40.))
@@ -301,7 +305,7 @@ pub fn segmented_track(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
         .p(px(3.))
         .rounded(px(10.))
         .bg(cx.theme().secondary)
-        .overflow_x_scroll()
+        .touch_overflow_x_scroll()
 }
 
 /// One segment of a [`segmented_track`]. The selected segment is a T3 solid

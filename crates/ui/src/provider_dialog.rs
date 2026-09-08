@@ -6,6 +6,7 @@
 //! everything, including pending secrets. Favorite toggling is the one live
 //! exception — favorites are a global, not a `ProviderSettings` field.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::collections::HashSet;
 
 use crate::overlay::{DialogButtons, OverlayExt as _};
@@ -885,7 +886,7 @@ impl Render for ProviderDialog {
                 520.,
                 window.viewport_size().height,
             ))
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .child(
                 v_flex()
                     .w_full()

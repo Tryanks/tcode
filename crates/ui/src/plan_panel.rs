@@ -1,5 +1,6 @@
 //! Proposed-plan Markdown and structured task steps, hosted beside the diff view.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -298,7 +299,7 @@ impl Render for PlanPanel {
                 .id("plan-scroll")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .touch_overflow_y_scroll()
                 .track_scroll(&self.vscroll)
                 .child(column),
         )

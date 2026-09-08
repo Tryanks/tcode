@@ -267,6 +267,11 @@ impl Styled for Textarea {
 }
 impl RenderOnce for Textarea {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        self.input
+        let State::Textarea(state) = &self.input.state else {
+            unreachable!()
+        };
+        let handle = crate::touch_scroll::Handle::Textarea(state.clone());
+        let id = state.entity_id();
+        crate::touch_scroll::register(self.input, handle).with_id(("textarea-scroll", id))
     }
 }

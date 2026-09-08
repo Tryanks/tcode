@@ -96,7 +96,10 @@ where
             .size_full()
             .refine_style(&root_style)
             .relative()
-            .child(scroll_area)
+            .child(crate::touch_scroll::register(
+                scroll_area,
+                crate::touch_scroll::Handle::Scroll(scroll_handle.clone()),
+            ))
             .child(ScrollbarLayer {
                 id: (self.id, "scrollbar").into(),
                 scroll_handle: Rc::new(scroll_handle),

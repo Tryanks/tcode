@@ -1,4 +1,5 @@
 use crate::theme::ActiveTheme as _;
+use crate::touch_scroll::TouchScrollExt as _;
 use gpui::{
     Anchor, AnyElement, App, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
@@ -275,7 +276,7 @@ impl Popover {
                     div()
                         .id("touch-picker-content")
                         .min_h_0()
-                        .overflow_y_scroll()
+                        .touch_overflow_y_scroll()
                         .p(px(16.))
                         .pb(px(32.))
                         .children(content)

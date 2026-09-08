@@ -143,3 +143,11 @@ ISC-licensed `gpui-toolkit/crates/gpui-ios` reference supplied with this
 worktree. This implementation was written for the different `gpui-pre` 0.3.3
 traits and renderer APIs; no reference source was vendored or copied into this
 crate.
+
+## Scroll target ownership
+
+Both mobile backends use GPUI's private gesture recognizer and scroll dispatch.
+See the [shared scroll ownership constraints](../gpui-android/README.md#scroll-target-ownership)
+for the distinction between its existing touch-down coordinate anchor and stable
+element capture. tcode's UI capture listener intercepts recognized scroll events while preserving
+UIKit's actual and predicted coordinates and GPUI's gesture recognition.

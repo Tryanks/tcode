@@ -1,5 +1,6 @@
 //! Full-page settings route with section navigation and editable settings.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -979,7 +980,7 @@ impl SettingsPage {
             .id("settings-section-list")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .child(column)
             .into_any_element()
     }
@@ -1163,7 +1164,7 @@ impl SettingsPage {
             .id("settings-scroll")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .child(
                 gpui_base::h_flex()
                     .w_full()

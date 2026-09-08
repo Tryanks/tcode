@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::touch_scroll::TouchScrollExt as _;
 
 impl Composer {
     pub(in super::super) fn render_approval_panel(
@@ -159,7 +160,7 @@ impl Composer {
                         .id("approval-detail-scroll")
                         .w_full()
                         .max_h(px(240.))
-                        .overflow_y_scroll()
+                        .touch_overflow_y_scroll()
                         .p_2()
                         .rounded(px(8.))
                         .bg(cx.theme().muted)

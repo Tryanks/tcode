@@ -1,6 +1,7 @@
 //! The right-side diff panel view: scope controls, virtualized unified/split
 //! lists, expandable gaps, and line-anchored review comments.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -1019,7 +1020,7 @@ impl DiffPanel {
                     .aria_label(crate::tr!("diff.scope_menu"))
                     .min_w(px(190.))
                     .max_h(px(320.))
-                    .overflow_y_scroll()
+                    .touch_overflow_y_scroll()
                     .child(list)
             })
             .bg(cx.theme().popover)
@@ -1110,7 +1111,7 @@ impl DiffPanel {
                         .aria_label(crate::tr!("diff.base_branches"))
                         .min_w(px(180.))
                         .max_h(px(280.))
-                        .overflow_y_scroll()
+                        .touch_overflow_y_scroll()
                         .child(list)
                 })
                 .bg(cx.theme().popover)
@@ -1384,7 +1385,7 @@ impl DiffPanel {
             cache.unified_content_width
         };
         let panel = cx.entity();
-        let mut rows = list(list_state, move |index, _, cx| {
+        let mut rows = list(list_state.clone(), move |index, _, cx| {
             panel.update(cx, |this, cx| this.render_list_item(index, split, cx))
         })
         .flex_1()
@@ -1403,8 +1404,11 @@ impl DiffPanel {
             .debug_selector(|| "diff-body".into())
             .flex_1()
             .min_h_0()
-            .overflow_x_scroll()
-            .child(rows);
+            .touch_overflow_x_scroll()
+            .child(crate::touch_scroll::register(
+                rows,
+                crate::touch_scroll::Handle::List(list_state),
+            ));
         // Do not let this horizontal overflow container translate ordinary
         // vertical wheel input into horizontal movement. The event can then
         // bubble to the List's vertical scroll handler; explicit horizontal

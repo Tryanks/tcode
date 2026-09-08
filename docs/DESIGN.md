@@ -345,6 +345,16 @@ stack, details, close controls and existing timing.
 
 ### Touch and typography
 
+Native touch pans capture the innermost registered scroll viewport at touch-down.
+The capture keeps the same handle through redraws, finger movement, and momentum;
+a textarea moving beneath the finger or the original anchor cannot steal it.
+ScrollHandle and list viewports can hand excess movement once to their nearest
+registered scroll ancestor. Textareas keep exclusive capture at their limits
+because their public scroll API clamps after layout. A new touch replaces the
+capture; cancel stops it. Taps, long presses, selection drags, and desktop mouse
+wheel dispatch retain GPUI's normal recognition. The UI owner is
+[`touch_scroll.rs`](../crates/ui/src/touch_scroll.rs).
+
 - Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.
   Icon buttons have a 44×44pt touch target and use the shared stroke icons in
   the foreground color.

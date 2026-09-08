@@ -2283,7 +2283,7 @@ impl Render for AppShell {
         } else {
             self.render_wide(window, cx)
         };
-        self.within_seam(body, cx)
+        crate::touch_scroll::root(self.within_seam(body, cx))
     }
 }
 

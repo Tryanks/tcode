@@ -9,6 +9,7 @@
 //!
 //! Title and action search use [`fuzzy_score`]; message search runs through the host.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -638,7 +639,7 @@ impl Render for CommandPalette {
             .aria_label(crate::tr!("palette.results"))
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .child(list_content);
 
         let card = crate::material::overlay_contour(

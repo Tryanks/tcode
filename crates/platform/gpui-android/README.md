@@ -160,3 +160,28 @@ reference's ISC permission and warranty notice remain applicable to ideas and
 adapted integration patterns: use, copying, modification, and distribution are
 permitted with the copyright and permission notice retained; the software is
 provided “AS IS” without warranty.
+
+## Scroll target ownership
+
+The platform forwards actual touch coordinates unchanged. GPUI 0.3.3 owns the
+private `TouchGestureRecognizer`, including slop, pan deltas, long presses,
+selection drags, velocity, and frame-driven momentum. Its `gestures.rs` emits
+pan start/move/end/cancel scroll positions at `ActiveTouch::start_position` and
+copies that position into momentum. Anchoring raw platform touches instead would
+remove the motion needed by that recognizer and break selection drags.
+
+A scroll coordinate is not element capture: `Window::dispatch_mouse_event`
+hit-tests the current rendered frame on every event. Content moving under even
+a fixed anchor can therefore change the hitboxes. `HitboxId::should_handle_scroll`
+uses that hit-test list, not pointer capture; the `div` overflow listener also
+allows propagation after changing its offset. This does not implement exclusive
+child scrolling with ancestor takeover only at a limit.
+
+tcode implements element capture in
+[`tcode-ui::touch_scroll`](../../ui/src/touch_scroll.rs). The shell observes
+GPUI's unclaimed touch-down offer, selects a registered viewport, and intercepts
+recognized scroll events in the capture phase. It applies their deltas directly
+to the retained handle, including GPUI's existing momentum, and stops propagation
+before the default position-based listeners run. Native touch coordinates and
+GPUI's tap, long-press, and selection recognition remain unchanged. The UI
+registry owns the viewport identity; no second platform recognizer is needed.

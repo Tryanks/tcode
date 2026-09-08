@@ -12,6 +12,7 @@
 //! [`hosting`], behind `remote-hosting`, inside Settings → Remote. A browser
 //! cannot listen or advertise, so that half simply does not exist there.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -771,7 +772,7 @@ impl RemotePanel {
             .flex_1()
             .min_h_0()
             .w_full()
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .on_action(cx.listener(Self::on_disconnect))
             .on_action(cx.listener(Self::on_forget))
             .child(

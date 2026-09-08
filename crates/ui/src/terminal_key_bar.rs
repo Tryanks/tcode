@@ -6,6 +6,7 @@
 
 use crate::material;
 use crate::theme::ActiveTheme as _;
+use crate::touch_scroll::TouchScrollExt as _;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -382,7 +383,7 @@ impl Render for TerminalKeyBar {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .overflow_x_scroll()
+                    .touch_overflow_x_scroll()
                     .child(symbols),
             )
     }

@@ -1,3 +1,4 @@
+use crate::touch_scroll::TouchScrollExt as _;
 use std::rc::Rc;
 
 use crate::overlay::{Notification, NotificationType};
@@ -7,7 +8,7 @@ use crate::widgets::spinner::Spinner;
 use crate::{icon::IconName, sizing::Sizable as _};
 use gpui::{
     App, ClipboardItem, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -95,7 +96,7 @@ pub fn notification(
                         div()
                             .id(("toast-detail-scroll", id as usize))
                             .max_h_40()
-                            .overflow_y_scroll()
+                            .touch_overflow_y_scroll()
                             .p_2()
                             .rounded(crate::material::radius_input())
                             .bg(cx.theme().muted)

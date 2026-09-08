@@ -2476,6 +2476,17 @@ fn markdown_entries_for_residency(
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_markdown_scroll_position(cx);
+        // Direct touch-handle scrolling bypasses ListState's wheel callback.
+        // Keep history prefetch tied to the resulting position on every frame.
+        if history_prefetch_due(
+            &self.list_state,
+            self.list_state.logical_scroll_top().item_ix,
+        ) && !self.list_state.is_following_tail()
+            && self.workspace_store.read(cx).history_error().is_none()
+        {
+            self.workspace_store
+                .update(cx, |store, cx| store.load_earlier_messages(cx));
+        }
         let active = self.workspace_store.read(cx).chat_active_session();
 
         let compact = self.window_state.read(cx).compact;
@@ -2620,7 +2631,11 @@ impl Render for ChatView {
         let timeline: AnyElement = if compact && is_draft && item_count == 0 {
             self.render_compact_draft_empty(&cwd, cx)
         } else {
-            timeline.into_any_element()
+            crate::touch_scroll::register(
+                timeline,
+                crate::touch_scroll::Handle::List(self.list_state.clone()),
+            )
+            .into_any_element()
         };
 
         let composer: AnyElement = if native_subagent_readonly {

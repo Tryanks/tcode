@@ -2602,7 +2602,7 @@ impl SessionsSidebar {
                 .debug_selector(|| "compact-thread-list".into())
                 .flex_1()
                 .min_h_0()
-                .child(
+                .child(crate::touch_scroll::register(
                     list(
                         self.compact_list_state.clone(),
                         cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
@@ -2630,7 +2630,8 @@ impl SessionsSidebar {
                         }),
                     )
                     .size_full(),
-                )
+                    crate::touch_scroll::Handle::List(self.compact_list_state.clone()),
+                ))
                 .into_any_element()
         };
 
@@ -3114,7 +3115,14 @@ impl Render for SessionsSidebar {
                         .overflow_y_scrollbar()
                         .child(div().size_full().child(list_content))
                         .into_any_element();
-                    (self.render_flat_header(cx).into_any_element(), thread_list)
+                    (
+                        self.render_flat_header(cx).into_any_element(),
+                        crate::touch_scroll::register(
+                            thread_list,
+                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
+                        )
+                        .into_any_element(),
+                    )
                 } else {
                     let top_offsets = flat_thread_top_offsets(&visible, &flat_sessions);
                     let visible = visible
@@ -3161,7 +3169,14 @@ impl Render for SessionsSidebar {
                         .flex_1()
                         .min_h_0()
                         .into_any_element();
-                    (self.render_flat_header(cx).into_any_element(), thread_list)
+                    (
+                        self.render_flat_header(cx).into_any_element(),
+                        crate::touch_scroll::register(
+                            thread_list,
+                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
+                        )
+                        .into_any_element(),
+                    )
                 }
             }
         };

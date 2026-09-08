@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::touch_scroll::TouchScrollExt as _;
 
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
@@ -636,7 +637,7 @@ fn render_model_pane(
         .h_full()
         .border_r_1()
         .border_color(cx.theme().border)
-        .overflow_y_scroll()
+        .touch_overflow_y_scroll()
         .child(rail_col);
 
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
@@ -687,7 +688,7 @@ fn render_model_pane(
                 .aria_label(crate::tr!("composer.model_results"))
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .touch_overflow_y_scroll()
                 .child(list),
         );
     if pending_restart {
@@ -788,7 +789,7 @@ fn render_compact_model_footer(
         });
 
     let group = |label: gpui::SharedString,
-                 track: gpui::Stateful<gpui::Div>,
+                 track: crate::touch_scroll::Registered<gpui::Stateful<gpui::Div>>,
                  cx: &mut Context<PopoverState>| {
         v_flex()
             .gap(px(6.))
@@ -1410,7 +1411,7 @@ fn render_traits_pane(
         .id("traits-options-scroll")
         .w(px(280.))
         .max_h(px(360.))
-        .overflow_y_scroll()
+        .touch_overflow_y_scroll()
         .child(pane)
         .into_any_element()
 }
