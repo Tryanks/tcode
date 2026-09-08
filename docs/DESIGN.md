@@ -449,7 +449,9 @@ One inset, applied once, at the page:
   modifiers highlight until the next terminal key or committed character consumes
   them; a combo carries its own Control, encodes through the same key mapping a
   hardware Ctrl+C takes, and consumes any sticky modifier rather than doubling
-  it. Desktop and browser terminals never draw the row.
+  it. Tapping the grid or a key explicitly reopens the software keyboard even
+  when the terminal retained focus after keyboard dismissal, on both mobile
+  platforms. Desktop and browser terminals never draw the row.
 
 Prose inside the content (errors, notices, file headers) wraps against the page
 inset rather than running past it. Code and diff lines do not wrap: they scroll

@@ -939,6 +939,7 @@ impl TerminalDrawer {
         cx: &mut Context<Self>,
     ) {
         self.focus_handle.focus(window, cx);
+        crate::window_seam::WindowSeam::request_soft_keyboard(cx);
         let Some((point, side)) = self.grid_point_and_side(terminal_id, event.position) else {
             return;
         };
@@ -2567,6 +2568,47 @@ mod tests {
             ..TerminalFrame::default()
         });
         model
+    }
+
+    #[gpui::test]
+    fn tapping_an_already_focused_terminal_requests_the_keyboard(cx: &mut gpui::TestAppContext) {
+        use crate::window_seam::WindowSeam;
+        use std::cell::Cell;
+        let requests = Rc::new(Cell::new(0));
+        let observed = requests.clone();
+        cx.update(|cx| {
+            crate::theme::init(cx);
+            cx.set_global(
+                WindowSeam::new(Default::default).with_soft_keyboard(move || {
+                    observed.set(observed.get() + 1);
+                }),
+            );
+        });
+        let (outgoing, _commands) = async_channel::unbounded();
+        let (_events, incoming) = async_channel::unbounded();
+        let store =
+            cx.new(|cx| WorkspaceStore::new(tcode_client::HostLink::new(outgoing, incoming), cx));
+        let (drawer, cx) = cx.add_window_view(|window, cx| TerminalDrawer::new(store, window, cx));
+        cx.update(|window, cx| {
+            drawer.update(cx, |drawer, cx| {
+                drawer.focus_handle.focus(window, cx);
+                assert!(drawer.focus_handle.is_focused(window));
+                drawer.terminal_mouse_down(
+                    1,
+                    &MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: point(px(20.), px(20.)),
+                        modifiers: Default::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(drawer.focus_handle.is_focused(window));
+            })
+        });
+        assert_eq!(requests.get(), 1);
     }
 
     #[test]
