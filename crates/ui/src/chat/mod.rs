@@ -3358,10 +3358,53 @@ mod tests {
             context_window: Some(200_000),
             ..Default::default()
         });
-        let (store, _, _) = seed_chat(cx, timeline);
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            crate::composer::Composer::new_with_layout(store, true, window, cx)
+        // Seed a catalog-backed model: the generic chat fixture has no model
+        // options and therefore cannot detect a missing effort control.
+        cx.update(crate::theme::init);
+        let data_root = std::env::temp_dir().join(format!(
+            "tcode-effort-layout-{}-{}",
+            std::process::id(),
+            tcode_services::store::now_millis()
+        ));
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(data_root).unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let (session_id, timeline) = smol::block_on(host.update_state_for_test(|state, cx| {
+            state.providers.model_catalogs.insert(
+                agent::ProviderKind::Codex,
+                vec![agent::ModelSpec {
+                    id: "effort-layout".into(),
+                    display_name: "A model with a long display name".into(),
+                    is_default: true,
+                    options: vec![agent::OptionDescriptor::Select {
+                        id: "reasoningEffort".into(),
+                        label: "Reasoning effort".into(),
+                        options: vec![agent::SelectOption {
+                            value: "xhigh".into(),
+                            label: "Extra high reasoning effort".into(),
+                            description: None,
+                        }],
+                        default_value: Some("xhigh".into()),
+                    }],
+                }],
+            );
+            let id = state.start_draft("effort-layout".into(), std::env::temp_dir(), cx);
+            let active = state.residents.live.get_mut(&id).unwrap();
+            active.meta.provider = agent::ProviderKind::Codex;
+            active.meta.model = Some("effort-layout".into());
+            active.timeline = timeline;
+            (id, active.timeline.clone())
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, timeline, cx);
         });
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
         for locale in ["en", "zh-CN"] {
             crate::set_locale(locale);
             view.update(cx, |_, cx| cx.notify());
@@ -3372,6 +3415,9 @@ mod tests {
                 });
                 let permission = cx.debug_bounds("permission-chip").expect("approval option");
                 let mode = cx.debug_bounds("mode-chip").expect("Build option");
+                let effort = cx
+                    .debug_bounds("traits-chip")
+                    .expect("standalone effort option");
                 let meter = cx
                     .debug_bounds("context-meter")
                     .expect("compact context meter");
@@ -3384,7 +3430,12 @@ mod tests {
                 );
                 assert_eq!(permission.top(), meter.top());
                 assert_eq!(mode.top(), meter.top());
-                assert!(permission.right() <= mode.left() && mode.right() <= meter.left());
+                assert_eq!(effort.top(), meter.top());
+                assert!(permission.right() <= mode.left());
+                assert!(mode.right() <= effort.left() && effort.right() <= meter.left());
+                assert!(permission.left() >= px(0.) && meter.right() <= px(width));
+                assert!(model.right() <= send.left());
+                assert!(effort.size.width >= px(44.) && effort.size.height >= px(44.));
                 assert!(
                     meter.top() >= send.bottom(),
                     "meter belongs to the second row"

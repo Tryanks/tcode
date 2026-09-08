@@ -298,6 +298,10 @@ impl Composer {
         let pending_restart = composer.options_pending_restart;
 
         let trigger = Button::new("traits-chip")
+            .debug_selector(|| "traits-chip".into())
+            .when(self.compact, |button| {
+                button.max_w(px(80.)).overflow_hidden()
+            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -306,11 +310,16 @@ impl Composer {
             .rounded(crate::material::radius_chip())
             .child(
                 h_flex()
+                    .when(self.compact, |el| el.min_w_0().overflow_hidden())
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(label)
+                    .child(
+                        div()
+                            .when(self.compact, |el| el.min_w_0().truncate())
+                            .child(label),
+                    )
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
 
@@ -369,7 +378,7 @@ impl Composer {
         Button::new("mode-chip")
             .debug_selector(|| "mode-chip".into())
             .when(self.compact, |button| {
-                button.max_w(px(88.)).overflow_hidden()
+                button.max_w(px(80.)).overflow_hidden()
             })
             .ghost()
             .compact()
@@ -454,7 +463,7 @@ impl Composer {
         let trigger = Button::new("permission-chip")
             .debug_selector(|| "permission-chip".into())
             .when(self.compact, |button| {
-                button.max_w(px(152.)).overflow_hidden()
+                button.max_w(px(96.)).overflow_hidden()
             })
             .ghost()
             .compact()
