@@ -204,10 +204,12 @@ envelope; a single record that cannot fit produces an explicit error.
 The jump-to-latest pill appears when more than one timeline viewport remains
 below the reading position. Its visibility follows the list's pixel geometry
 on wheel, captured touch, and programmatic scrolling, and after history or
-layout changes; unmeasured offscreen history does not suppress it. New content
-follows the tail only while the reader is within that one-screen threshold.
-Scrolling farther away preserves the reading anchor during streaming and
-history paging. Clicking the pill or submitting a message returns to the tail.
+layout changes; unmeasured offscreen history does not suppress it. Following is
+independent of that threshold: any upward user scroll pauses following immediately,
+including wheel, captured touch, scrollbar drag and keyboard scrolling. Incoming
+content and history paging preserve the reading anchor while paused. Following
+resumes only when the reader scrolls back to the bottom (within one pixel) or
+clicks the pill. Opening a conversation starts at the tail.
 
 ## Scrolling contract
 

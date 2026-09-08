@@ -28,9 +28,17 @@ impl Handle {
                 delta - consumed
             }
             Self::List(list) => {
+                if delta.y == px(0.) {
+                    return delta;
+                }
                 let old = list.scroll_px_offset_for_scrollbar();
                 let next = bounded_offset(old + delta, list.max_offset_for_scrollbar());
-                list.scroll_by(old.y - next.y);
+                // A following bottom-aligned list uses an end-of-list logical
+                // anchor. scroll_by would subtract from that anchor, swallowing
+                // pans shorter than the viewport when layout clamps to the end.
+                // Let ListState clamp its own padded extent; the scrollbar's
+                // maximum excludes list padding.
+                list.set_offset_from_scrollbar(old + delta);
                 delta - (next - old)
             }
             Self::Textarea(input) => input.update(cx, |input, cx| {

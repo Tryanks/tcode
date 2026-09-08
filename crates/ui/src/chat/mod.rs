@@ -38,7 +38,7 @@ use tcode_core::session::{
 use tcode_core::ui::RightTab;
 
 use crate::commit_dialog::CommitDialog;
-use crate::composer::{Composer, ComposerEvent};
+use crate::composer::Composer;
 use crate::git::{git_action_label_key, git_hint_key};
 use crate::shortcut::format_secondary_shortcut;
 use crate::store::WorkspaceStore;
@@ -433,30 +433,24 @@ impl ChatView {
             });
         });
 
-        let subscriptions = vec![
-            cx.subscribe(&composer, |this, _, event, cx| {
-                let ComposerEvent::Submitted = event;
-                // Re-engage tail following even if the user had scrolled up.
-                this.list_state.set_follow_mode(FollowMode::Tail);
-                this.list_state.scroll_to_end();
-                cx.notify();
-            }),
-            cx.observe_in(&workspace_store, window, |this, store, window, cx| {
-                this.sync_markdown_states(cx);
-                // Opening the terminal (button, palette, or any other route
-                // through the store) should hand keyboard focus to it, so the
-                // user can type a command without clicking into the panel.
-                let open = store.read(cx).panel_state().terminal_open;
-                if open && !this.terminal_was_open {
-                    let drawer = this.terminal_drawer.clone();
-                    window.defer(cx, move |window, cx| {
-                        gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
-                    });
-                }
-                this.terminal_was_open = open;
-                cx.notify();
-            }),
-        ];
+        let subscriptions =
+            vec![
+                cx.observe_in(&workspace_store, window, |this, store, window, cx| {
+                    this.sync_markdown_states(cx);
+                    // Opening the terminal (button, palette, or any other route
+                    // through the store) should hand keyboard focus to it, so the
+                    // user can type a command without clicking into the panel.
+                    let open = store.read(cx).panel_state().terminal_open;
+                    if open && !this.terminal_was_open {
+                        let drawer = this.terminal_drawer.clone();
+                        window.defer(cx, move |window, cx| {
+                            gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
+                        });
+                    }
+                    this.terminal_was_open = open;
+                    cx.notify();
+                }),
+            ];
         let terminal_drawer = cx.new(|cx| TerminalDrawer::new(workspace_store.clone(), window, cx));
         let terminal_was_open = workspace_store.read(cx).panel_state().terminal_open;
 
@@ -495,10 +489,8 @@ impl ChatView {
 
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
-        // Decide against the old content before appending or invalidating it.
-        // Do not re-engage during a scroll frame: snapping within the threshold
-        // there would prevent small wheel/touch deltas from ever leaving it.
-        let follow_tail = !jump_to_latest_visible(&self.list_state);
+        // ListState owns follow intent: user scrolling pauses Tail until the
+        // bottom is reached again. Content updates must not override that pause.
         let session_key = self.workspace_store.read(cx).active_session_id();
         let session_changed = session_key != self.session_key;
         if session_changed {
@@ -590,11 +582,6 @@ impl ChatView {
                 }
             }
             ListSync::Incremental { append, remeasure } => {
-                self.list_state.set_follow_mode(if follow_tail {
-                    FollowMode::Tail
-                } else {
-                    FollowMode::Normal
-                });
                 if let Some(range) = append {
                     let count = range.len();
                     self.list_state.splice(range.start..range.start, count);
@@ -611,7 +598,7 @@ impl ChatView {
         }
 
         if let Some(turn) = requested_turn.filter(|turn| *turn < self.turn_items.len()) {
-            self.list_state.set_follow_mode(FollowMode::Normal);
+            self.list_state.pause_following_tail();
             self.list_state.scroll_to(ListOffset {
                 item_ix: turn,
                 offset_in_item: px(0.),
@@ -2507,9 +2494,6 @@ fn markdown_entries_for_residency(
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
-        if show_jump_to_latest {
-            self.list_state.set_follow_mode(FollowMode::Normal);
-        }
         self.sync_markdown_scroll_position(cx);
         // Measure after this frame's list layout, including the initial tail
         // frame and frames caused by prepends. No scroll event is required.
@@ -2714,18 +2698,24 @@ impl Render for ChatView {
         )
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
         .flex_1()
-        .min_h_0()
-        .py_4();
+        .min_h_0();
 
         // A fresh phone draft shows its project/model context above the focused composer.
         let timeline: AnyElement = if compact && is_draft && item_count == 0 {
             self.render_compact_draft_empty(&cwd, cx)
         } else {
-            crate::touch_scroll::register(
-                timeline,
-                crate::touch_scroll::Handle::List(self.list_state.clone()),
-            )
-            .into_any_element()
+            // GPUI's scrollbar extent excludes List padding, while wheel and
+            // tail-resume calculations include it. Keep the inset outside the
+            // list so every input path shares the same bottom and pixel offset.
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .py_4()
+                .child(crate::touch_scroll::register(
+                    timeline,
+                    crate::touch_scroll::Handle::List(self.list_state.clone()),
+                ))
+                .into_any_element()
         };
 
         let composer: AnyElement = if native_subagent_readonly {
@@ -3403,6 +3393,81 @@ mod tests {
     }
 
     #[gpui::test]
+    fn late_updates_preserve_user_scroll_intent(cx: &mut TestAppContext) {
+        use gpui::{Context, IntoElement, Render, Window, px};
+        struct TouchChat(Entity<ChatView>);
+        impl Render for TouchChat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::touch_scroll::root(self.0.clone())
+            }
+        }
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        for phase in [gpui::TouchPhase::Started, gpui::TouchPhase::Moved] {
+            let mut timeline = synthetic_markdown_timeline(30);
+            timeline.mark_idle();
+            let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+            let (root, cx) = cx.add_window_view(|window, cx| {
+                TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
+            });
+            cx.simulate_resize(gpui::size(px(393.), px(852.)));
+            draw(cx);
+            let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
+            let bottom = list.scroll_px_offset_for_scrollbar().y;
+            let scroll = |delta, cx: &mut gpui::VisualTestContext| {
+                cx.simulate_event(gpui::ScrollWheelEvent {
+                    position: list.viewport_bounds().center(),
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), delta)),
+                    touch_phase: phase,
+                    ..Default::default()
+                });
+            };
+            scroll(px(120.), cx);
+            draw(cx);
+            assert_eq!(list.scroll_px_offset_for_scrollbar().y, bottom + px(120.));
+            assert!(!list.is_following_tail());
+            assert!(cx.debug_bounds("scroll-to-end").is_none());
+            let anchor = list.logical_scroll_top();
+            for update in 1..=30 {
+                cx.executor().advance_clock(Duration::from_millis(100));
+                Arc::make_mut(timeline.entries.last_mut().unwrap()).content =
+                    assistant(&"Late output frame.\n\n".repeat(update));
+                store.update(cx, |store, cx| {
+                    store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                    cx.notify();
+                });
+                draw(cx);
+                assert!(!list.is_following_tail(), "late update {update}, {phase:?}");
+                assert_eq!(list.logical_scroll_top().item_ix, anchor.item_ix);
+                assert_eq!(
+                    list.logical_scroll_top().offset_in_item,
+                    anchor.offset_in_item
+                );
+            }
+            scroll(px(-100000.), cx);
+            draw(cx);
+            assert!(
+                list.is_following_tail(),
+                "return to bottom {phase:?}: offset {:?}, max {:?}, anchor {:?}",
+                list.scroll_px_offset_for_scrollbar(),
+                list.max_offset_for_scrollbar(),
+                list.logical_scroll_top()
+            );
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id, synthetic_markdown_timeline(31), cx);
+                cx.notify();
+            });
+            draw(cx);
+            assert!(list.is_following_tail());
+            assert_eq!(list.logical_scroll_top().item_ix, list.item_count());
+        }
+    }
+
+    #[gpui::test]
     fn jump_to_latest_survives_unmeasured_history(cx: &mut TestAppContext) {
         use gpui::{Context, IntoElement, Render, VisualTestContext, Window, point, px};
 
@@ -3496,7 +3561,7 @@ mod tests {
             "new turn did not move the tail anchor"
         );
 
-        // Started is captured by touch_scroll::root and applies ListState::scroll_by,
+        // Started is captured by touch_scroll::root and applies a pixel offset,
         // bypassing the list's wheel callback. No store notification drives this UI.
         scroll(height * 3., gpui::TouchPhase::Started, cx);
         assert!(
@@ -3547,11 +3612,8 @@ mod tests {
 
         scroll(-height * 100., gpui::TouchPhase::Moved, cx);
         assert!(cx.debug_bounds("scroll-to-end").is_none());
-        // Returning within one screen permits the next live update to follow.
-        list.scroll_by(-height / 2.);
-        cx.update(|window, _| window.refresh());
-        draw(cx);
-        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        // Reaching the bottom resumes following, independently of pill visibility.
+        assert!(list.is_following_tail());
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, synthetic_markdown_timeline(123), cx);
             cx.notify();
