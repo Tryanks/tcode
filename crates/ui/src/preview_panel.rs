@@ -283,7 +283,11 @@ impl PreviewPanel {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(
+        test,
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
     pub(crate) fn url_field(&self, cx: &gpui::App) -> String {
         self.url_input.read(cx).value().to_string()
     }
