@@ -372,3 +372,49 @@ pub(super) fn status_window_level() -> isize {
     // SAFETY: STATUS_WINDOW_LEVEL_KEY is a documented CGWindowLevelKey value.
     unsafe { CGWindowLevelForKey(STATUS_WINDOW_LEVEL_KEY) as isize }
 }
+
+pub(super) fn window_exists(window_id: u32) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::{CFDictionaryGetValue, CFDictionaryRef};
+    use core_graphics::window::{
+        copy_window_info, kCGWindowIsOnscreen, kCGWindowListOptionIncludingWindow,
+    };
+
+    let Some(windows) = copy_window_info(kCGWindowListOptionIncludingWindow, window_id) else {
+        return false;
+    };
+    windows.iter().any(|window| {
+        // SAFETY: CGWindowListCopyWindowInfo returns an array of dictionaries;
+        // the borrowed Boolean remains owned by that array throughout the query.
+        unsafe {
+            let dictionary = *window as CFDictionaryRef;
+            let value = CFDictionaryGetValue(dictionary, kCGWindowIsOnscreen.cast());
+            !value.is_null()
+                && core_foundation::base::CFGetTypeID(value) == CFBoolean::type_id()
+                && bool::from(CFBoolean::wrap_under_get_rule(value.cast()))
+        }
+    })
+}
+
+pub(super) fn send_void_rect_bool(receiver: Id, name: &CStr, value: CGRect, display: bool) -> bool {
+    let Some(selector) = selector(name) else {
+        return false;
+    };
+    if !can_send(receiver, selector) {
+        return false;
+    }
+    invoke!((), receiver, selector, CGRect => value, i8 => i8::from(display));
+    true
+}
+
+// These getters inspect the actual AppKit panel in the opt-in native regression.
+// CGRect's objc_msgSend return ABI here is specific to the arm64 runner.
+#[cfg(all(test, target_arch = "aarch64"))]
+pub(super) fn native_panel_state(window: Id) -> (CGRect, bool, bool, u32) {
+    let frame = invoke!(CGRect, window, selector(c"frame").unwrap());
+    let visible = invoke!(i8, window, selector(c"isVisible").unwrap()) != 0;
+    let passthrough = invoke!(i8, window, selector(c"ignoresMouseEvents").unwrap()) != 0;
+    let number = invoke!(isize, window, selector(c"windowNumber").unwrap()) as u32;
+    (frame, visible, passthrough, number)
+}

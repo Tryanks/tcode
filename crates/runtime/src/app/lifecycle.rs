@@ -121,7 +121,7 @@ impl AppState {
         };
         let orchestrate_registration = self.orchestrate_registration_for(&meta);
         let orchestrate_report_registration = self.orchestrate_child_registration_for(&meta);
-        let computer_use_registration = self.mcp.computer_use_registration.clone();
+        let computer_use_registration = self.computer_use_registration_for(&meta);
         let provider_launcher = self.provider_launcher.clone();
         let session_id = meta.id.clone();
         if let Some(cursor) = &meta.resume_cursor {
@@ -338,6 +338,7 @@ impl AppState {
     }
 
     pub(crate) fn shutdown_active(&mut self, target_id: &str, _cx: &mut HostCx) {
+        self.revoke_computer_use_registration(target_id);
         if let Some(session_id) = self
             .resident(target_id)
             .map(|session| session.meta.id.as_str())
@@ -355,6 +356,15 @@ impl AppState {
 
     /// Shut down every provider process before the application exits.
     pub fn shutdown_all(&mut self, cx: &mut HostCx) {
+        for id in self
+            .mcp
+            .computer_use_registrations
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.revoke_computer_use_registration(&id);
+        }
         for id in self.residents.live.keys().cloned().collect::<Vec<_>>() {
             self.shutdown_active(&id, cx);
         }
@@ -484,6 +494,7 @@ impl AppState {
 
     /// Shut down and forget a parked session (archive/delete paths).
     pub(super) fn drop_background(&mut self, session_id: &str, cx: &mut HostCx) {
+        self.revoke_computer_use_registration(session_id);
         self.clear_approvals(session_id);
         self.pending_native_rewinds.remove(session_id);
         if let Some(parked) = self.residents.evict(session_id)
@@ -507,6 +518,7 @@ impl AppState {
             self.revoke_orchestrate_child_registration(&child_id);
         }
         self.revoke_preview_registration(parent_id);
+        self.revoke_computer_use_registration(parent_id);
         if let Some(registration) = self.mcp.orchestrate_registrations.remove(parent_id)
             && let Some(tokens) = &self.mcp.orchestrate_tokens
         {

@@ -6780,3 +6780,60 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         );
     });
 }
+
+#[test]
+fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutdown() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-cu-registration-lifecycle");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let mut host = mcp_host::Host::bind().unwrap();
+    let server = computer_use_mcp::start(&mut host);
+    let (session, commands) = fake_live_session(std::env::temp_dir());
+    state.update(cx, |state, cx| {
+        state
+            .host
+            .attach_computer_use_mcp(server.url, server.tokens);
+        let meta = session.meta.clone();
+        let other = SessionMeta::new(ProviderKind::Codex, std::env::temp_dir(), None);
+        state.install_selected(session);
+        let first = state.host.computer_use_registration_for(&meta).unwrap();
+        let second = state.host.computer_use_registration_for(&other).unwrap();
+        assert!(
+            first.bearer_token != second.bearer_token,
+            "provider sessions must not share one cancellation scope"
+        );
+        state.host.interrupt(&meta.id, cx).unwrap();
+        assert!(matches!(commands.try_recv(), Ok(SessionCommand::Interrupt)));
+        assert!(
+            state
+                .host
+                .computer_use_registration_for(&meta)
+                .unwrap()
+                .bearer_token
+                == first.bearer_token,
+            "Stop permits the same provider to start its next turn"
+        );
+        state.host.shutdown_active(&meta.id, cx);
+        assert!(matches!(commands.try_recv(), Ok(SessionCommand::Shutdown)));
+        assert!(
+            state
+                .host
+                .computer_use_registration_for(&other)
+                .unwrap()
+                .bearer_token
+                == second.bearer_token,
+            "another provider retains its registration"
+        );
+        assert!(
+            state
+                .host
+                .computer_use_registration_for(&meta)
+                .unwrap()
+                .bearer_token
+                != first.bearer_token,
+            "a restarted provider must not inherit revoked credentials"
+        );
+        state.host.shutdown_all(cx);
+        assert!(state.host.mcp.computer_use_registrations.is_empty());
+    });
+}
