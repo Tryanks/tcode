@@ -246,7 +246,10 @@ launch behavior is unchanged.
   attached machine's name as its subtitle and new-thread and settings actions.
   New thread starts a draft directly when the machine has one project and
   otherwise opens the command palette, which already owns "new thread in
-  ‹project›" and can search. **Recent** is the default: all unarchived threads
+  ‹project›" and can search. Choosing a project closes the palette and pushes
+  Thread even when reusing the selected draft. The draft page is titled **New
+  thread / 新建对话**, with the project name below it; the composer stays
+  unfocused until tapped. **Recent** is the default: all unarchived threads
   across projects ordered by the latest activity of each parent and its children,
   with children ordered by their own activity directly below their parent.
   Both views indent children 16pt beyond the row inset and use lighter titles;

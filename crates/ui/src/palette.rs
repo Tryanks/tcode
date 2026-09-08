@@ -415,6 +415,10 @@ impl CommandPalette {
                 self.store.update(cx, |store, cx| {
                     store.start_draft(project_id, cwd, cx);
                 });
+                // Draft selection arrives asynchronously and can reuse an
+                // already selected draft. Navigation is a separate intent.
+                self.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
@@ -544,6 +548,15 @@ impl Render for CommandPalette {
                 list_content = list_content.child(
                     h_flex()
                         .id(("palette-row", index))
+                        .debug_selector({
+                            let action = action.clone();
+                            move || match &action {
+                                Action::NewThread { project_id, .. } => {
+                                    format!("palette-new-thread-{project_id}")
+                                }
+                                _ => format!("palette-row-{index}"),
+                            }
+                        })
                         .role(Role::ListBoxOption)
                         .aria_label(item.label.clone())
                         .aria_selected(is_sel)

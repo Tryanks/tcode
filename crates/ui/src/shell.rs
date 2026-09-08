@@ -1395,6 +1395,7 @@ impl AppShell {
                 !projects.is_empty(),
                 cx,
             )
+            .debug_selector(|| "compact-new-thread".into())
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.start_thread(window, cx);
             }))
@@ -2800,6 +2801,145 @@ mod tests {
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
         draw(cx);
         cx.update(|window, _| assert!(focus.is_focused(window)));
+    }
+
+    fn new_thread_from_projects(cx: &mut TestAppContext, project_count: usize, compact: bool) {
+        use tcode_core::project::Project;
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-new-thread-{project_count}-{compact}-{}",
+            tcode_services::store::now_millis()
+        ));
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        let projects: Vec<_> = (0..project_count)
+            .map(|index| Project {
+                id: format!("project-{index}"),
+                name: format!("Project {index}"),
+                root: root.join(format!("project-{index}")),
+                created_at: index as u64,
+            })
+            .collect();
+        let expected = projects.last().unwrap().clone();
+        let host = spawn_host(disk, HostServices::default()).unwrap();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = projects;
+            state.settings.language = Some("en".into());
+        }))
+        .unwrap();
+        let (shell, _transport, cx) = mount(cx);
+        let store = store_of(&shell, cx);
+        // Keep the shell's transport deterministic; the real host link owns
+        // its pump, as in the store tests, and snapshots are drained below.
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new(host.link(), cx)
+        });
+        cx.simulate_resize(size(px(if compact { 393. } else { 1024. }), px(852.)));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(250));
+        draw(cx);
+        let focus = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        let mut selected_draft = None;
+        for reopen in [false, true] {
+            if reopen && compact {
+                cx.update(|window, cx| {
+                    shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+                });
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(250));
+                draw(cx);
+            }
+            if compact {
+                let plus = cx
+                    .debug_bounds("compact-new-thread")
+                    .expect("Threads new-thread button");
+                cx.simulate_click(plus.center(), gpui::Modifiers::default());
+            } else {
+                shell
+                    .read_with(cx, |shell, _| shell.window_state())
+                    .update(cx, |state, cx| {
+                        state.open_palette(cx);
+                    });
+            }
+            draw(cx);
+            if project_count > 1 || !compact {
+                assert!(shell.read_with(cx, |shell, cx| shell.window_state.read(cx).palette_open));
+                let row = cx
+                    .debug_bounds("palette-new-thread-project-1")
+                    .expect("project choice");
+                cx.simulate_click(row.center(), gpui::Modifiers::default());
+                draw(cx);
+            }
+            shell.read_with(cx, |shell, cx| {
+                let state = shell.window_state.read(cx);
+                assert!(!state.palette_open, "choosing a project closes the chooser");
+                if compact {
+                    assert_eq!(
+                        state.history().last(),
+                        Some(&Destination::Thread),
+                        "starting a draft navigates independently of session selection"
+                    );
+                } else {
+                    assert_eq!(state.route(), Route::Chat);
+                }
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+                if store
+                    .read_with(cx, |store, _| store.chat_active_session())
+                    .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "selected project's draft reaches chat"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            cx.update(|window, _| assert_eq!(focus.is_focused(window), !compact));
+            let selected = store.read_with(cx, |store, _| store.active_session_id());
+            assert!(selected.is_some());
+            if reopen {
+                assert_eq!(
+                    selected, selected_draft,
+                    "reopening reuses the selected draft"
+                );
+            }
+            selected_draft = selected;
+        }
+        host.to_host.close();
+        smol::block_on(host.stopped.recv()).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn compact_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
+        new_thread_from_projects(cx, 2, true);
+    }
+
+    #[gpui::test]
+    fn compact_single_project_skips_the_chooser(cx: &mut TestAppContext) {
+        new_thread_from_projects(cx, 1, true);
+    }
+
+    #[gpui::test]
+    fn wide_project_choice_opens_a_focused_draft(cx: &mut TestAppContext) {
+        new_thread_from_projects(cx, 2, false);
     }
 
     fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
