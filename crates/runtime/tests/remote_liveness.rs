@@ -140,11 +140,9 @@ fn child_host() {
     ));
     let server = server(&data);
     let code = server.new_pairing_code();
-    std::fs::write(
-        data.0.join("ready.json"),
-        serde_json::to_vec(&code).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(data.0.join("ready.tmp"), serde_json::to_vec(&code).unwrap()).unwrap();
+    // Publish only complete JSON: existence is the parent's readiness signal.
+    std::fs::rename(data.0.join("ready.tmp"), data.0.join("ready.json")).unwrap();
     std::thread::park();
 }
 
