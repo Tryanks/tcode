@@ -20,4 +20,5 @@ else
   echo 'Notice: wasm-opt unavailable; keeping the unoptimized wasm-bindgen output.' >&2
 fi
 cp "${SCRIPT_DIR}/static/index.html" "${DIST_DIR}/index.html"
+python3 "${SCRIPT_DIR}/build_auth.py"
 printf 'Built browser bundle: %s\n' "${DIST_DIR}"

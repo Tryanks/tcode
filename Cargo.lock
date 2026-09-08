@@ -455,45 +455,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asn1-rs"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f43a50ac4fdca5df8e885c21b835997f0a1cdee65494a6847694a98652d9d8"
-dependencies = [
- "asn1-rs-derive",
- "asn1-rs-impl",
- "displaydoc",
- "nom 7.1.3",
- "num-traits",
- "rusticata-macros",
- "thiserror 2.0.19",
- "time",
-]
-
-[[package]]
-name = "asn1-rs-derive"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3109e49b1e4909e9db6515a30c633684d68cdeaa252f215214cb4fa1a5bfee2c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
- "synstructure",
-]
-
-[[package]]
-name = "asn1-rs-impl"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -937,9 +898,6 @@ name = "bit-vec"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "bit_field"
@@ -1751,7 +1709,7 @@ dependencies = [
  "rangemap",
  "rustc-hash 2.1.3",
  "self_cell",
- "skrifa 0.40.0",
+ "skrifa",
  "smol_str",
  "swash",
  "sys-locale",
@@ -2043,20 +2001,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "der-parser"
-version = "10.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07da5016415d5a3c4dd39b11ed26f915f52fc4e0dc197d87908bc916e51bc1a6"
-dependencies = [
- "asn1-rs",
- "displaydoc",
- "nom 7.1.3",
- "num-bigint",
- "num-traits",
- "rusticata-macros",
 ]
 
 [[package]]
@@ -2647,15 +2591,6 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "font-types"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39a654f404bbcbd48ea58c617c2993ee91d1cb63727a37bf2323a4edeed1b8c5"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "font-types"
@@ -3254,6 +3189,7 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "smallvec",
+ "unicode-segmentation",
  "uuid",
 ]
 
@@ -3971,7 +3907,7 @@ dependencies = [
  "bitflags 2.13.0",
  "bytemuck",
  "core_maths",
- "read-fonts 0.37.0",
+ "read-fonts",
  "smallvec",
 ]
 
@@ -6016,15 +5952,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oid-registry"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12f40cff3dde1b6087cc5d5f5d4d65712f34016a03ed60e9c08dcc392736b5b7"
-dependencies = [
- "asn1-rs",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7198,29 +7125,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rcgen"
-version = "0.14.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
-dependencies = [
- "ring",
- "rustls-pki-types",
- "time",
- "x509-parser",
- "yasna",
-]
-
-[[package]]
-name = "read-fonts"
-version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6717cf23b488adf64b9d711329542ba34de147df262370221940dfabc2c91358"
-dependencies = [
- "bytemuck",
- "font-types 0.10.1",
-]
-
-[[package]]
 name = "read-fonts"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7228,7 +7132,7 @@ checksum = "7b634fabf032fab15307ffd272149b622260f55974d9fad689292a5d33df02e5"
 dependencies = [
  "bytemuck",
  "core_maths",
- "font-types 0.11.3",
+ "font-types",
 ]
 
 [[package]]
@@ -7379,10 +7283,7 @@ version = "0.5.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae16923db8d9ff3901f4077568a53ef6323beff12f8a18700eeae1abcf4ac03f"
 dependencies = [
- "image",
- "parking_lot",
  "rustc-hash 2.1.3",
- "skrifa 0.37.0",
  "tracing",
  "web-time",
 ]
@@ -7404,7 +7305,6 @@ dependencies = [
  "corcovado",
  "cursor-icon",
  "flate2",
- "image",
  "libc",
  "memchr",
  "parking_lot",
@@ -7613,15 +7513,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
-]
-
-[[package]]
-name = "rusticata-macros"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
-dependencies = [
- "nom 7.1.3",
 ]
 
 [[package]]
@@ -8258,22 +8149,12 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skrifa"
-version = "0.37.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c31071dedf532758ecf3fed987cdb4bd9509f900e026ab684b4ecb81ea49841"
-dependencies = [
- "bytemuck",
- "read-fonts 0.35.0",
-]
-
-[[package]]
-name = "skrifa"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fbdfe3d2475fbd7ddd1f3e5cf8288a30eb3e5f95832829570cd88115a7434ac"
 dependencies = [
  "bytemuck",
- "read-fonts 0.37.0",
+ "read-fonts",
 ]
 
 [[package]]
@@ -8596,7 +8477,7 @@ version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0811b01ca2c4e8718760713911feaf4675c24f94e50530a015ec646cfb622f7c"
 dependencies = [
- "skrifa 0.40.0",
+ "skrifa",
  "yazi",
  "zeno",
 ]
@@ -8796,6 +8677,7 @@ dependencies = [
 name = "tcode"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "computer-use-mcp",
  "embed-resource",
  "env_logger",
@@ -8820,12 +8702,14 @@ version = "0.1.0"
 dependencies = [
  "android-activity",
  "android_logger",
+ "async-channel",
  "futures",
  "gpui-android",
  "gpui-pre",
  "jni 0.21.1",
  "log",
- "tcode-mobile",
+ "tcode-client",
+ "tcode-remote",
  "tcode-ui",
 ]
 
@@ -8834,12 +8718,18 @@ name = "tcode-client"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "async-io",
+ "futures-lite",
+ "js-sys",
  "log",
  "serde",
  "serde_json",
  "smol",
  "tcode-protocol",
  "url",
+ "uuid",
+ "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]
@@ -8857,6 +8747,7 @@ dependencies = [
 name = "tcode-headless"
 version = "0.1.0"
 dependencies = [
+ "env_logger",
  "mcp-host",
  "orchestrate-mcp",
  "preview-mcp",
@@ -8872,30 +8763,11 @@ dependencies = [
 name = "tcode-ios"
 version = "0.1.0"
 dependencies = [
- "gpui-ios",
- "gpui-pre",
- "log",
- "tcode-mobile",
- "tcode-ui",
-]
-
-[[package]]
-name = "tcode-mobile"
-version = "0.1.0"
-dependencies = [
  "async-channel",
- "chrono",
- "dirs 6.0.0",
- "gpui-android",
- "gpui-base",
  "gpui-ios",
  "gpui-pre",
- "gpui-pre-platform",
  "log",
- "serde_json",
  "tcode-client",
- "tcode-core",
- "tcode-protocol",
  "tcode-remote",
  "tcode-ui",
 ]
@@ -8906,6 +8778,7 @@ version = "0.1.0"
 dependencies = [
  "agent",
  "base64 0.23.1",
+ "bitflags 2.13.0",
  "serde",
  "serde_json",
  "tcode-core",
@@ -8918,24 +8791,32 @@ dependencies = [
  "async-channel",
  "async-tungstenite",
  "base64 0.23.1",
+ "core-foundation 0.9.4",
+ "dirs 6.0.0",
  "futures-lite",
  "futures-rustls",
  "futures-util",
  "getrandom 0.3.4",
  "if-addrs 0.13.4",
+ "libc",
  "log",
  "mdns-sd",
- "rcgen",
+ "pbkdf2",
  "rustls",
  "serde",
  "serde_json",
  "sha1",
  "sha2 0.10.9",
  "smol",
+ "system-configuration-sys",
  "tcode-client",
  "tcode-protocol",
+ "tcode-runtime",
+ "tcode-services",
  "tungstenite",
+ "url",
  "uuid",
+ "webpki-roots 1.0.8",
 ]
 
 [[package]]
@@ -8994,7 +8875,9 @@ dependencies = [
  "chrono",
  "computer-use-mcp",
  "criterion",
+ "futures",
  "futures-lite",
+ "gpui-android",
  "gpui-base",
  "gpui-component-macros",
  "gpui-kit-assets",
@@ -9028,7 +8911,7 @@ dependencies = [
  "tcode-runtime",
  "tcode-services",
  "tcode-voice",
- "term",
+ "url",
  "web-time",
  "webview2-com",
  "windows-core 0.61.2",
@@ -9049,7 +8932,7 @@ dependencies = [
  "gpui-pre-web",
  "js-sys",
  "serde_json",
- "tcode-mobile",
+ "tcode-client",
  "tcode-protocol",
  "tcode-ui",
  "wasm-bindgen",
@@ -9104,8 +8987,8 @@ dependencies = [
  "async-channel",
  "libc",
  "portable-pty",
- "rio-graphics",
  "rio-vt",
+ "tcode-protocol",
 ]
 
 [[package]]
@@ -11212,24 +11095,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
-name = "x509-parser"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
-dependencies = [
- "asn1-rs",
- "data-encoding",
- "der-parser",
- "lazy_static",
- "nom 7.1.3",
- "oid-registry",
- "ring",
- "rusticata-macros",
- "thiserror 2.0.19",
- "time",
-]
-
-[[package]]
 name = "xattr"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11321,16 +11186,6 @@ name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
-
-[[package]]
-name = "yasna"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
-dependencies = [
- "bit-vec 0.9.1",
- "time",
-]
 
 [[package]]
 name = "yazi"

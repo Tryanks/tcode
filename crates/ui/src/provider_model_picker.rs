@@ -213,7 +213,7 @@ impl Render for ProviderModelPicker {
         let picker = cx.entity();
         crate::material::overlay_popover(self.popover_id)
             .trigger(self.trigger(cx))
-            .content(move |_, _, cx| {
+            .content(move |_, window, cx| {
                 let (options, profiles, selected_profile, selected, excluded) = {
                     let picker = picker.read(cx);
                     (
@@ -364,14 +364,20 @@ impl Render for ProviderModelPicker {
                     );
                 }
 
+                // The catalog is a viewport of its own; cap it against the
+                // window so a short one scrolls instead of overflowing it.
+                let catalog = crate::sizing::fit_viewport(300., window.viewport_size().height);
                 v_flex()
-                    .w(px(390.))
+                    .w(crate::sizing::fit_viewport(
+                        390.,
+                        window.viewport_size().width,
+                    ))
                     .child(tabs)
                     .child(crate::material::faded_hairline(cx))
                     .child(
                         div()
                             .w_full()
-                            .h(px(300.))
+                            .h(catalog)
                             .overflow_y_scrollbar()
                             .child(div().size_full().child(rows)),
                     )

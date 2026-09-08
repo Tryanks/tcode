@@ -294,6 +294,9 @@ impl AppState {
                 session_id: session_id.clone(),
             },
             ServerEvent::SessionSnapshot {
+                total: 0,
+                total_turns: 0,
+                truncated: false,
                 from: 0,
                 records: Vec::new(),
             },

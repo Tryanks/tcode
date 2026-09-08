@@ -86,6 +86,16 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Connection severity shared by the sidebar and attached machine row.
+    pub(crate) fn connection_color(&self, state: &tcode_client::ConnectionState) -> Hsla {
+        match state {
+            tcode_client::ConnectionState::Connected => self.success,
+            tcode_client::ConnectionState::Syncing
+            | tcode_client::ConnectionState::Reconnecting { .. } => self.warning,
+            tcode_client::ConnectionState::Offline { .. } => self.danger,
+        }
+    }
+
     pub fn theme_name(&self) -> &SharedString {
         &self.theme_name
     }
@@ -346,6 +356,36 @@ pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_connection_dots_preserve_severity() {
+        use tcode_client::{ConnectionFailure, ConnectionState};
+
+        for theme in [&embedded_themes().light, &embedded_themes().dark] {
+            for (state, expected) in [
+                (ConnectionState::Connected, theme.success),
+                (ConnectionState::Syncing, theme.warning),
+                (
+                    ConnectionState::Reconnecting {
+                        attempt: 1,
+                        reason: Some(ConnectionFailure::Unreachable),
+                    },
+                    theme.warning,
+                ),
+                (
+                    ConnectionState::Offline {
+                        reason: ConnectionFailure::AuthenticationRejected,
+                    },
+                    theme.danger,
+                ),
+            ] {
+                assert_eq!(theme.connection_color(&state), expected, "{state:?}");
+            }
+            assert_ne!(theme.success, theme.warning);
+            assert_ne!(theme.warning, theme.danger);
+            assert_ne!(theme.success, theme.danger);
+        }
+    }
 
     #[test]
     fn parses_embedded_tcode_themes() {

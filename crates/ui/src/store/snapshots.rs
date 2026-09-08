@@ -221,7 +221,6 @@ pub(crate) struct PanelState {
     pub right_tab: RightTab,
     pub right_panel_expanded: bool,
     pub terminal_open: bool,
-    #[cfg(feature = "terminal")]
     pub terminal_height: f32,
     pub plan_tab_active: bool,
 }
@@ -236,7 +235,6 @@ pub(crate) fn panel_state(
         right_tab: ui.map_or_else(RightTab::default, |ui| ui.right_tab),
         right_panel_expanded: ui.is_some_and(|ui| ui.right_panel_expanded),
         terminal_open: ui.is_some_and(|ui| ui.terminal_open),
-        #[cfg(feature = "terminal")]
         terminal_height: ui.map_or(240., |ui| ui.terminal_height),
         plan_tab_active: timeline.is_some_and(|timeline| timeline.proposed_plan.is_some())
             || status.is_some_and(|status| status.interaction_mode == agent::InteractionMode::Plan),

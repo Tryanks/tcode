@@ -113,15 +113,14 @@ impl Inline {
         let mut lines = Vec::new();
         let mut current_y = None;
         let mut current: Option<Bounds<Pixels>> = None;
-        let mut offset = 0;
-        for c in self.text.chars() {
-            let next_offset = offset + c.len_utf8();
-            let Some(pos) = text_layout.position_for_index(offset) else {
-                offset = next_offset;
+        for (position, next_position) in
+            character_positions(&self.text, |offset| text_layout.position_for_index(offset))
+        {
+            let Some(pos) = position else {
                 continue;
             };
             let mut width = line_height / 2.;
-            if let Some(next_pos) = text_layout.position_for_index(next_offset)
+            if let Some(next_pos) = next_position
                 && next_pos.y == pos.y
             {
                 width = next_pos.x - pos.x;
@@ -141,7 +140,6 @@ impl Inline {
                     current = Some(bounds);
                 }
             }
-            offset = next_offset;
         }
         if let Some(current) = current {
             lines.push(current);
@@ -425,5 +423,45 @@ impl Element for Inline {
                 }
             }
         });
+    }
+}
+
+// Adjacent characters share a boundary; querying it twice is particularly costly
+// for long wrapped paragraphs because GPUI searches their shaped lines each time.
+fn character_positions<T: Copy>(
+    text: &str,
+    mut lookup: impl FnMut(usize) -> Option<T>,
+) -> impl Iterator<Item = (Option<T>, Option<T>)> {
+    let first = lookup(0);
+    text.char_indices()
+        .scan(first, move |position, (offset, c)| {
+            let next = lookup(offset + c.len_utf8());
+            Some((std::mem::replace(position, next), next))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::character_positions;
+
+    #[test]
+    fn selection_geometry_looks_up_each_utf8_boundary_once() {
+        let mut queried = Vec::new();
+        let positions = character_positions("a中🙂b", |offset| {
+            queried.push(offset);
+            // A missing layout boundary must not shift subsequent characters.
+            (offset != 4).then_some(offset)
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(queried, [0, 1, 4, 8, 9]);
+        assert_eq!(
+            positions,
+            [
+                (Some(0), Some(1)),
+                (Some(1), None),
+                (None, Some(8)),
+                (Some(8), Some(9)),
+            ]
+        );
     }
 }

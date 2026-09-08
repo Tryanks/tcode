@@ -199,6 +199,7 @@ impl Render for PopupMenu {
         }
         let mut root = div()
             .id("tcode-popup-menu")
+            .debug_selector(|| "tcode-popup-menu".into())
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::cancel))
@@ -284,9 +285,18 @@ where
 {
     let menu_state =
         window.use_keyed_state((id.clone(), "menu-state"), cx, |_, _| MenuState::default());
-    gpui_base::Popover::new(id)
+    super::Popover::new(id)
+        .appearance(false)
         .mouse_button(button)
         .overlay_closable(true)
+        .on_open_change({
+            let menu_state = menu_state.clone();
+            move |open, _, cx| {
+                if !open {
+                    menu_state.update(cx, |state, _| state.menu = None);
+                }
+            }
+        })
         .trigger_with(move |_, _, _| trigger.into_any_element())
         .content(move |popover, window, cx| {
             if let Some(menu) = menu_state.read(cx).menu.clone() {
@@ -369,6 +379,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
     for ContextMenu<T>
 {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let dismissal = crate::overlay::OutsideDismissal::new(self.id.clone(), window, cx);
         let state = window.use_keyed_state((self.id, "context-menu"), cx, |_, _| {
             ContextMenuState::default()
         });
@@ -456,6 +467,7 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                 .size_full(),
             );
         }
+        trigger = trigger.child(dismissal.release_listener());
         let (menu, position) = {
             let state = state.read(cx);
             (state.menu.clone(), state.position)
@@ -470,7 +482,8 @@ impl<T: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ren
                         .position(position)
                         .snap_to_window_with_margin(px(8.))
                         .child(div().child(menu.clone()).on_mouse_down_out(
-                            move |_, _window, cx| {
+                            move |event, window, cx| {
+                                dismissal.consume(event, window, cx);
                                 menu.update(cx, |_, cx| cx.emit(DismissEvent));
                             },
                         )),
@@ -516,5 +529,90 @@ impl<T: IntoElement + 'static> RenderOnce for DropdownMenuPopover<T> {
             window,
             cx,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        PlatformInput, TestAppContext, TouchEvent, TouchId, TouchPhase, VisualTestContext, point,
+        size,
+    };
+    use std::cell::Cell;
+
+    struct MenuHarness(Rc<Cell<usize>>);
+    impl Render for MenuHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.0.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("row-a")
+                        .relative()
+                        .h(px(56.))
+                        .w_full()
+                        .child("A")
+                        .context_menu(|menu, _, _| menu.menu("Action", Box::new(Cancel)))
+                        .touch(true),
+                )
+                .child(
+                    div()
+                        .id("row-b")
+                        .mt(px(400.))
+                        .h(px(56.))
+                        .w_full()
+                        .child("B")
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+        }
+    }
+
+    fn touch(cx: &mut VisualTestContext, id: u64, phase: TouchPhase, position: Point<Pixels>) {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::Touch(TouchEvent {
+                    id: TouchId(id),
+                    phase,
+                    position,
+                    predicted_position: None,
+                    force: None,
+                }),
+                cx,
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn long_press_dismissal_consumes_outside_tap(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let clicks = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            move |_, _| MenuHarness(clicks)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let a = point(px(20.), px(40.));
+        touch(cx, 1, TouchPhase::Started, a);
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(801));
+        cx.run_until_parked();
+        touch(cx, 1, TouchPhase::Ended, a);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("tcode-popup-menu").is_some());
+        let b = point(px(20.), px(480.));
+        touch(cx, 2, TouchPhase::Started, b);
+        touch(cx, 2, TouchPhase::Ended, b);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
+        assert_eq!(clicks.get(), 0, "dismissal must not activate B");
+        touch(cx, 3, TouchPhase::Started, b);
+        touch(cx, 3, TouchPhase::Ended, b);
+        assert_eq!(clicks.get(), 1, "the second tap activates B");
     }
 }

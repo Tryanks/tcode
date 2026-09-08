@@ -1,24 +1,15 @@
 //! GPUI application lifetime and the `tcode_ios_start` entry point.
 
-use gpui::{App, Application, ApplicationHandle, AsyncApp};
+use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::rc::Rc;
 
+use gpui::{Application, ApplicationHandle, WindowBackgroundAppearance, WindowOptions};
+use tcode_client::host::ClientHost;
+use tcode_ui::{ShellOptions, ShellSetup, WindowSeam};
+
 thread_local! {
     static APPLICATION: OnceCell<ApplicationHandle> = const { OnceCell::new() };
-    static ASYNC_APPLICATION: OnceCell<AsyncApp> = const { OnceCell::new() };
-}
-
-/// Re-enter the embedded app without borrowing it synchronously from a UIKit callback.
-pub(crate) fn dispatch_to_app(callback: impl FnOnce(&mut App) + 'static) {
-    ASYNC_APPLICATION.with(|slot| {
-        let Some(app) = slot.get().cloned() else {
-            log::warn!("dropping iOS host callback before GPUI finished starting");
-            return;
-        };
-        let executor = app.foreground_executor().clone();
-        executor.spawn(async move { app.update(callback) }).detach();
-    });
 }
 
 #[unsafe(no_mangle)]
@@ -31,14 +22,39 @@ pub extern "C" fn tcode_ios_start() {
         let handle = Application::with_platform(gpui_ios::platform())
             .with_assets(tcode_ui::assets::Assets)
             .run_embedded(|cx| {
-                tcode_mobile::run_with_host(cx, Rc::new(crate::host::native_host()));
+                let (native_host, system_locale) = crate::host::native_host();
+                let host: Rc<dyn ClientHost> = Rc::new(native_host);
+                tcode_ui::run_shell(
+                    cx,
+                    host.clone(),
+                    // UIKit's safe area and keyboard frame. The platform
+                    // schedules a frame whenever either changes.
+                    WindowSeam::new(gpui_ios::insets).with_lifecycle(gpui_ios::platform()),
+                    ShellOptions {
+                        window: WindowOptions {
+                            // UIKit owns the geometry; the shell reads it back.
+                            window_bounds: None,
+                            titlebar: None,
+                            window_background: WindowBackgroundAppearance::Opaque,
+                            ..Default::default()
+                        },
+                        theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
+                        activate: true,
+                        system_locale,
+                        setup: ShellSetup {
+                            initial: tcode_ui::last_host_target(host.as_ref()),
+                            initial_pairing_error: None,
+                            client_host: Some(host),
+                            // A phone runs no host of its own.
+                            local: None,
+                            seed_blocking: false,
+                            restore_navigation: true,
+                        },
+                        ..Default::default()
+                    }
+                    .with_bundled_monospace(),
+                );
             });
-        let async_app = handle.to_async();
-        ASYNC_APPLICATION.with(|async_slot| {
-            if async_slot.set(async_app).is_err() {
-                log::warn!("tcode's asynchronous GPUI application was already retained");
-            }
-        });
         if slot.set(handle).is_err() {
             log::warn!("tcode's embedded GPUI application was already started");
         }

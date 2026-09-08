@@ -96,6 +96,7 @@ thread_local! {
 unsafe extern "C" {
     fn gpui_ios_host_log(level: u32, bytes: *const u8, length: usize);
     fn gpui_ios_host_schedule_frame();
+    fn gpui_ios_host_first_frame_rendered();
     fn gpui_ios_host_show_keyboard();
     fn gpui_ios_host_hide_keyboard();
     fn gpui_ios_host_configure_text_input(
@@ -176,6 +177,11 @@ fn with_window(f: impl FnOnce(&IosWindow)) {
         // window, and `Drop` unregisters it before that allocation is freed.
         f(unsafe { window.as_ref() });
     }
+}
+
+pub(crate) fn host_first_frame_rendered() {
+    // SAFETY: The UIKit host exports this callback and drawing runs on its main thread.
+    unsafe { gpui_ios_host_first_frame_rendered() }
 }
 
 pub(crate) fn host_schedule_frame() {

@@ -2,6 +2,7 @@ use super::{
     dispatcher::AndroidDispatcher,
     display::AndroidDisplay,
     host::{self, HostEvent},
+    text::AndroidTextSystem,
     window::{AndroidWindow, AndroidWindowInner, KeyResult},
 };
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent, input::InputEvent};
@@ -59,6 +60,7 @@ pub(crate) struct AndroidPlatform {
     active_handle: Cell<Option<AnyWindowHandle>>,
     callbacks: RefCell<PlatformCallbacks>,
     clipboard: RefCell<Option<ClipboardItem>>,
+    quit_pending: Cell<bool>,
     quitting: Cell<bool>,
 }
 
@@ -85,8 +87,36 @@ impl AndroidPlatform {
             active_handle: Cell::new(None),
             callbacks: RefCell::new(PlatformCallbacks::default()),
             clipboard: RefCell::new(None),
+            quit_pending: Cell::new(false),
             quitting: Cell::new(false),
         }
+    }
+
+    fn try_quit(&self) {
+        if self.quitting.get() {
+            return;
+        }
+
+        let callback = self.callbacks.borrow_mut().quit.take();
+        let allow = if let Some(mut callback) = callback {
+            let allow = callback();
+            self.callbacks.borrow_mut().quit = Some(callback);
+            allow
+        } else {
+            true
+        };
+        if allow {
+            self.quit_pending.set(false);
+            self.quitting.set(true);
+            host::finish_activity();
+        } else {
+            // GPUI returns false when quit is requested from inside an App
+            // update because shutdown cannot borrow the App until that update
+            // ends. Retry at the event-loop boundary instead of swallowing the
+            // request as though it were a cancellation.
+            self.quit_pending.set(true);
+        }
+        self.app.create_waker().wake();
     }
 
     pub(crate) fn set_process_back_callback(&self, callback: Box<dyn FnMut()>) {
@@ -266,17 +296,13 @@ impl AndroidPlatform {
 }
 
 fn load_android_text_system() -> Arc<dyn PlatformTextSystem> {
-    let text_system = Arc::new(CosmicTextSystem::new_without_system_fonts("Roboto"));
+    let text_system = CosmicTextSystem::new_without_system_fonts("Roboto");
     let mut font_paths = fs::read_dir("/system/fonts")
         .into_iter()
         .flatten()
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
-            // COLRv1 is unsupported by the wgpu text path, so let the bundled CBDT face win.
-            if path.file_name().and_then(|name| name.to_str()) == Some("NotoColorEmoji.ttf") {
-                return false;
-            }
             matches!(
                 path.extension().and_then(|extension| extension.to_str()),
                 Some("ttf" | "otf" | "ttc")
@@ -297,7 +323,7 @@ fn load_android_text_system() -> Arc<dyn PlatformTextSystem> {
     if let Err(error) = text_system.add_fonts(fonts) {
         log::error!("failed to register Android system fonts: {error:#}");
     }
-    text_system
+    Arc::new(AndroidTextSystem::new(text_system))
 }
 
 struct AndroidKeyboardLayout;
@@ -354,23 +380,14 @@ impl Platform for AndroidPlatform {
             if let Some(window) = self.window() {
                 window.pump_frame(false);
             }
+            if self.quit_pending.replace(false) {
+                self.try_quit();
+            }
         }
     }
 
     fn quit(&self) {
-        let callback = self.callbacks.borrow_mut().quit.take();
-        let allow = if let Some(mut callback) = callback {
-            let allow = callback();
-            self.callbacks.borrow_mut().quit = Some(callback);
-            allow
-        } else {
-            true
-        };
-        if allow {
-            self.quitting.set(true);
-            host::finish_activity();
-            self.app.create_waker().wake();
-        }
+        self.try_quit();
     }
 
     fn restart(&self, _binary_path: Option<PathBuf>, _arguments: Vec<OsString>) {

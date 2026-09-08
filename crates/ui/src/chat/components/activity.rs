@@ -255,15 +255,8 @@ fn activity_detail(
             .into_any_element(),
         _ => div().into_any_element(),
     };
-    div()
-        .w_full()
-        .ml_2()
-        .pl(px(14.))
-        .py_0p5()
-        .border_l_1()
-        .border_color(cx.theme().border)
+    crate::material::rail_detail(detail, cx)
         .text_size(px(11.5))
-        .child(detail)
         .into_any_element()
 }
 

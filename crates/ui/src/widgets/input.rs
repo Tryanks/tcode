@@ -1,3 +1,6 @@
+#[path = "input_configuration.rs"]
+mod input_configuration;
+
 use crate::{
     sizing::{Sizable, Size},
     theme::ActiveTheme as _,
@@ -156,6 +159,8 @@ impl RenderOnce for Input {
             } else {
                 base.clone().into_any_element()
             };
+            let input_entity = base.clone();
+            let focus = base.read(cx).focus_handle(cx);
             InputBase::new(("input", base.entity_id()))
                 .focused(focused)
                 .disabled(self.disabled)
@@ -164,6 +169,7 @@ impl RenderOnce for Input {
                 .when_some(aria_label.clone(), |this, label| {
                     this.accessibility_label(label)
                 })
+                .relative()
                 .flex()
                 .size_full()
                 .items_center()
@@ -200,6 +206,28 @@ impl RenderOnce for Input {
                 })
                 .refine_style(&self.style)
                 .child(editor)
+                // Register after the editor paints so GPUI uses its configured handler.
+                .child(
+                    gpui::canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            let bounds = input_entity.read(cx).text_bounds().unwrap_or(bounds);
+                            window.handle_input(
+                                &focus,
+                                input_configuration::ConfiguredInput {
+                                    inner: gpui::ElementInputHandler::new(
+                                        bounds,
+                                        input_entity.clone(),
+                                    ),
+                                    multi_line,
+                                },
+                                cx,
+                            );
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
                 .into_any_element()
         })
     }
@@ -239,6 +267,11 @@ impl Styled for Textarea {
 }
 impl RenderOnce for Textarea {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        self.input
+        let State::Textarea(state) = &self.input.state else {
+            unreachable!()
+        };
+        let handle = crate::touch_scroll::Handle::Textarea(state.clone());
+        let id = state.entity_id();
+        crate::touch_scroll::register(self.input, handle).with_id(("textarea-scroll", id))
     }
 }

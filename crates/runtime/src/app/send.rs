@@ -43,6 +43,9 @@ impl AppState {
             return;
         };
         active.push_scheduled(text, attachments, not_before);
+        if let Some(message) = active.queue.last_mut() {
+            message.delivery_key = cx.delivery_key.clone();
+        }
         let should_start = matches!(active.runtime, Runtime::Idle)
             && !(active.draft
                 && matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. }));
@@ -244,6 +247,9 @@ impl AppState {
         // See `on_turn_accepted`, which records the user message only after the
         // adapter confirms provider submission.
         active.push_queued(text, attachments);
+        if let Some(message) = active.queue.last_mut() {
+            message.delivery_key = cx.delivery_key.clone();
+        }
 
         // If the user switched models — or a provider that can't switch its
         // approval mode live (Codex) had its mode changed, or a launch-time
@@ -372,6 +378,9 @@ impl AppState {
         };
         active.push_queued(text, attachments);
         if let Some(message) = active.queue.last_mut() {
+            message.delivery_key = cx.delivery_key.clone();
+        }
+        if let Some(message) = active.queue.last_mut() {
             message.relay_transcript = Some(transcript);
         }
         let dispatch_failed = self.dispatch_next_queued(target_id, cx).is_err();
@@ -418,6 +427,7 @@ impl AppState {
             &message.text,
             message.context_len,
             &message.attachments,
+            message.delivery_key.as_deref(),
             cx,
         );
         if let Some(window) = message.context_window_changed {
@@ -491,10 +501,16 @@ impl AppState {
         text: &str,
         context_len: Option<usize>,
         attachments: &[Attachment],
+        delivery_key: Option<&str>,
         cx: &mut HostCx,
     ) {
         let user_event = AgentEvent::ItemCompleted(ThreadItem {
-            id: format!("local-user-{}", uuid::Uuid::new_v4()),
+            id: format!(
+                "local-user-{}",
+                delivery_key
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            ),
             parent_item_id: None,
             content: ItemContent::UserMessage {
                 text: text.to_owned(),
@@ -514,7 +530,12 @@ impl AppState {
         attachments: &[Attachment],
         cx: &mut HostCx,
     ) -> String {
-        let request_id = format!("local-steer-{}", uuid::Uuid::new_v4());
+        let request_id = format!(
+            "local-steer-{}",
+            cx.delivery_key
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        );
         self.record_event(
             session_id,
             &AgentEvent::SteerRequested {
@@ -630,14 +651,21 @@ impl AppState {
         self.reschedule_scheduled_wake(cx);
     }
 
-    pub fn interrupt(&mut self, target_id: &str, _cx: &mut HostCx) {
-        if let Some(ActiveSession {
+    pub fn interrupt(
+        &mut self,
+        target_id: &str,
+        _cx: &mut HostCx,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
         }) = self.resident(target_id)
-        {
-            let _ = commands.try_send(SessionCommand::Interrupt);
-        }
+        else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::Interrupt)
+            .map_err(provider_command_error)
     }
 
     pub fn respond_approval(
@@ -646,35 +674,39 @@ impl AppState {
         request_id: String,
         decision: ApprovalDecision,
         _cx: &mut HostCx,
-    ) {
-        if let Some(session_id) = self
-            .resident(target_id)
-            .map(|session| session.meta.id.as_str())
-            .map(str::to_string)
-        {
-            let _ = self.respond_session_approval(&session_id, request_id, decision);
-        }
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        self.respond_session_approval(target_id, request_id, decision)
+            .map_err(provider_command_error)
     }
 
-    /// Answer a pending user-input request (Claude `AskUserQuestion` / Codex
-    /// `requestUserInput`). `answers` is keyed by [`UserInputQuestion::id`] with
-    /// string (single-select / free text) or string-array (multi-select) values.
+    /// Answer the host's pending user-input request, acknowledging only after
+    /// the provider command channel has accepted the answer.
     pub fn respond_user_input(
         &mut self,
         target_id: &str,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
         _cx: &mut HostCx,
-    ) {
-        if let Some(ActiveSession {
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
         }) = self.resident(target_id)
-        {
-            let _ = commands.try_send(SessionCommand::RespondUserInput {
+        else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::RespondUserInput {
                 request_id,
                 answers,
-            });
-        }
+            })
+            .map_err(provider_command_error)
+    }
+}
+
+fn provider_command_error(error: impl std::fmt::Display) -> tcode_protocol::ProtocolError {
+    tcode_protocol::ProtocolError {
+        code: "provider_unavailable".into(),
+        message: error.to_string(),
     }
 }

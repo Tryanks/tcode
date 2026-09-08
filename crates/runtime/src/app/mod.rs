@@ -18,7 +18,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::host::{HostCx, HostEvent, HostTask};
-use crate::terminal::{LocalTerminalRegistry, TerminalContext, TerminalSplit, TerminalWorkspace};
+use crate::terminal::{
+    TerminalContext, TerminalProjection, TerminalRegistry, TerminalSplit, TerminalWorkspace,
+};
 use tcode_core::acp::{AcpAgentPatch, InstalledAcpAgent as InstalledAgent};
 use tcode_core::attachments::mime_from_path;
 use tcode_core::git::{GitAction, GitStatus, build_commit_prompt, sanitize_commit_message};
@@ -43,12 +45,13 @@ use tcode_core::ui::{
     ConversationDestination, MAX_TERMINALS_PER_SESSION, TerminalSplitDirection, WorkspaceMode,
 };
 use tcode_protocol::{
-    AcpMarketplaceItem, EventEnvelope, ExternalThread, GitActionRequest, GitStatusStatus,
-    IndexSnapshot, MergeWorktreeFailure, PathEntry,
-    ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus, QueuedMessageStatus,
-    RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification as RuntimeEvent,
-    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
-    TcodeUpdateStatus, TerminalStatus, ThreadExportFormat, Topic,
+    AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, ExternalThread,
+    GitActionRequest, GitStatusStatus, IndexSnapshot, MergeWorktreeFailure, PathEntry,
+    ProtocolError, ProviderVersionStatus as ProtocolProviderVersionStatus, ProvidersStatus,
+    QueryResponse, QueuedMessageStatus, RecentDir, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification as RuntimeEvent, RuntimeOperationId, RuntimeToast, ServerEvent,
+    SessionEventRecord, SessionSearchHit, SessionStatus, TcodeUpdateStatus, TerminalStatus,
+    ThreadExportFormat, Topic,
 };
 use tcode_services::acp_registry::{
     Registry, RegistryAgent, cached, install, load, platform_key, resolve_recipe, uninstall,
@@ -62,12 +65,12 @@ use tcode_services::git::{
     read_git_branch, read_status, run_claude_headless,
 };
 use tcode_services::import::{
-    ExternalImportUpdate, ExternalRoots, ImportOutcome, existing_external_ids, import_thread,
-    scan_recent_dirs,
+    ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
 };
 use tcode_services::provider_probe::{
     default_program, probe_provider, run_capture, run_capture_env, run_status,
 };
+use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::{SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
@@ -231,8 +234,10 @@ enum TerminalSpawnAction {
 mod acp;
 mod active_session;
 mod approvals;
+mod command_validation;
 mod events;
 mod git;
+mod history;
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -318,10 +323,11 @@ pub struct AppState {
     /// Terminal resources parked by conversation destination. Drawer chrome is
     /// client-owned; this map retains only PTYs, tabs, splits, and contexts.
     terminal_workspaces: HashMap<ConversationDestination, TerminalWorkspace>,
-    /// Construction-time local transport registry for opaque live terminal
-    /// objects. All serializable terminal metadata remains in SessionStatus.
-    terminal_registry: LocalTerminalRegistry,
-    terminal_output: HashMap<u64, crate::terminal::OutputReplay>,
+    /// Host-private index from terminal id to its PTY. Clients receive the
+    /// replicated grid instead; nothing here crosses the pipe.
+    terminal_registry: TerminalRegistry,
+    /// The replicated grid published on `Topic::Terminal`, one per live PTY.
+    terminal_projections: HashMap<u64, TerminalProjection>,
     preview_pending: HashMap<u64, async_channel::Sender<Result<preview_mcp::PreviewReply, String>>>,
     next_preview_request: u64,
     /// Provider-native rewind requested while a session is live or starting.
@@ -390,6 +396,13 @@ pub struct AppState {
     /// Present only after an app-relaunch triggered by a permission grant; applied
     /// once by [`AppState::apply_pending_relaunch`] and then cleared.
     pending_relaunch: Option<tcode_services::relaunch::RelaunchMarker>,
+    /// Latest external-import run per project. Only the current/latest run is
+    /// retained, so this is a replicated status rather than a job log.
+    external_imports: HashMap<String, ExternalImportStatus>,
+    next_import_run_id: u64,
+    /// Host-owned content index over this host's own session store. Its cache
+    /// lock is only ever taken on the blocking executor, never on the mailbox.
+    session_search: Arc<std::sync::Mutex<SessionSearch>>,
 }
 
 fn emit_runtime(cx: &mut HostCx, event: RuntimeEvent) {
@@ -405,14 +418,10 @@ fn permission_relaunch_marker(
 
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
-        Self::new_with_terminal_registry(store, LocalTerminalRegistry::default(), false)
+        Self::with_ai_titles(store, false)
     }
 
-    pub(crate) fn new_with_terminal_registry(
-        store: SessionStore,
-        terminal_registry: LocalTerminalRegistry,
-        ai_title_generation_enabled: bool,
-    ) -> Self {
+    pub(crate) fn with_ai_titles(store: SessionStore, ai_title_generation_enabled: bool) -> Self {
         // Load + migrate once and persist so derived project ids stay stable.
         let file = store.read_file();
         if let Err(err) = store.persist_index(&file) {
@@ -458,6 +467,7 @@ impl AppState {
         );
         let (store_writes, store_write_receiver) = smol::channel::unbounded();
         let (store_write_failures, store_write_failure_receiver) = smol::channel::unbounded();
+        let session_search = Arc::new(std::sync::Mutex::new(SessionSearch::new(store.clone())));
         Self {
             store,
             settings_store,
@@ -469,8 +479,8 @@ impl AppState {
             projects,
             residents: ResidentSessions::default(),
             terminal_workspaces: HashMap::new(),
-            terminal_registry,
-            terminal_output: HashMap::new(),
+            terminal_registry: TerminalRegistry::default(),
+            terminal_projections: HashMap::new(),
             preview_pending: HashMap::new(),
             next_preview_request: 0,
             pending_native_rewinds: HashMap::new(),
@@ -506,6 +516,9 @@ impl AppState {
             event_records: HashMap::new(),
             review_comment_drafts: HashMap::new(),
             pending_relaunch,
+            external_imports: HashMap::new(),
+            next_import_run_id: 1,
+            session_search,
         }
     }
 

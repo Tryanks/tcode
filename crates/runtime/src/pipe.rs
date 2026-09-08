@@ -1,7 +1,6 @@
 //! NDJSON in-process client/host pipe with typed endpoint APIs.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use tcode_client::HostLink;
 use tcode_protocol::{
@@ -10,12 +9,10 @@ use tcode_protocol::{
 };
 #[cfg(test)]
 use tcode_protocol::{EventEnvelope, ServerEvent, Subscription, Topic};
-use tcode_services::import::ExternalImportUpdate;
 use tcode_services::store::SessionStore;
 
 use crate::app::{AppState, DomainDiff};
 use crate::host::{HostCx, HostEvent, HostFn};
-use crate::terminal::LocalTerminalRegistry;
 
 /// Optional process-local services attached before the host starts accepting
 /// client traffic.
@@ -37,16 +34,11 @@ pub struct HostServices {
     pub computer_use: Option<computer_use_mcp::ComputerUseMcpServer>,
 }
 
-#[derive(Clone, Default)]
-pub struct ImportRoutes(Arc<Mutex<HashMap<u64, smol::channel::Sender<ExternalImportUpdate>>>>);
-
 #[derive(Clone)]
 pub struct SpawnedHost {
     pub to_host: async_channel::Sender<String>,
     pub from_host: async_channel::Receiver<String>,
     pub stopped: async_channel::Receiver<()>,
-    pub terminals: LocalTerminalRegistry,
-    pub import_routes: ImportRoutes,
     link: Arc<OnceLock<HostLink>>,
     #[cfg(any(test, feature = "test-support"))]
     test_mailbox: async_channel::Sender<HostFn>,
@@ -93,38 +85,6 @@ impl SpawnedHost {
     }
 }
 
-pub async fn start_external_import(
-    link: &HostLink,
-    routes: &ImportRoutes,
-    project_id: String,
-    threads: Vec<tcode_protocol::ExternalThread>,
-) -> Result<Option<async_channel::Receiver<ExternalImportUpdate>>, ProtocolError> {
-    let (id, response) = link.command_with_id(Command::StartExternalImport {
-        project_id,
-        threads,
-    });
-    let (sender, receiver) = async_channel::unbounded();
-    routes.0.lock().unwrap().insert(id, sender);
-    match response.await {
-        Ok(CommandResponse::ExternalImportStarted(true)) => Ok(Some(receiver)),
-        Ok(CommandResponse::ExternalImportStarted(false)) => {
-            routes.0.lock().unwrap().remove(&id);
-            Ok(None)
-        }
-        Ok(other) => {
-            routes.0.lock().unwrap().remove(&id);
-            Err(ProtocolError {
-                code: "unexpected_response".into(),
-                message: format!("expected external-import started result, got {other:?}"),
-            })
-        }
-        Err(error) => {
-            routes.0.lock().unwrap().remove(&id);
-            Err(error)
-        }
-    }
-}
-
 #[cfg(any(test, feature = "test-support"))]
 fn transport_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError {
@@ -142,7 +102,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     let (event_tx, event_rx) = async_channel::unbounded::<String>();
     let (stopped_tx, stopped_rx) = smol::channel::bounded(1);
     let (mailbox_tx, mailbox_rx) = smol::channel::unbounded::<HostFn>();
-    let terminals = LocalTerminalRegistry::default();
     // The host owns the broker, including when started without a desktop.
     // Both local and remote WebViews answer the same serialized reverse RPC.
     let (preview_registration, preview_requests) = match services.preview.take() {
@@ -154,9 +113,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         None => (None, None),
     };
 
-    let import_routes = ImportRoutes::default();
-    let host_terminals = terminals.clone();
-    let host_import_routes = import_routes.clone();
     #[cfg(any(test, feature = "test-support"))]
     let test_mailbox = mailbox_tx.clone();
 
@@ -164,11 +120,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
     std::thread::Builder::new()
         .name("tcode-host".into())
         .spawn(move || {
-            let mut state = AppState::new_with_terminal_registry(
-                store,
-                host_terminals,
-                services.ai_title_generation,
-            );
+            let mut state = AppState::with_ai_titles(store, services.ai_title_generation);
             if let Some((url, tokens)) = preview_registration {
                 state.attach_preview_mcp(url, tokens);
             }
@@ -192,13 +144,7 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
             }
             state.sync_terminal_handles();
             let _ = ready_tx.send(());
-            smol::block_on(host_loop(
-                state,
-                cx,
-                client_rx,
-                mailbox_rx,
-                host_import_routes,
-            ));
+            smol::block_on(host_loop(state, cx, client_rx, mailbox_rx));
             let _ = stopped_tx.send_blocking(());
         })?;
     ready_rx.recv().map_err(|error| {
@@ -212,8 +158,6 @@ pub fn spawn_host(store: SessionStore, mut services: HostServices) -> std::io::R
         to_host: client_tx,
         from_host: event_rx,
         stopped: stopped_rx,
-        terminals,
-        import_routes,
         link: Arc::new(OnceLock::new()),
         #[cfg(any(test, feature = "test-support"))]
         test_mailbox,
@@ -225,7 +169,6 @@ async fn host_loop(
     mut cx: HostCx,
     client: smol::channel::Receiver<String>,
     mailbox: smol::channel::Receiver<HostFn>,
-    import_routes: ImportRoutes,
 ) {
     let mut domain_diff = DomainDiff::new(&state);
     loop {
@@ -240,9 +183,7 @@ async fn host_loop(
         {
             Input::Client(message) => match message {
                 Ok(line) => match decode_client_line(&line) {
-                    Ok(message) => {
-                        handle_client_message(&mut state, &mut cx, message, &import_routes)
-                    }
+                    Ok(message) => handle_client_message(&mut state, &mut cx, message),
                     Err(error) => cx.send_message(HostMessage::Ack {
                         id: malformed_message_id(&line).unwrap_or(0),
                         result: Err(error),
@@ -256,7 +197,7 @@ async fn host_loop(
             },
         }
         state.sync_terminal_handles();
-        state.reap_terminal_output();
+        state.reap_terminal_projections();
         domain_diff.emit_changes(&state, &mut cx);
     }
 }
@@ -268,18 +209,39 @@ fn malformed_message_id(line: &str) -> Option<u64> {
         .as_u64()
 }
 
-fn handle_client_message(
-    state: &mut AppState,
-    cx: &mut HostCx,
-    message: ClientMessage,
-    import_routes: &ImportRoutes,
-) {
-    let ClientMessage { id, payload } = message;
+pub(crate) fn handle_client_message(state: &mut AppState, cx: &mut HostCx, message: ClientMessage) {
+    let ClientMessage { id, payload, key } = message;
     match payload {
         ClientPayload::Command(command) => {
-            let outcome = dispatch_command(state, cx, id, command, import_routes);
+            let scoped_key = key.filter(|_| command.requires_delivery_key()).map(|key| {
+                let (device, key) = key.split_once(':').unwrap_or(("local", &key));
+                (device.to_owned(), key.to_owned())
+            });
+            if let Some((device, key)) = &scoped_key {
+                let mut completed = cx.completed.lock().unwrap();
+                if let Some(cache) = completed.get_mut(device)
+                    && let Some(index) = cache.iter().position(|(cached, _)| cached == key)
+                {
+                    let cached = cache.remove(index).unwrap();
+                    let result = cached.1.clone();
+                    cache.push_back(cached);
+                    cx.send_message(HostMessage::Ack { id, result });
+                    return;
+                }
+            }
+            cx.delivery_key = scoped_key.as_ref().map(|(_, key)| key.clone());
+            let outcome = dispatch_command(state, cx, command);
+            cx.delivery_key = None;
             match outcome {
                 CommandOutcome::Immediate(result) => {
+                    if let Some((device, key)) = scoped_key {
+                        let mut completed = cx.completed.lock().unwrap();
+                        let cache = completed.entry(device).or_default();
+                        cache.push_back((key, result.clone()));
+                        while cache.len() > 512 {
+                            cache.pop_front();
+                        }
+                    }
                     cx.send_message(HostMessage::Ack { id, result })
                 }
                 CommandOutcome::StoreBarrier(barrier) => {
@@ -329,46 +291,31 @@ fn handle_client_message(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn handle_client_message_for_test(
-    state: &mut AppState,
-    cx: &mut HostCx,
-    message: ClientMessage,
-) {
-    handle_client_message(state, cx, message, &ImportRoutes::default());
-}
-
 enum CommandOutcome {
     Immediate(Result<CommandResponse, ProtocolError>),
     StoreBarrier(smol::channel::Receiver<()>),
 }
 
-fn dispatch_command(
-    app: &mut AppState,
-    cx: &mut HostCx,
-    request_id: u64,
-    command: Command,
-    import_routes: &ImportRoutes,
-) -> CommandOutcome {
+fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
+    if let Err(error) = app.validate_command_target(&command) {
+        return CommandOutcome::Immediate(Err(error));
+    }
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
             if let Some(terminal) = app.terminal_handle(terminal_id) {
                 terminal.write_input(bytes);
             }
+            app.schedule_terminal_projection(terminal_id, cx);
         }
         Command::ResizeTerminal {
             terminal_id,
             cols,
             rows,
-        } => {
-            if let Some(terminal) = app.terminal_handle(terminal_id) {
-                terminal.resize(
-                    usize::from(cols.clamp(2, 1000)),
-                    usize::from(rows.clamp(2, 1000)),
-                );
-            }
-        }
+            cell_width,
+            cell_height,
+        } => app.resize_terminal(terminal_id, cols, rows, cell_width, cell_height, cx),
+        Command::ClearTerminal { terminal_id } => app.clear_terminal(terminal_id, cx),
         Command::PreviewReply {
             request_id,
             response,
@@ -477,38 +424,17 @@ fn dispatch_command(
             app.remove_review_comment(&session_id, index, cx)
         }
         Command::CycleProjectSort => app.cycle_project_sort(cx),
-        Command::CreateProject { root } => {
-            response = CommandResponse::ProjectId(app.create_project(root, cx));
-        }
+        Command::CreateProject { root } => match app.create_project(root, cx) {
+            Ok(project_id) => response = CommandResponse::ProjectId(Some(project_id)),
+            Err(error) => return CommandOutcome::Immediate(Err(error)),
+        },
         Command::StartExternalImport {
             project_id,
             threads,
-        } => {
-            let receiver = app.start_external_import(&project_id, threads, cx);
-            response = CommandResponse::ExternalImportStarted(receiver.is_some());
-            if let Some(receiver) = receiver {
-                let route = import_routes.0.lock().unwrap().get(&request_id).cloned();
-                let import_routes = import_routes.clone();
-                cx.spawn_detached(async move {
-                    if let Some(route) = route {
-                        while let Ok(update) = receiver.recv().await {
-                            if route.send(update).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    import_routes.0.lock().unwrap().remove(&request_id);
-                });
-            } else {
-                import_routes.0.lock().unwrap().remove(&request_id);
-            }
-        }
-        Command::FinishExternalImport { project_id } => app.finish_external_import(&project_id, cx),
-        Command::ExportThread {
-            session_id,
-            destination,
-            format,
-        } => app.export_thread(&session_id, destination, format, cx),
+        } => match app.start_external_import(&project_id, threads, cx) {
+            Ok(started) => response = CommandResponse::ExternalImportStarted(started),
+            Err(error) => return CommandOutcome::Immediate(Err(error)),
+        },
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
@@ -558,17 +484,32 @@ fn dispatch_command(
         } => app.steer(&session_id, text, attachment_paths, cx),
         Command::SteerQueued { session_id, id } => app.steer_queued(&session_id, id, cx),
         Command::DropQueued { session_id, id } => app.drop_queued(&session_id, id, cx),
-        Command::Interrupt { session_id } => app.interrupt(&session_id, cx),
+        Command::Interrupt { session_id } => {
+            return CommandOutcome::Immediate(
+                app.interrupt(&session_id, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::RespondApproval {
             session_id,
             request_id,
             decision,
-        } => app.respond_approval(&session_id, request_id, decision, cx),
+        } => {
+            return CommandOutcome::Immediate(
+                app.respond_approval(&session_id, request_id, decision, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::RespondUserInput {
             session_id,
             request_id,
             answers,
-        } => app.respond_user_input(&session_id, request_id, answers, cx),
+        } => {
+            return CommandOutcome::Immediate(
+                app.respond_user_input(&session_id, request_id, answers, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::SetActiveModel {
             session_id,
             provider,
@@ -624,11 +565,26 @@ fn dispatch_command(
 }
 
 fn dispatch_query(
-    app: &AppState,
-    cx: &HostCx,
+    app: &mut AppState,
+    cx: &mut HostCx,
     query: Query,
 ) -> crate::host::HostTask<Result<QueryResponse, ProtocolError>> {
     match query {
+        Query::SessionHistoryPage {
+            session_id,
+            before,
+            limit,
+        } => {
+            let result = app.session_history_page(&session_id, before, limit);
+            cx.spawn_background(async move { result })
+        }
+        Query::Hosting { .. } => cx.spawn_background(async {
+            Err(ProtocolError {
+                code: "unsupported".into(),
+                message: "this host has no remote hosting controls".into(),
+            })
+        }),
+        Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app
                 .resident(&session_id)
@@ -700,9 +656,30 @@ fn dispatch_query(
                     .map_err(io_protocol_error)
             })
         }
-        Query::IsDirectory { path } => {
-            let task = cx.unblock(move || path.is_dir());
-            cx.spawn_background(async move { Ok(QueryResponse::IsDirectory(task.await)) })
+        Query::RenderThreadExport { session_id, format } => {
+            app.render_thread_export(&session_id, format, cx)
+        }
+        Query::SearchSessionContent { query, limit } => {
+            let task = app.search_session_content(query, limit, cx);
+            cx.spawn_background(async move { Ok(QueryResponse::SessionContentHits(task.await)) })
+        }
+        Query::RenderStoredOutput {
+            session_id,
+            item_id,
+            cols,
+        } => {
+            let Some(output) = app.stored_command_output(&session_id, &item_id) else {
+                return cx.spawn_background(async move {
+                    Err(ProtocolError {
+                        code: "unknown_stored_output".into(),
+                        message: format!("no stored command output {item_id} in {session_id}"),
+                    })
+                });
+            };
+            let task = cx.unblock(move || crate::terminal::render_stored_output(&output, cols));
+            cx.spawn_background(
+                async move { Ok(QueryResponse::TerminalFrame(Box::new(task.await))) },
+            )
         }
     }
 }
@@ -739,6 +716,430 @@ mod tests {
             }
         }
         panic!("timed out waiting for host event");
+    }
+
+    #[test]
+    fn missing_session_send_is_rejected() {
+        let root = std::env::temp_dir().join(format!("tcode-rejected-{}", uuid::Uuid::new_v4()));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let error = host
+            .link()
+            .command_blocking(Command::SendTurn {
+                session_id: "missing".into(),
+                text: "must not disappear".into(),
+                attachment_paths: Vec::new(),
+            })
+            .expect_err("a missing session must reject the write");
+        assert_eq!(error.code, "unknown_session");
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_conversation_actions_are_rejected_over_the_pipe() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-stale-actions-{}", uuid::Uuid::new_v4()));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let link = host.link();
+        let CommandResponse::SessionId(Some(id)) = link
+            .command_blocking(Command::StartDraft {
+                project_id: "fixture".into(),
+                cwd: root.clone(),
+            })
+            .unwrap()
+        else {
+            panic!("draft id")
+        };
+        for (command, code) in [
+            (
+                Command::DeleteProfile {
+                    profile_id: "codex".into(),
+                },
+                "builtin_profile",
+            ),
+            (
+                Command::InstallAcpAgent {
+                    id: "nonexistent-registry-agent".into(),
+                },
+                "unknown_acp_agent",
+            ),
+            (
+                Command::MergeWorktree {
+                    session_id: id.clone(),
+                },
+                "no_worktree",
+            ),
+            (
+                Command::SplitTerminal {
+                    session_id: id.clone(),
+                    direction: tcode_core::ui::TerminalSplitDirection::Horizontal,
+                },
+                "terminal_split_unavailable",
+            ),
+            (
+                Command::CaptureTerminalSelection {
+                    session_id: id.clone(),
+                    terminal_id: 999,
+                    selection: None,
+                },
+                "no_selection",
+            ),
+            (
+                Command::RewindTurn {
+                    session_id: id.clone(),
+                    turn: 999,
+                    mode: agent::RewindMode::Files,
+                },
+                "rewind_unavailable",
+            ),
+            (
+                Command::RespondApproval {
+                    session_id: id.clone(),
+                    request_id: "gone".into(),
+                    decision: agent::ApprovalDecision::Approve,
+                },
+                "unknown_approval",
+            ),
+            (
+                Command::RespondApproval {
+                    session_id: id.clone(),
+                    request_id: "gone".into(),
+                    decision: agent::ApprovalDecision::Deny,
+                },
+                "unknown_approval",
+            ),
+            (
+                Command::RespondUserInput {
+                    session_id: id.clone(),
+                    request_id: "gone".into(),
+                    answers: Default::default(),
+                },
+                "unknown_user_input",
+            ),
+            (
+                Command::SteerQueued {
+                    session_id: id.clone(),
+                    id: 42,
+                },
+                "unknown_queued_message",
+            ),
+            (
+                Command::DropQueued {
+                    session_id: id.clone(),
+                    id: 42,
+                },
+                "unknown_queued_message",
+            ),
+            (
+                Command::Interrupt {
+                    session_id: id.clone(),
+                },
+                "no_running_turn",
+            ),
+            (
+                Command::ClearTerminal { terminal_id: 999 },
+                "unknown_terminal",
+            ),
+            (
+                Command::ActivateTerminal {
+                    session_id: id.clone(),
+                    terminal_id: 999,
+                },
+                "unknown_terminal",
+            ),
+            (
+                Command::RemoveTerminalContext {
+                    session_id: id.clone(),
+                    context_id: 999,
+                },
+                "unknown_terminal_context",
+            ),
+            (
+                Command::RemoveReviewComment {
+                    session_id: id.clone(),
+                    index: 0,
+                },
+                "unknown_review_comment",
+            ),
+            (
+                Command::ImplementPlan {
+                    session_id: id.clone(),
+                },
+                "unknown_plan",
+            ),
+            (
+                Command::DismissPlan {
+                    session_id: id.clone(),
+                },
+                "unknown_plan",
+            ),
+            (
+                Command::DeleteProject {
+                    project_id: "gone".into(),
+                },
+                "unknown_project",
+            ),
+            (
+                Command::DeleteProfile {
+                    profile_id: "gone".into(),
+                },
+                "unknown_profile",
+            ),
+            (
+                Command::RenameSession {
+                    session_id: "gone".into(),
+                    title: "lost".into(),
+                },
+                "unknown_session",
+            ),
+        ] {
+            let error = link
+                .command_blocking(command.clone())
+                .expect_err("stale action must reject");
+            assert_eq!(error.code, code, "{command:?}");
+        }
+        for command in [
+            Command::ScheduleTurn {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+                fire_at_unix_secs: 1,
+            },
+            Command::Steer {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+            },
+            Command::ConfirmRelayAndSend {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+            },
+            Command::OrchestrateTurn {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                link.command_blocking(command).unwrap_err().code,
+                "unknown_session"
+            );
+        }
+        drop(link);
+        host.shutdown_blocking().unwrap();
+        // Windows may still hold the draft's files for a moment after shutdown;
+        // a leftover temp dir is not a test failure.
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Export rendering is host work and delivery is the client's, so the query
+    /// must hand back the complete artifact and leave nothing behind on the
+    /// host — including for a client whose filesystem the host cannot reach.
+    #[test]
+    fn rendering_a_thread_export_returns_the_whole_artifact_and_writes_nothing() {
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-export-query-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            data_root.join("workspace"),
+            Some("opus".into()),
+        );
+        meta.id = "export-session".into();
+        meta.title = "Export: fixture/thread".into();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &agent::AgentEvent::Warning {
+                    message: "recorded".into(),
+                },
+            )
+            .expect("append event");
+        store.upsert_meta(&meta).expect("write meta");
+        let event_log = store.read_event_log(&meta.id).expect("read event log");
+
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let before = tree_snapshot(&data_root);
+        let link = host.link();
+
+        let QueryResponse::ThreadExport {
+            bytes,
+            suggested_name,
+            mime,
+        } = smol::block_on(link.query(Query::RenderThreadExport {
+            session_id: meta.id.clone(),
+            format: tcode_protocol::ThreadExportFormat::Jsonl,
+        }))
+        .expect("render export over the pipe")
+        else {
+            panic!("unexpected export response");
+        };
+
+        // The JSONL artifact is a metadata header line followed by the session's
+        // own append-only log, byte for byte.
+        let split = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .expect("header line");
+        let header: serde_json::Value =
+            serde_json::from_slice(&bytes[..split]).expect("header is JSON");
+        assert_eq!(header["type"], "tcode_thread");
+        assert_eq!(header["version"], 1);
+        assert_eq!(header["meta"]["id"], "export-session");
+        assert_eq!(header["attachments"], "references_only");
+        assert_eq!(header["redaction"], "none");
+        assert_eq!(&bytes[split + 1..], event_log.as_slice());
+
+        // The name is safe on any client OS; the host's title had a separator in it.
+        assert_eq!(suggested_name, "Export- fixture-thread.jsonl");
+        assert_eq!(mime, "application/x-ndjson");
+
+        assert_eq!(
+            tree_snapshot(&data_root),
+            before,
+            "rendering an export must not write anything on the host"
+        );
+
+        let missing = smol::block_on(link.query(Query::RenderThreadExport {
+            session_id: "nope".into(),
+            format: tcode_protocol::ThreadExportFormat::Markdown,
+        }))
+        .expect_err("unknown session must be refused");
+        assert_eq!(missing.code, "unknown_session");
+
+        link.shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        std::fs::remove_dir_all(data_root).expect("remove test data");
+    }
+
+    /// Stored command output is re-wrapped by the host, not by the client: the
+    /// same item asked for at two widths comes back as two grids, each carrying
+    /// the styles the shell wrote.
+    #[test]
+    fn rendering_stored_output_rewraps_at_the_requested_width() {
+        use tcode_protocol::terminal::{CellFlags, TerminalColor};
+
+        let data_root =
+            std::env::temp_dir().join(format!("tcode-stored-output-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(data_root.clone()).expect("open session store");
+        let mut meta = tcode_core::project::SessionMeta::new(
+            agent::ProviderKind::ClaudeCode,
+            data_root.join("workspace"),
+            Some("opus".into()),
+        );
+        meta.id = "stored-output-session".into();
+        store
+            .append_event(
+                &meta.id,
+                1,
+                &agent::AgentEvent::ItemCompleted(agent::ThreadItem {
+                    id: "cmd-1".into(),
+                    parent_item_id: None,
+                    content: agent::ItemContent::CommandExecution {
+                        command: "echo red".into(),
+                        // Bold red, 25 characters: it fits one 40-column row and
+                        // wraps onto a second at 20.
+                        output: "\u{1b}[1;31mabcdefghijklmnopqrstuvwxy\u{1b}[0m".into(),
+                        exit_code: Some(0),
+                        status: agent::ItemStatus::Completed,
+                    },
+                }),
+            )
+            .expect("append event");
+        store.upsert_meta(&meta).expect("write meta");
+
+        let host = spawn_host(store, HostServices::default()).expect("spawn host");
+        let link = host.link();
+        // The host only renders what it has folded; a client reads a thread by
+        // subscribing to it, which is what makes the timeline resident.
+        link.subscribe(tcode_protocol::Subscription {
+            topic: Topic::SessionEvents {
+                session_id: meta.id.clone(),
+            },
+            after: None,
+        })
+        .expect("subscribe to the session");
+
+        let frame = |cols: u16| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match smol::block_on(link.query(Query::RenderStoredOutput {
+                    session_id: meta.id.clone(),
+                    item_id: "cmd-1".into(),
+                    cols,
+                })) {
+                    Ok(QueryResponse::TerminalFrame(frame)) => return *frame,
+                    Ok(other) => panic!("unexpected stored-output response: {other:?}"),
+                    Err(error) if std::time::Instant::now() < deadline => {
+                        assert_eq!(error.code, "unknown_stored_output");
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("stored output never became readable: {error:?}"),
+                }
+            }
+        };
+
+        let narrow = frame(40);
+        assert_eq!((narrow.cols, narrow.rows), (40, 1));
+        assert_eq!(narrow.visible[0].cells[20].text, "u");
+        let style = narrow.style(&narrow.visible[0].cells[0]);
+        assert_eq!(style.fg, TerminalColor::Indexed(1));
+        assert!(style.flags().contains(CellFlags::BOLD));
+
+        let narrower = frame(20);
+        assert_eq!((narrower.cols, narrower.rows), (20, 2));
+        assert_eq!(narrower.visible[1].cells[0].text, "u");
+        assert!(narrower.history.is_empty() && narrower.cursor.is_none());
+
+        // A width no screen has is answered at the nearest one the host renders.
+        assert_eq!(frame(4).cols, 20);
+        assert_eq!(frame(4000).cols, 400);
+
+        let missing = smol::block_on(link.query(Query::RenderStoredOutput {
+            session_id: meta.id.clone(),
+            item_id: "no-such-item".into(),
+            cols: 80,
+        }))
+        .expect_err("an unknown item must be refused");
+        assert_eq!(missing.code, "unknown_stored_output");
+
+        link.shutdown_blocking().expect("stop host");
+        host.stopped.recv_blocking().expect("host thread stopped");
+        drop(host);
+        std::fs::remove_dir_all(data_root).expect("remove test data");
+    }
+
+    /// Every path under `root`, sorted, with its length — enough to catch a
+    /// stray write without depending on file order.
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, u64)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                match entry.metadata() {
+                    Ok(metadata) if metadata.is_dir() => walk(&path, out),
+                    Ok(metadata) => out.push((path, metadata.len())),
+                    Err(_) => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
     }
 
     #[test]
@@ -815,41 +1216,71 @@ mod tests {
                 .any(|project| project.id == project_id && project.root == project_root)
         );
 
-        let import_progress = smol::block_on(start_external_import(
-            &link,
-            &host.import_routes,
-            project_id.clone(),
-            Vec::new(),
-        ))
-        .expect("start import over command")
-        .expect("known project starts an import");
+        // Subscribe before starting: the empty run completes immediately, so a
+        // client that only reacted to a post-start reply could miss it.
+        link.subscribe(Subscription {
+            after: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.clone(),
+            },
+        })
+        .expect("subscribe to import status");
+        assert!(matches!(
+            next_event(&events, |event| matches!(
+                event.topic,
+                Topic::ExternalImport { .. }
+            ))
+            .event,
+            ServerEvent::ExternalImportStatusReplaced { status: None, .. }
+        ));
         assert_eq!(
-            import_progress
-                .recv_blocking()
-                .expect("receive construction-bus progress"),
-            ExternalImportUpdate::Finished {
+            link.command_blocking(Command::StartExternalImport {
+                project_id: project_id.clone(),
+                threads: Vec::new(),
+            })
+            .expect("start import over command"),
+            CommandResponse::ExternalImportStarted(true)
+        );
+        let finished = next_event(&events, |event| {
+            matches!(
+                &event.event,
+                ServerEvent::ExternalImportStatusReplaced {
+                    status: Some(status),
+                    ..
+                } if matches!(status.state, tcode_protocol::ExternalImportState::Finished { .. })
+            )
+        });
+        let ServerEvent::ExternalImportStatusReplaced {
+            status: Some(status),
+            ..
+        } = finished.event
+        else {
+            unreachable!("filtered to finished import statuses")
+        };
+        assert_eq!(
+            status.state,
+            tcode_protocol::ExternalImportState::Finished {
                 imported: 0,
                 skipped: 0,
             }
         );
-        assert!(
-            smol::block_on(start_external_import(
-                &link,
-                &host.import_routes,
-                "missing".into(),
-                Vec::new(),
-            ))
-            .expect("unknown import command response")
-            .is_none()
+        assert_eq!(
+            link.command_blocking(Command::StartExternalImport {
+                project_id: "missing".into(),
+                threads: Vec::new(),
+            })
+            .expect("unknown import command response"),
+            CommandResponse::ExternalImportStarted(false)
         );
 
-        assert_eq!(
-            smol::block_on(link.query(Query::IsDirectory {
-                path: project_root.clone(),
-            }))
-            .expect("query directory over pipe"),
-            QueryResponse::IsDirectory(true)
-        );
+        // A path the client believes in but the host cannot resolve is refused
+        // by the host, not by whatever OS the client happens to run.
+        let rejected = link
+            .command_blocking(Command::CreateProject {
+                root: project_root.join("does-not-exist"),
+            })
+            .expect_err("missing project root must be refused");
+        assert_eq!(rejected.code, "invalid_project_root");
         assert_eq!(
             smol::block_on(link.query(Query::ListActiveWorkspace {
                 session_id: "missing".into()
@@ -871,3 +1302,8 @@ mod tests {
 #[cfg(test)]
 #[path = "pipe_p4b_tests.rs"]
 mod p4b_tests;
+
+#[cfg(test)]
+#[path = "terminal_replication_tests.rs"]
+#[cfg(unix)]
+mod terminal_replication_tests;

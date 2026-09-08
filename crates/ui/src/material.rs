@@ -2,8 +2,11 @@
 //! Reading surfaces remain near-opaque over the translucent window canvas;
 //! semantic colors come from the active theme.
 
+use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
+use crate::touch_scroll::TouchScrollExt as _;
 use crate::widgets::Popover;
+use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, BoxShadow, Div, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -18,6 +21,13 @@ pub(crate) const CHAT_ACTION_ROW_HEIGHT: f32 = 24.;
 pub(crate) const CHAT_CONTENT_MAX_WIDTH: f32 = 720.;
 /// Minimum horizontal padding around the shared chat/composer content column.
 pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
+/// The compact layout's page inset: content is held this far clear of both
+/// window edges. Cards inside that content inset a further [`CARD_INSET`].
+pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;
+/// Padding inside a card, chip or notice that already sits within a page inset.
+pub(crate) const CARD_INSET: f32 = 12.;
+/// The smallest square a finger can reliably hit.
+pub(crate) const TOUCH_TARGET: f32 = 44.;
 
 fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     Rgba {
@@ -72,7 +82,7 @@ pub fn radius_composer() -> Pixels {
 }
 /// The phone's bottom sheet, top corners only.
 pub fn radius_overlay_sheet() -> Pixels {
-    px(14.)
+    px(16.)
 }
 
 /// A T3 overlay popover: one panel surface at the overlay radius with the
@@ -139,6 +149,56 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
         }
     }
     group
+}
+
+/// One row of a navigable content list — a thread, a machine, a project. Plain
+/// rows on the page, not a card: 56pt of touch target at the page inset, with
+/// a hover fill on a pointer and a pressed tint everywhere.
+///
+/// Settings-like forms use [`grouped`] instead; see the list-style rule in
+/// `docs/DESIGN.md`.
+pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stateful<Div> {
+    accessible_clickable(gpui_base::h_flex(), id, Role::Button, label, cx)
+        .w_full()
+        .min_h(px(56.))
+        .px(px(COMPACT_PAGE_INSET))
+        .py(px(8.))
+        .gap_3()
+        .items_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(cx.theme().list_hover))
+        .active(|style| style.bg(cx.theme().list_active))
+}
+
+/// The caption above one section of a navigable content list.
+pub fn list_caption(label: SharedString, cx: &App) -> Div {
+    div()
+        .w_full()
+        .px(px(COMPACT_PAGE_INSET))
+        .pt(px(12.))
+        .pb(px(4.))
+        .text_size(px(13.))
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(label)
+}
+
+/// Stack [`list_row`]s with a hairline between them, indented to the text.
+pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
+    let mut list = v_flex().w_full();
+    let last = rows.len().saturating_sub(1);
+    for (index, row) in rows.into_iter().enumerate() {
+        list = list.child(row);
+        if index != last {
+            list = list.child(
+                div()
+                    .w_full()
+                    .pl(px(COMPACT_PAGE_INSET))
+                    .child(div().w_full().h(px(1.)).bg(cx.theme().border.opacity(0.6))),
+            );
+        }
+    }
+    list
 }
 
 /// Shared wordmark and DEV channel badge.
@@ -233,7 +293,10 @@ pub fn empty_state(
 
 /// Track for [`segment`] controls. Long labels scroll horizontally instead
 /// of clipping; shorter groups divide the available width.
-pub fn segmented_track(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
+pub(crate) fn segmented_track(
+    id: impl Into<ElementId>,
+    cx: &App,
+) -> crate::touch_scroll::Registered<Stateful<Div>> {
     gpui_base::h_flex()
         .id(id)
         .h(px(40.))
@@ -242,7 +305,7 @@ pub fn segmented_track(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
         .p(px(3.))
         .rounded(px(10.))
         .bg(cx.theme().secondary)
-        .overflow_x_scroll()
+        .touch_overflow_x_scroll()
 }
 
 /// One segment of a [`segmented_track`]. The selected segment is a T3 solid
@@ -274,6 +337,54 @@ pub fn segment(
         })
         .when(!selected, |el| el.text_color(cx.theme().muted_foreground))
         .child(div().flex_none().child(label))
+}
+
+/// A panel toolbar's icon control. Compact toolbars owe a finger a
+/// [`TOUCH_TARGET`] square, so the icon is passed as a *child*: `Button` scales
+/// whatever `icon()` receives from its own size, which would blow a 44pt button
+/// up to a 33pt glyph. The desktop keeps its dense control.
+pub fn toolbar_icon_button(
+    id: impl Into<ElementId>,
+    icon: crate::icon::IconName,
+    tooltip: impl Into<SharedString>,
+    compact: bool,
+) -> Button {
+    let tooltip = tooltip.into();
+    if compact {
+        Button::new(id)
+            .ghost()
+            .aria_label(tooltip.clone())
+            .tooltip(tooltip)
+            .with_size(px(TOUCH_TARGET))
+            .size(px(TOUCH_TARGET))
+            .child(crate::icon::Icon::new(icon).size(px(20.)))
+    } else {
+        Button::new(id)
+            .ghost()
+            .small()
+            .compact()
+            .icon(icon)
+            .tooltip(tooltip)
+    }
+}
+
+/// The indented body under a work-log row, a plan or a file edit: a hairline
+/// rail 8pt in from the column, with its content another 14pt clear of it.
+///
+/// The 8pt is padding on a full-width wrapper, never a margin on the rail
+/// itself: a `w_full` box with `ml_2` is 8pt *wider* than the column it sits in,
+/// and on a compact page that is 8pt straight off the edge.
+pub fn rail_detail(content: impl IntoElement, cx: &App) -> Div {
+    div().w_full().min_w_0().pl_2().child(
+        div()
+            .w_full()
+            .min_w_0()
+            .pl(px(14.))
+            .py_0p5()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .child(content),
+    )
 }
 
 pub fn semantic_chip(label: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> Div {
@@ -327,6 +438,39 @@ pub fn accessible_clickable(
         .id(id)
         .role(role)
         .aria_label(label)
+}
+
+/// Neutral rows shared by unhydrated workspace and conversation views.
+pub fn loading_skeleton(cx: &gpui::App) -> gpui::AnyElement {
+    v_flex()
+        .id("baseline-loading")
+        .debug_selector(|| "baseline-loading".into())
+        .flex_1()
+        .px(px(COMPACT_PAGE_INSET))
+        .pt(px(8.))
+        .gap(px(4.))
+        .children((0..3).map(|_| {
+            v_flex()
+                .h(px(56.))
+                .justify_center()
+                .gap(px(8.))
+                .opacity(0.3)
+                .child(
+                    div()
+                        .w(gpui::relative(0.7))
+                        .h(px(14.))
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary),
+                )
+                .child(
+                    div()
+                        .w(gpui::relative(0.35))
+                        .h(px(11.))
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary),
+                )
+        }))
+        .into_any_element()
 }
 
 #[cfg(test)]

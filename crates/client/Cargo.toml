@@ -10,6 +10,16 @@ log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
+futures-lite = "2"
+web-time = "1"
+uuid = { version = "1", features = ["v4", "js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-io = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
 
 [dev-dependencies]
 smol = "2"

@@ -6,21 +6,37 @@
   <link rel="icon" href="data:,">
   <title>tcode remote client</title>
   <style>
-    :root { color-scheme: dark; background: #111318; color: #f2f3f5; font: 14px system-ui, sans-serif; }
+    :root { color-scheme: light dark; background: #111318; color: #f2f3f5; font: 14px system-ui, sans-serif; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
     canvas { position: absolute; inset: 0; display: block; width: 100% !important; height: 100% !important; outline: none; }
+    [hidden] { display: none !important; }
+    #auth { position: absolute; inset: 0; margin: auto; height: fit-content; max-height: calc(100% - 48px); overflow-y: auto; max-width: 360px; padding: 24px; display: grid; gap: 16px; }
+    #auth h1, #auth p { margin: 0; }
+    #auth h1 { font-size: 24px; }
+    #auth p { line-height: 1.5; color: #a9abb5; }
+    #auth label { display: grid; gap: 8px; }
+    #auth input, #auth button { box-sizing: border-box; width: 100%; min-height: 44px; padding: 10px 12px; border-radius: 8px; border: 1px solid #555963; font: inherit; }
+    #auth input { color: inherit; background: #1b1e24; }
+    #auth button { background: #e9edf5; color: #111318; cursor: pointer; }
+    #auth :focus-visible { outline: 2px solid #8caeff; outline-offset: 3px; }
+    #auth [role=alert] { color: #ffa8a8; }
+    @media (prefers-color-scheme: light) {
+      :root { background: #f7f6f2; color: #22242b; }
+      #auth p { color: #60636b; } #auth input { background: white; }
+      #auth button { background: #272b35; color: white; } #auth [role=alert] { color: #a52424; }
+    }
     #loading, noscript { position: absolute; inset: 0; display: grid; place-content: center; white-space: pre-wrap; padding: 24px; }
   </style>
 </head>
 <body>
   <canvas id="tcode-canvas"></canvas>
-  <p id="loading" role="status">Loading tcode…
-首次打开 HTTPS 执行端时，浏览器会显示自签名证书提示。核对执行端地址后，在高级选项中继续；同一浏览器通常只需接受一次。
-On first HTTPS access, your browser shows a self-signed certificate warning. Check the host address, then continue in Advanced; acceptance is normally needed once.</p>
+  <p id="loading" role="status">Loading tcode…</p>
   <noscript>Enable JavaScript to use tcode.</noscript>
   <script type="module">
     import init, { start } from './tcode_web.js';
+    import { authorizeBrowser } from './auth.mjs';
     try {
+      await authorizeBrowser();
       await init();
       await start('tcode-canvas');
     } catch (error) {

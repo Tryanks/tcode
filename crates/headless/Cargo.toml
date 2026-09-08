@@ -12,6 +12,7 @@ default = []
 web = []
 
 [dependencies]
+env_logger = "0.11"
 mcp-host = { path = "../mcp-host" }
 orchestrate-mcp = { path = "../orchestrate-mcp" }
 preview-mcp = { path = "../preview-mcp" }

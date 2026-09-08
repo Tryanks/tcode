@@ -62,6 +62,11 @@ jobs:
       - name: Plan affected Cargo work
         id: rail
         if: steps.classify.outputs.skip != 'true'
+        # cargo-rail 0.25.0 rejects a `--since` plan whose diff contains a
+        # rename ("planning file changes are not strictly sorted"). The exact
+        # `--from/--to` plan below is authoritative for pull requests anyway,
+        # so tolerate the failure and only fall back for the plan reader.
+        continue-on-error: true
         uses: loadingalias/cargo-rail-action@78ad385a85627484a5b634cf1bc3caa1de872c6a # v8.2.0
         with:
           version: 0.25.0
@@ -79,7 +84,13 @@ jobs:
           PLAN_DIR: ${{ runner.temp }}/ci-plan
         run: |
           mkdir "$PLAN_DIR"
-          cp "$PLAN_READER" "$PLAN_DIR/read.py"
+          if [[ -n "$PLAN_READER" && -f "$PLAN_READER" ]]; then
+            cp "$PLAN_READER" "$PLAN_DIR/read.py"
+          else
+            [[ -n "$BASE" ]] || { echo "cargo-rail planning failed and no exact commit pair is available"; exit 1; }
+            curl -fsSL "https://raw.githubusercontent.com/loadingalias/cargo-rail-action/78ad385a85627484a5b634cf1bc3caa1de872c6a/scripts/plan.py" \
+              -o "$PLAN_DIR/read.py"
+          fi
           if [[ -n "$BASE" ]]; then
             cargo rail plan --json --from "$BASE" --to "$HEAD_COMMIT" > "$PLAN_DIR/plan.json"
           else

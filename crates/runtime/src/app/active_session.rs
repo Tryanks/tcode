@@ -12,6 +12,7 @@ pub struct QueuedMessage {
     /// Stable per-session id, so the UI can address a row for steer/drop even
     /// as earlier entries are dispatched out from under it.
     pub id: u64,
+    pub(super) delivery_key: Option<String>,
     pub text: String,
     /// Provider-only context for the first turn after a relay. The canonical
     /// user event continues to record only `text`.
@@ -89,6 +90,7 @@ pub(super) fn attachment_paths(attachments: &[Attachment]) -> Vec<String> {
 impl From<&str> for QueuedMessage {
     fn from(text: &str) -> Self {
         QueuedMessage {
+            delivery_key: None,
             id: 0,
             text: text.to_string(),
             relay_transcript: None,
@@ -416,6 +418,7 @@ impl ActiveSession {
         let context_len = std::mem::take(&mut self.pending_context_len);
         let context_window_changed = self.context_window_change();
         self.queue.push(QueuedMessage {
+            delivery_key: None,
             id,
             text,
             relay_transcript: None,
@@ -462,6 +465,7 @@ impl ActiveSession {
         self.next_queue_id += 1;
         let options = self.turn_options();
         self.queue.push(QueuedMessage {
+            delivery_key: None,
             id,
             text,
             relay_transcript: None,

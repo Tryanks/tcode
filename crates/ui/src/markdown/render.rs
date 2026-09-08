@@ -1051,7 +1051,7 @@ fn horizontal_scroll_area(
 ) -> impl IntoElement {
     let scroll = state.read(cx).scroll.clone();
     let state = state.clone();
-    div()
+    let area = div()
         .id(id)
         .w_full()
         .relative()
@@ -1085,7 +1085,8 @@ fn horizontal_scroll_area(
             if axis == ScrollGestureAxis::Horizontal {
                 cx.stop_propagation();
             }
-        })
+        });
+    crate::touch_scroll::register(area, crate::touch_scroll::Handle::Scroll(scroll))
 }
 
 #[cfg(test)]

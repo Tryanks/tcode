@@ -20,6 +20,8 @@ impl ProtocolError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientMessage {
     pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub payload: ClientPayload,
 }
 

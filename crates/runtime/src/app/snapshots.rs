@@ -178,42 +178,20 @@ impl AppState {
             Topic::SessionStatus { session_id } => {
                 ServerEvent::SessionStatusReplaced(self.session_status_snapshot(session_id)?)
             }
-            Topic::SessionEvents { session_id } => {
-                let stored;
-                let records = if let Some(records) = self.event_records.get(session_id) {
-                    records.as_slice()
-                } else {
-                    stored = self.store.read_events(session_id);
-                    &stored
-                };
-                let from = subscription
-                    .after
-                    .filter(|after| *after <= records.len() as u64)
-                    .unwrap_or(0);
-                ServerEvent::SessionSnapshot {
-                    from,
-                    records: records[from as usize..].to_vec(),
-                }
-            }
+            Topic::SessionEvents { .. } => self.session_events_snapshot(subscription),
             Topic::RuntimeEvents => return None,
             Topic::Preview { .. } => return None,
-            Topic::Terminal { terminal_id } => {
-                let terminal = self.terminal_handle(*terminal_id)?;
-                let (cols, rows) = terminal.grid().dimensions();
-                ServerEvent::TerminalOutput {
-                    terminal_id: *terminal_id,
-                    bytes: self
-                        .terminal_output
-                        .get(terminal_id)?
-                        .bytes
-                        .iter()
-                        .copied()
-                        .collect(),
-                    reset: true,
-                    cols: cols as u16,
-                    rows: rows as u16,
-                }
-            }
+            // Retained latest-run status, so a client that subscribes after a
+            // fast completion still recovers the outcome. `None` means no run
+            // has ever started for this project.
+            Topic::ExternalImport { project_id } => ServerEvent::ExternalImportStatusReplaced {
+                project_id: project_id.clone(),
+                status: self.external_imports.get(project_id).cloned(),
+            },
+            Topic::Terminal { terminal_id } => ServerEvent::TerminalFrame {
+                terminal_id: *terminal_id,
+                frame: Box::new(self.terminal_frame(*terminal_id)?),
+            },
         };
         Some(EventEnvelope {
             request_id: None,
@@ -269,6 +247,7 @@ impl AppState {
                 .queue
                 .iter()
                 .map(|message| QueuedMessageStatus {
+                    delivery_key: message.delivery_key.clone(),
                     id: message.id,
                     text: message.text.clone(),
                     fire_at_unix_secs: message.not_before.and_then(|time| {

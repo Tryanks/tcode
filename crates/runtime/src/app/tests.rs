@@ -5664,7 +5664,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // Stop. The provider reports an error and an interrupted turn while
         // preserving the complete multi-line error for later presentation.
-        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx);
+        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx).expect("interrupt delivered");
         assert!(matches!(
             commands_a.try_recv(),
             Ok(SessionCommand::Interrupt)
@@ -6588,7 +6588,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         let snapshot = events.try_recv().unwrap();
-        let ServerEvent::SessionSnapshot { from, records } = snapshot.event else {
+        let ServerEvent::SessionSnapshot { from, records, .. } = snapshot.event else {
             panic!("expected tail")
         };
         assert_eq!(from, 1);
@@ -6606,7 +6606,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         .unwrap();
         link.command_blocking(Command::ClearRelaunchMarker).unwrap();
         assert!(
-            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records } if records.len() == 3)
+            matches!(events.try_recv().unwrap().event, ServerEvent::SessionSnapshot { from: 0, records, .. } if records.len() == 3)
         );
     }
     assert!(
@@ -6616,4 +6616,167 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
     one.shutdown_blocking().unwrap();
     host.to_host.close();
     host.stopped.recv_blocking().unwrap();
+}
+
+#[test]
+fn session_history_snapshot_pages_and_absolute_tail_cursors() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-pages");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        let records: Vec<SessionEventRecord> = (0..2000)
+            .map(|index| SessionEventRecord {
+                ts: Some(index),
+                event: AgentEvent::Warning {
+                    message: format!("event {index}"),
+                },
+            })
+            .collect();
+        state.event_records.insert("large".into(), records.clone());
+        let subscription = tcode_protocol::Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "large".into(),
+            },
+            after: None,
+        };
+        let snapshot = state.subscription_snapshot(&subscription).unwrap();
+        assert!(
+            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
+                .unwrap()
+                .len()
+                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
+        );
+        let ServerEvent::SessionSnapshot {
+            from,
+            records: tail,
+            total,
+            truncated,
+            ..
+        } = snapshot.event
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!((from, total, truncated), (1600, 2000, false));
+        assert_eq!(tail, records[1600..]);
+        let mut before = from;
+        let mut loaded = tail;
+        while before > 0 {
+            let QueryResponse::SessionHistoryPage {
+                records: page,
+                from,
+                truncated,
+            } = state.session_history_page("large", before, 200).unwrap()
+            else {
+                panic!("page")
+            };
+            assert!(!truncated);
+            assert_eq!(from + page.len() as u64, before);
+            loaded.splice(0..0, page);
+            before = from;
+        }
+        assert_eq!(loaded, records);
+        for after in [0, 17, 1800, 1999, 2000] {
+            let snapshot = state
+                .subscription_snapshot(&tcode_protocol::Subscription {
+                    after: Some(after),
+                    ..subscription.clone()
+                })
+                .unwrap();
+            let ServerEvent::SessionSnapshot {
+                from,
+                records: tail,
+                ..
+            } = snapshot.event
+            else {
+                panic!("tail")
+            };
+            assert_eq!(from, after);
+            assert_eq!(tail, records[after as usize..]);
+        }
+    });
+}
+
+#[test]
+fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-byte-budget");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        let records: Vec<SessionEventRecord> = (0..10)
+            .map(|index| SessionEventRecord {
+                ts: Some(index),
+                event: AgentEvent::Warning {
+                    message: "x".repeat(1024 * 1024),
+                },
+            })
+            .collect();
+        state.event_records.insert("large".into(), records.clone());
+        let subscription = tcode_protocol::Subscription {
+            topic: Topic::SessionEvents {
+                session_id: "large".into(),
+            },
+            after: None,
+        };
+        let mut snapshot = state.subscription_snapshot(&subscription).unwrap();
+        snapshot.request_id = Some(u64::MAX);
+        assert!(
+            tcode_protocol::encode_line(&HostMessage::Event(snapshot.clone()))
+                .unwrap()
+                .len()
+                <= tcode_protocol::MAX_SESSION_HISTORY_BYTES
+        );
+        let ServerEvent::SessionSnapshot {
+            from,
+            records: tail,
+            truncated,
+            ..
+        } = snapshot.event
+        else {
+            panic!("snapshot")
+        };
+        assert!(truncated);
+        assert_eq!(tail, records[from as usize..]);
+        let response = state.session_history_page("large", 10, u32::MAX).unwrap();
+        let line = tcode_protocol::encode_line(&HostMessage::QueryResult {
+            id: u64::MAX,
+            result: Ok(response.clone()),
+        })
+        .unwrap();
+        assert!(line.len() <= tcode_protocol::MAX_SESSION_HISTORY_BYTES);
+        let QueryResponse::SessionHistoryPage {
+            from,
+            records: page,
+            truncated,
+        } = response
+        else {
+            panic!("page")
+        };
+        assert!(truncated);
+        assert_eq!(page, records[from as usize..]);
+        let snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                after: Some(0),
+                ..subscription
+            })
+            .unwrap();
+        let ServerEvent::SessionSnapshot {
+            from,
+            records: tail,
+            truncated,
+            ..
+        } = snapshot.event
+        else {
+            panic!("tail")
+        };
+        assert_eq!(from, 0);
+        assert!(truncated);
+        assert_eq!(tail, records[..tail.len()]);
+        state.event_records.get_mut("large").unwrap()[9].event = AgentEvent::Warning {
+            message: "x".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
+        };
+        assert_eq!(
+            state.session_history_page("large", 10, 1).unwrap_err().code,
+            "history_record_too_large"
+        );
+    });
 }

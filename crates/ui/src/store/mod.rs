@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
-use tcode_client::{ConnectionState, HostLink};
+use tcode_client::{
+    ConnectionState, HostLink,
+    host::{ClientHost, ClientPreferences},
+};
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
     project::{
@@ -14,32 +18,25 @@ use tcode_core::{
     session::{EntryContent, ReviewComment, StoredEvent, Timeline},
     settings::{
         BrowserSettings, ProjectSort, ProviderSettings, ResolvedProfile, Settings, SidebarLayout,
+        ThemeMode,
     },
     ui::{ConversationDestination, RightTab},
 };
-#[cfg(feature = "desktop")]
-use tcode_protocol::ExternalThread;
 use tcode_protocol::{AcpMarketplaceItem, RuntimeNotification as RuntimeEvent};
 use tcode_protocol::{
-    EventEnvelope, GitDiffResult, GitDiffScope, GitStatusStatus, PathEntry, ProviderVersionStatus,
-    ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionStatus, Subscription,
-    Topic,
+    Command, CommandResponse, EventEnvelope, ExternalImportStatus, ExternalThread, GitDiffResult,
+    GitDiffScope, GitStatusStatus, PathEntry, ProtocolError, ProviderVersionStatus,
+    ProvidersStatus, Query, QueryResponse, RecentDir, ServerEvent, SessionSearchHit, SessionStatus,
+    Subscription, TerminalFrame, Topic,
 };
-#[cfg(all(feature = "local-host", feature = "desktop"))]
-use tcode_runtime::pipe::{ImportRoutes, start_external_import};
-#[cfg(all(feature = "local-host", feature = "terminal"))]
-use tcode_runtime::terminal::LocalTerminalRegistry;
-#[cfg(feature = "terminal")]
-mod terminal;
-#[cfg(feature = "desktop")]
-use tcode_services::import::ExternalImportUpdate;
-#[cfg(feature = "terminal")]
+pub(crate) mod terminal;
 pub(crate) use terminal::ClientTerminal;
-#[cfg(feature = "terminal")]
 use terminal::TerminalWorkspace;
 
 use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
+mod history;
+pub(crate) use history::HISTORY_WINDOW_SCREENS;
 mod images;
 mod intents;
 pub(crate) use images::host_image;
@@ -61,6 +58,7 @@ pub enum TopicKind {
     ActiveSession,
     Terminal,
     Preview,
+    ExternalImport,
 }
 
 impl From<&Topic> for TopicKind {
@@ -75,6 +73,7 @@ impl From<&Topic> for TopicKind {
             Topic::RuntimeEvents => Self::RuntimeEvents,
             Topic::Terminal { .. } => Self::Terminal,
             Topic::Preview { .. } => Self::Preview,
+            Topic::ExternalImport { .. } => Self::ExternalImport,
         }
     }
 }
@@ -97,12 +96,11 @@ pub(crate) fn observe_store_topics<V: 'static>(
     })
 }
 
-#[cfg(feature = "local-host")]
-pub struct LocalAffordances {
-    #[cfg(feature = "terminal")]
-    pub terminals: LocalTerminalRegistry,
-    #[cfg(feature = "desktop")]
-    pub import_routes: ImportRoutes,
+/// Identity fixed for one workspace attachment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceAttachment {
+    Local,
+    Remote { host_id: String, host_name: String },
 }
 
 /// The client-facing projection and command boundary for workspace state.
@@ -111,26 +109,46 @@ pub struct LocalAffordances {
 /// or reading the backend `AppState` entity directly.
 pub struct WorkspaceStore {
     host: HostLink,
-    #[cfg(feature = "terminal")]
-    remote_terminals: HashMap<u64, std::sync::Arc<ClientTerminal>>,
-    #[cfg(feature = "desktop")]
+    attachment: WorkspaceAttachment,
+    client_host: Option<Rc<dyn ClientHost>>,
+    client_preferences: ClientPreferences,
+    image_namespace: u64,
+    attachment_tasks: Vec<Task<()>>,
+    /// Replicated terminal grids, keyed by the host's terminal id.
+    terminals: HashMap<u64, std::rc::Rc<ClientTerminal>>,
+    /// Preview requests routed to this client. Every client owns the channel:
+    /// one without a backend still has to answer `unsupported` rather than
+    /// leave the agent's call hanging.
     remote_preview: (
         async_channel::Sender<EventEnvelope>,
         async_channel::Receiver<EventEnvelope>,
     ),
-    remote_address: Option<String>,
-    #[cfg(all(feature = "local-host", feature = "terminal"))]
-    terminal_registry: Option<LocalTerminalRegistry>,
-    #[cfg(all(feature = "local-host", feature = "desktop"))]
-    import_routes: Option<ImportRoutes>,
-    /// Name of the remote host this store is a client of. `None` means the host
-    /// runs in this process, so local affordances are available.
-    remote_host: Option<String>,
+    /// Latest host-published import status per project, replicated from
+    /// [`Topic::ExternalImport`]. The dialog renders this rather than owning a
+    /// second events consumer.
+    import_statuses: HashMap<String, Option<ExternalImportStatus>>,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
     settings_replica: Settings,
+    /// Whether `settings_replica` is the host's settings or still the local
+    /// defaults it was constructed with. Views that copy a setting into an
+    /// editable input must not treat the defaults as the host's answer.
+    settings_hydrated: bool,
+    baseline_topics: HashSet<Topic>,
+    index_hydrated: bool,
+    last_refresh_attempt: Option<u32>,
+    address_refresh: Option<Task<()>>,
+    hydrated_sessions: HashSet<String>,
     selected_session_id: Option<String>,
     session_records: HashMap<String, Vec<StoredEvent>>,
+    session_from: HashMap<String, u64>,
+    selection_generation: u64,
+    session_turn_offset: usize,
+    history_task: Option<Task<()>>,
+    history_error: Option<String>,
+    history_pages_fetched: usize,
+    history_logged_records: Option<usize>,
+    session_catching_up: bool,
     session_statuses: HashMap<String, SessionStatus>,
     git_statuses: HashMap<String, GitStatusStatus>,
     session_replica: Option<(String, Timeline)>,
@@ -174,6 +192,16 @@ pub struct FallbackReview {
     pub draft: String,
 }
 
+/// A rendered thread export as it arrives from the host: complete bytes, a file
+/// name that is legal on any client OS, and the type to hand a download or
+/// share sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadExportArtifact {
+    pub bytes: Vec<u8>,
+    pub suggested_name: String,
+    pub mime: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForkAvailability {
     Available,
@@ -198,6 +226,22 @@ fn protocol_io_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::other(message.into())
 }
 
+fn effective_client_settings(host: &Settings, preferences: &ClientPreferences) -> Settings {
+    let mut settings = host.clone();
+    settings.theme_mode = match preferences.appearance.as_deref() {
+        Some("system") => ThemeMode::System,
+        Some("light") => ThemeMode::Light,
+        Some("dark") => ThemeMode::Dark,
+        _ => settings.theme_mode,
+    };
+    settings.language = match preferences.language.as_deref() {
+        Some("system") => None,
+        Some(language) => Some(language.to_owned()),
+        None => settings.language,
+    };
+    settings
+}
+
 impl WorkspaceStore {
     fn destination(status: &SessionStatus) -> ConversationDestination {
         if status.draft
@@ -209,30 +253,73 @@ impl WorkspaceStore {
         }
     }
 
+    /// An attached, blocking-seeded local store. Callers that must not block —
+    /// a phone or browser on a single-threaded executor — go through
+    /// [`WorkspaceStore::new_attached`] directly.
     pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
+        Self::new_attached(host, WorkspaceAttachment::Local, None, true, cx)
+    }
+
+    /// Construct the complete projection for exactly one client link.
+    ///
+    /// `seed_blocking` makes construction wait for the first Index/Settings/
+    /// Providers snapshots. Only the desktop composition root asks for it: it
+    /// applies the locale and theme from `settings()` the instant the store
+    /// exists. Every other client renders immediately and re-renders when the
+    /// snapshots land, which is the only option on a single-threaded executor.
+    pub fn new_attached(
+        host: HostLink,
+        attachment: WorkspaceAttachment,
+        client_host: Option<Rc<dyn ClientHost>>,
+        seed_blocking: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         static NEXT_IMAGE_NAMESPACE: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
+        let image_namespace =
+            NEXT_IMAGE_NAMESPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         cx.set_global(images::HostImages {
-            link: host.clone(),
-            namespace: NEXT_IMAGE_NAMESPACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            link: Some(host.clone()),
+            namespace: image_namespace,
         });
+        let client_preferences = client_host
+            .as_ref()
+            .map(|host| host.load_preferences())
+            .unwrap_or_default();
+        let remote = matches!(attachment, WorkspaceAttachment::Remote { .. });
         let store = Self {
             host: host.clone(),
-            #[cfg(feature = "terminal")]
-            remote_terminals: HashMap::new(),
-            #[cfg(feature = "desktop")]
+            attachment,
+            client_host,
+            client_preferences,
+            image_namespace,
+            attachment_tasks: Vec::new(),
+            terminals: HashMap::new(),
             remote_preview: async_channel::unbounded(),
-            remote_address: None,
-            #[cfg(all(feature = "local-host", feature = "terminal"))]
-            terminal_registry: None,
-            #[cfg(all(feature = "local-host", feature = "desktop"))]
-            import_routes: None,
-            remote_host: None,
-            connection_state: ConnectionState::Connected,
+            import_statuses: HashMap::new(),
+            connection_state: if remote {
+                host.connection_state()
+            } else {
+                ConnectionState::Connected
+            },
             index_replica: (Vec::new(), Vec::new()),
             settings_replica: Settings::default(),
+            settings_hydrated: false,
+            baseline_topics: HashSet::new(),
+            index_hydrated: false,
+            last_refresh_attempt: None,
+            address_refresh: None,
+            hydrated_sessions: HashSet::new(),
             selected_session_id: None,
             session_records: HashMap::new(),
+            session_from: HashMap::new(),
+            selection_generation: 0,
+            session_turn_offset: 0,
+            history_task: None,
+            history_error: None,
+            history_pages_fetched: 0,
+            history_logged_records: None,
+            session_catching_up: false,
             session_statuses: HashMap::new(),
             git_statuses: HashMap::new(),
             session_replica: None,
@@ -248,7 +335,6 @@ impl WorkspaceStore {
             conversation_ui: HashMap::new(),
             draft_fallback_pending: false,
         };
-        #[cfg(feature = "local-host")]
         let mut store = store;
 
         // Construction seeding is itself protocol traffic: subscribe, then
@@ -269,14 +355,8 @@ impl WorkspaceStore {
             after: None,
         });
         let events = host.events();
-        // A desktop build constructs its in-process or remote host before the
-        // first window and reads settings immediately afterwards. Preserve
-        // that synchronous seed contract only when local-host support is in
-        // the build. Portable clients return immediately and let the task
-        // below apply snapshots as they arrive, which is essential on a
-        // single-threaded wasm executor.
-        #[cfg(feature = "local-host")]
-        {
+        #[cfg(not(target_family = "wasm"))]
+        if seed_blocking {
             let mut seeded = HashSet::new();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while seeded.len() < seed_topics.len() && std::time::Instant::now() < deadline {
@@ -310,11 +390,13 @@ impl WorkspaceStore {
                 );
             }
         }
+        #[cfg(target_family = "wasm")]
+        let _ = seed_blocking;
 
         #[cfg(not(test))]
         {
             let event_messages = events;
-            cx.spawn(async move |this, cx| {
+            store.attachment_tasks.push(cx.spawn(async move |this, cx| {
                 while let Ok(envelope) = event_messages.recv().await {
                     if this
                         .update(cx, |store, cx| {
@@ -333,50 +415,71 @@ impl WorkspaceStore {
                         break;
                     }
                 }
-            })
-            .detach();
+            }));
+        }
+
+        #[cfg(not(test))]
+        {
+            let delivery_changes = host.delivery_changes();
+            store.attachment_tasks.push(cx.spawn(async move |this, cx| {
+                while delivery_changes.recv().await.is_ok() {
+                    if this
+                        .update(cx, |_, cx| {
+                            cx.emit(StoreChange {
+                                topic: TopicKind::SessionEvents,
+                            });
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
+
+        if remote {
+            let changes = host.connection_state_changes();
+            store.attachment_tasks.push(cx.spawn(async move |this, cx| {
+                while let Ok(state) = changes.recv().await {
+                    if this
+                        .update(cx, |store, cx| {
+                            store.refresh_address(&state, cx);
+                            store.apply_connection_state(state);
+                            cx.emit(StoreChange {
+                                topic: TopicKind::Index,
+                            });
+                            cx.emit(StoreChange {
+                                topic: TopicKind::SessionStatus,
+                            });
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
         }
 
         store
     }
 
-    #[cfg(feature = "local-host")]
-    pub fn new_local(host: &tcode_runtime::pipe::SpawnedHost, cx: &mut Context<Self>) -> Self {
-        let mut store = Self::new(host.link(), cx);
-        store.attach_local(LocalAffordances {
-            #[cfg(feature = "terminal")]
-            terminals: host.terminals.clone(),
-            #[cfg(feature = "desktop")]
-            import_routes: host.import_routes.clone(),
-        });
-        store
-    }
-
-    #[cfg(feature = "local-host")]
-    pub fn attach_local(&mut self, local: LocalAffordances) {
-        #[cfg(not(any(feature = "terminal", feature = "desktop")))]
-        let _ = local;
-        #[cfg(feature = "terminal")]
-        {
-            self.terminal_registry = Some(local.terminals);
-        }
-        #[cfg(feature = "desktop")]
-        {
-            self.import_routes = Some(local.import_routes);
-        }
-    }
-
-    /// Mark this store as a client of a remote host and start tracking the
-    /// link's connection state so the workspace can show its banner.
+    /// Compatibility path for the mobile coordinator until it adopts the
+    /// attachment identity constructor.
     pub fn attach_remote(&mut self, host_name: String, cx: &mut Context<Self>) {
-        self.remote_host = Some(host_name);
+        self.attachment = WorkspaceAttachment::Remote {
+            host_id: String::new(),
+            host_name,
+        };
         self.connection_state = self.host.connection_state();
         let changes = self.host.connection_state_changes();
-        cx.spawn(async move |this, cx| {
+        self.attachment_tasks.push(cx.spawn(async move |this, cx| {
             while let Ok(state) = changes.recv().await {
                 if this
                     .update(cx, |store, cx| {
-                        store.connection_state = state;
+                        store.refresh_address(&state, cx);
+                        store.apply_connection_state(state);
                         cx.notify();
                     })
                     .is_err()
@@ -384,13 +487,9 @@ impl WorkspaceStore {
                     break;
                 }
             }
-        })
-        .detach();
+        }));
     }
 
-    /// Whether the host lives in another process. Computer use settings and
-    /// native host-directory pickers remain local-only.
-    #[cfg(feature = "desktop")]
     pub(crate) fn preview_reply(
         &mut self,
         request_id: u64,
@@ -402,33 +501,283 @@ impl WorkspaceStore {
         });
     }
 
-    pub fn set_remote_address(&mut self, address: String) {
-        self.remote_address = Some(address);
-    }
-
-    #[cfg(feature = "desktop")]
     pub(crate) fn remote_preview_requests(&self) -> async_channel::Receiver<EventEnvelope> {
         self.remote_preview.1.clone()
     }
 
-    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
-    pub(crate) fn rewrite_preview_url(&self, url: &str) -> String {
-        self.remote_address.as_deref().map_or_else(
-            || url.to_string(),
-            |host| tcode_client::rewrite_preview_url(url, host),
-        )
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    pub(crate) fn preview_proxy(
+        &self,
+    ) -> Result<Option<tcode_client::pairing::PairedHost>, String> {
+        if !self.is_remote() {
+            return Ok(None);
+        }
+        self.client_host
+            .as_ref()
+            .and_then(|client| {
+                client
+                    .load_hosts()
+                    .into_iter()
+                    .find(|host| Some(host.host_id.as_str()) == self.remote_host_id())
+            })
+            .map(Some)
+            .ok_or_else(|| "remote preview requires a paired machine credential".into())
     }
 
     pub fn is_remote(&self) -> bool {
-        self.remote_host.is_some()
+        matches!(self.attachment, WorkspaceAttachment::Remote { .. })
     }
 
     pub fn remote_host_name(&self) -> Option<&str> {
-        self.remote_host.as_deref()
+        match &self.attachment {
+            WorkspaceAttachment::Local => None,
+            WorkspaceAttachment::Remote { host_name, .. } => Some(host_name),
+        }
+    }
+
+    pub fn remote_host_id(&self) -> Option<&str> {
+        match &self.attachment {
+            WorkspaceAttachment::Local => None,
+            WorkspaceAttachment::Remote { host_id, .. } => Some(host_id),
+        }
     }
 
     pub fn connection_state(&self) -> &ConnectionState {
-        &self.connection_state
+        if matches!(
+            self.connection_state,
+            ConnectionState::Connected | ConnectionState::Syncing
+        ) {
+            if self.baseline_ready() {
+                &ConnectionState::Connected
+            } else {
+                &ConnectionState::Syncing
+            }
+        } else {
+            &self.connection_state
+        }
+    }
+
+    fn refresh_address(&mut self, state: &ConnectionState, cx: &mut Context<Self>) {
+        if matches!(
+            state,
+            ConnectionState::Connected | ConnectionState::Syncing | ConnectionState::Offline { .. }
+        ) {
+            self.address_refresh.take();
+            self.last_refresh_attempt = None;
+        }
+        let ConnectionState::Reconnecting {
+            attempt,
+            reason:
+                Some(
+                    tcode_client::ConnectionFailure::Unreachable
+                    | tcode_client::ConnectionFailure::Timeout,
+                ),
+        } = state
+        else {
+            return;
+        };
+        if self.last_refresh_attempt == Some(*attempt) {
+            return;
+        }
+        self.last_refresh_attempt = Some(*attempt);
+        let Some(host_id) = self.remote_host_id().map(str::to_owned) else {
+            return;
+        };
+        let Some(client) = self.client_host.clone() else {
+            return;
+        };
+        self.address_refresh = Some(cx.spawn(async move |this, cx| {
+            if let Some(origin) = client.refresh_origin(&host_id).await {
+                let _ = this.update(cx, |store, _| {
+                    store
+                        .host
+                        .wake(tcode_client::recovery::Wake::Origin(origin));
+                });
+            }
+        }));
+    }
+
+    fn apply_connection_state(&mut self, state: ConnectionState) {
+        if matches!(
+            state,
+            ConnectionState::Syncing
+                | ConnectionState::Reconnecting { .. }
+                | ConnectionState::Offline { .. }
+        ) {
+            self.baseline_topics.clear();
+        }
+        self.connection_state = state;
+        if self.connection_state == ConnectionState::Syncing {
+            // State and domain events arrive on separate queues. Request a fresh
+            // baseline after invalidation, so a late event from the old socket
+            // cannot satisfy readiness for the new one. HostLink correlates the
+            // replies against these new request IDs and retains applied cursors.
+            for subscription in self.host.subscriptions() {
+                let _ = self.host.subscribe(subscription);
+            }
+        }
+    }
+
+    /// Outbox-derived navigation only; no host metadata is invented or cached.
+    pub(crate) fn pending_sessions(&self) -> Vec<(String, String)> {
+        let mut sessions = Vec::new();
+        for (_, command) in self.host.pending_commands() {
+            let Some(id) = command.session_id().map(str::to_owned) else {
+                continue;
+            };
+            let preview = match command {
+                Command::SendTurn { text, .. }
+                | Command::ScheduleTurn { text, .. }
+                | Command::Steer { text, .. }
+                | Command::ConfirmRelayAndSend { text, .. }
+                | Command::OrchestrateTurn { text, .. } => text,
+                _ => String::new(),
+            };
+            if !sessions.iter().any(|(existing, _)| existing == &id) {
+                sessions.push((id, preview));
+            }
+        }
+        sessions
+    }
+
+    pub(crate) fn pending_write_count(&self) -> usize {
+        self.host.pending_commands().len()
+    }
+
+    pub(crate) fn session_has_pending_writes(&self, id: &str) -> bool {
+        self.pending_sessions()
+            .iter()
+            .any(|(session, _)| session == id)
+    }
+
+    pub(crate) fn delivery_messages(&self) -> Vec<(String, String, Option<String>, bool)> {
+        let active = self.active_session_id().unwrap_or_default();
+        let message = |command: &Command| match command {
+            Command::SendTurn {
+                session_id, text, ..
+            }
+            | Command::ScheduleTurn {
+                session_id, text, ..
+            }
+            | Command::Steer {
+                session_id, text, ..
+            }
+            | Command::ConfirmRelayAndSend {
+                session_id, text, ..
+            }
+            | Command::OrchestrateTurn {
+                session_id, text, ..
+            } if session_id == &active => Some(text.clone()),
+            _ => None,
+        };
+        self.host
+            .pending_commands()
+            .into_iter()
+            .filter_map(|(key, command)| message(&command).map(|text| (key, text, None, false)))
+            .chain(
+                self.host
+                    .failed_commands()
+                    .into_iter()
+                    .filter_map(|(entry, error)| {
+                        message(&entry.command).map(|text| (entry.key, text, Some(error.message), false))
+                    }),
+            )
+            .chain(self.host.acknowledged_messages().into_iter().filter_map(|entry| {
+                let text = message(&entry.command)?;
+                let queued = self.session_status_replica.as_ref().is_some_and(|status| status.queued_messages.iter().any(|message| message.delivery_key.as_deref() == Some(entry.key.as_str()) || (message.delivery_key.is_none() && message.text == text)));
+                let recorded = self.with_active_timeline(|timeline| timeline.entries.iter().any(|record| {
+                    record.id == format!("local-user-{}", entry.key) || record.id == format!("local-steer-{}", entry.key)
+                        || matches!(&record.content, EntryContent::Item(agent::ItemContent::UserMessage { text: recorded, .. }) if recorded == &text)
+                })).unwrap_or(false);
+                if queued || recorded {
+                    // Once adopted by the host replica, a later rewind must not
+                    // resurrect the acknowledged placeholder.
+                    self.host.retire_acknowledged_message(&entry.key);
+                    None
+                } else { Some((entry.key, text, None, true)) }
+            }))
+            .collect()
+    }
+
+    pub(crate) fn approval_delivery_pending(&self, request: &str) -> bool {
+        self.host.pending_commands().iter().any(|(_, command)| matches!(command,
+            Command::RespondApproval { request_id, session_id, .. }
+            if request_id == request && Some(session_id.as_str()) == self.active_session_id().as_deref()))
+    }
+
+    pub(crate) fn retry_delivery(&self, key: &str) {
+        if let Err(error) = self.host.retry_failed(key) {
+            log::error!("retry failed: {}", error.message);
+        }
+    }
+
+    pub(crate) fn discard_delivery(&self, key: &str) {
+        self.host.discard_failed(key);
+    }
+
+    pub fn queued_outgoing(&self) -> usize {
+        self.host.queued_outgoing()
+    }
+
+    pub fn baseline_ready(&self) -> bool {
+        self.baseline_topics.contains(&Topic::Index)
+            && self.baseline_topics.contains(&Topic::Settings)
+            && self.selected_session_id.as_ref().is_none_or(|id| {
+                self.baseline_topics.contains(&Topic::SessionStatus {
+                    session_id: id.clone(),
+                }) && self.baseline_topics.contains(&Topic::SessionEvents {
+                    session_id: id.clone(),
+                })
+            })
+    }
+
+    /// Cached content remains readable while a new baseline is replayed.
+    pub fn threads_loading(&self) -> bool {
+        !self.index_hydrated
+            || !self.settings_hydrated
+            || (!matches!(self.connection_state(), ConnectionState::Connected)
+                && self.index_replica.0.is_empty()
+                && self.index_replica.1.is_empty())
+    }
+
+    pub fn chat_loading(&self) -> bool {
+        if !self.delivery_messages().is_empty() {
+            return false;
+        }
+        if !self.index_hydrated || !self.settings_hydrated {
+            return true;
+        }
+        if let Some(id) = &self.selected_session_id {
+            self.session_loading()
+                || !self.hydrated_sessions.contains(id)
+                || !self.session_statuses.contains_key(id)
+        } else {
+            self.threads_loading()
+        }
+    }
+
+    /// End this store's one-link lifetime before its views are replaced.
+    pub fn detach(&mut self, cx: &mut App) {
+        self.history_task = None;
+        self.attachment_tasks.clear();
+        self.address_refresh.take();
+        for subscription in self.host.subscriptions() {
+            let _ = self.host.unsubscribe(subscription);
+        }
+        self.host.close();
+        self.remote_preview.0.close();
+        self.remote_preview.1.close();
+        if let Some(images) = cx.try_global::<images::HostImages>()
+            && images.namespace == self.image_namespace
+        {
+            cx.set_global(images::HostImages {
+                link: None,
+                namespace: self.image_namespace,
+            });
+        }
     }
 
     pub fn sync_active_conversation_ui(&mut self) {
@@ -468,7 +817,6 @@ impl WorkspaceStore {
             return;
         }
         match (&envelope.topic, &envelope.event) {
-            #[cfg(feature = "desktop")]
             (
                 Topic::Preview { session_id },
                 ServerEvent::PreviewRequest {
@@ -480,45 +828,20 @@ impl WorkspaceStore {
             {
                 let _ = self.remote_preview.0.try_send(envelope.clone());
             }
-            #[cfg(feature = "terminal")]
             (
                 Topic::Terminal { terminal_id },
-                ServerEvent::TerminalOutput {
-                    terminal_id: output_id,
-                    bytes,
-                    reset,
-                    cols,
-                    rows,
+                ServerEvent::TerminalFrame {
+                    terminal_id: frame_id,
+                    frame,
                 },
-            ) if terminal_id == output_id => {
-                if let Some(terminal) = self.remote_terminals.get(terminal_id) {
-                    if *reset {
-                        let terminal = std::sync::Arc::new(ClientTerminal::remote(
-                            *terminal_id,
-                            self.host.clone(),
-                            usize::from(*cols),
-                            usize::from(*rows),
-                        ));
-                        if let Some(status) =
-                            self.session_status_replica.as_ref().and_then(|status| {
-                                status
-                                    .terminals
-                                    .iter()
-                                    .find(|entry| entry.id == *terminal_id)
-                            })
-                        {
-                            terminal.set_fallback_title(status.title.clone());
-                            if status.exited {
-                                terminal.set_exited(None);
-                            }
-                        }
-                        terminal.feed(bytes);
-                        self.remote_terminals.insert(*terminal_id, terminal);
-                    } else {
-                        terminal.feed(bytes);
-                    }
-                }
-            }
+            ) if terminal_id == frame_id => self.apply_terminal_frame(*terminal_id, frame),
+            (
+                Topic::Terminal { terminal_id },
+                ServerEvent::TerminalDelta {
+                    terminal_id: delta_id,
+                    delta,
+                },
+            ) if terminal_id == delta_id => self.apply_terminal_delta(*terminal_id, delta),
             (Topic::Index, ServerEvent::IndexUpsertSession(meta)) => {
                 match self
                     .index_replica
@@ -556,10 +879,23 @@ impl WorkspaceStore {
                 self.index_replica
                     .1
                     .retain(|project| project.id != *project_id);
+                self.import_statuses.remove(project_id);
                 self.conversation_ui
                     .remove(&ConversationDestination::ProjectDraft(project_id.clone()));
             }
+            (
+                Topic::ExternalImport { project_id },
+                ServerEvent::ExternalImportStatusReplaced {
+                    project_id: replaced,
+                    status,
+                },
+            ) if project_id == replaced => {
+                self.import_statuses
+                    .insert(project_id.clone(), status.clone());
+            }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
+                self.index_hydrated = true;
+                self.baseline_topics.insert(Topic::Index);
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
@@ -583,6 +919,10 @@ impl WorkspaceStore {
             (Topic::Settings, ServerEvent::SettingsReplaced(settings))
             | (Topic::Settings, ServerEvent::SettingsSnapshot(settings)) => {
                 self.settings_replica = settings.clone();
+                self.settings_hydrated = true;
+                if matches!(envelope.event, ServerEvent::SettingsSnapshot(_)) {
+                    self.baseline_topics.insert(Topic::Settings);
+                }
             }
             (Topic::Providers, ServerEvent::ProvidersReplaced(status)) => {
                 self.providers_replica = status.clone();
@@ -596,6 +936,7 @@ impl WorkspaceStore {
             (Topic::SessionStatus { session_id }, ServerEvent::SessionStatusReplaced(status))
                 if status.session_id == *session_id =>
             {
+                self.baseline_topics.insert(envelope.topic.clone());
                 self.session_statuses
                     .insert(session_id.clone(), status.clone());
                 if self.selected_session_id.as_ref() == Some(session_id) {
@@ -603,7 +944,6 @@ impl WorkspaceStore {
                     status.native_rewind_prefill_available =
                         self.native_rewind_prefills.contains_key(session_id);
                     self.session_status_replica = Some(status);
-                    #[cfg(feature = "terminal")]
                     self.sync_terminal_topics();
                     self.sync_active_conversation_ui();
                     self.background_session_flags.remove(session_id);
@@ -619,26 +959,54 @@ impl WorkspaceStore {
                     );
                 }
             }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error)) => {
+                if self.selected_session_id.as_ref() == Some(session_id) {
+                    self.history_error = Some(history::history_error_message(error.clone()));
+                }
+            }
             (
                 Topic::SessionEvents { session_id },
-                ServerEvent::SessionSnapshot { from, records },
+                ServerEvent::SessionSnapshot {
+                    from,
+                    records,
+                    total,
+                    total_turns,
+                    ..
+                },
             ) => {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
                 let held = self.session_records.entry(session_id.clone()).or_default();
+                let start = self.session_from.entry(session_id.clone()).or_insert(*from);
                 if *from == 0 {
                     held.clear();
-                } else if *from != held.len() as u64 {
+                    *start = 0;
+                } else if *from != *start + held.len() as u64 {
                     held.clear();
+                    self.session_from.remove(session_id);
                     self.session_replica = None;
+                    self.hydrated_sessions.remove(session_id);
+                    self.baseline_topics.remove(&envelope.topic);
+                    self.session_catching_up = false;
                     let _ = self.host.subscribe(Subscription {
                         topic: envelope.topic.clone(),
                         after: None,
                     });
                     return;
                 }
+                if records.is_empty() && *from != 0 && self.session_replica.is_some() {
+                    self.baseline_topics.insert(envelope.topic.clone());
+                    self.hydrated_sessions.insert(session_id.clone());
+                    return;
+                }
                 held.extend(records.iter().cloned());
+                let after = *start + held.len() as u64;
+                self.session_catching_up = after < *total;
+                let _ = self.host.update_after(&envelope.topic, after);
+                if self.session_catching_up {
+                    return;
+                }
                 let mut timeline = Timeline::fold_events(held.iter().cloned());
                 if !self
                     .session_status_replica
@@ -647,16 +1015,23 @@ impl WorkspaceStore {
                 {
                     timeline.mark_idle();
                 }
+                self.baseline_topics.insert(envelope.topic.clone());
+                self.hydrated_sessions.insert(session_id.clone());
+                self.session_turn_offset =
+                    (*total_turns as usize).saturating_sub(timeline.turns.len());
                 self.session_replica = Some((session_id.clone(), timeline));
-                let _ = self.host.update_after(&envelope.topic, held.len() as u64);
             }
             (Topic::SessionEvents { session_id }, ServerEvent::SessionEvent(record)) => {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
+                if self.session_catching_up || !self.session_from.contains_key(session_id) {
+                    return;
+                }
                 let held = self.session_records.entry(session_id.clone()).or_default();
                 held.push(record.clone());
-                let _ = self.host.update_after(&envelope.topic, held.len() as u64);
+                let after = self.session_from[session_id] + held.len() as u64;
+                let _ = self.host.update_after(&envelope.topic, after);
                 // A new turn means the user moved on; the recovery card for the
                 // stopped one is stale.
                 if matches!(record.event, agent::AgentEvent::TurnStarted { .. }) {
@@ -725,6 +1100,7 @@ impl WorkspaceStore {
             }
             _ => {}
         }
+        self.load_pending_chat_history(cx);
         // Every index mutation re-decides the destination in one place.
         if envelope.topic == Topic::Index {
             self.reconcile_destination(cx);
@@ -741,6 +1117,11 @@ impl WorkspaceStore {
     /// the last interacted project's draft, which is also what an empty
     /// workspace opens.
     fn reconcile_destination(&mut self, cx: &mut Context<Self>) {
+        // A deletion can arrive before the rejected Ack. Keep the authored
+        // write on screen so its failure still has Retry and Discard controls.
+        if !self.delivery_messages().is_empty() {
+            return;
+        }
         match &self.session_status_replica {
             // A draft has no index entry of its own; it stays until the user
             // navigates away. Its project leaving the index is the exception:
@@ -879,7 +1260,7 @@ impl WorkspaceStore {
     }
 
     #[cfg(test)]
-    fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn drain_host_events_for_test(&mut self, cx: &mut Context<Self>) {
         let events = self.host.events();
         while let Ok(envelope) = events.try_recv() {
             if let ServerEvent::Runtime(event) = &envelope.event {
@@ -1151,7 +1532,98 @@ impl WorkspaceStore {
     }
 
     pub fn settings(&self) -> Settings {
-        self.settings_replica.clone()
+        effective_client_settings(&self.settings_replica, &self.client_preferences)
+    }
+
+    /// Whether the Index baseline has arrived, including an empty Index.
+    pub fn index_hydrated(&self) -> bool {
+        self.index_hydrated
+    }
+
+    /// Whether [`WorkspaceStore::settings`] reflects the host yet.
+    pub fn settings_hydrated(&self) -> bool {
+        self.settings_hydrated
+    }
+
+    /// Whether this client can hand a produced file to the platform (a browser
+    /// download, a share sheet).
+    pub fn supports_artifact_delivery(&self) -> bool {
+        self.client_host
+            .as_ref()
+            .is_some_and(|host| host.supports_artifact_delivery())
+    }
+
+    pub fn deliver_artifact(&self, name: &str, mime: &str, bytes: &[u8]) -> Result<(), String> {
+        match &self.client_host {
+            Some(host) => host.deliver_artifact(name, mime, bytes),
+            None => Err("this device cannot save files".into()),
+        }
+    }
+
+    /// Open a *client-local* path in the user's editor. `None` when this client
+    /// has no editor integration at all.
+    pub fn open_in_editor(&self, path: &std::path::Path) -> Option<Result<(), String>> {
+        self.client_host.as_ref()?.open_in_editor(path)
+    }
+
+    pub fn client_theme_override(&self) -> Option<ThemeMode> {
+        match self.client_preferences.appearance.as_deref() {
+            Some("system") => Some(ThemeMode::System),
+            Some("light") => Some(ThemeMode::Light),
+            Some("dark") => Some(ThemeMode::Dark),
+            _ => None,
+        }
+    }
+
+    pub fn set_client_theme(&mut self, mode: Option<ThemeMode>) {
+        self.client_preferences.appearance = mode.map(|mode| match mode {
+            ThemeMode::System => "system".to_owned(),
+            ThemeMode::Light => "light".to_owned(),
+            ThemeMode::Dark => "dark".to_owned(),
+        });
+        self.save_client_preferences();
+    }
+
+    pub fn client_language_override(&self) -> Option<&str> {
+        self.client_preferences.language.as_deref()
+    }
+
+    pub fn set_client_language(&mut self, language: Option<String>) {
+        self.client_preferences.language = language;
+        self.save_client_preferences();
+    }
+
+    pub fn client_device_name_override(&self) -> Option<&str> {
+        self.client_preferences.device_name.as_deref()
+    }
+
+    pub fn client_device_name(&self) -> String {
+        self.client_preferences
+            .device_name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| self.client_host.as_ref().map(|host| host.device_name()))
+            .unwrap_or_else(|| "tcode".into())
+    }
+
+    pub fn set_client_device_name(&mut self, name: Option<String>) {
+        self.client_preferences.device_name = name.filter(|name| !name.trim().is_empty());
+        self.save_client_preferences();
+    }
+
+    pub fn reset_client_preferences(&mut self) {
+        self.client_preferences = ClientPreferences::default();
+        self.save_client_preferences();
+    }
+
+    fn save_client_preferences(&self) {
+        if let Some(host) = &self.client_host {
+            let mut preferences = self.client_preferences.clone();
+            // Navigation is written by the shell while this store is alive.
+            // Appearance edits must not replace it with our startup snapshot.
+            preferences.navigation = host.load_preferences().navigation;
+            host.save_preferences(&preferences);
+        }
     }
 
     pub fn live_command_panel(&self) -> bool {
@@ -1373,8 +1845,6 @@ impl WorkspaceStore {
         })
     }
 
-    /// Only the native preview panel prunes by liveness; Linux compiles it out.
-    #[cfg(all(feature = "desktop", not(target_os = "linux")))]
     pub(crate) fn preview_live_keys(&self) -> HashSet<String> {
         let mut keys = self
             .index_replica
@@ -1562,51 +2032,90 @@ impl WorkspaceStore {
             .map(|project| project.root.clone())
     }
 
-    pub fn scan_external_history(&self, cx: &mut App) -> Task<Vec<RecentDir>> {
+    /// Scan the *host's* external-agent histories. A failure is returned rather
+    /// than logged away: an empty list and a broken host look identical to the
+    /// user otherwise.
+    pub fn scan_external_history(&self, cx: &mut App) -> Task<Result<Vec<RecentDir>, String>> {
         let host = self.host.clone();
         cx.spawn(
             async move |_| match host.query(Query::ScanExternalHistory).await {
-                Ok(QueryResponse::ExternalHistory(recent)) => recent,
-                Ok(other) => {
-                    log::error!("unexpected external-history response: {other:?}");
-                    Vec::new()
-                }
-                Err(error) => {
-                    log::error!("external-history query failed: {}", error.message);
-                    Vec::new()
-                }
+                Ok(QueryResponse::ExternalHistory(recent)) => Ok(recent),
+                Ok(other) => Err(format!("unexpected external-history response: {other:?}")),
+                Err(error) => Err(error.message),
             },
         )
     }
 
-    /// Start an import and return its correlated progress stream when local
-    /// import routing is available.
-    #[cfg(feature = "desktop")]
+    /// Subscribe to a project's import status. Callers must do this *before*
+    /// starting a run: a fast completion is only recoverable through the
+    /// subscription snapshot, not through the start reply.
+    pub fn watch_external_import(&self, project_id: &str) {
+        if let Err(error) = self.host.subscribe(Subscription {
+            after: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.to_string(),
+            },
+        }) {
+            log::error!("failed to watch import status: {}", error.message);
+        }
+    }
+
+    pub fn unwatch_external_import(&mut self, project_id: &str) {
+        let _ = self.host.unsubscribe(Subscription {
+            after: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.to_string(),
+            },
+        });
+        self.import_statuses.remove(project_id);
+    }
+
+    /// The latest host-published status for a project, or `None` while the
+    /// snapshot is still in flight or no run has ever started.
+    pub fn external_import_status(&self, project_id: &str) -> Option<&ExternalImportStatus> {
+        self.import_statuses.get(project_id)?.as_ref()
+    }
+
     pub fn start_external_import(
         &self,
         project_id: &str,
         threads: Vec<ExternalThread>,
         cx: &mut App,
-    ) -> Task<Result<Option<async_channel::Receiver<ExternalImportUpdate>>, String>> {
-        #[cfg(feature = "local-host")]
-        {
-            let host = self.host.clone();
-            let routes = self.import_routes.clone();
-            let project_id = project_id.to_string();
-            cx.spawn(async move |_| {
-                let Some(routes) = routes else {
-                    return Ok(None);
-                };
-                start_external_import(&host, &routes, project_id, threads)
-                    .await
-                    .map_err(|error| error.message)
-            })
-        }
-        #[cfg(not(feature = "local-host"))]
-        {
-            let _ = (project_id, threads);
-            cx.spawn(async move |_| Ok(None))
-        }
+    ) -> Task<Result<CommandResponse, ProtocolError>> {
+        self.command(
+            tcode_protocol::Command::StartExternalImport {
+                project_id: project_id.to_string(),
+                threads,
+            },
+            cx,
+        )
+    }
+
+    /// Ask the host to search its own stored sessions. The index, cache and
+    /// session order live there; this client keeps only the answer.
+    pub fn search_session_content(
+        &self,
+        query: String,
+        limit: u32,
+        cx: &mut App,
+    ) -> Task<Vec<SessionSearchHit>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::SearchSessionContent { query, limit })
+                .await
+            {
+                Ok(QueryResponse::SessionContentHits(hits)) => hits,
+                Ok(other) => {
+                    log::error!("unexpected session-content response: {other:?}");
+                    Vec::new()
+                }
+                Err(error) => {
+                    log::error!("session-content query failed: {}", error.message);
+                    Vec::new()
+                }
+            }
+        })
     }
 
     pub(crate) fn commit_dialog_state(&self) -> CommitDialogState {
@@ -1766,6 +2275,78 @@ impl WorkspaceStore {
         })
     }
 
+    /// Ask the host to render a stored thread into transferable bytes. Nothing
+    /// is written anywhere: the host owns rendering and its store-flush barrier,
+    /// this client owns where the artifact goes.
+    pub fn render_thread_export(
+        &self,
+        session_id: String,
+        format: tcode_protocol::ThreadExportFormat,
+        cx: &mut App,
+    ) -> Task<Result<ThreadExportArtifact, String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::RenderThreadExport { session_id, format })
+                .await
+            {
+                Ok(QueryResponse::ThreadExport {
+                    bytes,
+                    suggested_name,
+                    mime,
+                }) => Ok(ThreadExportArtifact {
+                    bytes,
+                    suggested_name,
+                    mime,
+                }),
+                Ok(other) => Err(format!("unexpected thread-export response: {other:?}")),
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+
+    /// Ask the host to re-render a stored command's output at `cols`. The
+    /// emulator is the host's; a client only ever asks for a width.
+    pub fn render_stored_output(
+        &self,
+        session_id: String,
+        item_id: String,
+        cols: u16,
+        cx: &mut App,
+    ) -> Task<Result<TerminalFrame, String>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            match host
+                .query(Query::RenderStoredOutput {
+                    session_id,
+                    item_id,
+                    cols,
+                })
+                .await
+            {
+                Ok(QueryResponse::TerminalFrame(frame)) => Ok(*frame),
+                Ok(other) => Err(format!("unexpected stored-output response: {other:?}")),
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+
+    #[cfg(target_family = "wasm")]
+    pub fn hosting(
+        &self,
+        action: tcode_protocol::HostingAction,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::HostingState, String>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::Hosting { action }).await {
+                Ok(QueryResponse::Hosting(state)) => Ok(state),
+                Ok(_) => Err("unexpected hosting response".into()),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     pub fn read_file_bytes(&self, path: PathBuf, cx: &mut App) -> Task<std::io::Result<Vec<u8>>> {
         let host = self.host.clone();
         cx.spawn(
@@ -1775,23 +2356,6 @@ impl WorkspaceStore {
                     "unexpected file-bytes response: {other:?}"
                 ))),
                 Err(error) => Err(protocol_io_error(error.message)),
-            },
-        )
-    }
-
-    pub fn is_directory(&self, path: PathBuf, cx: &mut App) -> Task<bool> {
-        let host = self.host.clone();
-        cx.spawn(
-            async move |_| match host.query(Query::IsDirectory { path }).await {
-                Ok(QueryResponse::IsDirectory(is_directory)) => is_directory,
-                Ok(other) => {
-                    log::error!("unexpected is-directory response: {other:?}");
-                    false
-                }
-                Err(error) => {
-                    log::error!("is-directory query failed: {}", error.message);
-                    false
-                }
             },
         )
     }
@@ -1806,11 +2370,13 @@ impl WorkspaceStore {
         self.pending_chat_turn
             .as_ref()
             .filter(|(id, _)| id == session_id)
-            .map(|(_, turn)| *turn)
+            .and_then(|(_, turn)| turn.checked_sub(self.session_turn_offset))
     }
 
     pub(crate) fn take_pending_chat_turn(&mut self, session_id: &str, turn: usize) {
-        if self.pending_chat_turn.as_ref() == Some(&(session_id.to_string(), turn)) {
+        if self.pending_chat_turn.as_ref()
+            == Some(&(session_id.to_string(), turn + self.session_turn_offset))
+        {
             self.pending_chat_turn = None;
         }
     }
@@ -1910,7 +2476,6 @@ impl WorkspaceStore {
 
     /// Build renderer handles from replicated layout. Local affordances keep
     /// direct PTY/grid access; otherwise the handles wrap client emulators.
-    #[cfg(feature = "terminal")]
     pub fn with_terminal_workspace<R>(
         &self,
         read: impl FnOnce(&TerminalWorkspace) -> R,
@@ -1970,10 +2535,32 @@ impl WorkspaceStore {
         )
     }
 
+    pub(crate) fn session_loading(&self) -> bool {
+        self.selected_session_id.is_some()
+            && (self.session_replica.is_none() || self.session_status_replica.is_none())
+    }
+
     pub fn chat_active_session(&self) -> Option<(String, PathBuf, bool)> {
         self.session_status_replica
             .as_ref()
             .map(|status| (status.title.clone(), status.cwd.clone(), status.draft))
+            .or_else(|| {
+                let selected = self.selected_session_id.as_ref()?;
+                self.index_replica
+                    .0
+                    .iter()
+                    .find(|meta| &meta.id == selected)
+                    .map(|meta| (meta.title.clone(), meta.cwd.clone(), false))
+            })
+            .or_else(|| {
+                (!self.delivery_messages().is_empty()).then(|| {
+                    (
+                        crate::tr!("chat.waiting_connection").into_owned(),
+                        PathBuf::new(),
+                        false,
+                    )
+                })
+            })
     }
 
     pub fn chat_requested_model(&self) -> Option<String> {
@@ -2083,6 +2670,7 @@ impl Drop for WorkspaceStore {
         for subscription in self.host.subscriptions() {
             let _ = self.host.unsubscribe(subscription);
         }
+        self.host.close();
     }
 }
 
@@ -2097,13 +2685,623 @@ mod tests {
         git::{GitFileEntry, GitStatus},
         project::{Project, SessionMeta},
         session::{ReviewComment, ReviewSide},
+        settings::{Settings, ThemeMode},
     };
     use tcode_protocol::{Command, EventEnvelope, ServerEvent, SessionEventRecord, Topic};
     use tcode_runtime::host::HostEvent;
     use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
     use tcode_services::store::SessionStore;
 
-    use super::{ConversationDestination, WorkspaceStore};
+    use super::{
+        ConversationDestination, WorkspaceAttachment, WorkspaceStore, effective_client_settings,
+    };
+
+    #[gpui::test]
+    fn scripted_host_send_waits_for_ack_and_rejection_offers_retry(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        store.update(cx, |store, _| {
+            store.selected_session_id = Some("scripted".into());
+            store.send_turn("hello".into(), Vec::new());
+        });
+        let request = loop {
+            let request =
+                tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+            if matches!(
+                request.payload,
+                tcode_protocol::ClientPayload::Command(Command::SendTurn { .. })
+            ) {
+                break request;
+            }
+        };
+        let key = request.key.clone().unwrap();
+        assert_eq!(
+            store.read_with(cx, |store, _| store.delivery_messages()),
+            vec![(key.clone(), "hello".into(), None, false)]
+        );
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: request.id,
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "rejected".into(),
+                        message: "Host refused this send".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        // Drive the production pump on the test thread; no mocked HostLink.
+        let mut pump = std::pin::pin!(link.pump());
+        let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        assert_eq!(
+            store.read_with(cx, |store, _| store.delivery_messages()),
+            vec![(
+                key.clone(),
+                "hello".into(),
+                Some("Host refused this send".into()),
+                false,
+            )]
+        );
+        assert!(
+            !store.read_with(cx, |store, _| store.chat_loading()),
+            "a rejected write must be visible without a snapshot"
+        );
+        let window_state = cx.new(|_| crate::window_state::WindowState::new(false));
+        let (_chat, visual) = cx.add_window_view(|window, cx| {
+            crate::chat::ChatView::new(store.clone(), window_state, window, cx)
+        });
+        visual.simulate_resize(gpui::size(gpui::px(1024.), gpui::px(700.)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(visual.debug_bounds("retry-delivery").is_some());
+        assert!(visual.debug_bounds("discard-delivery").is_some());
+        store.update(cx, |store, _| store.retry_delivery(&key));
+        let retry = tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        assert_ne!(retry.key, request.key);
+        assert_eq!(retry.payload, request.payload);
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: retry.id,
+                    result: Ok(tcode_protocol::CommandResponse::Unit),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        assert_eq!(
+            store.read_with(cx, |store, _| store.delivery_messages()),
+            vec![(retry.key.unwrap(), "hello".into(), None, true)]
+        );
+        store.update(cx, |store, _| {
+            store.send_turn("discard me".into(), Vec::new())
+        });
+        let request =
+            tcode_protocol::decode_client_line(&requests.recv_blocking().unwrap()).unwrap();
+        replies
+            .send_blocking(
+                tcode_protocol::encode_line(&tcode_protocol::HostMessage::Ack {
+                    id: request.id,
+                    result: Err(tcode_protocol::ProtocolError {
+                        code: "unknown_session".into(),
+                        message: "gone".into(),
+                    }),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(std::future::Future::poll(pump.as_mut(), &mut task_cx).is_pending());
+        store.update(cx, |store, _| {
+            store.discard_delivery(request.key.as_ref().unwrap())
+        });
+        assert!(link.failed_commands().is_empty());
+        assert!(link.pending_commands().is_empty());
+        link.close();
+    }
+
+    #[gpui::test]
+    fn threads_wait_for_baseline_before_rendering_empty(cx: &mut TestAppContext) {
+        use gpui::{px, size};
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                tcode_client::HostLink::new(to_host, from_host),
+                super::WorkspaceAttachment::Remote {
+                    host_id: "test".into(),
+                    host_name: "Test".into(),
+                },
+                None,
+                false,
+                cx,
+            )
+        });
+        let window_state =
+            cx.new(|_| crate::window_state::WindowState::new(false).with_compact(true));
+        let (_sidebar, cx) = cx.add_window_view(|_, cx| {
+            crate::sidebar::SessionsSidebar::new(store.clone(), window_state, cx)
+        });
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("baseline-loading").is_some(),
+            "Threads must render a skeleton before Index arrives"
+        );
+        assert!(cx.debug_bounds("threads-empty").is_none());
+        store.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(Settings::default()),
+                },
+                cx,
+            );
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        sessions: vec![],
+                        projects: vec![],
+                        activity: Default::default(),
+                    }),
+                },
+                cx,
+            );
+            cx.emit(super::StoreChange {
+                topic: super::TopicKind::Index,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("baseline-loading").is_none());
+        assert!(
+            cx.debug_bounds("threads-empty").is_some(),
+            "An applied empty baseline must render the empty message"
+        );
+    }
+
+    #[gpui::test]
+    fn deleted_thread_keeps_its_pending_and_rejected_send_visible(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-deleted-pending-{}",
+            tcode_services::store::now_millis()
+        ));
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project_at("p", &root)).unwrap();
+        disk.upsert_meta(&thread(&root, "deleted", "p", None))
+            .unwrap();
+        let host = test_host(disk);
+        let link = host.link();
+        let workspace = cx.new(|cx| WorkspaceStore::new(link.clone(), cx));
+        workspace.update(cx, |store, _| store.select_session("deleted".into()));
+        wait_until(cx, &workspace, "selected thread", |cx| {
+            selected_status(cx, &workspace, "deleted")
+        });
+        link.set_connection_state(tcode_client::ConnectionState::Reconnecting {
+            attempt: 1,
+            reason: None,
+        });
+        workspace.update(cx, |store, _| {
+            store.send_turn("keep my failed send".into(), Vec::new())
+        });
+        smol::block_on(
+            host.update_state_for_test(|state, cx| state.delete_session("deleted", false, cx)),
+        )
+        .unwrap();
+        workspace.update(cx, |store, cx| {
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Index,
+                    event: ServerEvent::IndexRemoveSession {
+                        session_id: "deleted".into(),
+                    },
+                },
+                cx,
+            )
+        });
+        assert_eq!(
+            workspace.read_with(cx, |store, _| store.active_session_id()),
+            Some("deleted".into())
+        );
+        link.set_connection_state(tcode_client::ConnectionState::Connected);
+        wait_until(cx, &workspace, "rejected send", |cx| {
+            workspace.read_with(cx, |store, _| {
+                store
+                    .delivery_messages()
+                    .iter()
+                    .any(|(_, _, error, _)| error.is_some())
+            })
+        });
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.active_session_id().as_deref(), Some("deleted"));
+            assert_eq!(store.delivery_messages()[0].1, "keep my failed send");
+            assert!(!store.chat_loading());
+        });
+        let key = link.failed_commands()[0].0.key.clone();
+        workspace.update(cx, |store, _| store.discard_delivery(&key));
+        assert!(link.pending_commands().is_empty() && link.failed_commands().is_empty());
+        shutdown_test_host(&host);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn client_preferences_persist_and_override_host_settings_only_when_set() {
+        use tcode_client::host::{ClientHost as _, ClientPreferences};
+
+        let root = std::env::temp_dir().join(format!(
+            "tcode-desktop-preferences-{}",
+            tcode_services::store::now_millis()
+        ));
+        let client = tcode_remote::NativeClientHost::new(root.clone(), "fallback device");
+        let host = Settings {
+            theme_mode: ThemeMode::Dark,
+            language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.into()),
+            ..Settings::default()
+        };
+
+        assert_eq!(
+            effective_client_settings(&host, &client.load_preferences()),
+            host
+        );
+
+        client.save_preferences(&ClientPreferences {
+            appearance: Some("light".into()),
+            language: Some("system".into()),
+            device_name: Some("Desk client".into()),
+            ..Default::default()
+        });
+        let reloaded = tcode_remote::NativeClientHost::new(root.clone(), "different fallback");
+        let preferences = reloaded.load_preferences();
+        let effective = effective_client_settings(&host, &preferences);
+        assert_eq!(effective.theme_mode, ThemeMode::Light);
+        assert_eq!(effective.language, None);
+        assert_eq!(reloaded.device_name(), "Desk client");
+
+        reloaded.save_preferences(&ClientPreferences::default());
+        assert_eq!(
+            effective_client_settings(&host, &reloaded.load_preferences()),
+            host,
+            "clearing the client override must reveal the replicated host fallback"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn rapid_selection_is_immediate_idempotent_and_retires_old_loads(cx: &mut TestAppContext) {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let host = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        workspace.update(cx, |store, cx| {
+            let task_count = store.attachment_tasks.len();
+            for index in 0..20 {
+                let id = if index % 2 == 0 { "one" } else { "two" };
+                store.select_session(id.into());
+                assert_eq!(store.active_session_id().as_deref(), Some(id));
+                assert!(store.session_loading());
+                let messages = outgoing.len();
+                store.select_session(id.into());
+                assert_eq!(outgoing.len(), messages, "second tap must send nothing");
+                assert_eq!(store.attachment_tasks.len(), task_count);
+                assert_eq!(
+                    host.subscriptions()
+                        .iter()
+                        .filter(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    host.subscriptions()
+                        .iter()
+                        .filter(|sub| matches!(sub.topic, Topic::SessionStatus { .. }))
+                        .count(),
+                    1
+                );
+            }
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "one".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
+                        from: 0,
+                        records: vec![],
+                    },
+                },
+                cx,
+            );
+            assert!(
+                store.session_loading(),
+                "retired load must not replace the skeleton"
+            );
+            assert!(store.session_replica.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn paged_history_keeps_event_and_turn_cursors_absolute(cx: &mut TestAppContext) {
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let host = tcode_client::HostLink::new(to_host, from_host);
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        workspace.update(cx, |store, cx| {
+            store.select_session("large".into());
+            let records = (450..500)
+                .flat_map(|index| {
+                    [
+                        AgentEvent::TurnStarted {
+                            turn_id: index.to_string(),
+                        }
+                        .into(),
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            id: format!("user-{index}"),
+                            parent_item_id: None,
+                            content: ItemContent::UserMessage {
+                                text: format!("Message {index}"),
+                                attachments: vec![],
+                                context_len: None,
+                            },
+                        })
+                        .into(),
+                        AgentEvent::ItemCompleted(ThreadItem {
+                            id: format!("assistant-{index}"),
+                            parent_item_id: None,
+                            content: ItemContent::AssistantMessage {
+                                text: format!("Response {index}"),
+                            },
+                        })
+                        .into(),
+                        AgentEvent::TurnCompleted {
+                            turn_id: index.to_string(),
+                            status: TurnStatus::Completed,
+                            usage: None,
+                        }
+                        .into(),
+                    ]
+                })
+                .collect();
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "large".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        from: 1800,
+                        records,
+                        total: 2000,
+                        total_turns: 500,
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
+            assert_eq!(store.session_turn_offset, 450);
+            assert_eq!(
+                host.subscriptions()
+                    .iter()
+                    .find(|sub| matches!(sub.topic, Topic::SessionEvents { .. }))
+                    .unwrap()
+                    .after,
+                Some(2000)
+            );
+            while outgoing.try_recv().is_ok() {}
+            store.rewind_turn(2, agent::RewindMode::Conversation);
+            let command =
+                tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+            assert!(matches!(
+                command.payload,
+                tcode_protocol::ClientPayload::Command(Command::RewindTurn { turn: 452, .. })
+            ));
+            let topic = Topic::SessionEvents {
+                session_id: "large".into(),
+            };
+            store.baseline_topics.remove(&topic);
+            let retained_entry = store.session_replica.as_ref().unwrap().1.entries[0].clone();
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: topic.clone(),
+                    event: ServerEvent::SessionSnapshot {
+                        from: 2000,
+                        records: vec![],
+                        total: 2000,
+                        total_turns: 500,
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
+            assert!(
+                store.baseline_topics.contains(&topic),
+                "an empty reconnect tail still establishes readiness"
+            );
+            assert!(
+                std::sync::Arc::ptr_eq(
+                    &retained_entry,
+                    &store.session_replica.as_ref().unwrap().1.entries[0]
+                ),
+                "empty replay must retain the existing timeline"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn history_prefetch_keeps_one_bounded_page_in_flight(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-prefetch-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = test_host(SessionStore::open_at(root.clone()).unwrap());
+        let status = smol::block_on(host.update_state_for_test(|state, cx| {
+            let id = state.start_draft("history".into(), std::env::temp_dir(), cx);
+            state.session_status_snapshot(&id).unwrap()
+        }))
+        .unwrap();
+        shutdown_test_host(&host);
+        std::fs::remove_dir_all(root).unwrap();
+
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let workspace = cx.new(|cx| {
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, false, cx)
+        });
+        workspace.update(cx, |store, cx| {
+            store.selected_session_id = Some("large".into());
+            store.session_status_replica = Some(status);
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "large".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        from: 1800,
+                        records: (0..200)
+                            .map(|_| {
+                                agent::AgentEvent::Warning {
+                                    message: "short".into(),
+                                }
+                                .into()
+                            })
+                            .collect(),
+                        total: 2000,
+                        total_turns: 1,
+                        truncated: false,
+                    },
+                },
+                cx,
+            );
+        });
+        while outgoing.try_recv().is_ok() {}
+        workspace.update(cx, |store, cx| store.update_history_window(1., cx));
+        cx.run_until_parked();
+        let mut request =
+            tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        assert!(matches!(
+            request.payload,
+            tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+                before: 1800,
+                limit: 200,
+                ..
+            })
+        ));
+        workspace.update(cx, |store, cx| {
+            assert!(store.history_loading());
+            store.load_earlier_messages(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            outgoing.try_recv().is_err(),
+            "scrolling while loading must not queue another page"
+        );
+
+        for page in 0..4 {
+            let before = 1800 - page * 200;
+            assert!(matches!(
+                request.payload,
+                tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+                    before: requested_before,
+                    limit: 200,
+                    ..
+                }) if requested_before == before
+            ));
+            let records = (0..100)
+                .flat_map(|turn| {
+                    let turn_id = format!("{page}-{turn}");
+                    [
+                        agent::AgentEvent::TurnStarted {
+                            turn_id: turn_id.clone(),
+                        }
+                        .into(),
+                        agent::AgentEvent::TurnCompleted {
+                            turn_id,
+                            status: agent::TurnStatus::Completed,
+                            usage: None,
+                        }
+                        .into(),
+                    ]
+                })
+                .collect();
+            incoming
+                .try_send(
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                        id: request.id,
+                        result: Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
+                            records,
+                            from: before - 200,
+                            truncated: false,
+                        }),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            wait_until(cx, &workspace, "prefetched page applied", |cx| {
+                workspace.read_with(cx, |store, _| store.session_from["large"] == before - 200)
+            });
+            assert!(
+                outgoing.try_recv().is_err(),
+                "yield between automatic pages"
+            );
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(250));
+            cx.run_until_parked();
+            workspace.update(cx, |store, cx| {
+                store.update_history_window(if page < 3 { 2. + page as f32 } else { 6. }, cx);
+            });
+            cx.run_until_parked();
+            if page < 3 {
+                wait_until(cx, &workspace, "next prefetch request", |_| {
+                    !outgoing.is_empty()
+                });
+                request =
+                    tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+            }
+        }
+        assert!(
+            outgoing.try_recv().is_err(),
+            "stop when six screens are covered, without a scroll event"
+        );
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.session_from["large"], 1000);
+            assert_eq!(store.session_records["large"].len(), 1000);
+            assert!(!store.history_loading());
+        });
+    }
 
     fn test_host(store: SessionStore) -> SpawnedHost {
         spawn_host(store, HostServices::default()).expect("spawn test host")
@@ -2140,6 +3338,92 @@ mod tests {
             smol::block_on(smol::Timer::after(std::time::Duration::from_millis(1)));
         }
         panic!("timed out waiting for {description}");
+    }
+
+    #[gpui::test]
+    fn reconnect_retains_replicas_until_all_selected_thread_baselines_arrive(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_client::ConnectionState;
+        let root = scratch_root("baseline-replay");
+        let disk = SessionStore::open_at(root.clone()).unwrap();
+        disk.upsert_project(&project_at("p", &root)).unwrap();
+        disk.upsert_meta(&thread(&root, "one", "p", None)).unwrap();
+        let host = test_host(disk);
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        workspace.update(cx, |store, _| store.select_session("one".into()));
+        wait_until(cx, &workspace, "selected thread baseline", |cx| {
+            workspace.read_with(cx, |store, _| store.baseline_ready())
+        });
+        workspace.update(cx, |store, cx| {
+            let status = store.session_status_replica.clone().unwrap();
+            let snapshots = [
+                (
+                    Topic::Index,
+                    ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        sessions: store.index_replica.0.clone(),
+                        projects: store.index_replica.1.clone(),
+                        activity: Default::default(),
+                    }),
+                ),
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(store.settings_replica.clone()),
+                ),
+                (
+                    Topic::SessionStatus {
+                        session_id: "one".into(),
+                    },
+                    ServerEvent::SessionStatusReplaced(status),
+                ),
+                (
+                    Topic::SessionEvents {
+                        session_id: "one".into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        from: 0,
+                        records: vec![],
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
+                    },
+                ),
+            ];
+            store.apply_connection_state(ConnectionState::Reconnecting {
+                attempt: 2,
+                reason: None,
+            });
+            // Old socket events can already be queued when loss is published.
+            for (topic, event) in &snapshots {
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic: topic.clone(),
+                        event: event.clone(),
+                    },
+                    cx,
+                );
+            }
+            assert!(store.baseline_ready());
+            store.apply_connection_state(ConnectionState::Syncing);
+            assert!(!store.threads_loading(), "cached list remains visible");
+            assert!(!store.chat_loading(), "cached thread remains visible");
+            assert_eq!(store.active_session_id().as_deref(), Some("one"));
+            for (topic, event) in snapshots {
+                assert_eq!(store.connection_state(), &ConnectionState::Syncing);
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    },
+                    cx,
+                );
+            }
+            assert_eq!(store.connection_state(), &ConnectionState::Connected);
+        });
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn scratch_root(label: &str) -> std::path::PathBuf {
@@ -2247,7 +3531,7 @@ mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, _| store.select_session("parent".into()));
         wait_until(cx, &workspace, "parent selected", |cx| {
@@ -2314,7 +3598,7 @@ mod tests {
             disk.upsert_meta(&meta).expect("persist session");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         // Let the launch fallback settle on the first project before the user
         // navigates into "p" themselves.
@@ -2395,7 +3679,7 @@ mod tests {
                 patch: tcode_core::settings::SettingsPatch::LastProject(Some("remembered".into())),
             },
         );
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         wait_until(cx, &workspace, "remembered project draft", |cx| {
             workspace.read_with(cx, |store, _| {
                 store.session_status_replica.as_ref().is_some_and(|status| {
@@ -2408,7 +3692,7 @@ mod tests {
 
         let empty_root = scratch_root("no-projects");
         let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
-        let empty = cx.new(|cx| WorkspaceStore::new_local(&empty_host, cx));
+        let empty = cx.new(|cx| WorkspaceStore::new(empty_host.link(), cx));
         for _ in 0..5 {
             empty.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             cx.run_until_parked();
@@ -2437,7 +3721,7 @@ mod tests {
         meta.id = "reconnect".into();
         disk.upsert_meta(&meta).unwrap();
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session("reconnect".into()));
         wait_until(cx, &workspace, "selected status", |cx| {
             workspace.read_with(cx, |store, _| store.session_status_replica.is_some())
@@ -2458,7 +3742,10 @@ mod tests {
             workspace.read_with(cx, |store, _| store.session_records["reconnect"].len() == 3)
         });
         host.link()
-            .set_connection_state(tcode_client::ConnectionState::Reconnecting { attempt: 1 });
+            .set_connection_state(tcode_client::ConnectionState::Reconnecting {
+                attempt: 1,
+                reason: None,
+            });
         host.link()
             .set_connection_state(tcode_client::ConnectionState::Connected);
         command(&host, Command::ClearRelaunchMarker);
@@ -2472,6 +3759,9 @@ mod tests {
                         session_id: "reconnect".into(),
                     },
                     event: ServerEvent::SessionSnapshot {
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
                         from: 2,
                         records: vec![],
                     },
@@ -2559,7 +3849,7 @@ mod tests {
         }
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "initial session timeline replica", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2676,7 +3966,7 @@ mod tests {
             .upsert_meta(&seed_session)
             .expect("persist seed session");
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         wait_until(cx, &workspace, "initial session index", |cx| {
             workspace.read_with(cx, |store, _| {
                 store
@@ -2702,12 +3992,11 @@ mod tests {
             assert!(store.archived_groups().is_empty());
         });
 
-        command(
-            &host,
-            Command::CreateProject {
-                root: root.join("created"),
-            },
-        );
+        // The host validates a project root against its own filesystem, so this
+        // directory has to exist before it will accept it.
+        let created_root = root.join("created");
+        std::fs::create_dir_all(&created_root).unwrap();
+        command(&host, Command::CreateProject { root: created_root });
         command(
             &host,
             Command::ArchiveSession {
@@ -2806,7 +4095,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2893,7 +4182,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(session_id.clone()));
         wait_until(cx, &workspace, "selected session status", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -2949,7 +4238,7 @@ mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(first.id.clone()));
         wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -3034,7 +4323,7 @@ mod tests {
             .expect("persist second session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(first.id.clone()));
         wait_until(cx, &workspace, "first selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -3106,7 +4395,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
         wait_until(cx, &workspace, "selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -3171,7 +4460,7 @@ mod tests {
         session_store.upsert_meta(&meta).expect("persist session");
 
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
         wait_until(cx, &workspace, "selected session", |cx| {
             workspace.read_with(cx, |store, _| {
@@ -3236,7 +4525,7 @@ mod tests {
         meta.id = "git-replica".into();
         session_store.upsert_meta(&meta).unwrap();
         let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, _| store.select_session("git-replica".into()));
         // Subscribing adopts the session and spawns a real git probe of the
@@ -3337,7 +4626,7 @@ mod tests {
         disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
             .expect("persist session");
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, cx| {
             store.start_draft("doomed".into(), root.clone(), cx)
@@ -3389,7 +4678,7 @@ mod tests {
                 .expect("persist project");
         }
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, cx| {
             store.start_draft("doomed".into(), root.clone(), cx)
@@ -3427,7 +4716,7 @@ mod tests {
         disk.upsert_project(&project_at("p", &root))
             .expect("persist project");
         let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         workspace.update(cx, |store, cx| {
             store.start_draft("p".into(), root.clone(), cx)

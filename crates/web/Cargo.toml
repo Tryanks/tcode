@@ -19,7 +19,7 @@ gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
 gpui_web = { package = "gpui-pre-web", version = "=0.3.3", default-features = false }
 console_error_panic_hook = "0.1"
 tcode-protocol = { path = "../protocol", default-features = false }
-tcode-mobile = { path = "../mobile", default-features = false }
+tcode-client = { path = "../client" }
 tcode-ui = { path = "../ui", default-features = false }
 async-channel = "2"
 futures-lite = "2"
@@ -28,8 +28,9 @@ wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "=0.4.71"
 js-sys = "=0.3.98"
 web-sys = { version = "=0.3.98", features = [
-    "Window", "Document", "Element", "HtmlCanvasElement", "Node",
+    "Window", "Performance", "Document", "Element", "HtmlCanvasElement", "HtmlAnchorElement", "Node",
     "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList",
-    "Location", "Navigator", "Storage", "Request", "RequestInit",
+    "Location", "History", "Navigator", "Storage", "Request", "RequestInit",
     "Headers", "Response", "WebSocket", "Event", "EventTarget", "MessageEvent",
+    "Blob", "BlobPropertyBag", "Url", "UrlSearchParams",
 ] }

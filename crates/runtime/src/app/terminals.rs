@@ -1,8 +1,10 @@
 use super::*;
+use crate::terminal::{TerminalProjection, TerminalUpdate};
+use term::TermEvent;
 
 impl AppState {
-    pub(crate) fn reap_terminal_output(&mut self) {
-        self.terminal_output
+    pub(crate) fn reap_terminal_projections(&mut self) {
+        self.terminal_projections
             .retain(|id, _| self.terminal_registry.terminal(*id).is_some());
     }
 
@@ -10,45 +12,175 @@ impl AppState {
         self.terminal_registry.terminal(terminal_id)
     }
 
-    pub(crate) fn emit_terminal_output(
-        &mut self,
-        terminal_id: u64,
-        bytes: Vec<u8>,
-        reset: bool,
-        cx: &mut HostCx,
-    ) {
-        let Some(ring) = self.terminal_output.get_mut(&terminal_id) else {
+    /// The captured output of one stored command execution. Clients address it
+    /// by timeline entry id and never send the text back for rendering.
+    pub(crate) fn stored_command_output(&self, session_id: &str, item_id: &str) -> Option<String> {
+        self.resident(session_id)?
+            .timeline
+            .entries
+            .iter()
+            .find(|entry| entry.id == item_id)
+            .and_then(|entry| match &entry.content {
+                EntryContent::Item(ItemContent::CommandExecution { output, .. }) => {
+                    Some(output.clone())
+                }
+                _ => None,
+            })
+    }
+
+    fn terminal_subscribed(&self, terminal_id: u64) -> bool {
+        self.subscriptions
+            .contains(&Topic::Terminal { terminal_id })
+    }
+
+    fn emit_terminal(&mut self, terminal_id: u64, event: ServerEvent, cx: &mut HostCx) {
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic: Topic::Terminal { terminal_id },
+            event,
+        }));
+    }
+
+    /// The frame a subscriber receives on attach.
+    ///
+    /// Rebuilt only for the first subscriber: while anyone is attached the
+    /// retained frame is advanced by the same deltas they receive, so a second
+    /// client must read that shared state rather than start a new sequence.
+    pub(crate) fn refresh_terminal_projection(&mut self, terminal_id: u64) {
+        let Some(terminal) = self.terminal_handle(terminal_id) else {
             return;
         };
-        const CAPACITY: usize = 256 * 1024;
-        let ring = &mut ring.bytes;
-        let tail = &bytes[bytes.len().saturating_sub(CAPACITY)..];
-        let remove = (ring.len() + tail.len()).saturating_sub(CAPACITY);
-        ring.drain(..remove);
-        ring.extend(tail.iter().copied());
-        if self
-            .subscriptions
-            .contains(&Topic::Terminal { terminal_id })
-        {
-            let (cols, rows) = self
-                .terminal_handle(terminal_id)
-                .map(|terminal| {
-                    let (cols, rows) = terminal.grid().dimensions();
-                    (cols as u16, rows as u16)
-                })
-                .unwrap_or((80, 24));
-            cx.emit(HostEvent::Domain(EventEnvelope {
-                request_id: None,
-                topic: Topic::Terminal { terminal_id },
-                event: ServerEvent::TerminalOutput {
-                    terminal_id,
-                    bytes,
-                    reset,
-                    cols,
-                    rows,
-                },
-            }));
+        let projection = self
+            .terminal_projections
+            .entry(terminal_id)
+            .or_insert_with(TerminalProjection::new);
+        projection.reset(&terminal);
+    }
+
+    pub(crate) fn terminal_frame(&self, terminal_id: u64) -> Option<tcode_protocol::TerminalFrame> {
+        Some(self.terminal_projections.get(&terminal_id)?.frame.clone())
+    }
+
+    /// Record a terminal event and schedule the next projection.
+    ///
+    /// Bell and OSC 52 rides the delta so every attached client reacts, exactly
+    /// as they did when each client re-parsed the byte stream itself.
+    pub(crate) fn on_terminal_events(
+        &mut self,
+        terminal_id: u64,
+        bell: bool,
+        clipboard: Option<tcode_protocol::terminal::TerminalClipboard>,
+        cx: &mut HostCx,
+    ) {
+        let Some(projection) = self.terminal_projections.get_mut(&terminal_id) else {
+            return;
+        };
+        projection.bell |= bell;
+        if clipboard.is_some() {
+            projection.clipboard = clipboard;
         }
+        self.schedule_terminal_projection(terminal_id, cx);
+    }
+
+    /// Project immediately when the last one is a frame old, otherwise coalesce
+    /// into a single wakeup at the frame boundary.
+    pub(crate) fn schedule_terminal_projection(&mut self, terminal_id: u64, cx: &mut HostCx) {
+        let Some(projection) = self.terminal_projections.get_mut(&terminal_id) else {
+            return;
+        };
+        if projection.scheduled {
+            return;
+        }
+        let elapsed = projection.last_projected.elapsed();
+        if elapsed >= crate::terminal::FRAME_INTERVAL {
+            self.project_terminal(terminal_id, cx);
+            return;
+        }
+        projection.scheduled = true;
+        let delay = crate::terminal::FRAME_INTERVAL - elapsed;
+        let tick = cx.clone();
+        cx.spawn_detached(async move {
+            smol::Timer::after(delay).await;
+            tick.enqueue(move |state, cx| {
+                if let Some(projection) = state.terminal_projections.get_mut(&terminal_id) {
+                    projection.scheduled = false;
+                }
+                state.project_terminal(terminal_id, cx);
+            });
+        });
+    }
+
+    fn project_terminal(&mut self, terminal_id: u64, cx: &mut HostCx) {
+        let Some(terminal) = self.terminal_handle(terminal_id) else {
+            return;
+        };
+        // Without a subscriber nothing is snapshotted, so rio keeps
+        // accumulating damage and take-once image buffers for the next attach.
+        if !self.terminal_subscribed(terminal_id) {
+            return;
+        }
+        let Some(projection) = self.terminal_projections.get_mut(&terminal_id) else {
+            return;
+        };
+        projection.last_projected = std::time::Instant::now();
+        let update = if projection.styles_exhausted() {
+            Some(TerminalUpdate::Frame(projection.reset(&terminal)))
+        } else {
+            projection.update(&terminal)
+        };
+        // A burst that outran the scrollback budget owes the client its
+        // history, and the terminal may now be idle with no wakeup left to give.
+        let owes_history = projection.owes_history();
+        match update {
+            Some(TerminalUpdate::Frame(frame)) => self.emit_terminal(
+                terminal_id,
+                ServerEvent::TerminalFrame {
+                    terminal_id,
+                    frame: Box::new(frame),
+                },
+                cx,
+            ),
+            Some(TerminalUpdate::Delta(delta)) => self.emit_terminal(
+                terminal_id,
+                ServerEvent::TerminalDelta {
+                    terminal_id,
+                    delta: Box::new(delta),
+                },
+                cx,
+            ),
+            None => {}
+        }
+        if owes_history {
+            self.schedule_terminal_projection(terminal_id, cx);
+        }
+    }
+
+    pub(crate) fn resize_terminal(
+        &mut self,
+        terminal_id: u64,
+        cols: u16,
+        rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+        cx: &mut HostCx,
+    ) {
+        let Some(terminal) = self.terminal_handle(terminal_id) else {
+            return;
+        };
+        terminal.resize_with_cell_size(
+            usize::from(cols.clamp(2, 1000)),
+            usize::from(rows.clamp(2, 1000)),
+            u32::from(cell_width.max(1)),
+            u32::from(cell_height.max(1)),
+        );
+        self.schedule_terminal_projection(terminal_id, cx);
+    }
+
+    pub(crate) fn clear_terminal(&mut self, terminal_id: u64, cx: &mut HostCx) {
+        if let Some(terminal) = self.terminal_handle(terminal_id) {
+            terminal.clear();
+        }
+        self.schedule_terminal_projection(terminal_id, cx);
     }
 
     pub(super) fn restore_terminal_workspace(&mut self, active: &mut ActiveSession) -> bool {
@@ -171,9 +303,7 @@ impl AppState {
         let cwd = term::Terminal::resolve_spawn_cwd(cwd);
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let result = host_cx
-                .unblock(move || term::Terminal::spawn_with_output(cwd))
-                .await;
+            let result = host_cx.unblock(move || term::Terminal::spawn(cwd)).await;
             host_cx.enqueue(move |state, cx| {
                 let pending = state
                     .pending_terminal_spawns
@@ -196,7 +326,7 @@ impl AppState {
                     return;
                 }
 
-                let (terminal, output) = match result {
+                let terminal = match result {
                     Ok(terminal) => terminal,
                     Err(error) => {
                         let runtime_error = match action {
@@ -258,28 +388,55 @@ impl AppState {
                     return;
                 };
                 state.sync_terminal_handles();
-                state.terminal_output.insert(
-                    terminal_id,
-                    crate::terminal::OutputReplay {
-                        generation: spawn_id,
-                        bytes: Default::default(),
-                    },
-                );
-                state.emit_terminal_output(terminal_id, Vec::new(), true, cx);
-                let output_cx = cx.clone();
-                cx.spawn_detached(async move {
-                    while let Ok(bytes) = output.recv().await {
-                        output_cx.enqueue(move |state, cx| {
-                            if state
-                                .terminal_output
-                                .get(&terminal_id)
-                                .is_some_and(|replay| replay.generation == spawn_id)
-                            {
-                                state.emit_terminal_output(terminal_id, bytes, false, cx);
-                            }
-                        });
+                // A restart reuses the tab id, so the previous grid must not
+                // survive into the new PTY's projection.
+                state
+                    .terminal_projections
+                    .insert(terminal_id, TerminalProjection::new());
+                if state.terminal_subscribed(terminal_id) {
+                    state.refresh_terminal_projection(terminal_id);
+                    if let Some(frame) = state.terminal_frame(terminal_id) {
+                        state.emit_terminal(
+                            terminal_id,
+                            ServerEvent::TerminalFrame {
+                                terminal_id,
+                                frame: Box::new(frame),
+                            },
+                            cx,
+                        );
                     }
-                });
+                }
+                let events = state
+                    .terminal_handle(terminal_id)
+                    .map(|terminal| terminal.events());
+                if let Some(events) = events {
+                    let event_cx = cx.clone();
+                    cx.spawn_detached(async move {
+                        // Drain everything already queued into one wakeup: a
+                        // flood produces far more emulator events than frames.
+                        while let Ok(first) = events.recv().await {
+                            let (mut bell, mut clipboard) = (false, None);
+                            let mut note = |event| match event {
+                                TermEvent::Bell => bell = true,
+                                TermEvent::ClipboardStore { kind, text } => {
+                                    clipboard = Some(tcode_protocol::terminal::TerminalClipboard {
+                                        selection: kind
+                                            == term::rio_vt::clipboard::ClipboardType::Selection,
+                                        text,
+                                    });
+                                }
+                                TermEvent::Wakeup | TermEvent::Exited => {}
+                            };
+                            note(first);
+                            while let Ok(event) = events.try_recv() {
+                                note(event);
+                            }
+                            event_cx.enqueue(move |state, cx| {
+                                state.on_terminal_events(terminal_id, bell, clipboard, cx);
+                            });
+                        }
+                    });
+                }
                 state.persist_terminal_resource_count(&session_id, cx);
             });
         });
@@ -365,12 +522,30 @@ impl AppState {
         if active.terminal_workspace.terminals.len() + pending >= MAX_TERMINALS_PER_SESSION {
             return;
         }
+        let cwd = self.spawn_cwd(target_id);
         self.schedule_terminal_spawn(
-            active.meta.id.clone(),
-            active.meta.cwd.clone(),
+            self.resident(target_id)
+                .map(|active| active.meta.id.clone())
+                .unwrap_or_default(),
+            cwd,
             TerminalSpawnAction::New,
             cx,
         );
+    }
+
+    /// A new tab or split follows the active terminal's foreground directory,
+    /// falling back to the session's own cwd. This used to be a thread-local
+    /// override set by the desktop window, which only worked in-process.
+    fn spawn_cwd(&self, target_id: &str) -> PathBuf {
+        let Some(active) = self.resident(target_id) else {
+            return PathBuf::new();
+        };
+        active
+            .terminal_workspace
+            .active()
+            .map(|entry| entry.terminal.working_directory())
+            .filter(|cwd| cwd.is_dir())
+            .unwrap_or_else(|| active.meta.cwd.clone())
     }
 
     pub fn activate_terminal(&mut self, target_id: &str, terminal_id: u64, _cx: &mut HostCx) {
@@ -443,9 +618,11 @@ impl AppState {
         {
             return;
         }
+        let session_id = active.meta.id.clone();
+        let cwd = self.spawn_cwd(target_id);
         self.schedule_terminal_spawn(
-            active.meta.id.clone(),
-            active.meta.cwd.clone(),
+            session_id,
+            cwd,
             TerminalSpawnAction::Split { first, direction },
             cx,
         );
@@ -465,15 +642,16 @@ impl AppState {
             return;
         };
         let label = entry.terminal.label();
-        let selection = selection
-            .map(|selection| term::SelectedText {
-                line_start: selection.line_start,
-                line_end: selection.line_end,
-                text: selection.text,
-            })
-            .or_else(|| entry.terminal.selected_text());
+        // Selection is client state: the host grid has no viewport to select in.
         if let Some(selection) = selection {
-            active.terminal_workspace.add_context(label, selection);
+            active.terminal_workspace.add_context(
+                label,
+                term::SelectedText {
+                    line_start: selection.line_start,
+                    line_end: selection.line_end,
+                    text: selection.text,
+                },
+            );
         }
     }
 

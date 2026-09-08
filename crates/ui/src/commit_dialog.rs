@@ -2,6 +2,7 @@
 //! current branch, a default-branch safeguard banner, and a commit-message
 //! textarea pre-filled by AI generation (with a regenerate button).
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::collections::HashSet;
 
 use crate::theme::ActiveTheme as _;
@@ -301,7 +302,7 @@ impl Render for CommitDialog {
         }
         let file_list = div()
             .id("commit-files")
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .track_scroll(&self.scroll)
             .w_full()
             .max_h(px(180.))

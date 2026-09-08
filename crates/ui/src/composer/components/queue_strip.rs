@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::touch_scroll::TouchScrollExt as _;
 #[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_family = "wasm")]
@@ -27,7 +28,19 @@ impl Composer {
             self.scheduled_countdown_tick = None;
             return None;
         };
-        let queued = queue.messages;
+        let deliveries = self.workspace_store.read(cx).delivery_messages();
+        let queued: Vec<_> = queue
+            .messages
+            .into_iter()
+            .filter(|message| {
+                !deliveries.iter().any(|(key, text, failure, acknowledged)| {
+                    !acknowledged
+                        && failure.is_none()
+                        && (message.delivery_key.as_deref() == Some(key.as_str())
+                            || (message.delivery_key.is_none() && message.text == *text))
+                })
+            })
+            .collect();
         let can_steer = queue.can_steer;
         let agent = queue.agent;
         let has_scheduled = queued
@@ -142,7 +155,7 @@ impl Composer {
                 .id("queued-messages-scroll")
                 .w_full()
                 .max_h(px(180.))
-                .overflow_y_scroll()
+                .touch_overflow_y_scroll()
                 .child(strip)
                 .into_any_element(),
         )

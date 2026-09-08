@@ -5,7 +5,7 @@ use tcode_client::HostLink;
 use tcode_protocol::{Query, QueryResponse};
 
 pub(super) struct HostImages {
-    pub link: HostLink,
+    pub link: Option<HostLink>,
     pub namespace: u64,
 }
 impl Global for HostImages {}
@@ -15,11 +15,17 @@ impl Asset for HostImage {
     type Source = (u64, PathBuf);
     type Output = Result<Arc<Image>, ImageCacheError>;
     fn load(
-        (_, path): Self::Source,
+        (namespace, path): Self::Source,
         cx: &mut App,
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
-        let host = cx.global::<HostImages>().link.clone();
+        let images = cx.global::<HostImages>();
+        let host = images
+            .link
+            .clone()
+            .filter(|_| images.namespace == namespace)
+            .ok_or_else(|| std::io::Error::other("image belongs to a detached host"));
         async move {
+            let host = host?;
             let bytes = match host.query(Query::ReadFileBytes { path }).await {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
                 result => {

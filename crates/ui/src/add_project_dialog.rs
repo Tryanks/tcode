@@ -1,38 +1,57 @@
+//! Add Project: pick a directory on the *host* and, optionally, import the
+//! external-agent threads it already has.
+//!
+//! Everything here is host state reached over the pipe — the recents scan, the
+//! project root and the import run. The only native step is the directory
+//! picker, which browses *this* machine; it is offered when this build has one
+//! and the attachment is local, and never as a substitute for the host's own
+//! judgment about a path.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::overlay::{DialogActions, OverlayExt as _};
 use crate::scroll::ScrollableElement as _;
+use crate::sizing::fit_viewport;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::input::{Input, InputState};
 use crate::widgets::progress::Progress;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, Role, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use crate::store::WorkspaceStore;
+use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::time::{humanize_ago, now_secs};
-use tcode_protocol::{ExternalThread, RecentDir, SourceTool};
-use tcode_services::import::ExternalImportUpdate;
+use tcode_protocol::{CommandResponse, ExternalImportState, ExternalThread, RecentDir, SourceTool};
 
 const RECENT_LIMIT: usize = 15;
 const RECENT_ROW_HEIGHT_ESTIMATE: f32 = 64.;
 const RECENT_VIEWPORT_MAX_HEIGHT: f32 = 390.;
+/// Everything above the recents viewport inside the dialog: title, the path row
+/// and the footer. Subtracted so the list scrolls instead of pushing the Open
+/// button off a short window.
+const RECENT_VIEWPORT_CHROME: f32 = 260.;
 
 enum RecentState {
     Loading,
     Ready(Vec<RecentDir>),
+    Failed(String),
 }
+
+/// Whether this build can put up a directory picker at all.
+const NATIVE_DIRECTORY_PICKER: bool = cfg!(feature = "native-dialogs");
 
 pub(super) struct AddProjectDialog {
     store: Entity<WorkspaceStore>,
     path_input: Entity<InputState>,
     recent: RecentState,
-    path_error: bool,
+    /// The last failure to show under the path row. Host-authored where the
+    /// host produced it, so the user reads the host's own reason.
+    error: Option<String>,
 }
 
 pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut App) {
@@ -57,16 +76,24 @@ pub(super) fn open(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut 
 
 impl AddProjectDialog {
     fn new(store: Entity<WorkspaceStore>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let path_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(crate::tr!("sidebar.path_placeholder").into_owned())
-        });
+        let placeholder = match store.read(cx).remote_host_name() {
+            Some(host) => crate::tr!("sidebar.host_path_placeholder", host = host).into_owned(),
+            None => crate::tr!("sidebar.path_placeholder").into_owned(),
+        };
+        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         Self {
             store,
             path_input,
             recent: RecentState::Loading,
-            path_error: false,
+            error: None,
         }
+    }
+
+    /// Whether the platform directory picker is meaningful here. It browses this
+    /// machine, so a remote attachment must type a host path instead — the
+    /// picker would silently produce a path the host cannot resolve.
+    fn can_browse(&self, cx: &App) -> bool {
+        NATIVE_DIRECTORY_PICKER && !self.store.read(cx).is_remote()
     }
 
     fn scan(&mut self, cx: &mut Context<Self>) {
@@ -75,15 +102,19 @@ impl AddProjectDialog {
         cx.spawn(async move |this, cx| {
             let recent = recent.await;
             let _ = this.update(cx, |dialog, cx| {
-                dialog.recent = RecentState::Ready(recent);
+                dialog.recent = match recent {
+                    Ok(recent) => RecentState::Ready(recent),
+                    Err(error) => RecentState::Failed(error),
+                };
                 cx.notify();
             });
         })
         .detach();
     }
 
+    #[cfg(feature = "native-dialogs")]
     fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
@@ -101,42 +132,40 @@ impl AddProjectDialog {
         .detach();
     }
 
+    /// Send the typed text to the host as-is. Whether it is absolute and whether
+    /// it is a directory are facts about the host's filesystem and path rules,
+    /// so the host decides and its answer is what the user reads. The path is
+    /// never canonicalized or otherwise touched here.
     fn open_typed_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = PathBuf::from(self.path_input.read(cx).value().trim());
-        if !path.is_absolute() {
-            self.path_error = true;
+        let typed = self.path_input.read(cx).value().trim().to_owned();
+        if typed.is_empty() {
+            self.error = Some(crate::tr!("sidebar.path_required").into_owned());
             cx.notify();
             return;
         }
-        let is_directory = self
-            .store
-            .update(cx, |store, cx| store.is_directory(path.clone(), cx));
-        cx.spawn_in(window, async move |this, cx| {
-            let is_directory = is_directory.await;
-            let _ = this.update_in(cx, |dialog, window, cx| {
-                if is_directory {
-                    dialog.create_draft(path, window, cx);
-                } else {
-                    dialog.path_error = true;
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.create_draft(PathBuf::from(typed), window, cx);
     }
 
     fn create_draft(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
         let create = self
             .store
             .update(cx, |store, cx| store.create_project(path.clone(), cx));
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(tcode_protocol::CommandResponse::ProjectId(Some(project_id))) = create.await
-            else {
-                let _ = this.update_in(cx, |dialog, _, cx| {
-                    dialog.path_error = true;
-                    cx.notify();
-                });
-                return;
+            let project_id = match create.await {
+                Ok(CommandResponse::ProjectId(Some(project_id))) => project_id,
+                Ok(other) => {
+                    let _ = this.update_in(cx, |dialog, _, cx| {
+                        dialog.fail(format!("unexpected create-project response: {other:?}"), cx);
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update_in(cx, |dialog, _, cx| {
+                        dialog.fail(error.message, cx);
+                    });
+                    return;
+                }
             };
             let _ = this.update_in(cx, |dialog, window, cx| {
                 dialog.store.update(cx, |store, cx| {
@@ -148,35 +177,60 @@ impl AddProjectDialog {
         .detach();
     }
 
+    fn fail(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.error = Some(crate::tr!("sidebar.path_rejected", reason = reason).into_owned());
+        cx.notify();
+    }
+
     fn choose_recent(&mut self, recent: RecentDir, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
         let path = recent.path.clone();
         let create = self
             .store
             .update(cx, |store, cx| store.create_project(path, cx));
         let threads = recent.threads;
-        let total = threads.len();
-        let current_tool = threads
-            .first()
-            .map(|thread| thread.source.display_name().to_string())
-            .unwrap_or_default();
         let store = self.store.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(tcode_protocol::CommandResponse::ProjectId(Some(project_id))) = create.await
-            else {
-                return;
+            let project_id = match create.await {
+                Ok(CommandResponse::ProjectId(Some(project_id))) => project_id,
+                Ok(other) => {
+                    let _ = this.update_in(cx, |dialog, _, cx| {
+                        dialog.fail(format!("unexpected create-project response: {other:?}"), cx);
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = this.update_in(cx, |dialog, _, cx| dialog.fail(error.message, cx));
+                    return;
+                }
             };
+            // Subscribe before starting: an import short enough to finish
+            // before the start reply lands is only recoverable through the
+            // retained status snapshot.
             let import = store.update(cx, |store, cx| {
+                store.watch_external_import(&project_id);
                 store.start_external_import(&project_id, threads, cx)
             });
-            let Ok(Some(receiver)) = import.await else {
+            let started = import.await;
+            if !matches!(started, Ok(CommandResponse::ExternalImportStarted(true))) {
+                store.update(cx, |store, _cx| {
+                    store.unwatch_external_import(&project_id);
+                });
+                let reason = match started {
+                    Err(error) => error.message,
+                    _ => crate::tr!("sidebar.import_refused").into_owned(),
+                };
+                let _ = this.update_in(cx, |dialog, _, cx| {
+                    dialog.error =
+                        Some(crate::tr!("sidebar.import_failed", reason = reason).into_owned());
+                    cx.notify();
+                });
                 return;
-            };
+            }
             let _ = this.update_in(cx, |dialog, window, cx| {
                 window.close_dialog(cx);
-                let progress = cx.new(|_| ImportProgress::new(dialog.store.clone(), project_id));
-                progress.update(cx, |progress, cx| {
-                    progress.start(receiver, total, current_tool, cx)
-                });
+                let store = dialog.store.clone();
+                let progress = cx.new(|cx| ImportProgress::new(store, project_id, cx));
                 let content = progress.clone();
                 window.open_dialog(cx, move |builder, _, cx| {
                     let progress_content = content.clone();
@@ -198,7 +252,7 @@ impl AddProjectDialog {
         .detach();
     }
 
-    fn render_recent(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_recent(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         match &self.recent {
             RecentState::Loading => v_flex()
                 .gap_3()
@@ -207,6 +261,12 @@ impl AddProjectDialog {
                 .text_color(cx.theme().muted_foreground)
                 .child(crate::tr!("sidebar.recent_loading"))
                 .child(Progress::new("recent-directories-loading").loading(true))
+                .into_any_element(),
+            RecentState::Failed(error) => div()
+                .py_4()
+                .text_size(px(13.))
+                .text_color(cx.theme().danger)
+                .child(crate::tr!("sidebar.recent_failed", reason = error.clone()).into_owned())
                 .into_any_element(),
             RecentState::Ready(recent) if recent.is_empty() => div()
                 .py_4()
@@ -275,8 +335,10 @@ impl AddProjectDialog {
                     );
                 }
                 let visible_rows = recent.len().min(RECENT_LIMIT) as f32;
-                let viewport_height =
-                    px((visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT));
+                let viewport_height = fit_viewport(
+                    (visible_rows * RECENT_ROW_HEIGHT_ESTIMATE).min(RECENT_VIEWPORT_MAX_HEIGHT),
+                    window.viewport_size().height - px(RECENT_VIEWPORT_CHROME),
+                );
                 div()
                     .id("recent-directory-list")
                     .w_full()
@@ -290,19 +352,23 @@ impl AddProjectDialog {
 }
 
 impl Render for AddProjectDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let host = self.store.read(cx).remote_host_name().map(str::to_owned);
+        let recent_label = match &host {
+            Some(host) => crate::tr!("sidebar.recent_activity_host", host = host).into_owned(),
+            None => crate::tr!("sidebar.recent_activity").into_owned(),
+        };
+        let path_hint = host
+            .as_ref()
+            .map(|host| crate::tr!("sidebar.host_path_hint", host = host).into_owned());
+        let can_browse = self.can_browse(cx);
         v_flex()
             .gap_4()
             .child(
                 v_flex()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_semibold()
-                            .child(crate::tr!("sidebar.recent_activity")),
-                    )
-                    .child(self.render_recent(cx)),
+                    .child(div().text_size(px(13.)).font_semibold().child(recent_label))
+                    .child(self.render_recent(window, cx)),
             )
             .child(
                 v_flex()
@@ -316,114 +382,114 @@ impl Render for AddProjectDialog {
                                     .flex_1()
                                     .rounded(crate::material::radius_input()),
                             )
-                            // The native picker browses THIS machine; over a
-                            // remote link the typed path is validated against
-                            // the host instead (Query::IsDirectory).
-                            .when(!self.store.read(cx).is_remote(), |row| {
+                            .when(can_browse, |row| {
                                 row.child(
                                     Button::new("browse-project-directory")
                                         .rounded(crate::material::radius_button())
                                         .label(crate::tr!("sidebar.browse"))
                                         .on_click(cx.listener(|dialog, _, window, cx| {
-                                            dialog.browse(window, cx);
+                                            dialog.browse_clicked(window, cx);
                                         })),
                                 )
                             }),
                     )
-                    .when(self.path_error, |column| {
+                    .when_some(path_hint, |column, hint| {
+                        column.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(hint),
+                        )
+                    })
+                    .when_some(self.error.clone(), |column, error| {
                         column.child(
                             div()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().danger)
-                                .child(crate::tr!("sidebar.invalid_path")),
+                                .child(error),
                         )
                     }),
             )
     }
 }
 
+impl AddProjectDialog {
+    #[cfg(feature = "native-dialogs")]
+    fn browse_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.browse(window, cx);
+    }
+
+    /// Unreachable: the button is only rendered when `can_browse`, which is
+    /// false without the feature.
+    #[cfg(not(feature = "native-dialogs"))]
+    fn browse_clicked(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+}
+
+/// Renders the host's replicated import status. It owns no progress state of
+/// its own, so a completion that arrived before this view existed still shows
+/// up: the subscription snapshot carries the retained latest run.
 struct ImportProgress {
     store: Entity<WorkspaceStore>,
     project_id: String,
-    done: usize,
-    total: usize,
-    current_tool: String,
-    summary: Option<(usize, usize)>,
+    _subscription: gpui::Subscription,
 }
 
 impl ImportProgress {
-    fn new(store: Entity<WorkspaceStore>, project_id: String) -> Self {
+    fn new(store: Entity<WorkspaceStore>, project_id: String, cx: &mut Context<Self>) -> Self {
         Self {
+            _subscription: observe_store_topics(&store, &[TopicKind::ExternalImport], cx),
             store,
             project_id,
-            done: 0,
-            total: 0,
-            current_tool: String::new(),
-            summary: None,
         }
-    }
-
-    fn start(
-        &mut self,
-        receiver: async_channel::Receiver<ExternalImportUpdate>,
-        total: usize,
-        current_tool: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.total = total;
-        self.current_tool = current_tool;
-
-        cx.spawn(async move |this, cx| {
-            while let Ok(update) = receiver.recv().await {
-                let finished = matches!(update, ExternalImportUpdate::Finished { .. });
-                let _ = this.update(cx, |progress, cx| {
-                    match update {
-                        ExternalImportUpdate::Progress { done, total, tool } => {
-                            progress.done = done;
-                            progress.total = total;
-                            progress.current_tool = tool;
-                        }
-                        ExternalImportUpdate::Finished { imported, skipped } => {
-                            progress.summary = Some((imported, skipped));
-                            progress.store.update(cx, |store, _cx| {
-                                store.finish_external_import(progress.project_id.clone());
-                            });
-                        }
-                    }
-                    cx.notify();
-                });
-                if finished {
-                    break;
-                }
-            }
-        })
-        .detach();
     }
 }
 
 impl Render for ImportProgress {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let percent = if self.total == 0 {
-            100.0
-        } else {
-            self.done as f32 * 100.0 / self.total as f32
+        let state = self
+            .store
+            .read(cx)
+            .external_import_status(&self.project_id)
+            .map(|status| status.state.clone());
+        // The "n of N" line describes a run still in flight; the summary below
+        // replaces it once the host reports the outcome.
+        let running = match &state {
+            Some(ExternalImportState::Progress { done, total, tool }) => {
+                Some((*done, *total, tool.clone()))
+            }
+            _ => None,
         };
+        let summary = match state {
+            Some(ExternalImportState::Finished { imported, skipped }) => Some((imported, skipped)),
+            _ => None,
+        };
+        // A run with nothing to import is complete the moment it starts; a
+        // status that has not arrived yet is not.
+        let percent = match running {
+            Some((_, 0, _)) | None if summary.is_none() => 0.0,
+            Some((done, total, _)) if total > 0 => done as f32 * 100.0 / total as f32,
+            _ => 100.0,
+        };
+        let project_id = self.project_id.clone();
+        let store = self.store.clone();
         v_flex()
             .gap_3()
             .py_2()
             .child(Progress::new("external-import-progress").value(percent))
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!(
-                        "sidebar.import_progress",
-                        done = self.done,
-                        total = self.total,
-                        tool = self.current_tool.clone()
-                    )),
-            )
-            .when_some(self.summary, |column, (imported, skipped)| {
+            .when_some(running, |column, (done, total, tool)| {
+                column.child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::tr!(
+                            "sidebar.import_progress",
+                            done = done,
+                            total = total,
+                            tool = tool
+                        )),
+                )
+            })
+            .when_some(summary, |column, (imported, skipped)| {
                 column
                     .child(
                         div()
@@ -442,7 +508,12 @@ impl Render for ImportProgress {
                                 .rounded(crate::material::radius_button())
                                 .primary()
                                 .label(crate::tr!("sidebar.import_ok"))
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                                .on_click(move |_, window, cx| {
+                                    store.update(cx, |store, _cx| {
+                                        store.unwatch_external_import(&project_id);
+                                    });
+                                    window.close_dialog(cx);
+                                }),
                         ),
                     )
             })
@@ -518,4 +589,104 @@ fn tool_counts(threads: &[ExternalThread]) -> String {
     })
     .collect::<Vec<_>>()
     .join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, VisualTestContext};
+    use tcode_runtime::pipe::{HostServices, spawn_host};
+    use tcode_services::store::SessionStore;
+
+    use super::*;
+    use crate::store::WorkspaceAttachment;
+
+    /// A remote client types a path that means nothing on its own machine. The
+    /// answer — accept or reject, and why — comes from the host's filesystem,
+    /// and the client shows the host's words rather than judging the string
+    /// against its own path rules.
+    #[gpui::test]
+    fn a_remote_project_root_is_judged_by_the_host(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-add-project-remote-{}",
+            tcode_services::store::now_millis()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let host = spawn_host(
+            SessionStore::open_at(root.join("data")).unwrap(),
+            HostServices::default(),
+        )
+        .expect("spawn add-project test host");
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                host.link(),
+                WorkspaceAttachment::Remote {
+                    host_id: "build-box".into(),
+                    host_name: "build-box".into(),
+                },
+                None,
+                true,
+                cx,
+            )
+        });
+        // The dialog closes itself on success, which routes through the
+        // window's overlay root — so mount it the way the app does.
+        let built = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let capture = built.clone();
+        let store_for_view = store.clone();
+        let (_root, cx) = cx.add_window_view(move |window, cx| {
+            let dialog = cx.new(|cx| AddProjectDialog::new(store_for_view.clone(), window, cx));
+            *capture.borrow_mut() = Some(dialog.clone());
+            crate::overlay::OverlayHost::new(dialog, window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let dialog = built.borrow().clone().expect("dialog was built");
+
+        let type_and_open = |cx: &mut VisualTestContext, path: &str| {
+            let path = path.to_owned();
+            cx.update(|window, cx| {
+                dialog.update(cx, |dialog, cx| {
+                    dialog
+                        .path_input
+                        .update(cx, |input, cx| input.set_value(path.clone(), window, cx));
+                    dialog.open_typed_path(window, cx);
+                });
+            });
+            cx.run_until_parked();
+        };
+
+        // A Windows-style path on a Unix host (or a nonexistent one on Windows):
+        // rejected there, not here.
+        type_and_open(cx, r"C:\Users\dev\src");
+        let error = dialog.read_with(cx, |dialog, _| dialog.error.clone());
+        assert!(
+            error.is_some_and(|error| error.contains(r"C:\Users\dev\src")),
+            "the dialog must show the host's reason for refusing the path"
+        );
+        assert_eq!(
+            smol::block_on(host.update_state_for_test(|state, _| state.projects.len()))
+                .expect("read projects"),
+            0,
+            "a refused root must not create a project"
+        );
+
+        // A directory that exists on the host is accepted even though this
+        // client never looked at it.
+        type_and_open(cx, workspace.to_str().unwrap());
+        assert_eq!(dialog.read_with(cx, |dialog, _| dialog.error.clone()), None);
+        assert_eq!(
+            smol::block_on(host.update_state_for_test(|state, _| {
+                state
+                    .projects
+                    .iter()
+                    .map(|project| project.root.clone())
+                    .collect::<Vec<_>>()
+            }))
+            .expect("read projects"),
+            vec![workspace.clone()]
+        );
+
+        host.shutdown_blocking().expect("stop host");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

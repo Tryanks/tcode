@@ -5,6 +5,7 @@ use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use tcode_remote::PairingCode;
 use tcode_remote::client::{PairInvite, pair_url};
+use tcode_remote::client_host::default_device_name;
 use tcode_remote::discovery::start_beacon;
 use tcode_remote::{HostMux, RemoteConfig, serve};
 use tcode_runtime::pipe::{HostServices, spawn_host};
@@ -13,6 +14,7 @@ use tcode_services::store::SessionStore;
 #[cfg(feature = "web")]
 const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = Some(&[
     ("/index.html", include_bytes!("../../web/dist/index.html")),
+    ("/auth.mjs", include_bytes!("../../web/dist/auth.mjs")),
     (
         "/tcode_web.js",
         include_bytes!("../../web/dist/tcode_web.js"),
@@ -28,6 +30,7 @@ const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = None;
 const DEFAULT_LISTEN: &str = "0.0.0.0:47420";
 
 fn main() {
+    env_logger::init();
     if let Err(error) = run(std::env::args().skip(1).collect()) {
         eprintln!("tcode-headless: {error}");
         std::process::exit(1);
@@ -42,13 +45,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
         }
         Some("serve") => serve_command(&args[1..]),
         Some("pair") => pair_command(&args[1..]),
+        Some("set-password") => set_password_command(&args[1..]),
         Some(command) => Err(format!("unknown command {command:?}; use --help")),
     }
 }
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--listen ADDR:PORT] [--name NAME] [--data-dir DIR]\n  tcode-headless pair [--listen ADDR:PORT]\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--listen ADDR:PORT] [--name NAME] [--data-dir DIR] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--listen ADDR:PORT]\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -57,15 +61,21 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         .unwrap_or_else(|| DEFAULT_LISTEN.to_owned())
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
-    let name = option_value(args, "--name").unwrap_or_else(default_host_name);
+    let name = option_value(args, "--name").unwrap_or_else(default_device_name);
     let data_dir = option_value(args, "--data-dir").map(PathBuf::from);
-    reject_unknown_options(args, &["--listen", "--name", "--data-dir"])?;
+    reject_unknown_options(args, &["--listen", "--name", "--data-dir", "--password"])?;
     let store = match data_dir {
         Some(path) => SessionStore::open_at(path),
         None => SessionStore::open_default(),
     }
     .map_err(|error| format!("could not open session store: {error}"))?;
     let remote_data_dir = store.root().clone();
+    if let Some(password) =
+        option_value(args, "--password").or_else(|| std::env::var("TCODE_PASSWORD").ok())
+    {
+        tcode_remote::server::set_password(&remote_data_dir, &password, false)
+            .map_err(|error| error.to_string())?;
+    }
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,
@@ -83,7 +93,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
         }
     }
     let host =
-        spawn_host(store, services).map_err(|error| format!("host startup failed: {error}"))?;
+        spawn_host(store, services).map_err(|error| format!("machine startup failed: {error}"))?;
     let mux = HostMux::new(host.to_host.clone(), host.from_host.clone());
     let server = serve(
         mux.clone(),
@@ -92,33 +102,31 @@ fn serve_command(args: &[String]) -> Result<(), String> {
             host_name: name,
             data_dir: remote_data_dir,
             static_bundle: STATIC_BUNDLE,
+            browser_password: true,
         },
     )
-    .map_err(|error| format!("remote listener failed: {error}"))?;
+    .map_err(|error| format!("could not listen for other devices: {error}"))?;
     let pairing = server.new_pairing_code();
-    print_pairing(&pairing)?;
-    #[cfg(feature = "web")]
-    {
-        let bound = server.local_addr();
-        if bound.ip().is_unspecified() {
-            let mut addrs = pairing.addrs.clone();
-            addrs.push(if bound.is_ipv6() { "::1" } else { "127.0.0.1" }.into());
-            for addr in addrs {
-                if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
-                    if ip.is_ipv4() == bound.is_ipv4() {
-                        println!("Browser: https://{}/", SocketAddr::new(ip, bound.port()));
-                    }
-                }
-            }
-        } else {
-            println!("Browser: https://{bound}/");
+    if server.pairing_enabled() {
+        print_pairing(&pairing, server.local_addr())?;
+    } else {
+        println!("Native pairing disabled; enable Allow other devices in the browser");
+        for url in browser_urls(&pairing, server.local_addr()) {
+            println!("Browser: {url}");
         }
     }
+    println!(
+        "{}",
+        if server.password_configured() {
+            "Password protected"
+        } else {
+            "Set a password on first open"
+        }
+    );
     let beacon = start_beacon(
         pairing.host_id.clone(),
         pairing.host_name.clone(),
         server.local_addr().port(),
-        pairing.fp.clone(),
     );
     println!(
         "Listening on {} (press Ctrl-C to stop)",
@@ -129,6 +137,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let shutdown_connection = mux.attach();
     let shutdown_id = 1_u64;
     let shutdown_line = serde_json::to_string(&tcode_protocol::ClientMessage {
+        key: None,
         id: shutdown_id,
         payload: tcode_protocol::ClientPayload::Command(
             tcode_protocol::Command::ShutdownAllAndFlush,
@@ -138,7 +147,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     shutdown_connection
         .to_host
         .send_blocking(shutdown_line)
-        .map_err(|error| format!("could not request host shutdown: {error}"))?;
+        .map_err(|error| format!("could not stop this machine: {error}"))?;
     while let Ok(line) = shutdown_connection.from_host.recv_blocking() {
         let Ok(message) = serde_json::from_str::<tcode_protocol::HostMessage>(line.trim_end())
         else {
@@ -155,6 +164,35 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn set_password_command(args: &[String]) -> Result<(), String> {
+    let revoke = args.iter().any(|arg| arg == "--revoke-tokens");
+    let values: Vec<_> = args
+        .iter()
+        .filter(|arg| arg.as_str() != "--revoke-tokens")
+        .cloned()
+        .collect();
+    reject_unknown_options(&values, &["--data-dir", "--password"])?;
+    let password = option_value(&values, "--password")
+        .or_else(|| std::env::var("TCODE_PASSWORD").ok())
+        .ok_or("supply --password or TCODE_PASSWORD")?;
+    let store = match option_value(&values, "--data-dir") {
+        Some(path) => SessionStore::open_at(PathBuf::from(path)),
+        None => SessionStore::open_default(),
+    }
+    .map_err(|error| error.to_string())?;
+    tcode_remote::server::set_password(store.root(), &password, revoke)
+        .map_err(|error| error.to_string())?;
+    println!(
+        "Password changed. {}",
+        if revoke {
+            "Existing tokens revoked."
+        } else {
+            "Existing tokens kept."
+        }
+    );
+    Ok(())
+}
+
 fn pair_command(args: &[String]) -> Result<(), String> {
     let listen = option_value(args, "--listen").unwrap_or_else(|| DEFAULT_LISTEN.to_owned());
     reject_unknown_options(args, &["--listen"])?;
@@ -166,13 +204,17 @@ fn pair_command(args: &[String]) -> Result<(), String> {
     } else {
         "127.0.0.1"
     };
-    let (bytes, _) =
-        tcode_remote::client::tls_http(loopback, address.port(), "GET", "/admin/pair", "", "")?;
+    let bytes = tcode_remote::client::http(
+        &tcode_remote::client::lan_origin(loopback, address.port()),
+        "GET",
+        "/admin/pair",
+        "",
+    )?;
     let pairing: PairingCode = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    print_pairing(&pairing)
+    print_pairing(&pairing, address)
 }
 
-fn print_pairing(pairing: &PairingCode) -> Result<(), String> {
+fn print_pairing(pairing: &PairingCode, bound: SocketAddr) -> Result<(), String> {
     let addrs = if pairing.addrs.is_empty() {
         vec!["127.0.0.1".to_owned()]
     } else {
@@ -181,18 +223,39 @@ fn print_pairing(pairing: &PairingCode) -> Result<(), String> {
     let url = pair_url(&PairInvite {
         host_id: pairing.host_id.clone(),
         name: pairing.host_name.clone(),
-        addrs,
-        port: pairing.port,
+        origin: tcode_remote::client::lan_origin(&addrs[0], pairing.port),
         code: pairing.code.clone(),
-        fp: pairing.fp.clone(),
     });
     let qr = QrCode::new(url.as_bytes()).map_err(|error| error.to_string())?;
-    println!("Pairing code: {}", pairing.code);
-    println!("Fingerprint: {}", pairing.fp);
+    println!("Connection code: {}", pairing.code);
     println!("Expires in: {} seconds", pairing.expires_in_secs);
     println!("{url}");
     println!("{}", qr.render::<Dense1x2>().quiet_zone(true).build());
+    for url in browser_urls(pairing, bound) {
+        println!("Browser: {url}");
+    }
     Ok(())
+}
+
+fn browser_urls(pairing: &PairingCode, bound: SocketAddr) -> Vec<String> {
+    let ips = if bound.ip().is_unspecified() {
+        pairing
+            .addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<std::net::IpAddr>().ok())
+            .filter(|ip| ip.is_ipv4() == bound.is_ipv4())
+            .chain(std::iter::once(if bound.is_ipv6() {
+                std::net::Ipv6Addr::LOCALHOST.into()
+            } else {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            }))
+            .collect()
+    } else {
+        vec![bound.ip()]
+    };
+    ips.into_iter()
+        .map(|ip| format!("http://{}/", SocketAddr::new(ip, bound.port())))
+        .collect()
 }
 
 fn option_value(args: &[String], name: &str) -> Option<String> {
@@ -214,16 +277,6 @@ fn reject_unknown_options(args: &[String], options_with_values: &[&str]) -> Resu
         }
     }
     Ok(())
-}
-
-fn default_host_name() -> String {
-    ["HOSTNAME", "HOST", "COMPUTERNAME"]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(std::fs::read_to_string("/etc/hostname").ok())
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
-        .unwrap_or_else(|| "tcode-host".into())
 }
 
 #[cfg(unix)]
@@ -255,4 +308,31 @@ fn wait_for_interrupt() {
 fn wait_for_interrupt() {
     use std::io::Read as _;
     let _ = std::io::stdin().read(&mut [0_u8]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_links_omit_codes_while_native_admin_json_keeps_them() {
+        let pairing = PairingCode {
+            code: "123456".into(),
+            browser_url: "http://192.168.1.4:47420/#code=123456".into(),
+            expires_in_secs: 300,
+            host_id: "host".into(),
+            host_name: "Host".into(),
+            port: 47_420,
+            addrs: vec!["192.168.1.4".into()],
+        };
+
+        assert_eq!(
+            browser_urls(&pairing, "0.0.0.0:47420".parse().unwrap()),
+            ["http://192.168.1.4:47420/", "http://127.0.0.1:47420/",]
+        );
+        assert_eq!(
+            serde_json::to_value(pairing).unwrap()["browser_url"],
+            "http://192.168.1.4:47420/#code=123456"
+        );
+    }
 }

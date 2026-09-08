@@ -6,9 +6,11 @@ mod transport;
 
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
-use host::{WebHost, window};
+use host::{WebHost, take_pairing_code, window};
 #[cfg(feature = "debug-exports")]
-use tcode_mobile::host::{MobileHost as _, PairRequest, Transport};
+use tcode_client::host::Transport;
+use tcode_client::host::{ClientHost as _, PairRequest};
+use tcode_client::pairing::PairedHost;
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -77,6 +79,8 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     gpui_web::init_logging();
     prepare_canvas(canvas_id)?;
+    let host = Rc::new(WebHost);
+    let (initial, initial_pairing_error) = initial_target(host.as_ref()).await;
     let platform = Rc::new(gpui_web::WebPlatform::new_with_backend(
         true,
         gpui_web::WebBackendPreference::Auto,
@@ -86,13 +90,42 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         .with_http_client(http_client)
         .with_assets(tcode_ui::assets::Assets)
         .run_embedded(|cx| {
-            cx.text_system()
-                .add_fonts(vec![
-                    Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
-                    Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
-                ])
-                .expect("failed to load browser fonts");
-            tcode_mobile::run_with_host(cx, Rc::new(WebHost));
+            let host: Rc<dyn tcode_client::host::ClientHost> = host;
+            tcode_ui::run_shell(
+                cx,
+                host.clone(),
+                // The canvas *is* the window: the browser resizes it around the
+                // on-screen keyboard itself, so subtracting one here would
+                // subtract it twice.
+                tcode_ui::WindowSeam::flush(),
+                tcode_ui::ShellOptions {
+                    window: gpui::WindowOptions {
+                        // GPUI takes the browser window's size from the canvas
+                        // element; a fixed size here would be a lie.
+                        window_bounds: None,
+                        titlebar: None,
+                        window_background: gpui::WindowBackgroundAppearance::Opaque,
+                        ..Default::default()
+                    },
+                    fonts: vec![
+                        Cow::Borrowed(include_bytes!("../assets/NotoSans-Regular.ttf")),
+                        Cow::Borrowed(include_bytes!("../../../assets/fonts/DMSans[wght].ttf")),
+                    ],
+                    theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
+                    activate: true,
+                    setup: tcode_ui::ShellSetup {
+                        initial,
+                        initial_pairing_error,
+                        client_host: Some(host),
+                        // A browser tab runs no host of its own.
+                        local: None,
+                        seed_blocking: false,
+                        restore_navigation: false,
+                    },
+                    ..Default::default()
+                }
+                .with_bundled_monospace(),
+            );
             if let Some(document) = window().document() {
                 if let Some(loading) = document.get_element_by_id("loading") {
                     loading.remove();
@@ -104,6 +137,40 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
         });
     APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
     Ok(())
+}
+
+async fn initial_target(
+    host: &WebHost,
+) -> (Option<tcode_ui::remote::AttachmentTarget>, Option<String>) {
+    let saved = tcode_ui::last_host_target(host);
+    let code = match take_pairing_code() {
+        Ok(code) => code,
+        Err(error) => return (saved, Some(error)),
+    };
+    if saved.is_some() || code.is_none() {
+        return (saved, None);
+    }
+    let code = code.unwrap();
+    let origin = host.fixed_pairing_endpoint().unwrap();
+    let address = origin.clone();
+    match host.pair(PairRequest { origin, code }).await {
+        Ok(paired) => {
+            save_host(host, &paired);
+            host.set_last_host_id(Some(&paired.host_id));
+            (
+                Some(tcode_ui::remote::AttachmentTarget::Remote(paired)),
+                None,
+            )
+        }
+        Err(error) => (None, Some(tcode_ui::pairing::pair_error(&error, &address))),
+    }
+}
+
+fn save_host(host: &WebHost, paired: &PairedHost) {
+    let mut hosts = host.load_hosts();
+    hosts.retain(|saved| saved.host_id != paired.host_id);
+    hosts.push(paired.clone());
+    host.save_hosts(&hosts);
 }
 
 #[cfg(feature = "debug-exports")]
@@ -118,36 +185,14 @@ struct DebugConnection {
 #[wasm_bindgen]
 #[cfg(feature = "debug-exports")]
 pub async fn debug_pair_and_connect(code: String) -> String {
-    let (tx, rx) = async_channel::bounded(1);
-    let started = APPLICATION.with(|slot| {
-        let slot = slot.borrow();
-        let Some(application) = slot.as_ref() else {
-            return false;
-        };
-        application.update(|cx| {
-            let (addr, port) = WebHost.fixed_pairing_endpoint().unwrap();
-            WebHost.pair(
-                PairRequest {
-                    addr,
-                    port,
-                    code,
-                    fingerprint: String::new(),
-                },
-                cx,
-                Box::new(move |result, _cx| {
-                    let _ = tx.try_send(result);
-                }),
-            );
-        });
-        true
-    });
+    let started = APPLICATION.with(|slot| slot.borrow().is_some());
     if !started {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
-    let paired = match rx.recv().await {
-        Ok(Ok(host)) => host,
-        Ok(Err(error)) => return serde_json::json!({"error":error}).to_string(),
-        Err(error) => return serde_json::json!({"error":error.to_string()}).to_string(),
+    let origin = WebHost.fixed_pairing_endpoint().unwrap();
+    let paired = match WebHost.pair(PairRequest { origin, code }).await {
+        Ok(host) => host,
+        Err(error) => return serde_json::json!({"error":error}).to_string(),
     };
     let transport = WebHost.connect(&paired);
     let _ = transport.to_host.try_send(

@@ -1,5 +1,6 @@
 //! Proposed-plan Markdown and structured task steps, hosted beside the diff view.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -96,6 +97,7 @@ impl PlanPanel {
             .child(
                 h_flex()
                     .w_full()
+                    .min_w_0()
                     .gap_2()
                     .items_center()
                     .child(
@@ -122,6 +124,7 @@ impl PlanPanel {
             .child(
                 div()
                     .w_full()
+                    .min_w_0()
                     .text_size(px(13.))
                     .line_height(px(20.))
                     .child(MarkdownView::new(&md_state).selectable(true)),
@@ -183,17 +186,11 @@ impl PlanPanel {
 
     fn render_steps(&self, steps: &[PlanStep], cx: &mut Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let mut steps_col = v_flex()
-            .w_full()
-            .gap_1()
-            .ml_2()
-            .pl(px(14.))
-            .py_0p5()
-            .border_l_1()
-            .border_color(cx.theme().border);
+        let mut steps_col = v_flex().w_full().min_w_0().gap_1();
         for (index, step) in steps.iter().enumerate() {
             steps_col = steps_col.child(self.render_step(index, step, cx));
         }
+        let steps_col = material::rail_detail(steps_col, cx);
         v_flex()
             .w_full()
             .gap_1()
@@ -275,14 +272,21 @@ impl PlanPanel {
 }
 
 impl Render for PlanPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (markdown, steps) = self.store.read(cx).plan_panel_state();
 
         if markdown.is_none() && steps.is_empty() {
             return v_flex().size_full().child(self.render_empty(cx));
         }
 
-        let mut column = v_flex().w_full().p_3().gap_3();
+        // A compact page is inset from the window edges; the right column keeps
+        // its denser padding.
+        let inset = if crate::window_seam::window_is_compact(window, cx) {
+            material::COMPACT_PAGE_INSET
+        } else {
+            material::CARD_INSET
+        };
+        let mut column = v_flex().w_full().min_w_0().px(px(inset)).py_3().gap_3();
         if let Some(markdown) = markdown {
             column = column.child(self.render_proposed_plan(markdown, cx));
         }
@@ -295,7 +299,7 @@ impl Render for PlanPanel {
                 .id("plan-scroll")
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .touch_overflow_y_scroll()
                 .track_scroll(&self.vscroll)
                 .child(column),
         )

@@ -11,7 +11,9 @@
 //! a plain Objective-C IMP that cannot carry Rust state. Everything here runs on
 //! the UI thread that owns the webviews, hence `thread_local!`.
 
+#[cfg(not(target_os = "android"))]
 use std::cell::RefCell;
+#[cfg(not(target_os = "android"))]
 use std::collections::HashMap;
 
 /// One failed navigation, as the platform described it.
@@ -41,24 +43,29 @@ impl LoadError {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 thread_local! {
     static LAST: RefCell<HashMap<usize, LoadError>> = RefCell::new(HashMap::new());
 }
 
+#[cfg(not(target_os = "android"))]
 fn clear(webview: usize) {
     LAST.with_borrow_mut(|last| last.remove(&webview));
 }
 
+#[cfg(not(target_os = "android"))]
 fn record(webview: usize, error: LoadError) {
     log::info!("preview: {}", error.describe());
     LAST.with_borrow_mut(|last| last.insert(webview, error));
 }
 
 /// Start reporting failed navigations for a freshly created webview.
+#[cfg(not(target_os = "android"))]
 pub(crate) fn install(raw: &wry::WebView) {
     imp::install(raw);
 }
 
+#[cfg(not(target_os = "android"))]
 pub(crate) fn get(raw: &wry::WebView) -> Option<LoadError> {
     let webview = imp::key(raw);
     LAST.with_borrow(|last| last.get(&webview).cloned())
@@ -66,6 +73,7 @@ pub(crate) fn get(raw: &wry::WebView) -> Option<LoadError> {
 
 /// Drop the record for a webview that is going away, so a later allocation at
 /// the same address cannot inherit it.
+#[cfg(not(target_os = "android"))]
 pub(crate) fn forget(raw: &wry::WebView) {
     clear(imp::key(raw));
 }
@@ -361,5 +369,80 @@ mod tests {
                 "message": "The certificate for this server is invalid.",
             })
         );
+    }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn get(raw: &super::android::RawWebView) -> Option<LoadError> {
+    raw.load_error()
+}
+#[cfg(target_os = "android")]
+pub(crate) fn forget(raw: &super::android::RawWebView) {
+    raw.clear_load_error();
+}
+
+/// Android errors apply only to the main frame. Page-finished must not clear a
+/// failure: Android also finishes the generated error document.
+#[cfg(any(target_os = "android", test))]
+pub(super) fn android_event(
+    last: &mut Option<LoadError>,
+    kind: i32,
+    url: String,
+    code: i32,
+    message: String,
+) {
+    match kind {
+        0 => *last = None,
+        3..=6 => {
+            let domain = match kind {
+                3 => "WebView",
+                4 => "HTTP",
+                5 => "SSL",
+                _ => "Android",
+            };
+            *last = Some(LoadError {
+                url,
+                code: format!("{domain} {code}"),
+                message,
+            });
+        }
+        _ => {}
+    }
+}
+#[cfg(test)]
+mod android_tests {
+    use super::*;
+    #[test]
+    fn android_failure_survives_error_document_finish_until_next_navigation() {
+        for (kind, code, expected) in [(3, -2, "WebView -2"), (4, 503, "HTTP 503"), (5, 3, "SSL 3")]
+        {
+            let mut last = None;
+            android_event(
+                &mut last,
+                kind,
+                "https://dead.invalid/".into(),
+                code,
+                "failure".into(),
+            );
+            android_event(
+                &mut last,
+                1,
+                "https://dead.invalid/".into(),
+                0,
+                String::new(),
+            );
+            assert_eq!(
+                last.as_ref().unwrap().to_json(),
+                serde_json::json!({"url":"https://dead.invalid/", "code":expected, "message":"failure"})
+            );
+            android_event(
+                &mut last,
+                0,
+                "https://example.com/".into(),
+                0,
+                String::new(),
+            );
+            assert_eq!(last, None);
+        }
     }
 }

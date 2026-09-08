@@ -17,7 +17,6 @@ members = [
     "crates/ui",
     "crates/voice",
     "crates/app",
-    "crates/mobile",
     "crates/ios",
     "crates/android",
 ]
@@ -34,3 +33,9 @@ lto = "fat"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+# ndk-stack needs an unstripped library with line information for crash reports.
+[profile.android-release]
+inherits = "release"
+strip = false
+debug = 1

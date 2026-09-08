@@ -41,6 +41,12 @@ impl AppState {
                 Topic::SessionStatus { session_id }
                 | Topic::SessionEvents { session_id }
                 | Topic::GitStatus { session_id } => self.select_session(session_id, cx),
+                // No projection ran while nobody was attached, so the first
+                // subscriber rebuilds the frame. A later one reads that same
+                // retained frame and continues from the shared delta sequence.
+                Topic::Terminal { terminal_id } => {
+                    self.refresh_terminal_projection(*terminal_id);
+                }
                 _ => {}
             }
         }
@@ -108,17 +114,37 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
-    /// Create a project rooted at `root` (native picker feeds this).
-    /// Returns the new project's id, or an existing one if `root` matches.
-    pub fn create_project(&mut self, root: PathBuf, cx: &mut HostCx) -> Option<String> {
+    /// Create a project rooted at `root`, or return the existing id when one
+    /// already covers it.
+    ///
+    /// The root is validated here, against this host's filesystem and path
+    /// rules: a client cannot decide whether `C:\src` or `/srv/src` is absolute,
+    /// and only the host can see whether the directory exists.
+    pub fn create_project(
+        &mut self,
+        root: PathBuf,
+        cx: &mut HostCx,
+    ) -> Result<String, ProtocolError> {
         if let Some(existing) = self.projects.iter().find(|p| p.root == root) {
-            return Some(existing.id.clone());
+            return Ok(existing.id.clone());
+        }
+        if !root.is_absolute() {
+            return Err(ProtocolError {
+                code: "invalid_project_root".into(),
+                message: format!("{} is not an absolute path on this host", root.display()),
+            });
+        }
+        if !root.is_dir() {
+            return Err(ProtocolError {
+                code: "invalid_project_root".into(),
+                message: format!("{} is not a directory on this host", root.display()),
+            });
         }
         let project = Project::from_root(root);
         let id = project.id.clone();
         self.enqueue_store_write(StoreWrite::UpsertProject(project.clone()), cx);
         self.projects.push(project);
-        Some(id)
+        Ok(id)
     }
 
     /// Scan supported external-agent histories without exposing the import
@@ -142,46 +168,188 @@ impl AppState {
         })
     }
 
-    /// Import selected external threads in the background and stream runtime-
-    /// owned progress updates. Returns `None` for an unknown project.
+    /// Import selected external threads in the background, publishing progress
+    /// as replicated host state on [`Topic::ExternalImport`]. Returns `false`
+    /// for an unknown project; a second concurrent run is rejected outright.
+    ///
+    /// Completion is runtime-owned: the importer's last update finalizes the
+    /// index here regardless of whether any client is still subscribed.
     pub fn start_external_import(
-        &self,
+        &mut self,
         project_id: &str,
         threads: Vec<ExternalThread>,
-        executor: &HostCx,
-    ) -> Option<smol::channel::Receiver<ExternalImportUpdate>> {
-        let project = self
+        cx: &mut HostCx,
+    ) -> Result<bool, ProtocolError> {
+        let Some(project) = self
             .projects
             .iter()
-            .find(|project| project.id == project_id)?
-            .clone();
+            .find(|project| project.id == project_id)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        if let Some(status) = self.external_imports.get(project_id)
+            && matches!(status.state, ExternalImportState::Progress { .. })
+        {
+            return Err(ProtocolError {
+                code: "import_in_progress".into(),
+                message: format!("an import is already running for project {project_id}"),
+            });
+        }
+        let run_id = self.next_import_run_id;
+        self.next_import_run_id += 1;
+        let total = threads.len();
+        let tool = threads
+            .first()
+            .map(|thread| thread.source.display_name().to_string())
+            .unwrap_or_default();
+        self.replace_external_import_status(
+            project_id,
+            Some(ExternalImportStatus {
+                run_id,
+                state: ExternalImportState::Progress {
+                    done: 0,
+                    total,
+                    tool,
+                },
+            }),
+            cx,
+        );
+
         let store = self.store.clone();
         let metas = self.sessions.clone();
-        let (sender, receiver) = smol::channel::unbounded();
-        executor
-            .unblock(move || {
-                let total = threads.len();
-                let mut imported = 0;
-                let mut skipped = 0;
-                let mut existing = existing_external_ids(&metas);
-                for (index, thread) in threads.into_iter().enumerate() {
-                    let tool = thread.source.display_name().to_string();
-                    match import_thread(&store, &project, &thread, &mut existing) {
-                        ImportOutcome::Imported => imported += 1,
-                        ImportOutcome::SkippedDuplicate
-                        | ImportOutcome::SkippedEmpty
-                        | ImportOutcome::Failed(_) => skipped += 1,
-                    }
-                    let _ = sender.try_send(ExternalImportUpdate::Progress {
-                        done: index + 1,
-                        total,
-                        tool,
-                    });
+        let id = project_id.to_string();
+        let updates = cx.clone();
+        cx.unblock(move || {
+            let mut imported = 0;
+            let mut skipped = 0;
+            let mut existing = existing_external_ids(&metas);
+            for (index, thread) in threads.into_iter().enumerate() {
+                let tool = thread.source.display_name().to_string();
+                match import_thread(&store, &project, &thread, &mut existing) {
+                    ImportOutcome::Imported => imported += 1,
+                    ImportOutcome::SkippedDuplicate
+                    | ImportOutcome::SkippedEmpty
+                    | ImportOutcome::Failed(_) => skipped += 1,
                 }
-                let _ = sender.try_send(ExternalImportUpdate::Finished { imported, skipped });
-            })
-            .detach();
-        Some(receiver)
+                let (id, done) = (id.clone(), index + 1);
+                updates.enqueue(move |state, cx| {
+                    state.advance_external_import(
+                        &id,
+                        run_id,
+                        ExternalImportState::Progress { done, total, tool },
+                        cx,
+                    );
+                });
+            }
+            updates.enqueue(move |state, cx| {
+                state.complete_external_import(&id, run_id, imported, skipped, cx);
+            });
+        })
+        .detach();
+        Ok(true)
+    }
+
+    /// Publish a status the importer produced, ignoring updates from a run that
+    /// a newer one has already superseded.
+    fn advance_external_import(
+        &mut self,
+        project_id: &str,
+        run_id: u64,
+        state: ExternalImportState,
+        cx: &mut HostCx,
+    ) {
+        if self
+            .external_imports
+            .get(project_id)
+            .map(|status| status.run_id)
+            != Some(run_id)
+        {
+            return;
+        }
+        self.replace_external_import_status(
+            project_id,
+            Some(ExternalImportStatus { run_id, state }),
+            cx,
+        );
+    }
+
+    /// Finalize a finished run. The index is reloaded in this mailbox turn, so
+    /// its replacement reaches clients before the `Finished` status published
+    /// by the follow-up turn — a subscriber never sees `Finished` with a stale
+    /// session list.
+    fn complete_external_import(
+        &mut self,
+        project_id: &str,
+        run_id: u64,
+        imported: usize,
+        skipped: usize,
+        cx: &mut HostCx,
+    ) {
+        if self
+            .external_imports
+            .get(project_id)
+            .map(|status| status.run_id)
+            != Some(run_id)
+        {
+            return;
+        }
+        self.finish_external_import(project_id, cx);
+        let project_id = project_id.to_string();
+        cx.enqueue(move |state, cx| {
+            state.advance_external_import(
+                &project_id,
+                run_id,
+                ExternalImportState::Finished { imported, skipped },
+                cx,
+            );
+        });
+    }
+
+    pub(crate) fn replace_external_import_status(
+        &mut self,
+        project_id: &str,
+        status: Option<ExternalImportStatus>,
+        cx: &mut HostCx,
+    ) {
+        match &status {
+            Some(status) => {
+                self.external_imports
+                    .insert(project_id.to_string(), status.clone());
+            }
+            None => {
+                self.external_imports.remove(project_id);
+            }
+        }
+        cx.emit(HostEvent::Domain(EventEnvelope {
+            request_id: None,
+            topic: Topic::ExternalImport {
+                project_id: project_id.to_string(),
+            },
+            event: ServerEvent::ExternalImportStatusReplaced {
+                project_id: project_id.to_string(),
+                status,
+            },
+        }));
+    }
+
+    /// Search this host's own stored sessions in index order. Both the file
+    /// reads and the cache lock stay on the blocking executor.
+    pub fn search_session_content(
+        &self,
+        query: String,
+        limit: u32,
+        executor: &HostCx,
+    ) -> HostTask<Vec<SessionSearchHit>> {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(50);
+        let sessions = self.sessions.clone();
+        let search = self.session_search.clone();
+        executor.unblock(move || {
+            search
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .search(&sessions, &query, limit)
+        })
     }
 
     /// List one replicated session cwd on the background executor.
@@ -195,7 +363,7 @@ impl AppState {
 
     /// Reload sessions written by the external-history importer and expand its
     /// project group.
-    pub fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
+    fn finish_external_import(&mut self, project_id: &str, cx: &mut HostCx) {
         self.sessions = self.store.load_index();
         if self
             .settings
@@ -209,61 +377,56 @@ impl AppState {
         }
     }
 
-    /// Flush pending appends, then serialize and write a thread on the host's
-    /// blocking-I/O executor. The source session is only read.
-    pub fn export_thread(
+    /// Flush pending appends, then render a thread into transferable bytes on
+    /// the host's blocking-I/O executor. Nothing is written: the requesting
+    /// client owns the destination, which may not be on this machine at all.
+    pub fn render_thread_export(
         &mut self,
         session_id: &str,
-        destination: PathBuf,
         format: ThreadExportFormat,
         cx: &mut HostCx,
-    ) {
+    ) -> HostTask<Result<QueryResponse, ProtocolError>> {
         let Some(meta) = self.find_meta(session_id) else {
-            self.report_error(
-                RuntimeError::ExportThread {
-                    error: format!("unknown session {session_id}"),
-                },
-                cx,
-            );
-            return;
+            let session_id = session_id.to_owned();
+            return cx.spawn_background(async move {
+                Err(ProtocolError {
+                    code: "unknown_session".into(),
+                    message: format!("unknown session {session_id}"),
+                })
+            });
         };
         let barrier = self.store_write_barrier(cx);
         let store = self.store.clone();
         let host_cx = cx.clone();
-        HostCx::spawn_detached(cx, async move {
-            let result = match barrier.recv().await {
-                Ok(()) => {
-                    host_cx
-                        .unblock(move || export::export_thread(&store, &meta, &destination, format))
-                        .await
-                }
-                Err(error) => Err(std::io::Error::other(format!(
-                    "session-store flush failed: {error}"
-                ))),
-            };
-            host_cx.enqueue(move |state, cx| state.finish_thread_export(result, cx));
-        });
-    }
-
-    fn finish_thread_export(&mut self, result: std::io::Result<PathBuf>, cx: &mut HostCx) {
-        match result {
-            Ok(path) => {
-                let file = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                emit_runtime(
-                    cx,
-                    RuntimeEvent::Notice(RuntimeNotice::ThreadExported { file }),
-                );
+        cx.spawn_background(async move {
+            barrier.recv().await.map_err(|error| ProtocolError {
+                code: "store_barrier_closed".into(),
+                message: format!("session-store flush failed: {error}"),
+            })?;
+            let suggested_name = export::export_file_name(&meta.title, format);
+            let bytes = host_cx
+                .unblock(move || export::render_thread(&store, &meta, format))
+                .await
+                .map_err(|error| ProtocolError {
+                    code: "export_failed".into(),
+                    message: error.to_string(),
+                })?;
+            if bytes.len() > tcode_protocol::MAX_THREAD_EXPORT_BYTES {
+                return Err(ProtocolError {
+                    code: "export_too_large".into(),
+                    message: format!(
+                        "the rendered export is {} bytes, over the {} byte transfer limit",
+                        bytes.len(),
+                        tcode_protocol::MAX_THREAD_EXPORT_BYTES
+                    ),
+                });
             }
-            Err(error) => self.report_error(
-                RuntimeError::ExportThread {
-                    error: error.to_string(),
-                },
-                cx,
-            ),
-        }
+            Ok(QueryResponse::ThreadExport {
+                bytes,
+                suggested_name,
+                mime: export::export_mime(format).to_owned(),
+            })
+        })
     }
 
     /// Merge a clean dedicated-worktree branch into its clean original checkout
@@ -739,6 +902,7 @@ impl AppState {
             .retain(|id| id != project_id);
         self.persist_settings(cx);
         self.projects.retain(|project| project.id != project_id);
+        self.replace_external_import_status(project_id, None, cx);
     }
 
     /// Whether `session_id` owns live or queued work.
@@ -847,6 +1011,7 @@ impl AppState {
 
         let root_for_task = root.clone();
         let target_id = target_id.to_string();
+        let delivery_key = cx.delivery_key.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let result = host_cx
@@ -881,7 +1046,9 @@ impl AppState {
                             );
                         }
                         // Now that the worktree exists, run the deferred send.
+                        cx.delivery_key = delivery_key;
                         state.send_turn_assembled(&target_id, text, attachments, cx);
+                        cx.delivery_key = None;
                     }
                     Err(err) => {
                         active.draft_workspace = WorkspaceMode::LocalCheckout;
@@ -1070,6 +1237,9 @@ impl AppState {
                     session_id: meta.id.clone(),
                 },
                 ServerEvent::SessionSnapshot {
+                    total: 0,
+                    total_turns: 0,
+                    truncated: false,
                     from: 0,
                     records: Vec::new(),
                 },

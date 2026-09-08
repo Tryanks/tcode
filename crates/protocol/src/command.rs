@@ -14,6 +14,16 @@ pub use tcode_core::settings::SettingsPatch;
 
 use crate::ExternalThread;
 
+/// Fallback cell metrics matching the host emulator's own defaults, used when
+/// a client resizes without knowing its physical cell size.
+fn default_cell_width() -> u16 {
+    8
+}
+
+fn default_cell_height() -> u16 {
+    17
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSelection {
     pub line_start: usize,
@@ -48,6 +58,16 @@ pub enum Command {
         terminal_id: u64,
         cols: u16,
         rows: u16,
+        /// Physical cell size, which the host needs to answer a program's
+        /// pixel-size queries (CSI 14 t).
+        #[serde(default = "default_cell_width")]
+        cell_width: u16,
+        #[serde(default = "default_cell_height")]
+        cell_height: u16,
+    },
+    /// Clear the host grid and its scrollback, keeping the current prompt line.
+    ClearTerminal {
+        terminal_id: u64,
     },
     PreviewReply {
         request_id: u64,
@@ -178,23 +198,21 @@ pub enum Command {
         index: usize,
     },
     CycleProjectSort,
+    /// Register a project rooted at `root`. The host validates the path against
+    /// its own filesystem — a client never decides whether a host path is
+    /// absolute or exists — and answers `invalid_project_root` when it is not an
+    /// absolute, existing directory there.
     CreateProject {
         root: PathBuf,
     },
-    /// The command itself is ordinary serialized protocol traffic. Its
-    /// progress is routed by request id over the one local bus installed at
-    /// host construction; a remote transport must replace it with events.
+    /// Start an import run. Progress, completion and the finalized index are
+    /// host-owned: subscribe to [`crate::Topic::ExternalImport`] before sending
+    /// this, and read the outcome from that replicated status. Returns
+    /// [`CommandResponse::ExternalImportStarted(false)`] for an unknown
+    /// project, and an `import_in_progress` error for a second concurrent run.
     StartExternalImport {
         project_id: String,
         threads: Vec<ExternalThread>,
-    },
-    FinishExternalImport {
-        project_id: String,
-    },
-    ExportThread {
-        session_id: String,
-        destination: PathBuf,
-        format: ThreadExportFormat,
     },
     ToggleProjectCollapsed {
         project_id: String,
@@ -366,4 +384,79 @@ pub enum CommandResponse {
     },
     ArchivedCount(usize),
     ExternalImportStarted(bool),
+}
+
+impl Command {
+    /// The thread whose state this command addresses, for delivery navigation.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::OrchestrateTurn { session_id, .. }
+            | Self::RunGitAction { session_id, .. }
+            | Self::SetActiveAcpAgent { session_id, .. }
+            | Self::SetTerminalHeight { session_id, .. }
+            | Self::ToggleTerminalPanel { session_id, .. }
+            | Self::CloseTerminalPanel { session_id, .. }
+            | Self::RestartTerminal { session_id, .. }
+            | Self::NewTerminal { session_id, .. }
+            | Self::SplitTerminal { session_id, .. }
+            | Self::ActivateTerminal { session_id, .. }
+            | Self::CloseTerminal { session_id, .. }
+            | Self::CaptureTerminalSelection { session_id, .. }
+            | Self::RemoveTerminalContext { session_id, .. }
+            | Self::AddReviewComment { session_id, .. }
+            | Self::RemoveReviewComment { session_id, .. }
+            | Self::ArchiveSession { session_id, .. }
+            | Self::UnarchiveSession { session_id, .. }
+            | Self::RenameSession { session_id, .. }
+            | Self::DeleteSession { session_id, .. }
+            | Self::MergeWorktree { session_id, .. }
+            | Self::MarkSessionUnread { session_id, .. }
+            | Self::SetDraftWorkspace { session_id, .. }
+            | Self::SendTurn { session_id, .. }
+            | Self::ScheduleTurn { session_id, .. }
+            | Self::ConfirmRelayAndSend { session_id, .. }
+            | Self::Steer { session_id, .. }
+            | Self::SteerQueued { session_id, .. }
+            | Self::DropQueued { session_id, .. }
+            | Self::Interrupt { session_id, .. }
+            | Self::RespondApproval { session_id, .. }
+            | Self::RespondUserInput { session_id, .. }
+            | Self::SetActiveModel { session_id, .. }
+            | Self::SetActiveOption { session_id, .. }
+            | Self::SelectUltrathink { session_id, .. }
+            | Self::SetInteractionMode { session_id, .. }
+            | Self::ToggleInteractionMode { session_id, .. }
+            | Self::ImplementPlan { session_id, .. }
+            | Self::DismissPlan { session_id, .. }
+            | Self::ImplementPlanInNewThread { session_id, .. }
+            | Self::SavePlanToWorkspace { session_id, .. }
+            | Self::DownloadPlan { session_id, .. }
+            | Self::LoadBranches { session_id, .. }
+            | Self::CheckoutBranch { session_id, .. }
+            | Self::SetActiveApprovalMode { session_id, .. }
+            | Self::RewindTurn { session_id, .. } => Some(session_id),
+            Self::ForkThread { id } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Idempotent controls and reads do not need retained delivery.
+    /// All other variants are retained writes, including settings assignments:
+    /// repeating an old assignment after a newer one would undo user intent.
+    pub fn requires_delivery_key(&self) -> bool {
+        !matches!(
+            self,
+            Self::ResizeTerminal { .. }
+                | Self::PreviewReply { .. }
+                | Self::ShutdownAllAndFlush
+                | Self::OpenLatestSession
+                | Self::RefreshProviderStatus
+                | Self::RefreshProviderUsage
+                | Self::CheckProviderVersions
+                | Self::RefreshAcpRegistry
+                | Self::LoadBranches { .. }
+                | Self::CopyPlan { .. }
+                | Self::DownloadPlan { .. }
+        )
+    }
 }

@@ -1,23 +1,19 @@
 //! Workspace-entry filtering for the `@`-mention popover.
 
-#[cfg(not(any(feature = "desktop", feature = "remote")))]
 use std::path::Path;
 
 use tcode_protocol::PathEntry;
 
-#[cfg(any(feature = "desktop", feature = "remote"))]
-pub use tcode_services::user_files::relativize_to_workspace;
-
-/// Portable equivalent of the services helper. Canonicalization gracefully
-/// falls back to the supplied root on targets without a native filesystem.
-#[cfg(not(any(feature = "desktop", feature = "remote")))]
+/// Shorten a workspace path for display.
+///
+/// Both `path` and `cwd` belong to the *host*, so this is pure `std::path`
+/// string work: canonicalizing here would resolve a remote host's path against
+/// the client's own filesystem and produce a path that exists on neither.
 pub fn relativize_to_workspace(path: &str, cwd: &Path) -> String {
-    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let path = Path::new(path);
-    path.strip_prefix(cwd)
-        .or_else(|_| path.strip_prefix(canonical_cwd))
+    Path::new(path)
+        .strip_prefix(cwd)
         .map(|relative| relative.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_owned())
 }
 
 /// A ranked filter over workspace entries (case-insensitive), capped at `limit`.

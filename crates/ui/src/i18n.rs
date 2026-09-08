@@ -1,6 +1,6 @@
 //! Translation and locale selection for tcode.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::RefCell};
 
 rust_i18n::i18n!("../../locales", fallback = "en");
 
@@ -14,6 +14,12 @@ const _: &str = include_str!("../../../locales/zh-CN.yml");
 
 pub const LANGUAGE_ENGLISH: &str = "en";
 pub const LANGUAGE_SIMPLIFIED_CHINESE: &str = "zh-CN";
+
+thread_local! {
+    /// Mobile supplies the user's first configured language through its native
+    /// OS API. Desktop leaves this empty and keeps using `sys_locale`.
+    static PLATFORM_SYSTEM_LOCALE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 /// Resolve a persisted override, falling back to the supplied system locale.
 pub fn resolve_locale(override_locale: Option<&str>, system_locale: Option<&str>) -> &'static str {
@@ -29,10 +35,22 @@ pub fn resolve_locale(override_locale: Option<&str>, system_locale: Option<&str>
 
 /// Resolve and apply the requested locale, returning the selected locale.
 pub fn apply_locale(override_locale: Option<&str>) -> &'static str {
-    let system_locale = sys_locale::get_locale();
+    let system_locale = system_locale();
     let locale = resolve_locale(override_locale, system_locale.as_deref());
     set_locale(locale);
     locale
+}
+
+pub(crate) fn set_platform_system_locale(locale: Option<&str>) {
+    PLATFORM_SYSTEM_LOCALE.with(|system_locale| {
+        *system_locale.borrow_mut() = locale.map(str::to_owned);
+    });
+}
+
+fn system_locale() -> Option<String> {
+    PLATFORM_SYSTEM_LOCALE
+        .with(|locale| locale.borrow().clone())
+        .or_else(sys_locale::get_locale)
 }
 
 /// Set the process-global translation locale.
@@ -133,5 +151,12 @@ mod tests {
             resolve_locale(Some("unsupported"), Some("en-US")),
             LANGUAGE_ENGLISH
         );
+    }
+
+    #[test]
+    fn platform_system_locale_precedes_the_desktop_fallback() {
+        set_platform_system_locale(Some("zh-Hans-CN"));
+        assert_eq!(system_locale().as_deref(), Some("zh-Hans-CN"));
+        set_platform_system_locale(None);
     }
 }

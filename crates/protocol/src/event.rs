@@ -32,6 +32,7 @@ pub enum Topic {
 
     Terminal { terminal_id: u64 },
     Preview { session_id: String },
+    ExternalImport { project_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,14 +47,15 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum ServerEvent {
-    TerminalOutput {
+    /// The host's whole terminal grid, sent on subscribe and after a restart.
+    TerminalFrame {
         terminal_id: u64,
-        #[serde(with = "crate::wire::base64_bytes")]
-        bytes: Vec<u8>,
-        /// A replay (or restarted PTY) replaces the client emulator.
-        reset: bool,
-        cols: u16,
-        rows: u16,
+        frame: Box<crate::terminal::TerminalFrame>,
+    },
+    /// One coalesced grid update, continuing from the last frame or delta.
+    TerminalDelta {
+        terminal_id: u64,
+        delta: Box<crate::terminal::TerminalDelta>,
     },
     PreviewRequest {
         request_id: u64,
@@ -108,9 +110,49 @@ pub enum ServerEvent {
     SessionSnapshot {
         from: u64,
         records: Vec<StoredEvent>,
+        #[serde(default)]
+        total: u64,
+        /// Absolute turn count keeps turn-addressed actions correct in a window.
+        #[serde(default)]
+        total_turns: u64,
+        /// The byte budget reduced this reply below the requested record count.
+        #[serde(default)]
+        truncated: bool,
     },
+    SessionHistoryError(crate::ProtocolError),
     IndexSnapshot(IndexSnapshot),
     SettingsSnapshot(Settings),
+    /// The current (or latest) external-import run for one project. `None`
+    /// means no run has ever started, or the project is gone. Only the latest
+    /// run is retained, so a subscriber that attaches after a fast completion
+    /// still recovers the outcome from the subscription snapshot.
+    ExternalImportStatusReplaced {
+        project_id: String,
+        status: Option<ExternalImportStatus>,
+    },
+}
+
+/// Host-owned progress for one external-history import run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalImportStatus {
+    /// Host-generated, so a late subscriber can tell a replayed older run from
+    /// the run it started.
+    pub run_id: u64,
+    pub state: ExternalImportState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum ExternalImportState {
+    Progress {
+        done: usize,
+        total: usize,
+        tool: String,
+    },
+    Finished {
+        imported: usize,
+        skipped: usize,
+    },
 }
 
 /// Full provider/settings-page read projection.
@@ -258,6 +300,8 @@ pub struct TerminalContextStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueuedMessageStatus {
     pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_key: Option<String>,
     pub text: String,
     /// Unix timestamp for a scheduled row, or `None` for an ordinary queued
     /// message. Like the queue itself, this status is ephemeral.
@@ -378,7 +422,6 @@ pub enum RuntimeError {
     ProviderClosed { reason: Option<String> },
     PersistSessionIndex { error: String },
     ProviderMessage(String),
-    ExportThread { error: String },
 }
 
 #[non_exhaustive]
@@ -407,9 +450,6 @@ pub enum RuntimeNotice {
     },
     SwitchedBranch {
         branch: String,
-    },
-    ThreadExported {
-        file: String,
     },
     WorktreeSeeded {
         copied_files: usize,
@@ -441,7 +481,6 @@ impl RuntimeNotice {
             | Self::NativeRewindCompleted { .. }
             | Self::PlanSaved { .. }
             | Self::SwitchedBranch { .. }
-            | Self::ThreadExported { .. }
             | Self::WorktreeSeeded { .. }
             | Self::WorktreeMergedFastForward
             | Self::WorktreeMergedCommit => NoticeSeverity::Success,

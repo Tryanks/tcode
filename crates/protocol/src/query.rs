@@ -7,6 +7,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum Query {
+    /// Listener-owned operations, handled by the authenticated remote pipe.
+    Hosting {
+        action: HostingAction,
+    },
+    Ping,
+    /// Records strictly before the absolute event cursor, oldest first.
+    SessionHistoryPage {
+        session_id: String,
+        before: u64,
+        limit: u32,
+    },
     ListActiveWorkspace {
         session_id: String,
     },
@@ -33,15 +44,55 @@ pub enum Query {
     RemoveUserFile {
         path: PathBuf,
     },
-    IsDirectory {
-        path: PathBuf,
+    /// Render a stored thread into a transferable artifact. Rendering belongs to
+    /// the host (it owns the event log); where the bytes land belongs to the
+    /// client, so nothing is written here.
+    RenderThreadExport {
+        session_id: String,
+        format: crate::ThreadExportFormat,
+    },
+    /// Full-text search over the host's own stored session logs. The host owns
+    /// the index, the cache and the session order; clients supply no paths.
+    SearchSessionContent {
+        query: String,
+        limit: u32,
+    },
+    /// Re-render a stored command's output at `cols`. The emulator lives on the
+    /// host, so a client asks for the wrapped, styled grid instead of parsing
+    /// ANSI itself. `cols` outside [`STORED_OUTPUT_COLS`] is clamped into it.
+    RenderStoredOutput {
+        session_id: String,
+        /// Timeline entry id of the command execution.
+        item_id: String,
+        cols: u16,
     },
 }
 
+/// Widths the host will render stored output at. Narrower than the low bound is
+/// unreadable; wider is a client asking for a grid nobody can see.
+pub const STORED_OUTPUT_COLS: std::ops::RangeInclusive<u16> = 20..=400;
+
+/// Screen rows the host emulates stored output into. Trailing blank rows are
+/// trimmed, so a shorter output returns a shorter frame.
+pub const STORED_OUTPUT_ROWS: u16 = 16;
+
+/// Largest export the host will put on one response frame. The transport writes
+/// a single WebSocket text frame per NDJSON line and peers read with
+/// tungstenite's 16 MiB frame cap, so the base64 payload (4/3 of the raw bytes)
+/// plus its envelope must stay well inside that.
+pub const MAX_THREAD_EXPORT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Typed response paired with a [`Query`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum QueryResponse {
+    Hosting(HostingState),
+    Pong,
+    SessionHistoryPage {
+        records: Vec<crate::SessionEventRecord>,
+        from: u64,
+        truncated: bool,
+    },
     ActiveWorkspace(Vec<PathEntry>),
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
@@ -49,7 +100,31 @@ pub enum QueryResponse {
     FileBytes(#[serde(with = "crate::wire::base64_bytes")] Vec<u8>),
     SavedAttachment(PathBuf),
     UserFileRemoved,
-    IsDirectory(bool),
+    /// A rendered thread export. `suggested_name` is already safe for a file
+    /// name on any client OS; the client picks the destination.
+    ThreadExport {
+        #[serde(with = "crate::wire::base64_bytes")]
+        bytes: Vec<u8>,
+        suggested_name: String,
+        mime: String,
+    },
+    SessionContentHits(Vec<SessionSearchHit>),
+    /// Stored output rendered into the same grid DTO the live terminal
+    /// replicates. `history` is empty and there is no cursor: it is a finished
+    /// screen, not a session.
+    TerminalFrame(Box<crate::terminal::TerminalFrame>),
+}
+
+/// One content match in a stored session, addressed by the folded timeline
+/// entry it came from. The sole owner of this shape: the search service builds
+/// it and the palette renders it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub session_title: String,
+    pub entry_id: String,
+    pub turn: usize,
+    pub snippet: String,
 }
 
 /// Scope used when loading a Git diff.
@@ -146,4 +221,34 @@ pub struct RecentDir {
     pub path: PathBuf,
     pub last_active_ms: u64,
     pub threads: Vec<ExternalThread>,
+}
+
+/// Fresh history and backwards pages are bounded independently of live cursors.
+pub const SESSION_HISTORY_RECORDS: usize = 200;
+pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "content", rename_all = "snake_case")]
+pub enum HostingAction {
+    State,
+    SetEnabled(bool),
+    NewCode,
+    RevokeDevice(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostingState {
+    pub enabled: bool,
+    pub code: Option<String>,
+    pub expires_in_secs: u64,
+    pub host_id: String,
+    pub host_name: String,
+    pub devices: Vec<HostedDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostedDevice {
+    pub id: String,
+    pub name: String,
+    pub created_unix: u64,
 }

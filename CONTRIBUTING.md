@@ -89,9 +89,10 @@ cargo run -p agent --example probe -- claude \
 and installed ACP agents) — useful for demos, screenshots and trying a change
 without touching your real threads.
 
-**Launch flags** for driving surfaces that need a running app: `--open-latest`,
-`--open-diff`, `--open-settings`, `--open-palette`, and
-`--open-draft <project>`.
+**Launch flags**: `--open-latest` reopens the most recent thread,
+`--connect <host_id>` starts attached to a paired host, `--pair <addr> <port> <code>`
+pairs from the command line, and `--preview-smoke` / `--cu-smoke` run the
+preview and computer-use smoke phases.
 
 ## Code layout
 
@@ -101,8 +102,12 @@ crates/services          persistence, filesystem, process, git, import, and prob
 crates/runtime           session and provider lifecycle, queues, orchestration,
                          terminals, and semantic events
 crates/ui/src/i18n.rs     translation backend
-crates/ui                GPUI views, assets, presentation, and localized rendering
+crates/ui                GPUI views, assets, presentation, and localized rendering;
+                         `run_shell` is the one bootstrap every client opens
 crates/app/src/main.rs   desktop binary and composition root
+crates/ios, crates/android, crates/web
+                         platform bootstrap only: a ClientHost, a window seam,
+                         and a call into `tcode_ui::run_shell`
 crates/headless          headless host binary
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
 crates/term              terminal implementation (PTY)
