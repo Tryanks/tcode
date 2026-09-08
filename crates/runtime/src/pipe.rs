@@ -934,8 +934,11 @@ mod tests {
                 "unknown_session"
             );
         }
+        drop(link);
         host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows may still hold the draft's files for a moment after shutdown;
+        // a leftover temp dir is not a test failure.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Export rendering is host work and delivery is the client's, so the query
