@@ -2963,10 +2963,20 @@ mod tests {
             );
         });
 
+        // The host answers from its own thread; keep draining until the page
+        // hydrates rather than a fixed number of turns, so a slow CI runner
+        // cannot race the first snapshot.
         let drain = |cx: &mut VisualTestContext| {
-            for _ in 0..50 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
                 store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 cx.run_until_parked();
+                if page.read_with(cx, |page, _| page.hydrated)
+                    || std::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
         drain(cx);
