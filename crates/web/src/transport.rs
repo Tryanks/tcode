@@ -5,7 +5,13 @@ use std::collections::{BTreeMap, VecDeque};
 
 use async_channel::{Receiver, Sender};
 use futures_lite::future::race;
-use tcode_mobile::host::{ConnectionState, Transport};
+use tcode_client::{
+    ConnectionFailure, ConnectionState,
+    heartbeat::{Heartbeat, Tick},
+    host::Transport,
+    outgoing::{OutgoingReceiver, subscription_key},
+    recovery::Backoff,
+};
 use wasm_bindgen::{JsCast as _, prelude::*};
 
 use crate::host::window;
@@ -134,7 +140,7 @@ impl Drop for Socket {
 }
 
 pub fn connect(token: String, device_name: String) -> Transport {
-    let (to_host, outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     wasm_bindgen_futures::spawn_local(async move {
@@ -146,7 +152,7 @@ pub fn connect(token: String, device_name: String) -> Transport {
             },
         )
         .await;
-        let _ = state_tx.try_send(ConnectionState::Offline);
+
         incoming.close();
         outgoing.close();
     });
@@ -162,38 +168,34 @@ enum Input {
     Event(Event),
 }
 
-async fn next(outgoing: &Receiver<String>, events: &Receiver<Event>) -> Input {
+async fn next(outgoing: &OutgoingReceiver, events: &Receiver<Event>) -> Input {
     race(async { Input::Line(outgoing.recv().await) }, async {
         Input::Event(events.recv().await.unwrap_or(Event::Lost))
     })
     .await
 }
 
-fn subscription_key(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
-    let payload = value.get("payload")?;
-    if !matches!(payload.get("type")?.as_str()?, "subscribe" | "unsubscribe") {
-        return None;
-    }
-    serde_json::to_string(payload.get("content")?.get("topic")?).ok()
-}
-
 async fn connection_loop(
     token: String,
     device_name: String,
-    outgoing: &Receiver<String>,
+    outgoing: &OutgoingReceiver,
     incoming: &Sender<String>,
     state: &Sender<ConnectionState>,
 ) {
     let mut subscriptions = BTreeMap::<String, String>::new();
     let mut buffered = VecDeque::<String>::new();
-    let mut attempt = 1_u32;
+    let mut backoff = Backoff::default();
     let mut delay = 0;
+    let mut reason = None;
     loop {
         if outgoing.is_closed() {
             return;
         }
-        let _ = state.try_send(ConnectionState::Reconnecting { attempt });
+        outgoing.discard_retained_writes(&mut buffered);
+        let _ = state.try_send(ConnectionState::Reconnecting {
+            attempt: backoff.attempt(),
+            reason,
+        });
         // Each attempt has its own event queue, including foreground wakeups.
         let (tx, events) = async_channel::unbounded();
         let wake_tx = tx.clone();
@@ -221,9 +223,14 @@ async fn connection_loop(
         // Discard any backoff timer/wakeup already queued before opening.
         while events.try_recv().is_ok() {}
         let mut immediate = false;
+        let mut stable_ms = 0;
+        reason = Some(ConnectionFailure::Unreachable);
         if let Ok(socket) = Socket::new(&tx) {
-            let mut handshake_timer = Some(Timer::new(5000, tx.clone()));
+            let mut timer = Some(Timer::new(15000, tx.clone()));
             let mut ready = false;
+            let mut ready_since = None;
+            let mut connected = false;
+            let mut heartbeat = Heartbeat::new(now_ms());
             loop {
                 match next(outgoing, &events).await {
                     Input::Line(Err(_)) => return,
@@ -238,10 +245,12 @@ async fn connection_loop(
                             if ready {
                                 break;
                             }
+                        } else {
+                            outgoing.sent(&line);
                         }
                     }
                     Input::Event(Event::Open) => {
-                        let hello = serde_json::json!({"type":"hello", "protocol_version":tcode_protocol::PROTOCOL_VERSION, "token":token, "device_name":device_name});
+                        let hello = serde_json::json!({"type":"hello", "protocol_version":3, "supported_versions":[3,tcode_protocol::PROTOCOL_VERSION], "token":token, "device_name":device_name});
                         if socket.send(&hello.to_string()).is_err() {
                             break;
                         }
@@ -249,13 +258,44 @@ async fn connection_loop(
                     Input::Event(Event::Text(line)) if !ready => {
                         let hello: serde_json::Value =
                             serde_json::from_str(&line).unwrap_or_default();
+                        let failure = if hello["type"].as_str() == Some("hello_rejected") {
+                            Some(ConnectionFailure::hello_rejected(hello["reason"].as_str()))
+                        } else if hello["type"].as_str() == Some("hello_ok")
+                            && !matches!(hello["protocol_version"].as_u64(), Some(3 | 4))
+                        {
+                            Some(ConnectionFailure::ProtocolMismatch)
+                        } else {
+                            None
+                        };
+                        if let Some(failure) = failure {
+                            if failure == ConnectionFailure::AuthenticationRejected
+                                && crate::host::window()
+                                    .document()
+                                    .and_then(|document| document.document_element())
+                                    .and_then(|root| root.get_attribute("data-auth-mode"))
+                                    .as_deref()
+                                    == Some("password")
+                            {
+                                if let Ok(Some(storage)) = crate::host::window().local_storage() {
+                                    let _ = storage.remove_item("tcode.last_host");
+                                }
+                                let _ = crate::host::window().location().reload();
+                            }
+                            if failure.is_terminal() {
+                                let _ =
+                                    state.try_send(ConnectionState::Offline { reason: failure });
+                                return;
+                            }
+                            reason = Some(failure);
+                            break;
+                        }
                         if hello["type"].as_str() != Some("hello_ok")
-                            || hello["protocol_version"].as_u64()
-                                != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                            || !matches!(hello["protocol_version"].as_u64(), Some(3 | 4))
                         {
                             break;
                         }
-                        handshake_timer.take();
+                        let _ = state.try_send(ConnectionState::Syncing);
+                        timer.take();
                         if subscriptions
                             .values()
                             .any(|line| socket.send(line).is_err())
@@ -268,16 +308,24 @@ async fn connection_loop(
                                 failed = true;
                                 break;
                             }
+                            outgoing.sent(line);
                             buffered.pop_front();
                         }
                         if failed {
                             break;
                         }
                         ready = true;
-                        attempt = 0;
-                        let _ = state.try_send(ConnectionState::Connected);
+                        ready_since = Some(now_ms());
+                        heartbeat.received(now_ms());
+                        timer = Some(Timer::new(15000, tx.clone()));
                     }
                     Input::Event(Event::Text(line)) => {
+                        heartbeat.received(now_ms());
+                        timer = Some(Timer::new(15000, tx.clone()));
+                        if !connected {
+                            connected = true;
+                            let _ = state.try_send(ConnectionState::Connected);
+                        }
                         if incoming.try_send(format!("{}\n", line.trim_end())).is_err() {
                             return;
                         }
@@ -286,17 +334,57 @@ async fn connection_loop(
                         immediate = true;
                         break;
                     }
-                    Input::Event(Event::Timeout) if ready => {}
-                    Input::Event(Event::Lost | Event::Timeout) => break,
+                    Input::Event(Event::Timeout) if ready => {
+                        match heartbeat.tick(now_ms()) {
+                            Tick::Wait(ms) => timer = Some(Timer::new(ms as i32, tx.clone())),
+                            Tick::Ping => {
+                                // ID zero is reserved for transport probes; HostLink starts at one.
+                                let ping = tcode_protocol::ClientMessage {
+                                    key: None,
+                                    id: 0,
+                                    payload: tcode_protocol::ClientPayload::Query(
+                                        tcode_protocol::Query::Ping,
+                                    ),
+                                };
+                                if socket
+                                    .send(
+                                        &serde_json::to_string(&ping)
+                                            .expect("heartbeat serialization"),
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                timer = Some(Timer::new(
+                                    tcode_client::heartbeat::LIVENESS_REPLY_MS as i32,
+                                    tx.clone(),
+                                ));
+                            }
+                            Tick::Lost => {
+                                reason = Some(ConnectionFailure::Timeout);
+                                break;
+                            }
+                        }
+                    }
+                    Input::Event(Event::Timeout) => {
+                        reason = Some(ConnectionFailure::Timeout);
+                        break;
+                    }
+                    Input::Event(Event::Lost) => {
+                        reason = Some(ConnectionFailure::HostClosed);
+                        break;
+                    }
                 }
+            }
+            if connected {
+                stable_ms = ready_since.map_or(0, |start| now_ms().saturating_sub(start));
             }
         }
         delay = if immediate {
             0
         } else {
-            (1000_i32 << attempt.saturating_sub(1).min(5)).min(30_000)
+            backoff.failed(stable_ms, js_sys::Math::random()) as i32
         };
-        attempt = attempt.saturating_add(1).max(1);
     }
 }
 
@@ -310,4 +398,11 @@ fn remember(
     } else {
         buffered.push_back(line);
     }
+}
+
+fn now_ms() -> u64 {
+    window()
+        .performance()
+        .expect("browser performance clock")
+        .now() as u64
 }

@@ -172,10 +172,11 @@ pub(super) struct TestEntity(Rc<RefCell<TestClientState>>);
 impl TestEntity {
     pub(super) fn dispatch_command(&self, cx: &mut TestAppContext, id: u64, command: Command) {
         let mut host_cx = cx.host_cx();
-        crate::pipe::handle_client_message_for_test(
+        crate::pipe::handle_client_message(
             &mut self.0.borrow_mut(),
             &mut host_cx,
             ClientMessage {
+                key: None,
                 id,
                 payload: ClientPayload::Command(command),
             },

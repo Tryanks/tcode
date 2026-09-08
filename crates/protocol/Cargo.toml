@@ -13,6 +13,7 @@ process = ["agent/process", "tcode-core/process"]
 [dependencies]
 agent = { path = "../agent", default-features = false }
 base64 = "0.23"
+bitflags = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tcode-core = { path = "../core", default-features = false }

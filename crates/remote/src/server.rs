@@ -31,12 +31,15 @@ pub struct RemoteConfig {
     pub host_name: String,
     pub data_dir: PathBuf,
     pub static_bundle: Option<StaticBundle>,
+    /// Password login for the served browser; native clients still use codes.
+    pub browser_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairingCode {
     pub code: String,
-    pub fp: String,
+    #[serde(default)]
+    pub browser_url: String,
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
@@ -58,15 +61,15 @@ struct ActiveCode {
     failures: u8,
 }
 
-struct Shared {
-    fingerprint: String,
-    tls: futures_rustls::TlsAcceptor,
+pub(crate) struct Shared {
     mux: HostMux,
-    auth: Mutex<AuthStore>,
+    pub(crate) auth: Mutex<AuthStore>,
     pairing: Mutex<Option<ActiveCode>>,
+    browser_password: bool,
     static_bundle: Option<StaticBundle>,
     local_addr: SocketAddr,
-    shutdown: async_channel::Receiver<()>,
+    pub(crate) shutdown: async_channel::Receiver<()>,
+    connections: std::sync::atomic::AtomicUsize,
 }
 
 pub struct RemoteServer {
@@ -79,6 +82,14 @@ pub struct RemoteServer {
 impl RemoteServer {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    pub fn pairing_enabled(&self) -> bool {
+        !self.shared.browser_password || self.shared.auth.lock().unwrap().pairing_enabled
+    }
+
+    pub fn password_configured(&self) -> bool {
+        self.shared.auth.lock().unwrap().password_configured()
     }
 
     pub fn new_pairing_code(&self) -> PairingCode {
@@ -124,20 +135,19 @@ impl Drop for RemoteServer {
 
 pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
     let auth = AuthStore::open(&config.data_dir, &config.host_name)?;
-    let (tls, fingerprint) = auth.tls_config()?;
     let listener = TcpListener::bind(config.listen)?;
     listener.set_nonblocking(true)?;
     let local_addr = listener.local_addr()?;
     let (shutdown, shutdown_rx) = async_channel::bounded::<()>(1);
     let shared = Arc::new(Shared {
-        fingerprint,
-        tls: futures_rustls::TlsAcceptor::from(Arc::new(tls)),
         mux,
         auth: Mutex::new(auth),
         pairing: Mutex::new(None),
         static_bundle: config.static_bundle,
+        browser_password: config.browser_password,
         local_addr,
         shutdown: shutdown_rx.clone(),
+        connections: std::sync::atomic::AtomicUsize::new(0),
     });
     let thread_shared = shared.clone();
     let thread = std::thread::Builder::new()
@@ -166,9 +176,16 @@ pub fn serve(mux: HostMux, config: RemoteConfig) -> io::Result<RemoteServer> {
                     .await;
                     match next {
                         Next::Accepted(Ok((stream, peer))) => {
+                            use std::sync::atomic::Ordering;
+                            if thread_shared.connections.fetch_add(1, Ordering::Relaxed) >= 256 {
+                                thread_shared.connections.fetch_sub(1, Ordering::Relaxed);
+                                continue;
+                            }
                             let shared = thread_shared.clone();
                             smol::spawn(async move {
-                                if let Err(error) = handle_connection(stream, peer, shared).await {
+                                let result = handle_connection(stream, peer, shared.clone()).await;
+                                shared.connections.fetch_sub(1, Ordering::Relaxed);
+                                if let Err(error) = result {
                                     log::debug!("remote connection ended: {error}");
                                 }
                             })
@@ -195,14 +212,7 @@ async fn handle_connection(
     peer: SocketAddr,
     shared: Arc<Shared>,
 ) -> io::Result<()> {
-    let mut stream = futures_lite::future::race(shared.tls.accept(stream), async {
-        smol::Timer::after(Duration::from_secs(5)).await;
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "TLS handshake timed out",
-        ))
-    })
-    .await?;
+    let mut stream = stream;
     let request = match futures_lite::future::race(read_request(&mut stream), async {
         smol::Timer::after(Duration::from_secs(5)).await;
         Err(io::Error::new(
@@ -224,11 +234,37 @@ async fn handle_connection(
             return Err(error);
         }
     };
+    if request.method == "CONNECT" || request.path.starts_with("http://") {
+        return crate::proxy::handle(stream, request, peer, &shared).await;
+    }
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/ws") if is_websocket_upgrade(&request) => {
             websocket(stream, request, shared).await
         }
+        ("GET", "/auth/state") => {
+            let state = if shared.browser_password {
+                serde_json::json!({"mode": "password", "configured": shared.auth.lock().unwrap().password_configured()})
+            } else {
+                serde_json::json!({"mode": "code"})
+            };
+            json_response(&mut stream, "200 OK", &state).await
+        }
+        ("POST", "/auth/setup" | "/auth/login") if shared.browser_password => {
+            password_auth(&mut stream, request, shared).await
+        }
         ("POST", "/pair") => pair(&mut stream, request, &shared).await,
+        ("GET", "/admin/pair")
+            if peer.ip().is_loopback()
+                && shared.browser_password
+                && !shared.auth.lock().unwrap().pairing_enabled =>
+        {
+            json_response(
+                &mut stream,
+                "403 Forbidden",
+                &serde_json::json!({"error":"pairing_disabled"}),
+            )
+            .await
+        }
         ("GET", "/admin/pair") if peer.ip().is_loopback() => {
             json_response(&mut stream, "200 OK", &mint_pairing_code(&shared)).await
         }
@@ -267,13 +303,20 @@ struct PairResponse {
     host_id: String,
     host_name: String,
     token: String,
-    fp: String,
 }
 
 async fn pair<S>(stream: &mut S, request: Request, shared: &Shared) -> io::Result<()>
 where
     S: futures_lite::io::AsyncWrite + Unpin,
 {
+    if shared.browser_password && !shared.auth.lock().unwrap().pairing_enabled {
+        return json_response(
+            stream,
+            "403 Forbidden",
+            &serde_json::json!({"error":"pairing_disabled"}),
+        )
+        .await;
+    }
     let request: PairRequest = match serde_json::from_slice::<PairRequest>(&request.body) {
         Ok(request)
             if !request.device_name.trim().is_empty()
@@ -305,13 +348,101 @@ where
         let mut auth = shared.auth.lock().unwrap();
         let token = auth.issue_token(request.device_name)?;
         PairResponse {
-            fp: shared.fingerprint.clone(),
             host_id: auth.host_id.to_string(),
             host_name: auth.host_name.clone(),
             token,
         }
     };
     json_response(stream, "200 OK", &result).await
+}
+
+// Password hashing runs off the executor; the auth lock serializes setup and login.
+async fn password_auth<S>(stream: &mut S, request: Request, shared: Arc<Shared>) -> io::Result<()>
+where
+    S: futures_lite::io::AsyncWrite + Unpin,
+{
+    #[derive(Deserialize)]
+    struct PasswordRequest {
+        password: String,
+        #[serde(default)]
+        device_name: String,
+    }
+    // Requiring JSON prevents a cross-origin HTML form from claiming first setup.
+    if !request.headers.get("content-type").is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+    }) {
+        return json_response(
+            stream,
+            "415 Unsupported Media Type",
+            &serde_json::json!({"error":"application/json required"}),
+        )
+        .await;
+    }
+    let setup = request.path == "/auth/setup";
+    let Ok(request) = serde_json::from_slice::<PasswordRequest>(&request.body) else {
+        return json_response(
+            stream,
+            "400 Bad Request",
+            &serde_json::json!({"error":"malformed request"}),
+        )
+        .await;
+    };
+    if request.password.len() > 1024
+        || (!setup && (request.device_name.trim().is_empty() || request.device_name.len() > 256))
+    {
+        return json_response(
+            stream,
+            "400 Bad Request",
+            &serde_json::json!({"error":"malformed request"}),
+        )
+        .await;
+    }
+    // PBKDF2 takes a few hundred milliseconds; a dedicated thread keeps the
+    // executor free without the runtime's unblock helper, which this crate
+    // cannot depend on.
+    let (done, wait) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = done.send_blocking((move || -> io::Result<_> {
+        let mut auth = shared.auth.lock().unwrap();
+        if setup {
+            if auth.password_configured() {
+                return Ok(("409 Conflict", serde_json::json!({"error":"already configured"})));
+            }
+            if request.password.chars().count() < 8 {
+                return Ok(("400 Bad Request", serde_json::json!({"error":"password requires at least 8 characters"})));
+            }
+            auth.set_password(&request.password, false)?;
+            Ok(("200 OK", serde_json::json!({"configured":true})))
+        } else if auth.verify_password(&request.password) {
+            let token = auth.issue_token(request.device_name)?;
+            Ok(("200 OK", serde_json::json!({"host_id":auth.host_id,"host_name":auth.host_name,"token":token})))
+        } else {
+            Ok(("403 Forbidden", serde_json::json!({"error":"invalid password or temporarily locked"})))
+        }
+        })());
+    });
+    let (status, value) = wait
+        .recv()
+        .await
+        .map_err(|_| io::Error::other("password worker exited"))??;
+    json_response(stream, status, &value).await
+}
+
+/// Change a stopped headless host's password without changing its identity.
+pub fn set_password(
+    data_dir: &std::path::Path,
+    password: &str,
+    revoke_tokens: bool,
+) -> io::Result<()> {
+    let name = std::fs::read(data_dir.join("remote.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value["host_name"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| "tcode".into());
+    AuthStore::open(data_dir, &name)?.set_password(password, revoke_tokens)
 }
 
 fn consume_pairing_code(shared: &Shared, candidate: &str) -> bool {
@@ -345,15 +476,35 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
         expires: Instant::now() + PAIRING_LIFETIME,
         failures: 0,
     });
+    let addrs = local_addrs();
+    let browser_ip = if shared.local_addr.ip().is_unspecified() {
+        addrs
+            .iter()
+            .filter_map(|addr| addr.parse::<std::net::IpAddr>().ok())
+            .find(|ip| ip.is_ipv4() == shared.local_addr.is_ipv4())
+            .unwrap_or_else(|| {
+                if shared.local_addr.is_ipv6() {
+                    std::net::Ipv6Addr::LOCALHOST.into()
+                } else {
+                    std::net::Ipv4Addr::LOCALHOST.into()
+                }
+            })
+    } else {
+        shared.local_addr.ip()
+    };
+    let browser_url = format!(
+        "http://{}/#code={code}",
+        SocketAddr::new(browser_ip, shared.local_addr.port())
+    );
     let auth = shared.auth.lock().unwrap();
     PairingCode {
-        fp: shared.fingerprint.clone(),
         code,
+        browser_url,
         expires_in_secs: PAIRING_LIFETIME.as_secs(),
         host_id: auth.host_id.to_string(),
         host_name: auth.host_name.clone(),
         port: shared.local_addr.port(),
-        addrs: local_addrs(),
+        addrs,
     }
 }
 
@@ -435,11 +586,13 @@ struct Hello {
     #[serde(rename = "type")]
     kind: String,
     protocol_version: u32,
+    #[serde(default)]
+    supported_versions: Vec<u32>,
     token: String,
 }
 
 async fn websocket(
-    mut stream: futures_rustls::server::TlsStream<Async<std::net::TcpStream>>,
+    mut stream: Async<std::net::TcpStream>,
     request: Request,
     shared: Arc<Shared>,
 ) -> io::Result<()> {
@@ -464,11 +617,11 @@ async fn websocket(
         _ => None,
     };
     if let Some(hello) = &hello
-        && hello.protocol_version != tcode_protocol::PROTOCOL_VERSION
+        && !matches!(hello.protocol_version, 3 | 4)
     {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
-            "reason": "protocol version mismatch",
+            "reason": "protocol",
             "expected": tcode_protocol::PROTOCOL_VERSION,
             "received": hello.protocol_version
         });
@@ -478,15 +631,22 @@ async fn websocket(
         let _ = websocket.close(None).await;
         return Ok(());
     }
+    let version = hello.as_ref().map_or(3, |hello| {
+        if hello.protocol_version == 4 || hello.supported_versions.contains(&4) {
+            4
+        } else {
+            3
+        }
+    });
     let token = hello.filter(|hello| {
         hello.kind == "hello"
-            && hello.protocol_version == tcode_protocol::PROTOCOL_VERSION
+            && matches!(hello.protocol_version, 3 | 4)
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
     let Some(token) = token.map(|hello| hello.token) else {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
-            "reason": "invalid hello or token"
+            "reason": "token"
         });
         let _ = websocket
             .send(Message::Text(rejected.to_string().into()))
@@ -500,7 +660,7 @@ async fn websocket(
             "type": "hello_ok",
             "host_id": auth.host_id,
             "host_name": auth.host_name,
-            "protocol_version": tcode_protocol::PROTOCOL_VERSION
+            "protocol_version": version
         })
     };
     websocket
@@ -529,6 +689,12 @@ async fn websocket(
                 _ = shutdown => Input::Shutdown,
             }
         };
+        // Active streams may never reach the idle keepalive tick. Recheck
+        // before forwarding in either direction, including hosting polls.
+        if !shared.auth.lock().unwrap().token_is_valid(&token) {
+            let _ = websocket.close(None).await;
+            break;
+        }
         match input {
             Input::WebSocket(Some(Ok(Message::Text(line)))) => {
                 if line.len() > crate::wire::MAX_BODY_BYTES
@@ -537,7 +703,49 @@ async fn websocket(
                     let _ = websocket.close(None).await;
                     break;
                 }
-                let mut line = line.to_string();
+                if let Ok(tcode_protocol::ClientMessage {
+                    id,
+                    key: _,
+                    payload:
+                        tcode_protocol::ClientPayload::Query(tcode_protocol::Query::Hosting { action }),
+                }) = serde_json::from_str(&line)
+                {
+                    let result = if shared.browser_password {
+                        hosting_action(&shared, action)
+                            .map(tcode_protocol::QueryResponse::Hosting)
+                            .map_err(|error| tcode_protocol::ProtocolError {
+                                code: "hosting_error".into(),
+                                message: error.to_string(),
+                            })
+                    } else {
+                        Err(tcode_protocol::ProtocolError {
+                            code: "unsupported".into(),
+                            message: "manage desktop hosting on that machine".into(),
+                        })
+                    };
+                    let reply = tcode_protocol::HostMessage::QueryResult { id, result };
+                    websocket
+                        .send(Message::Text(
+                            serde_json::to_string(&reply)
+                                .map_err(io::Error::other)?
+                                .into(),
+                        ))
+                        .await
+                        .map_err(io::Error::other)?;
+                    continue;
+                }
+                // The authenticated token scopes keys across socket lifetimes.
+                // Ignore client-supplied prefixes so devices cannot share a cache.
+                let mut value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                if let Some(key) = value.get("key").and_then(serde_json::Value::as_str) {
+                    if uuid::Uuid::parse_str(key).is_err() {
+                        let _ = websocket.close(None).await;
+                        break;
+                    }
+                    let device = format!("{:x}", Sha1::digest(token.as_bytes()));
+                    value["key"] = format!("{device}:{key}").into();
+                }
+                let mut line = value.to_string();
                 if !line.ends_with('\n') {
                     line.push('\n');
                 }
@@ -560,12 +768,6 @@ async fn websocket(
                 .map_err(io::Error::other)?,
             Input::Host(Err(_)) => break,
             Input::Ping => {
-                // Revoking a device only rewrites remote.json; this is what
-                // actually evicts a connection that already presented the token.
-                if !shared.auth.lock().unwrap().token_is_valid(&token) {
-                    let _ = websocket.close(None).await;
-                    break;
-                }
                 if unanswered_pings >= 2 {
                     let _ = websocket.close(None).await;
                     break;
@@ -584,4 +786,67 @@ async fn websocket(
     }
     connection.to_host.close();
     Ok(())
+}
+
+fn hosting_action(
+    shared: &Shared,
+    action: tcode_protocol::HostingAction,
+) -> io::Result<tcode_protocol::HostingState> {
+    use tcode_protocol::HostingAction;
+    match action {
+        HostingAction::State => {}
+        HostingAction::SetEnabled(enabled) => {
+            let mut auth = shared.auth.lock().unwrap();
+            let mut updated = auth.clone();
+            updated.pairing_enabled = enabled;
+            updated.save()?;
+            *auth = updated;
+            drop(auth);
+            if !enabled {
+                *shared.pairing.lock().unwrap() = None;
+            } else {
+                mint_pairing_code(shared);
+            }
+        }
+        HostingAction::NewCode => {
+            if shared.auth.lock().unwrap().pairing_enabled {
+                mint_pairing_code(shared);
+            }
+        }
+        HostingAction::RevokeDevice(id) => {
+            shared.auth.lock().unwrap().revoke(&id)?;
+        }
+    }
+    let (code, expires_in_secs) = shared
+        .pairing
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|code| code.expires > Instant::now())
+        .map(|code| {
+            (
+                Some(code.code.clone()),
+                code.expires
+                    .saturating_duration_since(Instant::now())
+                    .as_secs(),
+            )
+        })
+        .unwrap_or((None, 0));
+    let auth = shared.auth.lock().unwrap();
+    Ok(tcode_protocol::HostingState {
+        enabled: auth.pairing_enabled,
+        code: if auth.pairing_enabled { code } else { None },
+        expires_in_secs,
+        host_id: auth.host_id.to_string(),
+        host_name: auth.host_name.clone(),
+        devices: auth
+            .devices
+            .iter()
+            .map(|device| tcode_protocol::HostedDevice {
+                id: device.id.to_string(),
+                name: device.name.clone(),
+                created_unix: device.created_unix,
+            })
+            .collect(),
+    })
 }

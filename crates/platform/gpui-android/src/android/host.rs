@@ -29,7 +29,7 @@ pub(crate) enum HostEvent {
     Back,
 }
 
-static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+pub(super) static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 static EVENTS: Mutex<VecDeque<HostEvent>> = Mutex::new(VecDeque::new());
 
 pub(crate) fn initialize(app: &AndroidApp) {
@@ -98,14 +98,16 @@ pub(crate) fn hide_keyboard() {
 }
 
 pub(crate) fn configure_input(configuration: TextInputConfiguration) {
+    // GPUI has no separate multiline flag; Enter explicitly requests a line break.
     with_activity(
         "gpuiConfigureInput",
-        "(ZIZI)V",
+        "(ZIZIZ)V",
         vec![
             OwnedArgument::Bool(configuration.autocorrect),
             OwnedArgument::Int(configuration.autocapitalize as i32),
             OwnedArgument::Bool(configuration.suggestions),
             OwnedArgument::Int(configuration.input_action as i32),
+            OwnedArgument::Bool(configuration.input_action == gpui::TextInputAction::Enter),
         ],
     );
 }
@@ -206,4 +208,38 @@ pub fn on_insets(left: i32, top: i32, right: i32, bottom: i32, ime_bottom: i32) 
 
 pub fn on_back() {
     enqueue(HostEvent::Back);
+}
+
+/// Rasterize on the calling render thread; a software Canvas needs no UI-thread hop.
+pub(crate) fn rasterize_emoji(glyph: u32, size: f32) -> anyhow::Result<Option<Vec<i32>>> {
+    let app = APP
+        .lock()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Android host not initialized"))?;
+    // SAFETY: Android owns the VM and live activity for the lifetime of this app handle.
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+    let mut env = vm.attach_current_thread()?;
+    let result = env.with_local_frame(4, |env| -> anyhow::Result<Option<Vec<i32>>> {
+        // SAFETY: the app handle keeps this NativeActivity alive.
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let object = env
+            .call_method(
+                &activity,
+                "gpuiRasterizeEmoji",
+                "(IF)[I",
+                &[JValue::Int(glyph.try_into()?), JValue::Float(size)],
+            )?
+            .l()?;
+        if object.is_null() {
+            return Ok(None);
+        }
+        let array = jni::objects::JIntArray::from(object);
+        let mut pixels = vec![0; env.get_array_length(&array)? as usize];
+        env.get_int_array_region(&array, 0, &mut pixels)?;
+        Ok(Some(pixels))
+    });
+    if result.is_err() {
+        let _ = env.exception_clear();
+    }
+    result
 }

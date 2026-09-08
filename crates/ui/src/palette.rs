@@ -9,9 +9,7 @@
 //!
 //! Title and action search use [`fuzzy_score`]; message search runs through the host.
 
-#[cfg(feature = "desktop")]
-use std::sync::{Arc, Mutex};
-#[cfg(feature = "desktop")]
+use crate::touch_scroll::TouchScrollExt as _;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -27,19 +25,7 @@ use gpui::{
     Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
-use tcode_protocol::ThreadExportFormat;
-#[cfg(feature = "desktop")]
-use tcode_services::session_search::{SessionSearch, SessionSearchHit};
-#[cfg(feature = "desktop")]
-use tcode_services::store::SessionStore;
-
-#[cfg(not(feature = "desktop"))]
-struct SessionSearchHit {
-    session_id: String,
-    session_title: String,
-    snippet: String,
-    turn: usize,
-}
+use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
 use crate::provider_card::provider_glyph;
 use crate::settings::ThemeMode;
@@ -93,7 +79,6 @@ enum Action {
     },
     ExportThread {
         session_id: String,
-        title: String,
         cwd: std::path::PathBuf,
         format: ThreadExportFormat,
     },
@@ -127,8 +112,7 @@ pub struct CommandPalette {
     query: Entity<InputState>,
     focus_handle: FocusHandle,
     selected: usize,
-    #[cfg(feature = "desktop")]
-    content_search: Option<Arc<Mutex<SessionSearch>>>,
+    pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
     _search_task: Option<Task<()>>,
@@ -166,16 +150,11 @@ impl CommandPalette {
 
         Self {
             store,
-            window_state: window_state.clone(),
+            window_state,
             query,
             focus_handle: cx.focus_handle(),
             selected: 0,
-            #[cfg(feature = "desktop")]
-            content_search: (!window_state.read(cx).compact)
-                .then(SessionStore::open_default)
-                .and_then(Result::ok)
-                .map(SessionSearch::new)
-                .map(|search| Arc::new(Mutex::new(search))),
+            outside_dismissal: crate::overlay::OutsideDismissal::default(),
             content_hits: Vec::new(),
             search_generation: 0,
             _search_task: None,
@@ -193,7 +172,9 @@ impl CommandPalette {
         self.content_hits.clear();
     }
 
-    #[cfg(feature = "desktop")]
+    /// Debounce, then ask the host for content hits. The index, cache and
+    /// session metadata are host-owned; this keeps only the debounce and the
+    /// generation guard that discards an answer a newer query superseded.
     fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
         self.search_generation = self.search_generation.wrapping_add(1);
         let generation = self.search_generation;
@@ -205,38 +186,34 @@ impl CommandPalette {
             self._search_task = None;
             return;
         }
-        let Some(search) = self.content_search.clone() else {
-            return;
-        };
-        let sessions = self.store.read(cx).sidebar_sessions();
         let query = query.to_string();
+        let store = self.store.clone();
         self._search_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            let hits = cx
-                .background_executor()
-                .spawn(async move {
-                    search
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .search(&sessions, &query, 50)
-                })
+            let hits = store
+                .update(cx, |store, cx| store.search_session_content(query, 50, cx))
                 .await;
             let _ = this.update(cx, |palette, cx| {
-                if palette.search_generation == generation {
-                    palette.content_hits = hits;
-                    cx.notify();
-                }
+                palette.apply_content_hits(generation, hits, cx);
             });
         }));
     }
 
-    #[cfg(not(feature = "desktop"))]
-    fn schedule_content_search(&mut self, _cx: &mut Context<Self>) {
-        self.search_generation = self.search_generation.wrapping_add(1);
-        self.content_hits.clear();
-        self._search_task = None;
+    /// Adopt an answer only while it still belongs to the current query. The
+    /// host may answer an earlier keystroke after a later one.
+    fn apply_content_hits(
+        &mut self,
+        generation: u64,
+        hits: Vec<SessionSearchHit>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.search_generation != generation {
+            return;
+        }
+        self.content_hits = hits;
+        cx.notify();
     }
 
     fn close(&self, cx: &mut Context<Self>) {
@@ -346,7 +323,6 @@ impl CommandPalette {
                     IconName::Inbox,
                     Action::ExportThread {
                         session_id: meta.id.clone(),
-                        title: meta.title.clone(),
                         cwd: meta.cwd.clone(),
                         format,
                     },
@@ -442,6 +418,10 @@ impl CommandPalette {
                 self.store.update(cx, |store, cx| {
                     store.start_draft(project_id, cwd, cx);
                 });
+                // Draft selection arrives asynchronously and can reuse an
+                // already selected draft. Navigation is a separate intent.
+                self.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
             }
             Action::OpenSettings => {
                 // open_settings also clears palette_open.
@@ -455,7 +435,7 @@ impl CommandPalette {
                     ThemeMode::Dark
                 };
                 self.store.update(cx, |store, _cx| {
-                    store.set_theme_mode(next);
+                    store.set_client_theme(Some(next));
                 });
                 apply_theme(next, window, cx);
                 self.close(cx);
@@ -488,7 +468,6 @@ impl CommandPalette {
             }
             Action::ExportThread {
                 session_id,
-                title,
                 cwd,
                 format,
             } => {
@@ -496,7 +475,6 @@ impl CommandPalette {
                 crate::thread_export::prompt_thread_export(
                     self.store.clone(),
                     session_id,
-                    title,
                     cwd,
                     format,
                     window,
@@ -551,8 +529,20 @@ impl Render for CommandPalette {
             self.selected = total - 1;
         }
         let muted = cx.theme().muted_foreground;
+        let compact = self.window_state.read(cx).compact;
+        let viewport = window.viewport_size();
+        let insets = crate::window_seam::WindowSeam::current(cx).content_insets();
+        let available =
+            (viewport.height - insets.top - insets.bottom - px(if compact { 52. } else { 120. }))
+                .max(px(0.));
+        let dismissal = self.outside_dismissal.clone();
 
-        let mut list_content = v_flex().w_full().px_2().py_2().gap_1();
+        let mut list_content = v_flex()
+            .flex_none()
+            .w_full()
+            .px(px(if compact { 16. } else { 8. }))
+            .py_2()
+            .gap_1();
         let mut flat = 0usize;
         for group in &groups {
             list_content = list_content.child(
@@ -573,6 +563,15 @@ impl Render for CommandPalette {
                 list_content = list_content.child(
                     h_flex()
                         .id(("palette-row", index))
+                        .debug_selector({
+                            let action = action.clone();
+                            move || match &action {
+                                Action::NewThread { project_id, .. } => {
+                                    format!("palette-new-thread-{project_id}")
+                                }
+                                _ => format!("palette-row-{index}"),
+                            }
+                        })
                         .role(Role::ListBoxOption)
                         .aria_label(item.label.clone())
                         .aria_selected(is_sel)
@@ -650,22 +649,28 @@ impl Render for CommandPalette {
         }
         let list = div()
             .id("palette-list")
+            .debug_selector(|| "palette-list".into())
             .role(Role::ListBox)
             .aria_label(crate::tr!("palette.results"))
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
+            .touch_overflow_y_scroll()
             .child(list_content);
 
         let card = crate::material::overlay_contour(
             v_flex()
-                .w(if self.window_state.read(cx).compact {
-                    window.viewport_size().width - px(32.)
+                .w(if compact {
+                    viewport.width
                 } else {
-                    px(640.)
+                    px(640.).min(viewport.width - px(32.))
                 })
-                .max_h(px(440.))
-                .rounded(crate::material::radius_overlay())
+                .h(px(440.).min(available))
+                .when(compact, |card| {
+                    card.rounded_t(crate::material::radius_overlay_sheet())
+                })
+                .when(!compact, |card| {
+                    card.rounded(crate::material::radius_overlay())
+                })
                 .overflow_hidden(),
             cx,
         )
@@ -673,7 +678,7 @@ impl Render for CommandPalette {
             h_flex()
                 .flex_none()
                 .h(px(48.))
-                .px_3()
+                .px(px(if compact { 16. } else { 12. }))
                 .gap_2()
                 .items_center()
                 .child(Icon::new(IconName::Search).small().text_color(muted))
@@ -686,42 +691,54 @@ impl Render for CommandPalette {
                 ),
         )
         .child(list)
-        .child(
-            h_flex()
-                .flex_none()
-                .h(px(34.))
-                .px_3()
-                .gap_3()
-                .items_center()
-                .text_size(px(11.))
-                .text_color(muted)
-                .child(crate::tr!("palette.navigate"))
-                .child(crate::tr!("palette.select"))
-                .child(crate::tr!("palette.close")),
-        );
+        .when(!compact, |card| {
+            card.child(
+                h_flex()
+                    .flex_none()
+                    .h(px(34.))
+                    .px_3()
+                    .gap_3()
+                    .items_center()
+                    .text_size(px(11.))
+                    .text_color(muted)
+                    .child(crate::tr!("palette.navigate"))
+                    .child(crate::tr!("palette.select"))
+                    .child(crate::tr!("palette.close")),
+            )
+        });
 
-        div()
+        let card = card
+            .id("palette-card")
+            .debug_selector(|| "palette-card".into())
+            .occlude()
+            .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_mouse_down_out(cx.listener(move |this, event, window, cx| {
+                dismissal.consume(event, window, cx);
+                this.close(cx);
+            }));
+        let overlay = div()
             .id("palette-overlay")
             .track_focus(&self.focus_handle)
-            .absolute()
-            .inset_0()
-            .size_full()
-            .bg(gpui::black().opacity(0.35))
+            .occlude()
+            .w(viewport.width)
+            .h(viewport.height)
+            .bg(crate::material::scrim(1., cx))
             .flex()
-            .justify_center()
+            .flex_col()
+            .items_center()
+            .when(compact, |overlay| overlay.justify_end().pb(insets.bottom))
+            .when(!compact, |overlay| overlay.pt(insets.top + px(96.)))
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.close(cx);
-                }),
-            )
-            .child(
-                div()
-                    .mt(px(96.))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(card),
-            )
+            .child(card);
+        gpui::deferred(
+            gpui::anchored()
+                .position(gpui::point(px(0.), px(0.)))
+                .child(overlay),
+        )
+        .with_priority(gpui_base::POPUP_PRIORITY)
     }
 }
 
@@ -800,9 +817,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn arrow_keys_move_and_clamp_the_highlight_while_the_query_keeps_focus(
-        cx: &mut TestAppContext,
-    ) {
+    fn empty_query_lists_commands_and_arrow_keys_keep_query_focus(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
             "tcode-palette-keyboard-test-{}",
@@ -810,7 +825,7 @@ mod tests {
         ));
         let store = SessionStore::open_at(root.clone()).expect("open test store");
         let host = spawn_host(store, HostServices::default()).expect("spawn test host");
-        let workspace_store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
         let palette_store = workspace_store.clone();
         let (harness, cx) = cx.add_window_view(move |window, cx| {
             PaletteHarness::new(palette_store.clone(), window, cx)
@@ -820,6 +835,28 @@ mod tests {
         cx.update(|window, cx| {
             let query = palette.read(cx).query.clone();
             query.read(cx).focus_handle(cx).focus(window, cx);
+        });
+
+        cx.update(|_, cx| {
+            palette.update(cx, |palette, cx| {
+                assert!(palette.query.read(cx).value().is_empty());
+                let items = palette.flat_items(cx);
+                assert!(
+                    items
+                        .iter()
+                        .any(|item| matches!(item.action, Action::OpenSettings))
+                );
+                assert!(
+                    items
+                        .iter()
+                        .any(|item| matches!(item.action, Action::ToggleTheme))
+                );
+                assert!(
+                    items
+                        .iter()
+                        .any(|item| matches!(item.action, Action::ToggleTerminal))
+                );
+            });
         });
 
         dispatch_palette_key(&palette, cx, "down");
@@ -841,6 +878,63 @@ mod tests {
         cx.update(|_, cx| {
             let total = palette.update(cx, |palette, cx| palette.flat_items(cx).len());
             assert_eq!(palette.read(cx).selected, total - 1);
+        });
+
+        drop(palette);
+        drop(workspace_store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn a_host_answer_for_a_superseded_query_is_discarded(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-palette-search-test-{}",
+            tcode_services::store::now_millis()
+        ));
+        let store = SessionStore::open_at(root.clone()).expect("open test store");
+        let host = spawn_host(store, HostServices::default()).expect("spawn test host");
+        let workspace_store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let palette_store = workspace_store.clone();
+        let (harness, cx) = cx.add_window_view(move |window, cx| {
+            PaletteHarness::new(palette_store.clone(), window, cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+        let palette = cx.update(|_, cx| harness.read(cx).palette.clone());
+
+        let hit = |snippet: &str| SessionSearchHit {
+            session_id: "session-1".into(),
+            session_title: "Thread".into(),
+            entry_id: "entry-1".into(),
+            turn: 0,
+            snippet: snippet.into(),
+        };
+        let stale = cx.update(|window, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.query.update(cx, |state, cx| {
+                    state.set_value("first".to_string(), window, cx)
+                });
+                palette.schedule_content_search(cx);
+                let stale = palette.search_generation;
+                palette.query.update(cx, |state, cx| {
+                    state.set_value("second".to_string(), window, cx)
+                });
+                palette.schedule_content_search(cx);
+                stale
+            })
+        });
+        cx.update(|_, cx| {
+            palette.update(cx, |palette, cx| {
+                palette.apply_content_hits(stale, vec![hit("answer for `first`")], cx);
+                assert!(
+                    palette.content_hits.is_empty(),
+                    "an answer for a superseded query must not be shown"
+                );
+                let current = palette.search_generation;
+                palette.apply_content_hits(current, vec![hit("answer for `second`")], cx);
+                assert_eq!(palette.content_hits.len(), 1);
+                assert_eq!(palette.content_hits[0].snippet, "answer for `second`");
+            });
         });
 
         drop(palette);

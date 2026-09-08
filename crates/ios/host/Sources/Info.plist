@@ -22,6 +22,11 @@
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>NSBonjourServices</key>
     <array><string>_tcode._tcp</string></array>
     <key>NSLocalNetworkUsageDescription</key>
@@ -51,6 +56,8 @@
     <dict>
         <key>UIColorName</key>
         <string>LaunchBackground</string>
+        <key>UIImageName</key>
+        <string>LaunchGlyph</string>
     </dict>
     <key>UIRequiredDeviceCapabilities</key>
     <array>
@@ -62,6 +69,15 @@
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
 </dict>
 </plist>

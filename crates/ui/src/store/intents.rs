@@ -8,7 +8,6 @@ use tcode_core::{
     session::ReviewComment,
     settings::{
         ChildApprovalMode, ImageMode, OrchestrateChildModel, ProfileSettingsPatch, SidebarLayout,
-        ThemeMode,
     },
     ui::{TerminalSplitDirection, WorkspaceMode},
 };
@@ -60,12 +59,6 @@ impl WorkspaceStore {
         self.patch_settings(SettingsPatch::LastProject(Some(project_id)));
     }
 
-    pub fn set_language(&mut self, value: Option<String>) {
-        self.patch_settings(SettingsPatch::Language(value));
-    }
-    pub fn set_theme_mode(&mut self, value: ThemeMode) {
-        self.patch_settings(SettingsPatch::ThemeMode(value));
-    }
     pub fn set_word_wrap_diffs(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::WordWrapDiffs(value));
     }
@@ -223,8 +216,14 @@ impl WorkspaceStore {
     pub fn mark_session_unread(&mut self, session_id: String) {
         self.dispatch(Command::MarkSessionUnread { session_id });
     }
-    pub(super) fn leave_session(&mut self) {
-        #[cfg(feature = "terminal")]
+    pub(crate) fn leave_session(&mut self) {
+        self.selection_generation = self.selection_generation.wrapping_add(1);
+        self.history_task = None;
+        self.history_error = None;
+        self.history_pages_fetched = 0;
+        self.history_logged_records = None;
+        self.session_turn_offset = 0;
+        self.session_catching_up = false;
         self.clear_terminal_topics();
         if let Some(status) = &self.session_status_replica
             && !status.draft
@@ -247,7 +246,6 @@ impl WorkspaceStore {
                 tcode_protocol::Topic::SessionStatus {
                     session_id: session_id.clone(),
                 },
-                #[cfg(feature = "desktop")]
                 tcode_protocol::Topic::Preview {
                     session_id: session_id.clone(),
                 },
@@ -277,6 +275,14 @@ impl WorkspaceStore {
         self.remember_project(project_id);
         self.leave_session();
         self.selected_session_id = Some(session_id.clone());
+        self.baseline_topics
+            .remove(&tcode_protocol::Topic::SessionStatus {
+                session_id: session_id.clone(),
+            });
+        self.baseline_topics
+            .remove(&tcode_protocol::Topic::SessionEvents {
+                session_id: session_id.clone(),
+            });
         self.session_status_replica = self.session_statuses.get(&session_id).cloned();
         self.git_status_replica = self
             .git_statuses
@@ -284,11 +290,11 @@ impl WorkspaceStore {
             .cloned()
             .unwrap_or_default();
         let records = self.session_records.entry(session_id.clone()).or_default();
-        self.session_replica = Some((
-            session_id.clone(),
-            tcode_core::session::Timeline::fold_events(records.iter().cloned()),
-        ));
-        let after = Some(records.len() as u64);
+        self.session_replica = None;
+        let after = self
+            .session_from
+            .get(&session_id)
+            .map(|from| from + records.len() as u64);
         for topic in [
             tcode_protocol::Topic::SessionStatus {
                 session_id: session_id.clone(),
@@ -296,12 +302,20 @@ impl WorkspaceStore {
             tcode_protocol::Topic::GitStatus {
                 session_id: session_id.clone(),
             },
-            #[cfg(feature = "desktop")]
             tcode_protocol::Topic::Preview {
                 session_id: session_id.clone(),
             },
             tcode_protocol::Topic::SessionEvents { session_id },
         ] {
+            // A client with no preview backend must not become a competing
+            // owner of the session's preview: it would win requests it can only
+            // refuse. It still answers `unsupported` for anything that reaches
+            // it through an already-open subscription.
+            if matches!(topic, tcode_protocol::Topic::Preview { .. })
+                && !crate::preview_panel::PREVIEW_BACKEND
+            {
+                continue;
+            }
             let _ = self.host.subscribe(tcode_protocol::Subscription {
                 after: if matches!(topic, tcode_protocol::Topic::SessionEvents { .. }) {
                     after
@@ -311,7 +325,6 @@ impl WorkspaceStore {
                 topic,
             });
         }
-        #[cfg(feature = "terminal")]
         self.sync_terminal_topics();
         self.sync_active_conversation_ui();
     }
@@ -378,6 +391,9 @@ impl WorkspaceStore {
         });
     }
     pub fn respond_approval(&mut self, request_id: String, decision: ApprovalDecision) {
+        if self.approval_delivery_pending(&request_id) {
+            return;
+        }
         self.dispatch(Command::RespondApproval {
             session_id: self.active_session_id().unwrap_or_default(),
             request_id,
@@ -398,7 +414,7 @@ impl WorkspaceStore {
     pub fn rewind_turn(&mut self, turn: usize, mode: RewindMode) {
         self.dispatch(Command::RewindTurn {
             session_id: self.active_session_id().unwrap_or_default(),
-            turn,
+            turn: turn + self.session_turn_offset,
             mode,
         });
     }
@@ -458,21 +474,6 @@ impl WorkspaceStore {
         cx: &mut App,
     ) -> Task<Result<CommandResponse, ProtocolError>> {
         self.command(Command::CreateProject { root }, cx)
-    }
-    pub fn finish_external_import(&mut self, project_id: String) {
-        self.dispatch(Command::FinishExternalImport { project_id });
-    }
-    pub fn export_thread(
-        &mut self,
-        session_id: String,
-        destination: PathBuf,
-        format: tcode_protocol::ThreadExportFormat,
-    ) {
-        self.dispatch(Command::ExportThread {
-            session_id,
-            destination,
-            format,
-        });
     }
     pub fn toggle_project_collapsed(&mut self, project_id: String) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });
@@ -634,7 +635,6 @@ impl WorkspaceStore {
         });
     }
     pub fn capture_terminal_selection(&mut self, terminal_id: u64) {
-        #[cfg(feature = "terminal")]
         let selection = self
             .client_terminal(terminal_id)
             .and_then(|terminal| terminal.selected_text())
@@ -643,8 +643,6 @@ impl WorkspaceStore {
                 line_end: selection.line_end,
                 text: selection.text,
             });
-        #[cfg(not(feature = "terminal"))]
-        let selection = None;
         self.dispatch(Command::CaptureTerminalSelection {
             session_id: self.active_session_id().unwrap_or_default(),
             terminal_id,

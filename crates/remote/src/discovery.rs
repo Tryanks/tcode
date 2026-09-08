@@ -75,7 +75,6 @@ pub struct Beacon {
     pub name: String,
     pub port: u16,
     pub addr: String,
-    pub fp: String,
 }
 
 #[cfg(feature = "server")]
@@ -106,11 +105,9 @@ pub fn start_beacon(
     host_id: impl Into<String>,
     name: impl Into<String>,
     port: u16,
-    fp: impl Into<String>,
 ) -> BeaconHandle {
     let host_id = host_id.into();
     let name = name.into();
-    let fp = fp.into();
     let mut handle = BeaconHandle {
         daemon: None,
         fullname: String::new(),
@@ -120,7 +117,6 @@ pub fn start_beacon(
             ("host_id", host_id.as_str()),
             ("name", name.as_str()),
             ("port", &port.to_string()),
-            ("fp", fp.as_str()),
         ];
         let service = ServiceInfo::new(
             SERVICE_TYPE,
@@ -223,17 +219,12 @@ fn parse_txt(txt: &mdns_sd::TxtProperties, port: u16, addr: String) -> Option<Be
     };
     let host_id = field("host_id")?;
     let name = field("name")?;
-    let fp = field("fp")?;
-    if port == 0
-        || field("port")?.parse::<u16>().ok()? != port
-        || !tcode_client::pairing::valid_fingerprint(&fp)
-    {
+    if port == 0 || field("port")?.parse::<u16>().ok()? != port {
         return None;
     }
     Some(Beacon {
         host_id,
         name,
-        fp,
         addr,
         port,
     })
@@ -259,7 +250,6 @@ mod tests {
             ("host_id", name.as_str()),
             ("name", "Loopback"),
             ("port", "47420"),
-            ("fp", &"ab".repeat(32)),
         ];
         let mut info = ServiceInfo::new(
             SERVICE_TYPE,
@@ -304,7 +294,6 @@ mod tests {
             ("host_id", "test"),
             ("name", "Test host"),
             ("port", "47420"),
-            ("fp", &"ab".repeat(32)),
         ];
         let info = ServiceInfo::new(
             SERVICE_TYPE,
@@ -317,12 +306,7 @@ mod tests {
         .unwrap();
         assert!(parse_txt(info.get_properties(), 47420, "127.0.0.1".into()).is_some());
         assert!(parse_txt(info.get_properties(), 1, "127.0.0.1".into()).is_none());
-        let malformed = [
-            ("host_id", "test"),
-            ("name", "Test"),
-            ("port", "47420"),
-            ("fp", "invalid"),
-        ];
+        let malformed = [("host_id", "test"), ("name", ""), ("port", "47420")];
         let info = ServiceInfo::new(
             SERVICE_TYPE,
             "test",

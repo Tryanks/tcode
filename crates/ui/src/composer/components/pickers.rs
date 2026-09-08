@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::touch_scroll::TouchScrollExt as _;
 
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
@@ -199,7 +200,8 @@ impl Composer {
             .collect();
 
         let trigger = Button::new("model-picker")
-            .when(self.compact, |button| button.max_w(px(200.)).min_w_0())
+            .debug_selector(|| "model-picker".into())
+            .when(self.compact, |button| button.max_w(px(160.)).min_w_0())
             .ghost()
             .compact()
             .h(px(28.))
@@ -296,6 +298,10 @@ impl Composer {
         let pending_restart = composer.options_pending_restart;
 
         let trigger = Button::new("traits-chip")
+            .debug_selector(|| "traits-chip".into())
+            .when(self.compact, |button| {
+                button.max_w(px(80.)).overflow_hidden()
+            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -304,11 +310,16 @@ impl Composer {
             .rounded(crate::material::radius_chip())
             .child(
                 h_flex()
+                    .when(self.compact, |el| el.min_w_0().overflow_hidden())
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(label)
+                    .child(
+                        div()
+                            .when(self.compact, |el| el.min_w_0().truncate())
+                            .child(label),
+                    )
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
 
@@ -365,6 +376,10 @@ impl Composer {
             ),
         };
         Button::new("mode-chip")
+            .debug_selector(|| "mode-chip".into())
+            .when(self.compact, |button| {
+                button.max_w(px(80.)).overflow_hidden()
+            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -374,12 +389,14 @@ impl Composer {
             .tooltip(tooltip)
             .child(
                 h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap_1p5()
                     .items_center()
                     .text_size(px(11.5))
                     .text_color(muted)
                     .child(Icon::empty().path(icon).small().text_color(muted))
-                    .child(label),
+                    .child(div().min_w_0().truncate().child(label)),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.workspace_store
@@ -406,6 +423,8 @@ impl Composer {
         track.a = 0.35;
 
         let trigger = Button::new("context-meter")
+            .debug_selector(|| "context-meter".into())
+            .aria_label(crate::tr!("composer.context_window_title").into_owned())
             .ghost()
             .compact()
             .h(px(28.))
@@ -421,11 +440,12 @@ impl Composer {
         crate::material::overlay_popover("context-popover")
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
-                popover.bottom_sheet(crate::tr!("mobile.model"))
+                popover.bottom_sheet(crate::tr!("composer.context_window_title"))
             })
             .trigger(trigger)
-            .content(move |_, _, cx| {
-                render_context_meter_pane(usage, account_usage.clone(), provider, pct, cx)
+            .content(move |_, window, cx| {
+                let compact = crate::window_seam::window_is_compact(window, cx);
+                render_context_meter_pane(usage, account_usage.clone(), provider, pct, compact, cx)
             })
             .into_any_element()
     }
@@ -441,6 +461,10 @@ impl Composer {
         let muted = cx.theme().muted_foreground;
 
         let trigger = Button::new("permission-chip")
+            .debug_selector(|| "permission-chip".into())
+            .when(self.compact, |button| {
+                button.max_w(px(96.)).overflow_hidden()
+            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -449,12 +473,14 @@ impl Composer {
             .rounded(crate::material::radius_input())
             .child(
                 h_flex()
+                    .min_w_0()
+                    .overflow_hidden()
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
                     .child(Icon::empty().path(icon_path).small().text_color(muted))
-                    .child(label)
+                    .child(div().min_w_0().truncate().child(label))
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
 
@@ -503,8 +529,16 @@ impl Composer {
                 popover.bottom_sheet(crate::tr!("composer.more_controls"))
             })
             .trigger(trigger)
-            .content(move |_, _, cx| {
-                render_overflow_pane(usage, mode, interaction, &store_entity, &cx.entity(), cx)
+            .content(move |_, window, cx| {
+                render_overflow_pane(
+                    usage,
+                    mode,
+                    interaction,
+                    &store_entity,
+                    &cx.entity(),
+                    window,
+                    cx,
+                )
             })
             .into_any_element()
     }
@@ -621,7 +655,7 @@ fn render_model_pane(
         .h_full()
         .border_r_1()
         .border_color(cx.theme().border)
-        .overflow_y_scroll()
+        .touch_overflow_y_scroll()
         .child(rail_col);
 
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
@@ -672,7 +706,7 @@ fn render_model_pane(
                 .aria_label(crate::tr!("composer.model_results"))
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
+                .touch_overflow_y_scroll()
                 .child(list),
         );
     if pending_restart {
@@ -773,7 +807,7 @@ fn render_compact_model_footer(
         });
 
     let group = |label: gpui::SharedString,
-                 track: gpui::Stateful<gpui::Div>,
+                 track: crate::touch_scroll::Registered<gpui::Stateful<gpui::Div>>,
                  cx: &mut Context<PopoverState>| {
         v_flex()
             .gap(px(6.))
@@ -1130,7 +1164,11 @@ fn render_permission_pane(
         );
     }
 
-    let mut pane = v_flex().w(px(280.)).child(list);
+    let mut pane = v_flex()
+        .debug_selector(|| "permission-pane".into())
+        .w_full()
+        .when(!compact, |pane| pane.w(px(280.)))
+        .child(list);
     if pending_restart {
         pane = pane.child(
             div()
@@ -1393,9 +1431,10 @@ fn render_traits_pane(
     }
     div()
         .id("traits-options-scroll")
-        .w(px(280.))
+        .w_full()
+        .when(!compact, |pane| pane.w(px(280.)))
         .max_h(px(360.))
-        .overflow_y_scroll()
+        .touch_overflow_y_scroll()
         .child(pane)
         .into_any_element()
 }
@@ -1409,6 +1448,7 @@ fn render_overflow_pane(
     interaction: InteractionMode,
     store_entity: &Entity<WorkspaceStore>,
     popover: &Entity<PopoverState>,
+    window: &Window,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -1439,7 +1479,10 @@ fn render_overflow_pane(
     let interaction_store = store_entity.clone();
     let interaction_popover = popover.clone();
     v_flex()
-        .w(px(220.))
+        .w_full()
+        .when(!crate::window_seam::window_is_compact(window, cx), |pane| {
+            pane.w(px(220.))
+        })
         .p_1()
         .gap_0p5()
         .child(item(Icon::new(IconName::Info), context_label(usage)))
@@ -1483,6 +1526,7 @@ fn render_context_meter_pane(
     account_usage: Option<tcode_core::usage::ProviderUsage>,
     provider: Option<ProviderKind>,
     pct: Option<f32>,
+    compact: bool,
     cx: &mut Context<PopoverState>,
 ) -> AnyElement {
     let muted = cx.theme().muted_foreground;
@@ -1492,7 +1536,11 @@ fn render_context_meter_pane(
     } else {
         rgb(METER_BLUE).into()
     };
-    let mut pane = v_flex().w(px(256.)).p_3().gap_2();
+    let mut pane = v_flex()
+        .debug_selector(|| "context-pane".into())
+        .w_full()
+        .when(!compact, |pane| pane.w(px(256.)).p_3())
+        .gap_2();
 
     let used = usage.as_ref().and_then(context_meter::used_tokens);
     let max = usage.and_then(|u| u.context_window);
@@ -1666,4 +1714,105 @@ fn render_context_meter_pane(
     }
 
     pane.into_any_element()
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+    use gpui::{Render, TestAppContext, WindowInsets, size};
+
+    struct PickerHarness {
+        store: Entity<WorkspaceStore>,
+        context: bool,
+    }
+
+    impl Render for PickerHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let compact = crate::window_seam::window_is_compact(window, cx);
+            let store = self.store.clone();
+            let context = self.context;
+            div().size_full().p_4().child(
+                crate::material::overlay_popover("picker-regression")
+                    .when(compact, |popover| popover.bottom_sheet("Details"))
+                    .trigger(
+                        Button::new("open")
+                            .label("Open")
+                            .debug_selector(|| "picker-open".into()),
+                    )
+                    .content(move |_, _, cx| {
+                        if context {
+                            render_context_meter_pane(None, None, None, None, compact, cx)
+                        } else {
+                            render_permission_pane(
+                                (ApprovalMode::Supervised, compact),
+                                false,
+                                true,
+                                &store,
+                                &cx.entity(),
+                                cx,
+                            )
+                        }
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn picker_sheets_span_window_and_preserve_wide_width(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let host = tcode_runtime::pipe::spawn_host(
+            tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
+                "tcode-sheet-test-{}",
+                tcode_services::store::now_millis()
+            )))
+            .unwrap(),
+            tcode_runtime::pipe::HostServices::default(),
+        )
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        for context in [false, true] {
+            for (width, bottom) in [(393., 34.), (393., 300.), (1024., 0.)] {
+                let (_, cx) = cx.add_window_view(|_, _| PickerHarness {
+                    store: store.clone(),
+                    context,
+                });
+                cx.simulate_resize(size(px(width), px(852.)));
+                cx.update(|window, cx| {
+                    cx.set_global(crate::window_seam::WindowSeam::new(move || {
+                        let mut insets = WindowInsets::default();
+                        insets.safe_area.top = px(47.);
+                        insets.safe_area.bottom = px(34.);
+                        insets.ime.bottom = px(bottom);
+                        insets
+                    }));
+                    window.draw(cx).clear(cx);
+                });
+                let trigger = cx.debug_bounds("picker-open").unwrap().center();
+                cx.simulate_click(trigger, Default::default());
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let pane = cx
+                    .debug_bounds(if context {
+                        "context-pane"
+                    } else {
+                        "permission-pane"
+                    })
+                    .unwrap();
+                if width < 900. {
+                    let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();
+                    assert_eq!(sheet.left(), px(0.));
+                    assert_eq!(sheet.right(), px(393.));
+                    assert_eq!(sheet.bottom(), px(852. - bottom));
+                    assert!(sheet.top() >= px(99.));
+                    assert_eq!(pane.left(), px(16.));
+                    assert_eq!(pane.right(), px(377.));
+                    let scrim = cx.debug_bounds("touch-picker-backdrop").unwrap();
+                    assert_eq!(scrim.origin, gpui::point(px(0.), px(0.)));
+                    assert_eq!(scrim.size, size(px(393.), px(852.)));
+                } else {
+                    assert_eq!(pane.size.width, px(if context { 256. } else { 280. }));
+                }
+            }
+        }
+    }
 }

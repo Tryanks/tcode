@@ -77,7 +77,7 @@ and a live plan/task panel.
 | [OpenCode](https://opencode.ai) | `opencode` on your `PATH` |
 
 **Everything else, over [ACP](https://agentclientprotocol.com).** Tcode ships a
-marketplace backed by the official Agent Client Protocol registry.
+marketplace backed by the official ACP registry.
 Install one from **Settings → Providers**, or point Tcode at any command that
 speaks ACP.
 
@@ -88,39 +88,52 @@ speaks ACP.
 > ACP entries that duplicate a native integration are deliberately hidden from
 > the marketplace so each CLI has one clear, highest-fidelity path.
 
-## Remote work mode
+## Use tcode from other devices
 
-One tcode is the **host**: it runs the agents and keeps your projects and
-threads. Any other tcode — another desktop, your phone, a browser tab — is a
-screen for that host. Everything travels over your own LAN or overlay network
-(Tailscale, EasyTier); there is no relay service.
+Tcode runs on the machine that holds your projects, starts your agents, and
+keeps your threads. You can open that machine from another desktop, a phone or
+tablet, or a browser tab. Everything travels over your own LAN or overlay
+network (Tailscale, EasyTier); there is no relay service.
 
-**Host from the desktop.** Settings → Remote → **Host this computer**. Share the
-pairing code or QR code with the device you want to connect. Codes are
-single-use and expire after five minutes.
+Every device shows the *same* app. There is no reduced phone build: the layout
+follows the window's width — under 900px it becomes a machines → threads →
+thread stack, and above it uses the desktop split. Some actions depend on the
+device in your hands, such as opening a native file dialog or driving the
+embedded preview browser.
 
-**Host from a server.** Download `tcode-headless` from
+**Use your desktop as the machine.** In **Settings → Other devices**, turn on
+**Let other devices connect to this machine**. Share the connection code or QR
+code with the device you want to connect. Codes are single-use and expire after
+five minutes.
+
+**Use a server as the machine.** Download `tcode-headless` from
 [Releases](https://github.com/Tryanks/tcode/releases), install your agent CLIs
 on the server, then:
 
 ```sh
 tcode-headless serve --listen 0.0.0.0:47420 --name build-server
-tcode-headless pair      # prints a fresh pairing code and QR code
+tcode-headless pair      # prints a fresh connection code and QR code
 ```
 
-Release builds also serve the browser client at `https://<host>:47420/`.
+Release builds also serve the browser app at `http://<machine>:47420/`. Set a
+password on first open, or preset it with `TCODE_PASSWORD`. Saved browser tokens
+skip login on later visits.
 
-**Connect a screen.** Desktop: Settings → Remote → pair by code or pick a nearby
-host, then **Connect**. Phone: **Pair a host**, scan the QR code or enter the
-address and code. Browser: open the host's HTTPS URL, verify its certificate in
-the browser, and enter the code. See [pairing and certificate trust](docs/remote.md)
-for the native and browser flows.
+**Connect another device.** Open the sidebar's **Machines** row on a desktop,
+or the opening screen on a phone. Add the machine with its connection code, or
+choose it under **Nearby machines**, then connect. In a browser, open the
+printed HTTP link and log in with the password. The browser’s **Settings →
+Other devices** shows codes and QR codes for native clients and controls new
+pairings and device revocation.
+See [Use tcode from other devices](docs/remote.md) for the native-app and
+browser steps.
 
-**Security.** Connections use TLS with a per-host self-signed certificate that
-native clients pin at pairing. Pairing issues a device token you can revoke on
-the host. QR codes carry the fingerprint; typing a code by hand trusts the first
-certificate you reach, so compare fingerprints. Details, a systemd unit, and
-troubleshooting: [docs/remote.md](docs/remote.md).
+**Security.** LAN connections use plain HTTP and WebSockets. Adding a machine
+creates a device token that can be revoked on that machine. Anyone who captures
+LAN traffic can read the token; use a VPN or HTTPS tunnel on untrusted networks.
+See [Reaching your machine from outside](docs/remote.md#reaching-your-machine-from-outside)
+for Tailscale, WireGuard, Cloudflare Tunnel and frp, and the
+[remote guide](docs/remote.md) for setup and troubleshooting.
 
 ## Getting started
 
@@ -139,13 +152,13 @@ inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
 executable, and an XDG desktop entry plus themed PNG on Linux. Release downloads
 also include a `SHA256SUMS.txt` file.
 
-| Platform / client | Release download |
+| Platform / device | Release download |
 | --- | --- |
 | macOS, arm64 / x64 | Desktop `.zip` / `.dmg`; headless `.zip` |
 | Windows, x64 / arm64 | Desktop or headless `.zip` |
 | Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
 | Android, arm64 | `tcode-<version>-android-arm64-debug.apk` — debug build; install with adb |
-| iOS, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned debug build; re-sign before installing |
+| iOS / iPadOS, arm64 | `tcode-<version>-ios-arm64-unsigned.ipa` — unsigned debug build; re-sign before installing |
 | Browser | Embedded in the headless release; open its HTTPS URL. No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
@@ -166,7 +179,13 @@ lives under your platform's app-data directory.
 ## Building from source
 
 Build instructions, platform prerequisites, workspace layout, tests and provider
-probes are in [CONTRIBUTING.md](CONTRIBUTING.md).
+probes are in [CONTRIBUTING.md](CONTRIBUTING.md). To review the compact layout
+without a device, open the shared shell at phone geometry:
+
+```sh
+cargo run -p tcode-ui --example phone              # 393×852
+cargo run -p tcode-ui --example phone -- --android # 412×915
+```
 
 The editable macOS 26 source is
 [`assets/icons/app/tcode.icon`](assets/icons/app/tcode.icon). Icon Composer's

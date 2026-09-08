@@ -1,7 +1,8 @@
 //! UI-agnostic terminal process management and emulation.
 
+use std::collections::HashMap;
+#[cfg(feature = "pty")]
 use std::{
-    collections::HashMap,
     io,
     path::{Path, PathBuf},
     thread,
@@ -25,34 +26,27 @@ use rio_vt::{
 
 mod grid_emulator;
 mod hyperlinks;
-pub mod mappings;
+pub mod project;
+#[cfg(feature = "pty")]
 mod pty;
+#[cfg(feature = "pty")]
 mod pty_info;
 mod sync;
 
 pub use hyperlinks::HyperlinkMatch;
-
-/// Renderer-facing graphics values and pure placement geometry from rio.
-pub mod graphics {
-    pub use rio_graphics::{
-        ColorType, GraphicData, GraphicId, GraphicOverlay, atlas_image_key, kitty_image_key,
-    };
-    pub use rio_vt::ansi::graphics::{
-        AtlasPlacement, KittyOverlayGeometry, KittyPlacement, OverlayViewport, UpdateQueues,
-        VirtualPlacement, atlas_overlay_geometry, clip_overlay_to_rect, kitty_overlay_geometry,
-        resolve_source_rect,
-    };
-    pub use rio_vt::ansi::kitty_virtual::{
-        IncompletePlacement, PLACEHOLDER, PlaceholderRun, RunGeometry, compute_run_geometry,
-    };
-}
+pub use project::Projector;
 
 pub use grid_emulator::GridEmulator;
 pub use grid_emulator::GridEvent;
+#[cfg(feature = "pty")]
 use pty::{PtyEvent, PtyHandle};
 
+#[cfg(any(feature = "pty", test))]
 const DEFAULT_COLS: usize = 80;
+#[cfg(any(feature = "pty", test))]
 const DEFAULT_ROWS: usize = 24;
+/// Scrollback rows a diagnostic peek copies; the wire cap is the same.
+pub const HISTORY_PEEK_LIMIT: usize = 1000;
 const DEFAULT_CELL_WIDTH_PX: u32 = 8;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 17;
 
@@ -81,6 +75,9 @@ pub struct TermSnapshot {
     pub cols: usize,
     pub screen_lines: usize,
     pub visible_rows: Vec<Row<Square>>,
+    /// Scrollback rows requested by [`GridEmulator::snapshot_since`], oldest
+    /// first. Empty for the plain [`GridEmulator::snapshot`].
+    pub history_rows: Vec<Row<Square>>,
     pub row_damage: Vec<bool>,
     pub damage: TerminalDamage,
     pub cursor_state: CursorState,
@@ -93,24 +90,15 @@ pub struct TermSnapshot {
     pub history_size: usize,
     /// Lines evicted from rio's scrollback ring before the retained history.
     pub lines_evicted: u64,
-    /// Image pixels added or removed since the preceding snapshot.
-    ///
-    /// Pixel buffers appear here once and are consumed by the renderer's image
-    /// registry; placement snapshots below intentionally contain metadata only.
-    pub graphics_updates: Option<graphics::UpdateQueues>,
-    /// Active-screen sixel and iTerm2 placement metadata; geometry filters it to the viewport.
-    pub atlas_placements: Vec<graphics::AtlasPlacement>,
-    /// Active-screen direct kitty placement metadata, sorted by z-index.
-    pub kitty_placements: Vec<graphics::KittyPlacement>,
-    /// Kitty Unicode-placeholder placement metadata keyed by image/placement id.
-    pub kitty_virtual_placements: HashMap<(u32, u32), graphics::VirtualPlacement>,
     pub mode: Mode,
     pub keyboard_mode: KeyboardModes,
     pub selection: Option<SelectionRange>,
     /// Snapshot of rio's interned style table, indexed by `Square::style_id`.
     pub styles: Vec<Style>,
-    /// Zero-width continuations for visible squares, indexed by rio extras id.
+    /// Zero-width continuations for snapshotted squares, indexed by rio extras id.
     pub zero_width: HashMap<u16, Vec<char>>,
+    /// OSC 8 targets `(uri, id)` for snapshotted squares, indexed by extras id.
+    pub links: HashMap<u16, (String, String)>,
 }
 
 impl TermSnapshot {
@@ -207,6 +195,7 @@ pub enum SelectionSide {
     Right,
 }
 
+#[cfg(feature = "pty")]
 pub struct Terminal {
     pty: PtyHandle,
     emulator: GridEmulator,
@@ -214,6 +203,7 @@ pub struct Terminal {
     events: async_channel::Receiver<TermEvent>,
 }
 
+#[cfg(feature = "pty")]
 impl Terminal {
     /// Resolve the cwd that a subsequent [`Terminal::spawn`] should use.
     pub fn resolve_spawn_cwd(cwd: impl AsRef<Path>) -> PathBuf {
@@ -445,7 +435,19 @@ impl Terminal {
     }
 
     pub fn snapshot(&self) -> TermSnapshot {
-        let mut snapshot = self.emulator.snapshot();
+        self.snapshot_since(0, 0)
+    }
+
+    /// See [`GridEmulator::snapshot_since`].
+    pub fn snapshot_since(&self, scrolled_before: u64, budget: usize) -> TermSnapshot {
+        let mut snapshot = self.emulator.snapshot_since(scrolled_before, budget);
+        snapshot.title = self.label();
+        snapshot
+    }
+
+    /// See [`GridEmulator::peek_snapshot`].
+    pub fn peek_snapshot(&self) -> TermSnapshot {
+        let mut snapshot = self.emulator.peek_snapshot();
         snapshot.title = self.label();
         snapshot
     }
@@ -455,9 +457,10 @@ impl Terminal {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pty"))]
 mod tests {
     use super::*;
+    use std::thread;
     use std::time::{Duration, Instant};
 
     #[cfg(not(windows))]
@@ -775,8 +778,9 @@ mod tests {
         let state = wait_until(&terminal, |state| {
             state.mode.contains(Mode::MOUSE_DRAG) && state.mode.contains(Mode::SGR_MOUSE)
         });
-        assert!(mappings::routes_mouse(state.mode, false));
-        assert!(!mappings::routes_mouse(state.mode, true));
+        // Routing itself is decided by the client from the replicated bits;
+        // this only guards that a real PTY still sets them.
+        assert!(state.mode.intersects(Mode::MOUSE_MODE));
     }
 
     #[cfg(unix)]

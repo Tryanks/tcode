@@ -7,9 +7,10 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, DismissEvent, ElementId, Entity, EventEmitter,
-    FocusHandle, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, DismissEvent,
+    ElementId, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{
     Toast as BaseToast, ToastManager, ToastMotion, ToastOptions, ToastStack, ToastStackState,
@@ -72,6 +73,7 @@ pub struct Notification {
     type_: Option<NotificationType>,
     message: Option<SharedString>,
     title: Option<SharedString>,
+    compact_message: Option<SharedString>,
     icon: Option<Icon>,
     autohide: bool,
     content: Option<ContentBuilder>,
@@ -92,6 +94,7 @@ impl Notification {
             type_: None,
             message: None,
             title: None,
+            compact_message: None,
             icon: None,
             autohide: true,
             content: None,
@@ -123,6 +126,11 @@ impl Notification {
         self.message = Some(message.into());
         self
     }
+    pub(crate) fn compact_message(mut self, message: SharedString) -> Self {
+        self.compact_message = Some(message);
+        self
+    }
+
     pub fn title(mut self, title: impl Into<SharedString>) -> Self {
         self.title = Some(title.into());
         self
@@ -162,6 +170,41 @@ impl Notification {
         self.autohide = false;
         self
     }
+    pub(super) fn requires_dialog(&self) -> bool {
+        matches!(self.type_, Some(NotificationType::Error))
+    }
+
+    pub(super) fn dialog_title(&self) -> Option<SharedString> {
+        self.title.clone().or_else(|| self.message.clone())
+    }
+
+    pub(super) fn dialog_content(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let content = self.content.clone().map(|build| build(self, window, cx));
+        let action = self.action.clone().map(|build| build(self, window, cx));
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .when(self.title.is_some(), |el| el.children(self.message.clone()))
+            .children(content)
+            .when_some(action, |el, action| {
+                el.child(
+                    div()
+                        .id("notification-dialog-action")
+                        .on_click(|_, window, cx| {
+                            use super::OverlayExt as _;
+                            window.close_dialog(cx);
+                        })
+                        .child(action),
+                )
+            })
+            .into_any_element()
+    }
+
     pub fn dismiss(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(DismissRequest);
     }
@@ -192,6 +235,60 @@ impl EventEmitter<DismissEvent> for Notification {}
 
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if crate::window_seam::window_is_compact(window, cx) {
+            let entering = self.transition_status == ToastTransitionStatus::Starting;
+            let action = self
+                .action
+                .clone()
+                .map(|build| build(self, window, cx).ghost());
+            let icon = self.icon.clone().or_else(|| {
+                self.type_.and_then(|kind| {
+                    (!matches!(kind, NotificationType::Info)).then(|| kind.icon(cx))
+                })
+            });
+            return div()
+                .id("compact-toast")
+                .debug_selector(|| "compact-toast".into())
+                .role(gpui::Role::Alert)
+                .occlude()
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_h(px(44.))
+                .max_w_full()
+                .py(px(12.))
+                .px(px(16.))
+                .rounded_full()
+                .bg(cx.theme().popover)
+                .shadow_lg()
+                .text_color(cx.theme().foreground)
+                .on_click(cx.listener(|this, _, window, cx| this.dismiss(window, cx)))
+                .children(icon)
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(15.))
+                        .line_height(px(20.))
+                        .line_clamp(2)
+                        .child(
+                            self.compact_message
+                                .clone()
+                                .or_else(|| self.message.clone())
+                                .or_else(|| self.title.clone())
+                                .unwrap_or_default(),
+                        ),
+                )
+                .children(action)
+                .with_animation(
+                    "compact-toast-enter",
+                    Animation::new(Duration::from_millis(150)),
+                    move |el, delta| {
+                        let delta = if entering { delta } else { 1. };
+                        el.opacity(delta).relative().top(px(8. * (1. - delta)))
+                    },
+                )
+                .into_any_element();
+        }
         let content = self
             .content
             .clone()
@@ -206,6 +303,7 @@ impl Render for Notification {
             .or_else(|| self.type_.map(|kind| kind.icon(cx)));
         let has_icon = icon.is_some();
         BaseToast::new("notification")
+            .debug_selector(|| "wide-toast".into())
             .transition_status(self.transition_status)
             .flex()
             .items_start()
@@ -249,12 +347,14 @@ impl Render for Notification {
                         })),
                 ),
             )
+            .into_any_element()
     }
 }
 
 pub(crate) struct NotificationList {
     manager: ToastManager<NotificationId, Entity<Notification>>,
     stack_state: ToastStackState,
+    compact: bool,
     focus_handle: FocusHandle,
     subscriptions: HashMap<NotificationId, Subscription>,
 }
@@ -279,14 +379,32 @@ impl NotificationList {
         Self {
             manager: ToastManager::new(ToastMotion::sonner()),
             stack_state: ToastStackState::default(),
+            compact: false,
             focus_handle: cx.focus_handle().tab_stop(true),
             subscriptions: HashMap::new(),
         }
     }
 
-    pub fn push(&mut self, note: Notification, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn push(&mut self, note: Notification, window: &mut Window, cx: &mut Context<Self>) {
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        self.sync_layout(compact, window, cx);
+        let timeout = if compact {
+            // Replacement is immediate: discarded messages never reappear later.
+            self.manager = ToastManager::new(ToastMotion {
+                duration: Duration::from_millis(150),
+                exit_duration: Duration::ZERO,
+                ..ToastMotion::sonner()
+            });
+            self.subscriptions.clear();
+            Some(Duration::from_secs(if note.action.is_some() {
+                5
+            } else {
+                3
+            }))
+        } else {
+            note.autohide.then_some(Duration::from_secs(5))
+        };
         let id = note.id.clone();
-        let autohide = note.autohide;
         let entity = cx.new(|_| note);
         let dismiss_id = id.clone();
         self.subscriptions.insert(
@@ -298,12 +416,72 @@ impl NotificationList {
         self.manager.push(
             id,
             entity,
-            ToastOptions {
-                timeout: autohide.then_some(Duration::from_secs(5)),
-            },
+            ToastOptions { timeout },
             cx.background_executor().now(),
         );
         cx.notify();
+    }
+
+    fn sync_layout(&mut self, compact: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact == compact {
+            return;
+        }
+        self.compact = compact;
+        if compact {
+            let errors = self
+                .manager
+                .iter()
+                .filter(|(_, note, status)| {
+                    *status != ToastTransitionStatus::Ending && note.read(cx).requires_dialog()
+                })
+                .map(|(_, note, _)| note.clone())
+                .collect::<Vec<_>>();
+            if !errors.is_empty() {
+                cx.defer_in(window, move |_, window, cx| {
+                    for note in errors {
+                        super::open_notification_dialog(note, window, cx);
+                    }
+                });
+            }
+        }
+        let latest = self
+            .manager
+            .iter()
+            .rev()
+            .find(|(_, note, status)| {
+                *status != ToastTransitionStatus::Ending
+                    && (!compact || !note.read(cx).requires_dialog())
+            })
+            .map(|(id, note, _)| (id.clone(), note.clone()));
+        self.manager = ToastManager::new(if compact {
+            ToastMotion {
+                duration: Duration::from_millis(150),
+                exit_duration: Duration::ZERO,
+                ..ToastMotion::sonner()
+            }
+        } else {
+            ToastMotion::sonner()
+        });
+        self.subscriptions
+            .retain(|id, _| latest.as_ref().is_some_and(|(latest, _)| latest == id));
+        if let Some((id, note)) = latest {
+            let value = note.read(cx);
+            let timeout = if compact {
+                Some(Duration::from_secs(if value.action.is_some() {
+                    5
+                } else {
+                    3
+                }))
+            } else {
+                value.autohide.then_some(Duration::from_secs(5))
+            };
+            self.manager.push(
+                id,
+                note,
+                ToastOptions { timeout },
+                cx.background_executor().now(),
+            );
+        }
     }
 
     fn dismiss(&mut self, id: &NotificationId, cx: &mut Context<Self>) {
@@ -321,7 +499,8 @@ impl NotificationList {
     fn advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let changes = self.manager.advance(
             cx.background_executor().now(),
-            self.stack_state.is_expanded() || !window.is_window_active(),
+            !crate::window_seam::window_is_compact(window, cx)
+                && (self.stack_state.is_expanded() || !window.is_window_active()),
         );
         for id in changes.presented {
             if let Some(note) = self.manager.get(&id) {
@@ -381,7 +560,21 @@ impl NotificationList {
 }
 
 impl Render for NotificationList {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = crate::window_seam::window_is_compact(window, cx);
+        self.sync_layout(compact, window, cx);
+        if compact {
+            return div()
+                .max_w_full()
+                .children(
+                    self.manager
+                        .iter()
+                        .rev()
+                        .find(|(_, _, status)| *status != ToastTransitionStatus::Ending)
+                        .map(|(_, note, _)| note.clone()),
+                )
+                .into_any_element();
+        }
         let items = self
             .manager
             .visible(5)
@@ -396,5 +589,18 @@ impl Render for NotificationList {
             .focus_handle(self.focus_handle.clone())
             .w(DEFAULT_WIDTH)
             .max_h(window.viewport_size().height)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+impl NotificationList {
+    pub(super) fn assert_messages(&self, cx: &App, expected: &[&str]) {
+        let messages = self
+            .manager
+            .iter()
+            .map(|(_, note, _)| note.read(cx).message.as_ref().unwrap().as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, expected);
     }
 }

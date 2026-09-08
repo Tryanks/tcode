@@ -38,7 +38,7 @@ pub(crate) const CAPTION_STRIP_HEIGHT: f32 = 52.;
 const CAPTION_BUTTON_WIDTH: f32 = 46.;
 /// Horizontal space the whole cluster occupies, for surfaces that must reserve
 /// room for it rather than simply place it last in a row.
-#[cfg(feature = "desktop")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) const CAPTION_CLUSTER_WIDTH: f32 = CAPTION_BUTTON_WIDTH * 3.;
 /// Whether this build owns its window chrome and must draw caption buttons.
 const CLIENT_DECORATED: bool = cfg!(target_os = "windows");
@@ -54,6 +54,8 @@ pub(crate) enum CaptionSurface {
     Preview,
     /// The settings content header (the settings route replaces the workspace).
     Settings,
+    /// The hosts content header (the hosts route keeps the sidebar beside it).
+    Hosts,
 }
 
 /// Which surface's top strip owns the window's top-right corner, or `None` when
@@ -69,10 +71,17 @@ fn caption_host(
     }
     Some(match route {
         Route::Settings => CaptionSurface::Settings,
+        Route::Hosts => CaptionSurface::Hosts,
         Route::Chat if !right_panel_open => CaptionSurface::Chat,
         Route::Chat if right_tab == RightTab::Preview => CaptionSurface::Preview,
         Route::Chat => CaptionSurface::RightPanel,
     })
+}
+
+/// The compact layout has exactly one top strip, so it always owns the corner
+/// where this platform expects its caption buttons.
+pub(crate) fn compact_hosts_caption() -> bool {
+    CLIENT_DECORATED
 }
 
 /// Whether `surface` must render the caption cluster this frame.
@@ -200,7 +209,7 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
 mod tests {
     use super::*;
 
-    const ROUTES: [Route; 2] = [Route::Chat, Route::Settings];
+    const ROUTES: [Route; 3] = [Route::Chat, Route::Settings, Route::Hosts];
     const TABS: [RightTab; 3] = [RightTab::Diff, RightTab::Plan, RightTab::Preview];
 
     #[test]

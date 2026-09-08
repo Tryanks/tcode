@@ -9,6 +9,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -26,6 +27,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
+import java.util.Locale;
 
 /** Minimal NativeActivity host for GPUI. */
 public final class GpuiActivity extends NativeActivity {
@@ -34,7 +36,10 @@ public final class GpuiActivity extends NativeActivity {
     private static final int HOST_CANCELLED = 1;
     private static final int HOST_ERROR = 2;
 
+    public PreviewHost previewHost;
     private GpuiInputView inputView;
+    private boolean keyboardVisible;
+    private boolean keyboardShowPending;
     private long cameraRequest;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
 
@@ -63,10 +68,15 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeOnBack(boolean enabled);
     private native void nativeQrScanCompleted(long requestId, int status, String value);
 
+    private native boolean nativeFirstFrameRendered();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        androidx.core.splashscreen.SplashScreen splash =
+                androidx.core.splashscreen.SplashScreen.installSplashScreen(this);
         ensureNativeLibraryVisibleToJvm();
         super.onCreate(savedInstanceState);
+        splash.setKeepOnScreenCondition(() -> !nativeFirstFrameRendered());
         configureEdgeToEdgeWindow();
 
         inputView = new GpuiInputView(this);
@@ -76,6 +86,7 @@ public final class GpuiActivity extends NativeActivity {
         FrameLayout.LayoutParams layout = new FrameLayout.LayoutParams(1, 1);
         layout.gravity = Gravity.BOTTOM | Gravity.START;
         addContentView(inputView, layout);
+        previewHost = new PreviewHost(this);
 
         View decor = getWindow().getDecorView();
         decor.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -113,6 +124,8 @@ public final class GpuiActivity extends NativeActivity {
     @SuppressWarnings("deprecation")
     private void configureEdgeToEdgeWindow() {
         Window window = getWindow();
+        boolean lightAppearance = (getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_YES;
         window.setStatusBarColor(Color.TRANSPARENT);
         window.setNavigationBarColor(Color.TRANSPARENT);
         if (Build.VERSION.SDK_INT >= 29) {
@@ -125,20 +138,31 @@ public final class GpuiActivity extends NativeActivity {
             if (controller != null) {
                 int lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                         | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-                controller.setSystemBarsAppearance(lightBars, lightBars);
+                controller.setSystemBarsAppearance(lightAppearance ? lightBars : 0, lightBars);
             }
         } else {
-            window.getDecorView().setSystemUiVisibility(
+            int visibility =
                     View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                             | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-                            | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            if (lightAppearance) {
+                visibility |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                        | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
+            window.getDecorView().setSystemUiVisibility(visibility);
         }
     }
 
     @SuppressWarnings("deprecation")
     private void publishInsets(WindowInsets insets) {
+        boolean visible = Build.VERSION.SDK_INT >= 30
+                ? insets.isVisible(WindowInsets.Type.ime())
+                : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom();
+        if (keyboardVisible && !visible) {
+            keyboardShowPending = false;
+            releaseInputFocus();
+        }
+        keyboardVisible = visible;
         if (Build.VERSION.SDK_INT >= 30) {
             android.graphics.Insets safe = insets.getInsets(
                     WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
@@ -156,26 +180,49 @@ public final class GpuiActivity extends NativeActivity {
     public void onBackPressed() { nativeOnBack(true); }
 
     public void gpuiShowKeyboard() {
+        keyboardShowPending = true;
         inputView.setFocusable(true);
         inputView.setFocusableInTouchMode(true);
         inputView.requestFocus();
-        inputView.post(() -> ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
-                .showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT));
+        inputView.post(this::showKeyboardIfReady);
+    }
+
+    private void showKeyboardIfReady() {
+        if (!keyboardShowPending || !hasWindowFocus()) return;
+        keyboardShowPending = !((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
+                .showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && inputView != null && keyboardShowPending) {
+            inputView.post(this::showKeyboardIfReady);
+        }
     }
 
     public void gpuiHideKeyboard() {
+        keyboardShowPending = false;
         InputMethodManager manager =
                 (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         manager.hideSoftInputFromWindow(inputView.getWindowToken(), 0);
+        releaseInputFocus();
+    }
+
+    private void releaseInputFocus() {
         inputView.clearFocus();
         inputView.setFocusable(false);
         inputView.setFocusableInTouchMode(false);
     }
 
     public void gpuiConfigureInput(
-            boolean autocorrect, int autocapitalize, boolean suggestions, int inputAction) {
-        inputView.configure(autocorrect, autocapitalize, suggestions, inputAction);
+            boolean autocorrect, int autocapitalize, boolean suggestions, int inputAction, boolean multiLine) {
+        inputView.configure(autocorrect, autocapitalize, suggestions, inputAction, multiLine);
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).restartInput(inputView);
+    }
+
+    public int[] gpuiRasterizeEmoji(int glyph, float size) throws java.io.IOException {
+        return SystemEmoji.rasterize(glyph, size);
     }
 
     public void gpuiFinish() { finish(); }
@@ -186,6 +233,20 @@ public final class GpuiActivity extends NativeActivity {
 
     public String gpuiDeviceModel() {
         return Build.MODEL == null || Build.MODEL.isEmpty() ? "Android" : Build.MODEL;
+    }
+
+    /** Snapshot used by the Rust shell at startup; restart after changing the OS language. */
+    @SuppressWarnings("deprecation")
+    public String gpuiSystemLocale() {
+        Configuration configuration = getResources().getConfiguration();
+        Locale locale = null;
+        if (Build.VERSION.SDK_INT >= 24 && !configuration.getLocales().isEmpty()) {
+            locale = configuration.getLocales().get(0);
+        } else {
+            locale = configuration.locale;
+        }
+        if (locale == null) locale = Locale.getDefault();
+        return locale.toLanguageTag();
     }
 
     public void gpuiStartCameraScan(long requestId) {
@@ -251,8 +312,9 @@ public final class GpuiActivity extends NativeActivity {
             if (Build.VERSION.SDK_INT >= 33) setAutoHandwritingEnabled(false);
         }
 
-        void configure(boolean autocorrect, int autocapitalize, boolean suggestions, int action) {
+        void configure(boolean autocorrect, int autocapitalize, boolean suggestions, int action, boolean multiLine) {
             int type = InputType.TYPE_CLASS_TEXT;
+            if (multiLine) type |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
             if (autocorrect) type |= InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
             if (!suggestions) type |= InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
             if (autocapitalize == 1) type |= InputType.TYPE_TEXT_FLAG_CAP_WORDS;
@@ -266,8 +328,9 @@ public final class GpuiActivity extends NativeActivity {
                 case 5: imeOptions = EditorInfo.IME_ACTION_PREVIOUS; break;
                 case 6: imeOptions = EditorInfo.IME_ACTION_SEARCH; break;
                 case 7: imeOptions = EditorInfo.IME_ACTION_SEND; break;
-                default: imeOptions = EditorInfo.IME_ACTION_NONE;
+                default: imeOptions = EditorInfo.IME_ACTION_DONE;
             }
+            if (multiLine) imeOptions = EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_ENTER_ACTION;
         }
 
         @Override public boolean onCheckIsTextEditor() { return true; }
@@ -294,6 +357,10 @@ public final class GpuiActivity extends NativeActivity {
                 @Override public boolean deleteSurroundingText(int before, int after) {
                     if (before > 0) nativeDeleteBackward();
                     return super.deleteSurroundingText(before, after);
+                }
+                @Override public boolean deleteSurroundingTextInCodePoints(int before, int after) {
+                    if (before > 0) nativeDeleteBackward();
+                    return super.deleteSurroundingTextInCodePoints(before, after);
                 }
                 @Override public boolean sendKeyEvent(KeyEvent event) {
                     forwardKeyEvent(event); return true;

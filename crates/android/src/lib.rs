@@ -7,40 +7,87 @@ mod host;
 #[unsafe(no_mangle)]
 pub fn android_main(app: android_activity::AndroidApp) {
     use futures::{StreamExt as _, channel::mpsc};
+    use gpui::{WindowBackgroundAppearance, WindowOptions};
+    use std::borrow::Cow;
     use std::rc::Rc;
+    use tcode_client::host::ClientHost;
+    use tcode_ui::{ShellOptions, ShellSetup, WindowSeam};
 
     android_logger::init_once(
         android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Info)
+            .with_max_level(log::LevelFilter::Debug)
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .parse("info,tcode_ui::store::history=debug")
+                    .build(),
+            )
             .with_tag("Tcode-GPUI"),
     );
-    std::panic::set_hook(Box::new(|panic| log::error!("GPUI Android panic: {panic}")));
+    std::panic::set_hook(Box::new(|panic| {
+        log::error!("GPUI Android panic: {panic}");
+        log::error!("{}", std::backtrace::Backtrace::force_capture());
+    }));
     gpui_android::init_platform(&app);
     gpui::Application::with_platform(gpui_android::platform())
         .with_assets(tcode_ui::assets::Assets)
         .run(move |cx| {
-            // cosmic-text's Android fallback scans registered faces when
-            // the primary lacks a glyph. Register before shaping; loading as a
-            // primary family would trigger upstream's ASCII-m font filter.
-            use std::io::Read as _;
-            let font_path = std::ffi::CString::new("fonts/NotoColorEmoji.ttf").unwrap();
-            if let Some(mut asset) = app.asset_manager().open(&font_path) {
-                let mut font = Vec::new();
-                if asset.read_to_end(&mut font).is_ok() {
-                    if let Err(error) = cx
-                        .text_system()
-                        .add_fonts(vec![std::borrow::Cow::Owned(font)])
-                    {
-                        log::error!("failed registering emoji fallback: {error}");
+            // Standard Android images provide this face through /system/fonts.
+            // Custom ROM hosts may supply a bitmap fallback asset if it is absent.
+            if !std::path::Path::new("/system/fonts/NotoColorEmoji.ttf").exists() {
+                use std::io::Read as _;
+                let path = std::ffi::CString::new("fonts/NotoColorEmoji.ttf").unwrap();
+                if let Some(mut asset) = app.asset_manager().open(&path) {
+                    let mut font = Vec::new();
+                    match asset.read_to_end(&mut font) {
+                        Ok(_) => {
+                            if let Err(error) = cx.text_system().add_fonts(vec![Cow::Owned(font)]) {
+                                log::error!(
+                                    "failed registering custom-ROM emoji fallback: {error:#}"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            log::error!("failed reading custom-ROM emoji fallback: {error}")
+                        }
                     }
+                } else {
+                    log::warn!("system emoji font absent; custom-ROM fallback asset not supplied");
                 }
-            } else {
-                log::error!("bundled Noto Color Emoji font is missing");
             }
 
-            let mobile_host = host::native_host(app.clone(), cx)
+            let (native_host, system_locale) = host::native_host(app.clone(), cx)
                 .expect("failed to initialize Android host services");
-            tcode_mobile::run_with_host(cx, Rc::new(mobile_host));
+            let host: Rc<dyn ClientHost> = Rc::new(native_host);
+            tcode_ui::run_shell(
+                cx,
+                host.clone(),
+                // System bars, display cutout and the IME. Android schedules a
+                // frame whenever they change, so the shell never polls.
+                WindowSeam::new(gpui_android::insets).with_lifecycle(gpui_android::platform()),
+                ShellOptions {
+                    window: WindowOptions {
+                        // The activity owns the geometry; the shell reads it back.
+                        window_bounds: None,
+                        titlebar: None,
+                        window_background: WindowBackgroundAppearance::Opaque,
+                        ..Default::default()
+                    },
+                    theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
+                    activate: true,
+                    system_locale,
+                    setup: ShellSetup {
+                        initial: tcode_ui::last_host_target(host.as_ref()),
+                        initial_pairing_error: None,
+                        client_host: Some(host),
+                        local: None,
+                        seed_blocking: false,
+                        restore_navigation: true,
+                    },
+                    ..Default::default()
+                }
+                .with_bundled_monospace(),
+            );
+
             let (back_sender, mut back_receiver) = mpsc::unbounded();
             gpui_android::set_back_callback(move || {
                 let _ = back_sender.unbounded_send(());
@@ -48,7 +95,10 @@ pub fn android_main(app: android_activity::AndroidApp) {
             cx.spawn(async move |cx| {
                 while back_receiver.next().await.is_some() {
                     cx.update(|cx| {
-                        if !tcode_mobile::handle_back(cx) {
+                        // The shell dismisses the keyboard, then the topmost
+                        // overlay, then its navigation stack. `false` only at
+                        // the root, where Android closes the app.
+                        if !tcode_ui::handle_back(cx) {
                             cx.quit();
                         }
                     });
@@ -65,6 +115,14 @@ mod jni_exports {
         objects::{JObject, JString},
         sys::{jboolean, jint, jlong},
     };
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeFirstFrameRendered(
+        _env: JNIEnv,
+        _activity: JObject,
+    ) -> jboolean {
+        u8::from(gpui_android::first_frame_rendered())
+    }
 
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeCommitText(

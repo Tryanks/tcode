@@ -2,7 +2,65 @@
 
 The visual and interaction contract for tcode. Update it deliberately when a
 product decision changes; historical design drafts are not additional rules.
-Phone and browser adaptations are in [mobile design](mobile-design.md).
+There is one shell, described here; **Compact layout** below covers the narrow
+end of it.
+
+## One shell, one layout rule
+
+Desktop, iOS, Android and the browser run the same shell. It has exactly one
+layout rule:
+
+> **Compact iff the available logical content width — the viewport width minus
+> whatever the system occludes on its left and right — is under 900px.** At
+> exactly 900 the layout is wide.
+
+Nothing else decides it. Not the operating system, not the input device, not a
+saved preference: a desktop window dragged narrow is compact, an iPad in
+landscape is wide, and rotating a phone changes the layout the same way
+dragging a window edge does. The rule is never persisted, because a window
+width is not a setting.
+
+Input-device behavior is a separate question with a separate answer. Whether
+Enter submits follows the *keyboard*, not the width: a wide tablet still types
+on glass, and a narrow desktop window still has a hardware Enter key.
+
+Crossing the breakpoint is a layout change and nothing else. It never detaches
+from the host, never reconnects, and never rebuilds a view that holds user
+state. The selected thread, the composer draft and its selection, pending
+attachments, approvals, scroll position and focus all survive in both
+directions, and the sidebar and right-panel widths come back as they were left
+when the window widens again.
+
+## Capability-appropriate UI
+
+Every product view is built by every client. A view is never compiled away
+because of the platform it happens to run on: the difference between clients is
+which *operations* they can perform, not which screens exist.
+
+An operation is gated only when it is genuinely native — a file dialog, an
+embedded webview, macOS permission grants, dictation, the AppKit pasteboard,
+launching an editor — and then by two independent things: whether this build has
+the capability at all, and whether it applies to the current attachment. A
+picker that browses this machine is meaningless while the workspace runs on
+another one, so it is withheld even where the build has it.
+
+Where an operation is unavailable, the view says which machine can perform it
+and offers what it can (open externally, copy, type the value) instead of a
+control that would do nothing. A client never infers the host's state from its
+own operating system, and never reports a success it did not perform.
+
+| Preview operation | macOS | Windows | Android | iOS / Web / Linux |
+| --- | --- | --- | --- | --- |
+| URL, external browser, copy | Yes | Yes | Yes | Yes |
+| Embedded page, history, JS automation, navigation errors | Yes | Yes | Yes | Unavailable |
+| Visible page PNG | Yes | Unavailable | Yes | Unavailable |
+| Local port discovery | Local workspace | Local workspace | Hidden | Hidden |
+
+Native preview capabilities require the `native-preview` build feature. Android
+uses normal WebView TLS validation and blocks insecure mixed content in HTTPS
+pages. Downloads, file uploads and new-window popups have no Android preview
+integration yet. Native child overlays can cover overlapping GPUI popovers;
+the command palette and navigation away hide the child explicitly.
 
 ## Design tokens
 
@@ -11,8 +69,26 @@ The embedded [theme](../themes/tcode.json) owns colors and font choices;
 geometry and radii. Use those definitions rather than maintaining a second
 palette in documentation.
 
-DM Sans is bundled for UI text. Desktop monospace text uses the configured
-system family; mobile font registration is described in [mobile design](mobile-design.md).
+Browser shell icons are embedded from the same dependency-owned icon set that
+generates the shared icon names. Rendering navigation never requires a separate
+asset server or internet access.
+
+DM Sans is bundled for UI text and comes from the same font resource on every
+client. Desktop monospace text uses the configured system family; iOS and
+Android and the browser register the same bundled Lilex faces in its place.
+The browser terminal uses an embedded monospace Nerd Fonts symbol fallback for prompt
+icons absent from Lilex; terminal text retains fixed cell spacing. Android uses the system
+Noto Color Emoji fallback, including COLRv1 color glyphs on modern devices. Native debug builds embed fonts and SVGs in the
+package rather than reading a development machine's asset path.
+Android loads the device's system fonts and explicitly prefers Noto Sans CJK SC,
+Noto Sans SC, then Source Han Sans SC for missing UI glyphs; CJK fonts are not
+bundled. iOS retains its native system fallback (including PingFang).
+On Android, hiding the software keyboard preserves input focus; tapping inside
+that input opens the keyboard again. Backspace removes a whole grapheme or the
+selection, including while an IME composing region is active. Multiline fields
+request a newline key from Android IMEs; plain Enter inserts a line break in
+the composer. Single-line fields keep a Done action that invokes their existing
+submit or next-step behavior. Modified hardware Enter bindings are unchanged.
 The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.
@@ -47,6 +123,22 @@ T3 child surfaces (popovers, menus, dialogs, drawers and toasts) use the fully
 opaque `popover.background` token so lower layers never show through; they do
 not receive native Acrylic.
 
+### Launch
+
+The Android adaptive launcher icon preserves the original desktop/iOS charcoal
+background gradient (#313131 to #141414) and muted salmon/orange folded T
+(#DD6660 / #E1955A, with a shaded stem), independent of system theme. Its
+foreground has about 25% padding on each side so launcher masks do not clip the glyph. The splash uses the transparent glyph drawable
+separately, without the launcher's charcoal background.
+
+Mobile launch screens show only the app icon glyph centered on the embedded
+theme’s opaque canvas, with system light/dark variants and matching system bars.
+Android uses the system splash through AndroidX and holds it until GPUI’s first
+successful frame presentation; iOS uses the same canvas and glyph in its native
+launch screen and a matching cover held until the first GPUI presentation.
+Native host backgrounds keep that canvas until the shell draws,
+so startup never exposes a default white/black window or decorative backdrop.
+
 ## Layout metrics (at 1440×900)
 
 - Sidebar is resizable. Collapsed it occupies **0px** —
@@ -60,9 +152,81 @@ not receive native Acrylic.
   (must reflow, never clip, when the diff panel narrows the chat region).
 - Composer: floating opaque card with the shared composer radius, a hairline
   border and subtle shadow. Focus changes the border color without resizing it.
+- Timeline-to-composer spacing: **16px** from the last timeline row's bottom
+  edge to the composer card's top edge when scrolled to the end, in both compact
+  and wide layouts, including when the last row has a running status. The timeline
+  wrapper owns this gap outside the `List`; the composer adds no top inset.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
+
+## Connection baseline
+
+Before the first Index and Settings snapshots are applied, Threads and the wide
+sidebar show the same neutral loading rows. Chat also waits for the selected
+thread's SessionStatus and SessionEvents baseline. No empty-workspace or
+empty-conversation message appears while that content is unknown. Empty messages
+are reserved for an applied, genuinely empty baseline.
+
+A reconnect keeps cached lists and conversations visible. The connection banner
+and dot show **Syncing / 同步中** until the workspace and selected thread have
+received their replayed baseline, then **Connected**. Loading state belongs to
+the attachment's store and survives layout changes.
+
+## Opening a conversation
+
+The first tap selects the sidebar row and pushes the compact Thread destination
+immediately. Until both status and timeline arrive, the chat shows a muted message
+skeleton. Selecting that conversation again sends no requests. Changing selection
+retires the old subscription generation; its late snapshot cannot replace the new
+conversation.
+
+Menus and dismissible popovers consume the outside pointer sequence that closes
+them, including its release. The underlying row or control acts only on a second
+tap or click. Closing or choosing a menu clears its transient state; thread-row
+selection follows the selected conversation, independently of which row opened a
+menu.
+
+## Timeline history
+
+A newly opened conversation starts with up to the last 400 event records, within
+an 8 MiB envelope. On the first layout (including cold-start restore), and after
+every prepend, earlier history loads until the content above the viewport covers
+six viewport heights or history is exhausted. The same six-screen threshold
+triggers scroll-ahead loading. Only one page of at most 200 records loads at a
+time, with a 250ms yield between pages so layout can measure the new content.
+Leaving the conversation cancels the sequence. A one-viewport placeholder before
+the first loaded turn reserves scrollable space for incoming history; while
+loading, its bottom 24pt row shows a small centered spinner. The reservation is
+excluded from the loaded-window measurement and moves back as pages arrive,
+preserving the visible turn and pixel offset. There is no load control,
+end-of-history message, or page-error feedback. Failed pages are logged and
+retried when the prefetch condition is met again, with at most one retry per
+five seconds.
+
+Prepending preserves the visible turn and its offset in pixels. Existing list
+measurements and markdown state remain resident; only new or changed turns need
+measurement. A page may complete a partially loaded turn. Live replay cursors
+remain absolute event positions, independent of how much earlier history is
+currently visible. Snapshots and pages fit within 8 MiB including their serialized
+envelope; a single record that cannot fit produces an explicit error.
+
+The jump-to-latest pill appears when more than one timeline viewport remains
+below the reading position. Its visibility follows the list's pixel geometry
+on wheel, captured touch, and programmatic scrolling, and after history or
+layout changes; unmeasured offscreen history does not suppress it. Following is
+independent of that threshold: any upward user scroll pauses following immediately,
+including wheel, captured touch, scrollbar drag and keyboard scrolling. Incoming
+content and history paging preserve the reading anchor while paused. Following
+resumes only when the reader scrolls back to the bottom (within one pixel) or
+clicks the pill. Opening a conversation starts at the tail.
+
+The timeline uses the space above the composer's measured height; the two-row
+compact composer never overlays its last row. Vertical breathing room belongs
+to the timeline container, outside the list's scroll extent, so captured touch,
+wheel and tail following agree on the bottom. The shell reserves the window's
+safe-area/IME inset once. The running-status row remains fully visible above the
+composer at the end, including when the keyboard opens or closes.
 
 ## Scrolling contract
 
@@ -75,6 +239,260 @@ queued messages, user-input options, approval details and expanded toast
 details. A bounded flex column with `overflow` on the same node is not an
 acceptable substitute: flexbox can shrink its rows until no scrollable overflow
 remains.
+
+Those heights are desktop design sizes, and the same views open at every width.
+Each is capped to what the window can actually show, so a short window scrolls
+the list instead of pushing the footer off-screen. Dialogs are capped the same
+way — width and height — because a dialog wider than the viewport is also
+positioned off-centre.
+
+## Compact layout
+
+### Destinations
+
+Compact replaces the split with a navigation stack over one history:
+
+**Machines → Threads → Thread → Panel**, plus **Add a machine** over Machines and
+**Settings → Settings section** over wherever they were opened from, pushed and
+popped with a 200ms lateral transition.
+
+On iOS and Android, a cold launch restores the client-local navigation path,
+selected conversation and machine. Settings pages restore the page beneath them;
+Add a machine restores Machines. A removed machine returns to Machines. A
+conversation missing from the host's Index baseline returns to Threads; until
+that baseline arrives the restored page shows its loading skeleton. Desktop
+launch behavior is unchanged.
+
+- **Machines** — which machine this window talks to, and nothing else: **This
+  machine** where the device has one, the added machines, one **Add a machine**
+  button and the machines found nearby. It is the root of a window with no
+  attachment, and it can also be *visited* from an attached workspace through
+  the sidebar's feature area (see **Sidebar**) without leaving that machine.
+  Letting other devices connect to this machine is a setting of this machine
+  and lives in **Settings → Other devices**, never here. **This machine** is a
+  row like any other on the page: title over one muted subtitle, no leading
+  icon, and the connection dot in the same trailing slot a saved machine's
+  takes.
+- **Add a machine** — the connection form, pushed by **Add a machine**, by a
+  **Nearby machines** row that prefilled an endpoint, or by a
+  rejected-authentication row's **Pair again**.
+  Labels sit above full-width fields, the primary action is pinned at the foot
+  of the page above the keyboard, and adding ends with the machine name and **Connect**. The single **Address**
+  field accepts a host, host:port, or full HTTP(S) origin.
+- **Threads** — the shared sidebar under a nav bar titled **Threads**, with the
+  attached machine's name as its subtitle and new-thread and settings actions.
+  New thread starts a draft directly when the machine has one project and
+  otherwise opens the command palette, which already owns "new thread in
+  ‹project›" and can search. Choosing a project closes the palette and pushes
+  Thread even when reusing the selected draft. The draft page is titled **New
+  thread / 新建对话**, with the project name below it; the composer stays
+  unfocused until tapped. **Recent** is the default: all unarchived threads
+  across projects ordered by the latest activity of each parent and its children,
+  with children ordered by their own activity directly below their parent.
+  Both views indent children 16pt beyond the row inset and use lighter titles;
+  status glyphs and washes are unchanged. A parent’s child-count disclosure
+  toggles the same per-parent collapse state as the wide sidebar. Collapsing
+  hides children without changing family ordering; running children keep their
+  parent in Recent. Children with archived or missing parents remain top-level
+  with a muted “(parent unavailable)” subtitle. Recent shows the project name beside the
+  relative time in the muted subtitle. **By project** keeps the grouped list.
+  The list header has a 44pt layout toggle sharing the wide sidebar’s persisted
+  Flat/Grouped setting; search opens the shared palette in either view. Both
+  views use the same plain rows, status glyphs and approval/input washes.
+  In By project, a header separates one project from the next, so it appears
+  only from the second project onwards: with a single project the threads are
+  listed directly, under no caption.
+- **Thread** — the shared chat view. Its desktop header is replaced by the nav
+  bar; the timeline, composer, approvals and user-input panels are the same
+  entities the wide layout uses.
+- **Panel** — the terminal, diff, plan and preview at full width, chosen from a
+  segmented control. They are the same entities the wide layout puts in the
+  split: a compact window has less room, not less product. Export and the
+  per-thread actions stay on the thread row's context menu.
+  The segmented control is the page's **only** selector, so a panel does not
+  also draw its own tab row, and it drops the right column's expand / split /
+  close controls — Back is how you leave the page. What remains is one toolbar
+  row on the page inset with 44pt touch targets: the diff's source and base
+  pickers, the terminal's tab strip and a new-terminal target, the preview's
+  address field. Everything else moves into that row's overflow menu.
+  Preview's overflow includes **Close preview**, which destroys the conversation's
+  browser and clears its URL and history, leaving URL entry in the same panel.
+  The next navigation creates a fresh browser. Compact previews are also released
+  when leaving Thread for Threads, switching conversations or machines, or deleting
+  the conversation. Switching panel segments or moving Panels ↔ Thread only hides
+  the browser and preserves the page. Wide-layout preview behavior is unchanged.
+- **Settings** and **Settings section** — the section list, then one section's
+  detail (see **Settings** below).
+
+**One navigation bar.** Every compact page — Settings included — is composed as
+the same 52pt nav bar: Back at the top left, a centered title that truncates
+rather than colliding with its controls, an optional muted subtitle under it,
+and at most two trailing actions. No compact page draws a header of its own or
+puts a Back control at the bottom of a list.
+
+**Back is labelled with a place, not a title.** Each destination owns one short
+fixed label — Machines, Threads, Thread, Panels, Settings — and a Back control
+carries the label of the destination it returns to (Add a machine answers with
+its caller's, Machines; a settings section returns to Settings). Dynamic titles
+never reach a Back control, so it never truncates and never changes width when
+a machine or thread is renamed. The nav bar reserves the same room on both
+sides at every page, so the centered title does not shift between pages.
+
+Back — the Android system gesture and every Back control — unwinds in one order:
+the software keyboard or composition, then the topmost dismissible overlay
+(dialog, menu, palette), then one entry of the window's history. It reports "not
+consumed" only at the root, where the platform closes the app. Non-dismissible
+dialogs, such as import progress and approval prompts, keep refusing dismissal.
+
+**Navigating never detaches.** Walking back from Threads to Machines, or
+visiting Machines from an open thread, keeps the link, the selected thread and
+every view over that workspace. Only two things detach: connecting to a
+*different* machine, which clears the previous machine's history and lands on
+the new machine's threads, and an explicit **Disconnect** in a machine row's
+own menu. **Remove** removes the saved credential and leaves a live attachment
+running. Resizing never detaches and keeps the page the window is on.
+
+### The window seam
+
+A window is not always the rectangle it reports: a status bar, a notch, a home
+indicator or a software keyboard can cover part of it. Those edges belong to the
+*window*, not to the host the workspace is attached to.
+
+There is one safe content rectangle, shared by pages, the palette, dialogs and
+toasts. Bottom avoidance is **max(safe area, keyboard)**, never their sum — a
+keyboard that already covers the home indicator does not need it counted twice.
+Backgrounds paint edge to edge; only interactive content is constrained, and
+only once. The browser canvas is already resized around its on-screen keyboard,
+so the client adds no inset of its own there and takes its size from the actual
+canvas.
+
+Insets change without a timer: the platform schedules a frame when they move, so
+the layout follows the keyboard immediately.
+
+### Bottom sheets
+
+The shared command palette opens from the Threads search pill and the Search nav action on Thread, attached Machines and Settings pages, using a full-width bottom sheet with a focused input above touch-scrollable commands and search results.
+
+Compact pickers and details use the shared bottom sheet: an opaque T3 surface
+spanning the full window width, independent of the wide popover’s desktop width.
+Only its top corners are rounded, at 16pt; content is inset 16pt. The full-page
+scrim includes the window seam, while bottom padding on that layer places the
+sheet above `max(safe.bottom, ime.bottom)`. Its height is capped below the 52pt
+nav bar plus the top safe area; taller content scrolls inside the sheet. Tapping
+the scrim dismisses and consumes the whole pointer sequence, including release.
+
+### Toasts
+
+Compact notifications are system-style pills centered horizontally in the safe
+content rectangle, 16pt above its effective bottom edge (including the keyboard).
+They fit their content up to the available width minus 32pt. One fully rounded,
+opaque T3 surface with a soft shadow contains 15pt text, normally one line and
+clamped to two, with 12pt vertical and 16pt horizontal padding and a 44pt minimum
+height. A status glyph and one trailing inline action are optional. There is no
+separate title, detail expander or close button; tapping the pill dismisses it.
+The surrounding layer does not intercept page input.
+
+A pill fades and slides up over 150ms, then dismisses after 3 seconds (5 with an
+action). New messages immediately replace old ones; there is no pending backlog.
+Errors use the existing dialog on compact so required recovery actions and
+technical details cannot disappear. Wide windows retain their corner cards,
+stack, details, close controls and existing timing.
+
+### Touch and typography
+
+Native touch pans capture the innermost registered scroll viewport at touch-down.
+The capture keeps the same handle through redraws, finger movement, and momentum;
+a textarea moving beneath the finger or the original anchor cannot steal it.
+ScrollHandle and list viewports can hand excess movement once to their nearest
+registered scroll ancestor. Textareas keep exclusive capture at their limits
+because their public scroll API clamps after layout. A new touch replaces the
+capture; cancel stops it. Taps, long presses, selection drags, and desktop mouse
+wheel dispatch retain GPUI's normal recognition. The UI owner is
+[`touch_scroll.rs`](../crates/ui/src/touch_scroll.rs).
+
+- Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.
+  Icon buttons have a 44×44pt touch target and use the shared stroke icons in
+  the foreground color.
+- The compact composer's radius is 16pt. Other shared components keep their own
+  material radii.
+- Empty states are an icon, a title, a short explanation and any necessary
+  primary action, centered and width-limited; they show no desktop shortcuts.
+- Nothing depends on hover. Long text, model lists and variable-length option
+  sets wrap or scroll rather than truncating a choice away.
+- Compact approval cards default to expanded, with deny and allow on one row and
+  every other available action on its own; user questions keep their options,
+  free text and editor prefill.
+
+### The compact inset rule
+
+One inset, applied once, at the page:
+
+- **Page inset 16pt** left and right. Every compact page's content — the diff,
+  plan/tasks and preview bodies included — starts and ends there. A view that
+  the wide layout draws in the right column does not get to keep the column's
+  denser padding when it becomes a page.
+- **Card inset 12pt.** A card, notice, chip or row *inside* that content pads a
+  further 12pt; it never re-applies the page inset.
+- **Timeline-to-composer gap 16pt**, once, as in wide layout. No additional
+  separator spacer or composer top padding is added to the timeline's bottom inset.
+- **Terminal exception.** The terminal grid stays edge to edge horizontally —
+  it is measured in columns, and narrowing it drops columns — but it still sits
+  inside the window's safe rect and keeps 8pt of air below the segmented control.
+  On iOS and Android, focusing the grid raises the software keyboard and adds one
+  44pt special-key row at the bottom of that rect, directly above the keyboard.
+  The row reserves its height before the grid is measured, so it never covers the
+  last terminal row. It contains Esc, Tab, sticky Ctrl and Alt, four arrows, the
+  one-tap `^C` and `^D` combos, then a horizontally scrolling symbol tail ordered
+  by how often a shell line needs the character: `- / | ~ : . _`. Sticky
+  modifiers highlight until the next terminal key or committed character consumes
+  them; a combo carries its own Control, encodes through the same key mapping a
+  hardware Ctrl+C takes, and consumes any sticky modifier rather than doubling
+  it. Desktop and browser terminals never draw the row.
+
+Prose inside the content (errors, notices, file headers) wraps against the page
+inset rather than running past it. Code and diff lines do not wrap: they scroll
+horizontally *inside* the body, so the page edge stays where it is.
+
+A row that pairs a label and description with a control follows the same rule as
+Settings: on a compact page the control moves to its own full-width line under
+the text, so the description is never squeezed into a column a word wide. A
+fixed 44pt affordance — a switch — is the exception and stays beside its label.
+
+### One list style
+
+Two kinds of list, one rule for which is which:
+
+- **Navigable content lists** — threads, machines, nearby machines, projects —
+  are **plain rows**: no card, no border, no radius. Each row is at least 56pt
+  tall at the 16pt page inset, separated from the next by a hairline indented
+  to that inset, with a hover fill on a pointer and a pressed tint everywhere.
+  Sections carry a caption in one shared style; a project header is that
+  caption plus its collapse affordance. A row's own overflow trigger (the
+  machine row's "…") keeps its 44×44 hit region *inside* the row, so the row's
+  hover fill covers the whole row rather than stopping short of a seam.
+- **Settings-like forms** — the Settings sections, **Other devices**, **Add a
+  machine** — keep the grouped floating card with inset hairlines between rows.
+
+So Machines and Threads read as one family of pages, and neither reads as a
+settings page.
+
+### Connection states
+
+| State | Presentation |
+| --- | --- |
+| Connecting | The initial index has not arrived; the thread list shows a loading skeleton |
+| Syncing | Hello accepted; waiting for the first host message |
+| Connected | First host message received and the link healthy; no status banner |
+| Reconnecting | Content is kept; the banner names the retry attempt and failure reason |
+| Offline | Terminal authentication or protocol failure; the banner explains how to recover |
+| Certificate changed / authentication rejected | An explicit error and a **Pair again** entry point; retrying stops |
+| Protocol mismatch | **Update the app**; retrying stops |
+
+Offline keeps the last received replica readable and disables writes; visited
+threads keep their events, and unvisited ones may have only their list summary.
+Reconnecting resubscribes to the current thread. A native app returning to the
+foreground, or a browser page becoming visible again, interrupts the backoff and
+retries at once.
 
 ## Surface anatomy
 
@@ -98,9 +516,18 @@ in both states.
    host it.
 2. Search row: magnifier + "Search" muted + ⌘K (macOS) / Ctrl+K
    (Windows/Linux) kbd chip → opens the palette.
-3. Project/thread header: sort, grouped/flat layout and add-project controls.
+3. Feature area: the window's persistent entries, directly under the search
+   field at both widths, `flex_none` and outside the thread list's scrolling and
+   filtering. Each entry is one sidebar-sized row — leading stroke icon, label,
+   a muted trailing value and, where it has one, a status glyph — and it takes
+   the selected surface while its destination is showing. Compact rows are 44pt
+   for touch. Today it holds one entry, **Machines**, whose trailing value is the
+   attached machine's name (or "Not connected") with the connection glyph; it
+   navigates to `Destination::Hosts` without disturbing the attachment. Later
+   persistent features are rows here, not new controls elsewhere.
+4. Project/thread header: sort, grouped/flat layout and add-project controls.
    Sorting and layout choices are persisted.
-4. Project groups: rotating chevron + folder icon + 13px medium name; hover
+5. Project groups: rotating chevron + folder icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. Inline rename
@@ -109,7 +536,13 @@ in both states.
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
    expansion so the list can be collapsed again).
-5. Footer: gear + "Settings" → settings route.
+6. Footer: gear + "Settings" → settings route.
+
+In wide layout, the sidebar switches the content route directly: Machines
+replaces Chat in the content column, and selecting a thread, starting a draft,
+or choosing its project switches that column back to Chat. Wide routes do not
+put Back in the Machines header or accumulate a page history. Compact keeps the
+single navigation stack and its Back semantics described above.
 
 ### Chat header
 
@@ -232,7 +665,13 @@ platform pays that inset.
 The composer holds the draft plus removable attachment, terminal-context and
 review-comment chips. Its controls select the provider/model, model parameters,
 approval mode and Build/Plan mode, subject to provider capabilities. Context
-usage comes from the live session. Sending during a turn queues the message;
+usage comes from the live session. Compact controls use two non-wrapping rows:
+the model picker, the standalone model-parameters (reasoning-effort) chip and
+Send above; approval mode and Build/Plan below, with the
+context ring at the trailing edge of the second row. The ring keeps a 44pt hit
+target opening its details sheet. Option labels truncate when space is tight;
+both rows fit at 360pt in English and Simplified Chinese.
+Sending during a turn queues the message;
 the secondary send action steers when the provider supports it. Stop interrupts
 the current turn. Queue/steer guidance belongs in the send tooltip.
 
@@ -291,6 +730,48 @@ Unified and split rows share syntax highlights and line-number drag selection.
 Unified rows use two 44px gutters and a 2px change-color rail; each split cell
 uses a 42px gutter without the rail. Both retain an 18px minimum row height.
 
+The terminal is host state, not a client's own emulator. The host owns the
+grid and publishes it — cells, cursor, modes and scrollback — so every attached
+client renders the same screen, and a client that attaches mid-session sees
+exactly what the host sees. Scrolling and selection are local to each viewer:
+two clients read different parts of the same terminal without disturbing each
+other, and only the keys and mouse reports a client sends reach the shell.
+Keyboard input is encoded from the replicated modes, so bracketed paste,
+application cursor keys and mouse reporting behave the same everywhere. In-grid
+images are not supported: the terminal is a coding tool's terminal, and it
+renders text.
+
+A stored command's output in the chat timeline is the same grid, rendered on
+demand. The client measures the width it can show and asks the host for that
+item at that many columns; the host replays the captured bytes through its own
+emulator and answers with one finished screen. The panel shows the plain text
+until the answer arrives, keeps the answer per width, and asks again once a
+width change settles.
+
+The Preview tab exists on every client. Its URL field, open-in-system-browser
+and copy-URL work everywhere; the embedded browser, history, JS automation and
+screenshots need a system webview. macOS, Windows and Android builds have
+an embedded browser (screenshots are supported on macOS and Android). Android
+uses an activity-attached child window for each WebView above the GPUI surface
+(NativeActivity does not paint ordinary Java view children), follows the panel bounds
+through rotation and keyboard insets, and hides it when leaving the compact
+Preview destination. Page inputs use the WebView’s native keyboard focus. Without one the tab explains that and offers the portable actions rather
+than dead back/reload/screenshot controls, agent automation requests are
+answered with an explicit "unsupported" instead of timing out, and such a client
+does not subscribe as an owner of the session's preview at all. Localhost port
+discovery scans the client, so it is offered only for a local desktop workspace; a host
+URL typed into the field is relative to the attached machine. Remote Windows and Android embedded previews route all HTTP(S) traffic through the
+machine's token-authenticated forward proxy, including localhost; the URL bar
+never substitutes the machine's LAN address. Proxy setup completes before page
+navigation and follows attachment teardown. Unsupported proxy capabilities fail
+closed through the existing unavailable/load-error presentation. macOS attached
+previews refuse WebView creation and explain that the machine proxy cannot be
+applied safely: WebKit bypasses it for client-local destinations, including
+subresources. URL entry, copy, and open externally remain available. Local desktop
+attachments use no preview proxy. Hosting enables the proxy automatically on the
+hosting port, without another setting. See [remote networking](remote.md#networking)
+for platform requirements and the token's network-access implications.
+
 Right-panel state (open/closed, Diff/Plan/Preview tab, expansion and selected
 turn), each Preview WebView, and the bottom terminal workspace all belong to the
 conversation destination rather than the shared window. Stored threads key by
@@ -301,13 +782,71 @@ context. Because WebViews are native child overlays rather than GPUI scene
 nodes, their visibility is synchronized directly from app state: closing
 Preview, selecting Diff/Plan, switching conversations, opening the command
 palette, or leaving Chat hides every WebView that no longer owns the panel.
+Compact conversation-exit teardown follows the **Panel** rule above.
 
-### Settings (full-page route)
+### Settings (wide route)
+
+Settings replaces the **whole window**: opening it switches the window to the
+settings page, and the left column is the settings rail — not the workspace
+sidebar, which is gone while the route is showing. This is the one route that
+does so; Machines instead replaces only the content column and keeps the sidebar
+beside it. The rail is therefore the window's left column: it carries the
+wordmark, clears the platform's window controls, groups its sections under
+**This device** and **‹machine› settings** captions, and ends in the row that
+leaves Settings.
 
 Settings uses a left navigation column and independently scrolling content.
 Groups share the composer's opaque floating-card treatment. Rows pair a title
 and description with a control; sparse groups use space, dense lists use inset
-hairlines. Restore defaults requires confirmation.
+hairlines. Restore defaults requires confirmation. Compact clients have no room
+for the rail beside the content: the same sections become a full-width list that
+pushes to one section at a time, and both pages wear the shell's one nav bar —
+Back to whatever Settings was opened from, then Back to the section list. The
+compact page draws no header of its own.
+
+**Compact rows stack.** Where a wide row puts its label left and its control
+right, a compact row puts the label and description above a full-width control:
+no fixed-width label column, prose that wraps rather than overflowing, and no
+horizontal clipping. A row whose control is a 44pt switch keeps it beside the
+label at both widths, since a switch never squeezes the text.
+
+Both the compact list and wide rail divide Settings into two captioned groups,
+in this order: **This device** contains General (appearance, language and device
+name) plus Other devices wherever the build can host connections; **‹machine
+name› settings** contains Providers, Usage, Orchestrate, Computer Use, Browser
+and Archived Threads. The attached host's display name supplies ‹machine name›;
+a local attachment uses the machine name shown by the hosting panel, and a
+client with neither uses **Machine settings**. The captions use the same compact
+11px muted caption style as captions inside Settings pages; this grouping is
+ownership guidance, not a platform test.
+
+Computer Use and Browser configure a *screen* — the one the agent drives — so
+they sit at the end of the machine group under a collapsible **Advanced**
+disclosure. It is expanded by default wherever this client drives a screen of
+its own: the local desktop, and a desktop with computer-use capability attached
+to another machine. On a client attached elsewhere with no computer use of its
+own — a phone, a browser tab — it starts collapsed, so the machine's list leads
+with the sections that can do work there. Opening one of those sections from a
+deep link or the palette expands the disclosure rather than selecting a section
+the rail does not show.
+
+A section is listed only when at least one of its rows applies to the current
+device and attachment. Applicability comes from capabilities, never directly
+from the operating system: replicated machine settings remain editable over a
+remote link, while operations that drive a local native facility require that
+facility here. Thus Browser is omitted without an embedded preview backend and
+Other devices is omitted without hosting support. A mixed section stays listed
+for its applicable rows and withholds only the unavailable rows. Computer Use
+configuration is replicated and stays editable; only its **System permissions**
+group is local — it shows live status and Grant/Recheck when this build can read
+them *and* the workspace is this machine's, and otherwise says to manage system
+permissions on the named host. A client never reports the host's permission
+state from its own OS. A stale deep link or command targeting a withheld section
+lands on the Settings root rather than opening an empty page.
+
+Editable fields are seeded from the host's settings the first time a real
+snapshot exists, not from local defaults, and a field the user has since edited
+is never rewritten by a later snapshot.
 
 Provider profiles expose only applicable options. Pi defaults to no tcode
 permission extension; its Native approvals toggle enables the gate for
@@ -315,7 +854,8 @@ supervised and auto-accept-edits sessions. Without it those stored modes take
 effect as Full access, while Read only uses pi's native tool filter. Trust
 project extensions adds `--approve` at launch. Pi has no MCP client; explicitly
 enabled orchestration or computer-use registrations produce an unavailable-tools
-warning. Remote setup is documented in [remote work mode](remote.md), and
+warning. Using tcode from other devices is documented in
+[Use tcode from other devices](remote.md), and
 permissions in [computer use](computer-use.md).
 
 Orchestrate uses one provider-neutral workflow, refreshed on each explicit
@@ -372,12 +912,81 @@ threads, including collaboration children.
 Both add-model popovers reuse the provider/model picker with fixed tabs and a
 300px scrollable model list.
 
+Theme, language and device name belong to the client. An explicit client choice
+overrides the attached host's replicated setting; restoring that row reveals the
+host setting again. Changing hosts replaces the workspace store, shell and all
+descendant views in the same window. The local kernel and remote hosting controls
+remain alive independently, so connecting to a host and returning to **This
+machine** never relaunch the process and never interrupt other attached
+clients.
+
+**Settings → Other devices** is **Let other devices connect to this machine**
+and nothing else: the listener, **Let nearby devices find this machine**,
+connection codes and **Connected devices**. It needs a listener and a beacon,
+so the section only exists where the client can host — a phone or a browser has
+no such setting. Choosing which machine to talk to is a product surface, not a
+setting: it lives in **Machines**, reached from the sidebar's feature area at
+both widths. Adding a machine follows the same rules everywhere: an answer
+from a superseded attempt is discarded; the form accepts one HTTP(S) origin;
+and a browser fixes that origin to the page that served it, hides discovery,
+and hides camera scanning. Pairing confirmation shows the machine name and
+**Connect**. Rejected authentication offers **Pair again**.
+Protocol mismatch says **Update the app**. The shell banner and
+attached machine row show the connection failure reason. The sidebar machine dot
+and Machines page share the same severity colors: syncing and reconnecting
+use a warning dot, terminal offline failures use a danger dot, and only a
+connection that has received its first host message uses a success dot. Syncing
+remains visible between hello acceptance and that first message. Connection loss
+updates the banner immediately, before the retry delay.
+
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 
 Centered top-anchored modal over a dim backdrop: search input; grouped results
 — Actions (new thread per project, open settings, toggle theme, toggle diff
-panel) and Threads (fuzzy over titles); footer key hints (↑↓ Navigate · Enter
-Select · Esc Close).
+panel), Threads (fuzzy over titles) and Messages; footer key hints (↑↓ Navigate ·
+Enter Select · Esc Close). A leading `>` restricts results to Actions.
+
+Messages are full-text hits inside stored conversations, shown as the thread
+title over the matching snippet; selecting one opens that thread at the hit's
+turn. The search itself belongs to the host: it indexes its own session logs, in
+its own index order, and clients send only the query text. Every client gets the
+group, including compact ones — there is no local session store to reopen. The
+client owns presentation only: a 150ms debounce and discarding an answer that a
+newer keystroke has already superseded.
+
+### Exporting a thread
+
+The host renders the artifact — it owns the event log and flushes pending writes
+first — and writes nothing. The client owns delivery, because "where does this
+file go" is a question about the machine the user is at, which over a remote link
+is not the host. The export dialog names the file and its size, and offers only
+what this client can actually do: **Save** through the platform save panel,
+**Download** where the platform has one (a browser Blob), and **Copy** to the
+clipboard everywhere. A dismissed save panel is a decision, not a failure, and
+reports nothing. An export too large for one response frame is refused with an
+explicit size error rather than truncated.
+
+### Importing external history
+
+The project root in **Add project** belongs to the host: whether a path is
+absolute and whether it exists are facts about the host's filesystem, so the host
+decides and the dialog shows the host's own reason for refusing one. The native
+directory picker browses *this* machine, so it appears only for a local
+workspace; a remote one types a host path, with the recents list and the import
+run also coming from the host. Failures — a refused path, an unreadable recents
+scan, a refused import — are shown, never swallowed.
+
+Choosing a directory in **Add project** starts an import and opens a modal,
+non-dismissible progress dialog with a bar, the "n of N" line naming the tool
+being read, and — once finished — an imported/skipped summary and an OK button.
+
+Import progress is host state, not a client-side job. The host keeps the latest
+run per project and publishes it, so closing the window, disconnecting, or
+attaching a second client never abandons the run or loses its outcome: a client
+that attaches after a fast completion still sees the summary. The imported
+threads appear in the sidebar before the dialog reports the run finished. A
+second import of the same project while one is running is refused rather than
+queued.
 
 ### Session lifetime
 
@@ -410,8 +1019,11 @@ dispatch response.
 
 The workspace does not sit on a blank page. When no conversation is open — at
 launch, or because the thread on screen was archived or deleted — it opens the
-new-thread draft of the project the user last interacted with, composer focused
-and ready. "Last interacted" is set by user navigation only (opening a thread,
+new-thread draft of the project the user last interacted with. In wide layout
+the composer is focused and ready. Compact conversations start unfocused,
+including restored conversations and drafts; only tapping the composer focuses
+it. Compact navigation away from or between conversations blurs the focused
+element and dismisses the software keyboard. "Last interacted" is set by user navigation only (opening a thread,
 starting a draft); background model activity and archive timestamps never move
 it, and it is persisted, so a launch lands where the user left off. A remembered
 project that no longer exists falls back to the first project in the sidebar.
@@ -453,3 +1065,42 @@ linked CI workflow. For visual changes, also launch the affected surface and
 review both themes at its normal and narrow widths. Exercise keyboard focus,
 scrolling and the changed interaction. Capture the relevant states for the PR;
 unit or compile checks alone do not establish visual correctness.
+
+## Headless browser authentication and hosting
+
+The headless web page opens with a centered password form before the shared
+canvas starts. First open shows password and confirmation, with a minimum of
+eight characters; configured hosts show one password field. Inputs are masked,
+labels sit above full-width controls, and the primary action has a 44px minimum
+height. Errors stay in the form with an alert role; keyboard focus is visible.
+The page follows the browser light/dark preference and fits narrow viewports.
+A saved valid token skips login; rejected tokens return to the login form.
+
+In the browser, Settings → Other devices belongs to the attached machine. Its
+Allow other devices switch controls new native pairings, not web login. The
+current code, expiry and QR use the desktop hosting presentation, stacking on
+narrow screens. Paired devices and Remove remain visible when pairing is off.
+The listener owns this state and returns it over the authenticated pipe. Native
+Add a machine continues to show an address and six-digit connection code.
+## Pending writes on weak networks
+
+User-authored sends remain muted with **Sending…** until the host acknowledges
+them. During Syncing or Reconnecting the caption is **Waiting for connection…**;
+reconnection does not turn a pending send into a delivered bubble. Terminal
+failure shows an inline error with **Retry** and **Discard**. Queued approval
+decisions keep their controls disabled with a pending caption. The connection
+banner owns transient transport failures. See [Weak networks](remote.md#weak-networks)
+for persistence, ordering, limits and protocol compatibility.
+
+Pending writes also own launch recovery: a saved machine with a non-empty outbox
+wins over normal launch navigation (saved-machine order breaks ties). With no
+pending writes desktop still starts locally and mobile restores its last machine.
+Attachment opens the first pending thread. This derives only IDs and message
+previews from the existing outbox; it adds no offline cache or synthetic host
+metadata. Before a snapshot exists, the existing pending-message timeline remains
+visible. The snapshot adopts those messages through the normal Ack/replica merge.
+The disconnected banner appends the pending write count after its failure reason.
+Threads marks cached rows **Pending** and provides one **Waiting for connection…**
+row per uncached pending session, with its first message preview, at both widths.
+A host deletion arriving before the rejected Ack does not navigate away from an
+unresolved send: its inline error and Retry/Discard controls remain on screen.

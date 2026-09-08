@@ -1,12 +1,146 @@
-use gpui::{Context, Entity, EventEmitter};
+use gpui::{Context, Entity, EventEmitter, SharedString};
+use serde::{Deserialize, Serialize};
 
 use crate::store::WorkspaceStore;
 
+/// One place the window can be. The window keeps a *history* of them, and every
+/// Back — the toolbar control, the Android gesture, the desktop Back row — pops
+/// that one history. There is no second navigation authority: the compact
+/// navigation stack mirrors it, and the wide layout derives its [`Route`] from
+/// whichever destination is on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Destination {
+    /// Which host this window talks to: the root, and a place that can also be
+    /// *visited* from an attached workspace without detaching from it.
+    Hosts,
+    /// The pairing form, pushed from Hosts (or from a Nearby / repair row that
+    /// prefilled it).
+    Pair,
+    Threads,
+    Thread,
+    /// The thread's terminal, diff/plan or preview, full width.
+    Panel,
+    /// The settings root: the section list in compact, the whole route in wide.
+    Settings,
+    /// One settings section's detail. Which section it is belongs to the page;
+    /// *that a detail is open* is navigation and belongs here.
+    SettingsSection,
+}
+
+/// The shell's client-local checkpoint, independent of the host's settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct NavigationSnapshot {
+    pub history: Vec<Destination>,
+    pub host_id: Option<String>,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub panel: NavigationPanel,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum NavigationPanel {
+    Terminal,
+    #[default]
+    Diff,
+    Plan,
+    Preview,
+}
+
+impl NavigationPanel {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Diff => "diff",
+            Self::Plan => "plan",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+impl NavigationSnapshot {
+    pub fn from_preferences(value: serde_json::Value) -> Option<Self> {
+        let mut snapshot: Self = serde_json::from_value(value).ok()?;
+        // Ignore malformed/unbounded local state rather than building an
+        // arbitrary number of mounted views during startup.
+        if snapshot.history.len() > 128 {
+            return None;
+        }
+        snapshot.history.retain(|destination| {
+            !matches!(
+                destination,
+                Destination::Settings | Destination::SettingsSection | Destination::Pair
+            )
+        });
+        if snapshot.history.first() != Some(&Destination::Hosts) {
+            snapshot.history.insert(0, Destination::Hosts);
+        }
+        snapshot.history.dedup();
+        if snapshot.host_id.is_none() {
+            snapshot.without_host();
+        } else if snapshot.session_id.is_none() {
+            snapshot.without_thread();
+        }
+        Some(snapshot)
+    }
+
+    pub fn without_host(&mut self) {
+        self.host_id = None;
+        self.session_id = None;
+        self.history = vec![Destination::Hosts];
+    }
+
+    fn without_thread(&mut self) {
+        self.session_id = None;
+        if let Some(index) = self
+            .history
+            .iter()
+            .position(|destination| matches!(destination, Destination::Thread | Destination::Panel))
+        {
+            self.history.truncate(index);
+        }
+    }
+}
+
+impl Destination {
+    /// Which wide surface shows this destination. The wide layout shows a whole
+    /// hierarchy at once, so several destinations share one route.
+    pub fn route(self) -> Route {
+        match self {
+            Self::Hosts | Self::Pair => Route::Hosts,
+            Self::Settings | Self::SettingsSection => Route::Settings,
+            Self::Threads | Self::Thread | Self::Panel => Route::Chat,
+        }
+    }
+
+    /// The short, fixed label a Back control carries when this destination is
+    /// the one it returns to. Deliberately not the page's own title: a Back
+    /// control names a kind of place, so it stays the same width whatever the
+    /// machine or thread underneath is called, and never truncates. Pair is
+    /// reached from Machines and answers with its caller's label.
+    pub fn back_label(self) -> SharedString {
+        crate::tr!(match self {
+            Self::Hosts | Self::Pair => "hosts.title",
+            Self::Threads => "mobile.threads",
+            Self::Thread => "mobile.thread",
+            Self::Panel => "chat.panels",
+            Self::Settings | Self::SettingsSection => "settings.title",
+        })
+        .into_owned()
+        .into()
+    }
+}
+
 /// Window-global UI state owned by the GPUI layer.
 pub struct WindowState {
-    /// Opt-in touch layout; desktop windows keep the default rendering.
+    /// The layout the window's current width calls for. Derived from the
+    /// viewport by [`crate::window_seam::compact_for`] and never persisted:
+    /// widening a window is not a preference.
     pub compact: bool,
-    pub route: Route,
+    /// Where the window has been, oldest first. Never empty: `history[0]` is
+    /// [`Destination::Hosts`], the root the platform's Back gesture falls off.
+    history: Vec<Destination>,
     pub palette_open: bool,
     pub sidebar_collapsed: bool,
     pub quit_prompt_epoch: u64,
@@ -18,7 +152,7 @@ impl WindowState {
     pub fn new(sidebar_collapsed: bool) -> Self {
         Self {
             compact: false,
-            route: Route::Chat,
+            history: vec![Destination::Hosts],
             palette_open: false,
             sidebar_collapsed,
             quit_prompt_epoch: 0,
@@ -32,10 +166,122 @@ impl WindowState {
         self
     }
 
-    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
-        if self.compact {
-            cx.emit(OpenThread);
+    /// Set the layout for the width the window now has. Returns whether the
+    /// rule flipped, so the shell only reconciles navigation when it did.
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) -> bool {
+        if self.compact == compact {
+            return false;
         }
+        self.compact = compact;
+        cx.notify();
+        true
+    }
+
+    pub fn history(&self) -> &[Destination] {
+        &self.history
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: &NavigationSnapshot, cx: &mut Context<Self>) {
+        self.history.clone_from(&snapshot.history);
+        cx.notify();
+    }
+
+    /// A restored thread was archived/deleted while this client was away.
+    pub(crate) fn discard_restored_thread(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .history
+            .iter()
+            .position(|destination| matches!(destination, Destination::Thread | Destination::Panel))
+        {
+            self.history.truncate(index);
+            cx.notify();
+        }
+    }
+
+    pub fn destination(&self) -> Destination {
+        *self.history.last().expect("the history is never empty")
+    }
+
+    /// The destination Back returns to, or `None` at the root.
+    pub fn parent(&self) -> Option<Destination> {
+        (self.history.len() > 1).then(|| self.history[self.history.len() - 2])
+    }
+
+    pub fn route(&self) -> Route {
+        self.destination().route()
+    }
+
+    /// Push `destination`. Visiting somewhere the window already is does
+    /// nothing, so a repeated tap cannot stack the same page twice.
+    pub fn go(&mut self, destination: Destination, cx: &mut Context<Self>) {
+        if self.destination() == destination {
+            return;
+        }
+        self.history.push(destination);
+        cx.notify();
+    }
+
+    /// Pop one step. `false` only where there is nothing left to pop — in
+    /// compact that is the root, where the platform closes the app; in wide it
+    /// is the workspace, which is not a page you can leave.
+    pub fn back(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.history.len() < 2 {
+            return false;
+        }
+        if self.compact {
+            self.history.pop();
+            cx.notify();
+            return true;
+        }
+        // Wide shows the whole workspace hierarchy at once, so only a change of
+        // route is a step the user can see.
+        let route = self.route();
+        if route == Route::Chat {
+            return false;
+        }
+        while self.history.len() > 1 && self.route() == route {
+            self.history.pop();
+        }
+        cx.notify();
+        true
+    }
+
+    /// A fresh attachment: the previous host's pages are not this host's, so the
+    /// history restarts at its thread list.
+    pub fn enter_workspace(&mut self, cx: &mut Context<Self>) {
+        self.history.truncate(1);
+        self.history.push(Destination::Threads);
+        cx.notify();
+    }
+
+    /// No attachment: only the root remains.
+    pub fn leave_workspace(&mut self, cx: &mut Context<Self>) {
+        self.history.truncate(1);
+        cx.notify();
+    }
+
+    /// "Show me this thread." It is a navigation intent, not a layout decision:
+    /// every width emits it and the shell decides how to present it — a wide
+    /// window already shows the thread beside the list, a compact one pushes it.
+    pub fn open_thread(&mut self, cx: &mut Context<Self>) {
+        cx.emit(OpenThread);
+    }
+
+    /// Sidebar-driven conversation navigation replaces the wide Hosts visit
+    /// with Chat. Compact keeps the visit on its stack so Back still returns
+    /// through every page exactly as it did before.
+    pub fn leave_route_for_chat(&mut self, cx: &mut Context<Self>) {
+        if self.compact || self.route() != Route::Hosts {
+            return;
+        }
+        while self.history.len() > 1 && self.route() == Route::Hosts {
+            self.history.pop();
+        }
+        if self.route() != Route::Chat {
+            return;
+        }
+        *self.history.last_mut().expect("the history is never empty") = Destination::Thread;
+        cx.notify();
     }
 
     pub fn toggle_sidebar_collapsed(
@@ -50,16 +296,17 @@ impl WindowState {
         cx.notify();
     }
 
-    /// Switch to the full-page settings route (closes the palette).
+    /// Switch to the settings route (closes the palette).
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.palette_open = false;
-        self.route = Route::Settings;
-        cx.notify();
+        self.go(Destination::Settings, cx);
     }
 
-    /// Return from settings to the chat workspace.
+    /// Leave settings, however deep in it the window is.
     pub fn close_settings(&mut self, cx: &mut Context<Self>) {
-        self.route = Route::Chat;
+        while self.history.len() > 1 && self.route() == Route::Settings {
+            self.history.pop();
+        }
         cx.notify();
     }
 
@@ -79,14 +326,129 @@ impl WindowState {
     }
 }
 
-/// The top-level window route: the chat workspace or the full-page settings.
+/// The top-level window surface: the chat workspace, the hosts list or
+/// settings. Derived from [`WindowState::destination`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Route {
     #[default]
     Chat,
+    Hosts,
     Settings,
 }
 
 #[derive(Clone, Copy)]
 pub struct OpenThread;
 impl EventEmitter<OpenThread> for WindowState {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext as _, TestAppContext};
+
+    /// The history is the only navigation authority: a visit to Hosts from an
+    /// open thread comes back to that thread, and settings unwinds one step at
+    /// a time.
+    #[gpui::test]
+    fn back_pops_the_history_one_step_and_stops_at_the_root(cx: &mut TestAppContext) {
+        let state = cx.new(|_| WindowState::new(false).with_compact(true));
+        state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.go(Destination::Thread, cx);
+            // Visiting Hosts from a thread is a push, not a rewind.
+            state.go(Destination::Hosts, cx);
+            assert_eq!(state.parent(), Some(Destination::Thread));
+            assert!(state.back(cx));
+            assert_eq!(state.destination(), Destination::Thread);
+
+            state.open_settings(cx);
+            state.go(Destination::SettingsSection, cx);
+            assert!(state.back(cx));
+            assert_eq!(state.destination(), Destination::Settings);
+            assert!(state.back(cx));
+            assert_eq!(state.destination(), Destination::Thread);
+
+            assert!(state.back(cx));
+            assert!(state.back(cx));
+            assert_eq!(state.destination(), Destination::Hosts);
+            assert!(!state.back(cx), "the root belongs to the platform");
+        });
+    }
+
+    /// A Back control names the kind of place it returns to, never the title of
+    /// the page there: the labels are short, fixed and identical for the whole
+    /// settings pair, so no Back control ever truncates.
+    #[test]
+    fn every_destination_has_a_short_fixed_back_label() {
+        let _locale = crate::settings::TestLocaleGuard::acquire();
+        for (destination, label) in [
+            (Destination::Hosts, "Machines"),
+            (Destination::Pair, "Machines"),
+            (Destination::Threads, "Threads"),
+            (Destination::Thread, "Thread"),
+            (Destination::Panel, "Panels"),
+            (Destination::Settings, "Settings"),
+            (Destination::SettingsSection, "Settings"),
+        ] {
+            assert_eq!(destination.back_label(), label, "{destination:?}");
+        }
+    }
+
+    /// Connecting somewhere else is the one thing that discards where the
+    /// window has been: the previous host's pages are not this host's.
+    #[gpui::test]
+    fn entering_a_workspace_clears_the_previous_host_s_pages(cx: &mut TestAppContext) {
+        let state = cx.new(|_| WindowState::new(false).with_compact(true));
+        state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.go(Destination::Thread, cx);
+            state.go(Destination::Panel, cx);
+
+            state.enter_workspace(cx);
+            assert_eq!(
+                state.history(),
+                [Destination::Hosts, Destination::Threads],
+                "the new host starts at its own thread list"
+            );
+            assert!(state.back(cx));
+            assert_eq!(state.destination(), Destination::Hosts);
+            assert!(!state.back(cx));
+        });
+    }
+
+    /// Wide has no page stack: the shared close-route action leaves Hosts or
+    /// Settings in one step and reports "not consumed" in the workspace.
+    #[gpui::test]
+    fn wide_back_leaves_a_route_rather_than_a_page(cx: &mut TestAppContext) {
+        let state = cx.new(|_| WindowState::new(false));
+        state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.go(Destination::Hosts, cx);
+            assert!(state.back(cx));
+            assert_eq!(state.route(), Route::Chat);
+
+            state.open_settings(cx);
+            state.go(Destination::SettingsSection, cx);
+            assert!(state.back(cx));
+            assert_eq!(state.route(), Route::Chat);
+            assert!(!state.back(cx));
+        });
+    }
+
+    /// Repeated wide visits are route switches, not pages added to a stack.
+    #[gpui::test]
+    fn wide_sidebar_navigation_replaces_a_hosts_visit_without_growing_history(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|_| WindowState::new(false));
+        state.update(cx, |state, cx| {
+            state.enter_workspace(cx);
+            state.go(Destination::Hosts, cx);
+            state.leave_route_for_chat(cx);
+            assert_eq!(state.history(), [Destination::Hosts, Destination::Thread]);
+
+            state.go(Destination::Hosts, cx);
+            state.leave_route_for_chat(cx);
+            assert_eq!(state.history(), [Destination::Hosts, Destination::Thread]);
+        });
+    }
+}

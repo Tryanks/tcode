@@ -1,6 +1,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    rc::Rc,
 };
 
 use crate::overlay::{DialogButtons, Notification, OverlayExt as _};
@@ -17,9 +18,9 @@ use crate::{
 };
 use gpui::{
     Action, AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SpringAnimation,
-    SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list,
-    prelude::FluentBuilder as _, px,
+    IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
+    SpringAnimation, SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, list, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
@@ -31,10 +32,10 @@ use tcode_core::{
 };
 
 use crate::shortcut::format_secondary_shortcut;
-use crate::store::{ForkAvailability, TopicKind, WorkspaceStore, observe_store_topics};
+use crate::store::{ForkAvailability, StoreChange, TopicKind, WorkspaceStore};
 use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
-use crate::window_state::WindowState;
+use crate::window_state::{Destination, Route, WindowState};
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
@@ -134,6 +135,7 @@ struct ThreadFlags {
     background: bool,
 }
 
+#[derive(Clone)]
 struct ThreadRowState {
     session_id: String,
     row_key: String,
@@ -207,6 +209,76 @@ fn visible_threads<'a>(
         .iter()
         .filter(|meta| thread_visible(meta, collapsed_parents))
         .collect()
+}
+
+/// Compact lists own their ordering: form families before sorting so live workers
+/// stay attached even when their parent is older or its project is folded.
+fn compact_visible_threads<'a>(
+    sessions: &'a [SessionMeta],
+    collapsed: &HashSet<String>,
+    project: Option<&str>,
+) -> Vec<&'a SessionMeta> {
+    let mut ordered: Vec<_> = sessions
+        .iter()
+        .filter(|meta| meta.archived_at.is_none())
+        .collect();
+    ordered.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let by_id: HashMap<_, _> = ordered
+        .iter()
+        .map(|meta| (meta.id.as_str(), *meta))
+        .collect();
+    let mut families: Vec<(&SessionMeta, Vec<&SessionMeta>)> = Vec::new();
+    for meta in &ordered {
+        let mut root = *meta;
+        let mut visited = HashSet::from([root.id.as_str()]);
+        while let Some(parent) = root
+            .parent_session_id
+            .as_deref()
+            .and_then(|id| by_id.get(id))
+        {
+            if !visited.insert(parent.id.as_str()) {
+                break;
+            }
+            root = parent;
+        }
+        if project.is_some_and(|id| root.project_id.as_deref() != Some(id)) {
+            continue;
+        }
+        if let Some((_, members)) = families.iter_mut().find(|(head, _)| head.id == root.id) {
+            members.push(meta);
+        } else {
+            families.push((root, vec![meta]));
+        }
+    }
+    // Families were encountered in descending maximum activity order.
+    fn append<'a>(
+        meta: &'a SessionMeta,
+        members: &[&'a SessionMeta],
+        collapsed: &HashSet<String>,
+        rows: &mut Vec<&'a SessionMeta>,
+    ) {
+        if rows.iter().any(|row| row.id == meta.id) {
+            return;
+        }
+        rows.push(meta);
+        if !collapsed.contains(&meta.id) {
+            for child in members
+                .iter()
+                .filter(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
+            {
+                append(child, members, collapsed, rows);
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    for (root, members) in families {
+        append(root, &members, collapsed, &mut rows);
+    }
+    rows
 }
 
 #[derive(Debug)]
@@ -431,8 +503,58 @@ struct RenameState {
     _sub: Subscription,
 }
 
+#[derive(Clone)]
+struct CompactThreadRow {
+    meta: SessionMeta,
+    state: ThreadRowState,
+    working: bool,
+    title: SharedString,
+    row_id: SharedString,
+    label: SharedString,
+    project_name: Option<SharedString>,
+    relative_time: SharedString,
+    children_id: SharedString,
+    children_label: SharedString,
+    children_count: SharedString,
+    separator: bool,
+}
+
+#[derive(Clone)]
+struct CompactProjectRow {
+    project_id: String,
+    row_id: SharedString,
+    name: SharedString,
+    label: SharedString,
+    count: SharedString,
+    collapsed: bool,
+}
+
+#[derive(Clone)]
+enum CompactListRow {
+    Project(CompactProjectRow),
+    Thread(Rc<CompactThreadRow>),
+    BottomInset,
+}
+
+impl CompactListRow {
+    fn key(&self) -> &str {
+        match self {
+            Self::Project(row) => &row.row_id,
+            Self::Thread(row) => &row.row_id,
+            Self::BottomInset => "compact-bottom-inset",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CompactListModel {
+    rows: Vec<CompactListRow>,
+    has_projects: bool,
+    locale: String,
+    minute: u64,
+}
+
 pub struct SessionsSidebar {
-    loading: bool,
     store: Entity<WorkspaceStore>,
     window_state: Entity<WindowState>,
     /// Project ids whose thread list is expanded past the collapsed limit.
@@ -450,36 +572,35 @@ pub struct SessionsSidebar {
     /// which does not exist yet while the sidebar is constructed.
     startup_archive_dialog: Option<(usize, u32, usize)>,
     flat_list_state: ListState,
+    compact_list_state: ListState,
+    compact_model: Option<Rc<CompactListModel>>,
+    compact_model_dirty: bool,
+    #[cfg(test)]
+    compact_rows_rendered: std::cell::Cell<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl SessionsSidebar {
-    pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
-        if self.loading != loading {
-            self.loading = loading;
-            cx.notify();
-        }
-    }
-
     fn compact(&self, cx: &gpui::App) -> bool {
         self.window_state.read(cx).compact
     }
-
     pub fn new(
         store: Entity<WorkspaceStore>,
         window_state: Entity<WindowState>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![observe_store_topics(
-            &store,
-            &[
-                TopicKind::Index,
-                TopicKind::Settings,
-                TopicKind::ActiveSession,
-                TopicKind::SessionStatus,
-            ],
-            cx,
-        )];
+        let subscriptions = vec![cx.subscribe(&store, |this, _, change: &StoreChange, cx| {
+            if matches!(
+                change.topic,
+                TopicKind::Index
+                    | TopicKind::Settings
+                    | TopicKind::ActiveSession
+                    | TopicKind::SessionStatus
+            ) {
+                this.compact_model_dirty = true;
+                cx.notify();
+            }
+        })];
         // Launch sweep: the same auto-archive pass expanding a thread list
         // runs, applied to every project up front so stale threads are gone
         // before the first paint (and before the fold state is seeded below).
@@ -523,7 +644,6 @@ impl SessionsSidebar {
             initial_collapsed_parents(&sessions, active_id.as_deref())
         };
         Self {
-            loading: false,
             store,
             window_state,
             expanded_groups: HashSet::new(),
@@ -533,6 +653,11 @@ impl SessionsSidebar {
             auto_archive_notice: None,
             startup_archive_dialog: None,
             flat_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            compact_list_state: ListState::new(0, ListAlignment::Top, px(120.)),
+            compact_model: None,
+            compact_model_dirty: true,
+            #[cfg(test)]
+            compact_rows_rendered: std::cell::Cell::new(0),
             _subscriptions: subscriptions,
         }
     }
@@ -639,6 +764,8 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) {
         self.project_filter = (!action.0.is_empty()).then(|| action.0.clone());
+        self.window_state
+            .update(cx, |state, cx| state.leave_route_for_chat(cx));
         cx.notify();
     }
 
@@ -795,7 +922,6 @@ impl SessionsSidebar {
         crate::thread_export::prompt_thread_export(
             self.store.clone(),
             meta.id,
-            meta.title,
             meta.cwd,
             format,
             window,
@@ -1110,16 +1236,100 @@ impl SessionsSidebar {
         )
     }
 
+    /// The feature area: the window's persistent entries, directly under the
+    /// search field at both widths. Today it holds one — Hosts — and the next
+    /// one is a row in this list, not another one-off control.
+    fn render_feature_rows(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact = self.window_state.read(cx).compact;
+        let active = self.window_state.read(cx).route() == Route::Hosts;
+        let store = self.store.read(cx);
+        let host = store
+            .remote_host_name()
+            .map(SharedString::from)
+            .unwrap_or_else(|| crate::tr!("hosts.this_computer").into_owned().into());
+        let connection_color = cx.theme().connection_color(store.connection_state());
+        div()
+            .flex_none()
+            .px(px(if compact { COMPACT_PAGE_PADDING } else { 8. }))
+            .pb_1()
+            .child(
+                crate::material::accessible_clickable(
+                    h_flex(),
+                    "sidebar-hosts",
+                    Role::Button,
+                    crate::tr!("hosts.title"),
+                    cx,
+                )
+                .h(px(if compact { 44. } else { 32. }))
+                .debug_selector(|| "sidebar-feature-hosts".into())
+                .items_center()
+                .gap_2()
+                .px_2()
+                .rounded(cx.theme().radius)
+                .cursor_pointer()
+                .when(active, |row| row.bg(cx.theme().list_active))
+                .when(!active, |row| {
+                    row.hover(|s| s.bg(cx.theme().sidebar_accent))
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.window_state
+                        .update(cx, |state, cx| state.go(Destination::Hosts, cx));
+                }))
+                .child(
+                    Icon::new(IconName::Network)
+                        .small()
+                        .flex_none()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(if compact { 15. } else { 13. }))
+                        .text_color(cx.theme().sidebar_foreground)
+                        .child(crate::tr!("hosts.title")),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(if compact { 13. } else { 12. }))
+                        .text_align(gpui::TextAlign::Right)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(host),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(connection_color),
+                ),
+            )
+    }
+
     fn render_layout_toggle(&self, layout: SidebarLayout, cx: &mut Context<Self>) -> Button {
         let tooltip = match layout {
             SidebarLayout::Flat => crate::tr!("sidebar.layout_grouped"),
             SidebarLayout::Grouped => crate::tr!("sidebar.layout_flat"),
         };
+        let compact = self.compact(cx);
         Button::new("toggle-sidebar-layout")
             .ghost()
             .xsmall()
             .compact()
-            .icon(IconName::LayoutDashboard)
+            .map(|button| {
+                if compact {
+                    button
+                        .with_size(px(44.))
+                        .w(px(44.))
+                        .h(px(44.))
+                        .child(Icon::new(IconName::LayoutDashboard).size(px(18.)))
+                } else {
+                    button.icon(IconName::LayoutDashboard)
+                }
+            })
+            .aria_label(tooltip.clone())
             .tooltip(tooltip)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let next = match layout {
@@ -1575,14 +1785,16 @@ impl SessionsSidebar {
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
+            this.compact_model_dirty = true;
             toggle_parent_for_row_click(
                 &mut this.collapsed_parents,
                 &session_id,
                 is_active,
                 has_direct_children,
             );
-            this.store.update(cx, |store, _cx| {
+            this.store.update(cx, |store, cx| {
                 store.select_session(session_id.clone());
+                cx.notify();
             });
             this.window_state
                 .update(cx, |state, cx| state.open_thread(cx));
@@ -1628,6 +1840,17 @@ impl SessionsSidebar {
                     title.font_semibold()
                 })
                 .child(meta.title.clone())
+                .when(
+                    self.store.read(cx).session_has_pending_writes(&meta.id),
+                    |row| {
+                        row.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().warning)
+                                .child(crate::tr!("sidebar.pending_write")),
+                        )
+                    },
+                )
                 .into_any_element()
         }
     }
@@ -2183,94 +2406,290 @@ fn proceed_delete(
 }
 
 const COMPACT_PAGE_PADDING: f32 = 16.;
-const COMPACT_ROW_HEIGHT: f32 = 56.;
 const COMPACT_SEARCH_HEIGHT: f32 = 40.;
 
 impl SessionsSidebar {
-    /// Compact thread list with search and project groups. Navigation replaces
-    /// persistent row selection; desktop-only controls stay in the desktop list.
-    fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let (groups, collapsed_projects, sessions, flags) = {
-            let store = self.store.read(cx);
-            let sessions = store.sidebar_sessions();
-            let flags = sessions
-                .iter()
-                .map(|meta| {
-                    (
-                        meta.id.clone(),
-                        ThreadFlags {
-                            unread: store.session_unread(&meta.id),
-                            waiting_for_approval: store.pending_approval_for(&meta.id),
-                            waiting_for_input: store.pending_user_input_for(&meta.id),
-                            working: store.turn_running_for(&meta.id),
-                            background: store.background_only_for(&meta.id),
-                        },
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            let groups = store.grouped_sessions();
-            let collapsed = groups
-                .iter()
-                .filter(|group| store.is_project_collapsed(&group.project.id))
-                .map(|group| group.project.id.clone())
-                .collect::<HashSet<_>>();
-            (groups, collapsed, sessions, flags)
-        };
+    /// Store changes and local disclosures invalidate the model. Scroll and
+    /// navigation-animation frames only clone the shared snapshot; ListState
+    /// measures the visible rows, including project captions of different height.
+    fn compact_model(&mut self, cx: &mut Context<Self>) -> Rc<CompactListModel> {
+        let now = now_secs();
+        let locale = rust_i18n::locale();
+        if self.compact_model_dirty
+            || self
+                .compact_model
+                .as_ref()
+                .is_none_or(|model| model.locale.as_str() != &*locale)
+        {
+            let (groups, collapsed_projects, sessions, flags, layout) = {
+                let store = self.store.read(cx);
+                let sessions = store
+                    .sidebar_sessions()
+                    .into_iter()
+                    .filter(|meta| meta.archived_at.is_none())
+                    .collect::<Vec<_>>();
+                let flags = sessions
+                    .iter()
+                    .map(|meta| {
+                        (
+                            meta.id.clone(),
+                            ThreadFlags {
+                                unread: store.session_unread(&meta.id),
+                                waiting_for_approval: store.pending_approval_for(&meta.id),
+                                waiting_for_input: store.pending_user_input_for(&meta.id),
+                                working: store.turn_running_for(&meta.id),
+                                background: store.background_only_for(&meta.id),
+                            },
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let groups = store.grouped_sessions();
+                let collapsed = groups
+                    .iter()
+                    .filter(|group| store.is_project_collapsed(&group.project.id))
+                    .map(|group| group.project.id.clone())
+                    .collect::<HashSet<_>>();
+                (groups, collapsed, sessions, flags, store.sidebar_layout())
+            };
 
-        let body = if self.loading {
-            v_flex()
-                .flex_1()
-                .px(px(COMPACT_PAGE_PADDING))
-                .pt(px(8.))
-                .gap(px(4.))
-                .children((0..3).map(|_| {
-                    v_flex()
-                        .h(px(COMPACT_ROW_HEIGHT))
-                        .justify_center()
-                        .gap(px(8.))
-                        .opacity(0.3)
-                        .child(
-                            div()
-                                .w(gpui::relative(0.7))
-                                .h(px(14.))
-                                .rounded(px(4.))
-                                .bg(cx.theme().secondary),
+            let mut rows = Vec::new();
+            let thread_rows = |visible: Vec<&SessionMeta>, recent: bool| {
+                let mut rows = Vec::new();
+                let last = visible.len().saturating_sub(1);
+                for (index, meta) in visible.into_iter().enumerate() {
+                    let state = self.thread_row_state(
+                        meta,
+                        &sessions,
+                        &flags,
+                        format!("compact-thread-{}", meta.id),
+                    );
+                    let project_name = recent
+                        .then(|| {
+                            groups.iter().find(|group| {
+                                meta.project_id.as_deref() == Some(group.project.id.as_str())
+                            })
+                        })
+                        .flatten()
+                        .map(|group| SharedString::from(group.project.name.clone()));
+                    rows.push(CompactListRow::Thread(Rc::new(CompactThreadRow {
+                        title: meta.title.clone().into(),
+                        row_id: format!("compact-thread-row-{}", meta.id).into(),
+                        label: crate::tr!("sidebar.thread", title = meta.title.clone())
+                            .into_owned()
+                            .into(),
+                        relative_time: humanize_ago(now.saturating_sub(meta.updated_at)).into(),
+                        children_id: format!("compact-children-{}", meta.id).into(),
+                        children_label: crate::tr!(
+                            "sidebar.child_threads",
+                            count = state.direct_children
                         )
-                        .child(
-                            div()
-                                .w(gpui::relative(0.35))
-                                .h(px(11.))
-                                .rounded(px(4.))
-                                .bg(cx.theme().secondary),
-                        )
-                }))
-                .into_any_element()
-        } else if groups.is_empty() {
-            crate::material::empty_state(
-                Icon::new(IconName::Folder),
-                crate::tr!("mobile.projects_empty"),
-                crate::tr!("mobile.projects_help"),
-                cx,
-            )
-            .into_any_element()
-        } else {
-            let mut list = v_flex().w_full().px(px(COMPACT_PAGE_PADDING)).pb(px(24.));
-            for group in &groups {
-                let collapsed = collapsed_projects.contains(&group.project.id);
-                list = list.child(self.render_compact_group_header(group, collapsed, cx));
-                if collapsed {
-                    continue;
+                        .into_owned()
+                        .into(),
+                        children_count: state.direct_children.to_string().into(),
+                        working: flags.get(&meta.id).is_some_and(|flags| flags.working),
+                        state,
+                        meta: meta.clone(),
+                        project_name,
+                        separator: index != last,
+                    })));
                 }
-                for meta in visible_threads(&group.sessions, &self.collapsed_parents) {
-                    list = list.child(self.render_compact_thread(meta, &sessions, &flags, cx));
+                rows
+            };
+            if layout == SidebarLayout::Flat {
+                rows.extend(thread_rows(
+                    compact_visible_threads(&sessions, &self.collapsed_parents, None),
+                    true,
+                ));
+            } else {
+                // Build the same family order for each project before adding captions.
+                for group in &groups {
+                    let visible = compact_visible_threads(
+                        &sessions,
+                        &self.collapsed_parents,
+                        Some(&group.project.id),
+                    );
+                    let count = visible.len();
+                    let collapsed =
+                        groups.len() > 1 && collapsed_projects.contains(&group.project.id);
+                    let start = rows.len();
+                    if !collapsed {
+                        rows.extend(thread_rows(visible, false));
+                    }
+                    if groups.len() > 1 {
+                        rows.insert(
+                            start,
+                            CompactListRow::Project(CompactProjectRow {
+                                project_id: group.project.id.clone(),
+                                row_id: format!("compact-group-{}", group.project.id).into(),
+                                name: group.project.name.clone().into(),
+                                label: crate::tr!(
+                                    "sidebar.project",
+                                    name = group.project.name.clone()
+                                )
+                                .into_owned()
+                                .into(),
+                                count: count.to_string().into(),
+                                collapsed,
+                            }),
+                        );
+                    }
                 }
             }
+            rows.push(CompactListRow::BottomInset);
+            let mut anchor = self.compact_list_state.logical_scroll_top();
+            let anchor_key = self
+                .compact_model
+                .as_ref()
+                .and_then(|model| model.rows.get(anchor.item_ix))
+                // The loading/empty model contains only padding. Anchoring to
+                // it would open the first Index snapshot at the list's bottom.
+                .filter(|row| !matches!(row, CompactListRow::BottomInset))
+                .map(|row| row.key().to_owned());
+            self.compact_list_state
+                .splice(0..self.compact_list_state.item_count(), rows.len());
+            if let Some(index) =
+                anchor_key.and_then(|key| rows.iter().position(|row| row.key() == key))
+            {
+                anchor.item_ix = index;
+                self.compact_list_state.scroll_to(anchor);
+            }
+            self.compact_model = Some(Rc::new(CompactListModel {
+                rows,
+                has_projects: !groups.is_empty(),
+                locale: locale.to_string(),
+                minute: now / 60,
+            }));
+            self.compact_model_dirty = false;
+        }
+        let model = self
+            .compact_model
+            .as_mut()
+            .expect("compact model initialized");
+        if model.minute != now / 60 {
+            let model = Rc::make_mut(model);
+            model.minute = now / 60;
+            for row in &mut model.rows {
+                if let CompactListRow::Thread(row) = row {
+                    let row = Rc::make_mut(row);
+                    row.relative_time =
+                        humanize_ago(now.saturating_sub(row.meta.updated_at)).into();
+                }
+            }
+        }
+        model.clone()
+    }
+
+    /// Compact thread list with shared layout preference. Navigation replaces
+    /// persistent row selection; desktop-only controls stay in the desktop list.
+    fn pending_thread_rows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let cached = self.store.read(cx).sidebar_sessions();
+        let loading = self.store.read(cx).threads_loading();
+        v_flex()
+            .w_full()
+            .children(
+                self.store
+                    .read(cx)
+                    .pending_sessions()
+                    .into_iter()
+                    .filter(|(id, _)| loading || !cached.iter().any(|meta| &meta.id == id))
+                    .map(|(id, preview)| {
+                        v_flex()
+                            .id(SharedString::from(format!("pending-thread-{id}")))
+                            .debug_selector(|| "pending-thread-row".into())
+                            .px_4()
+                            .py_2()
+                            .gap_1()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .child(crate::tr!("chat.waiting_connection")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .truncate()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(preview),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().warning)
+                                    .child(crate::tr!("sidebar.pending_write")),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.store.update(cx, |store, cx| {
+                                    store.select_session(id.clone());
+                                    cx.notify();
+                                });
+                                this.window_state
+                                    .update(cx, |state, cx| state.open_thread(cx));
+                            }))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        #[cfg(test)]
+        self.compact_rows_rendered.set(0);
+        let model = self.compact_model(cx);
+        let layout = self.store.read(cx).sidebar_layout();
+        let body = if self.store.read(cx).threads_loading() {
+            if self.store.read(cx).pending_sessions().is_empty() {
+                crate::material::loading_skeleton(cx)
+            } else {
+                self.pending_thread_rows(cx)
+            }
+        } else if !model.has_projects {
+            div()
+                .id("threads-empty")
+                .debug_selector(|| "threads-empty".into())
+                .size_full()
+                .child(crate::material::empty_state(
+                    Icon::new(IconName::Folder),
+                    crate::tr!("mobile.projects_empty"),
+                    crate::tr!("mobile.projects_help"),
+                    cx,
+                ))
+                .into_any_element()
+        } else {
             div()
                 .id("compact-thread-list")
+                .debug_selector(|| "compact-thread-list".into())
                 .flex_1()
                 .min_h_0()
-                .overflow_y_scroll()
-                .child(list)
+                .child(crate::touch_scroll::register(
+                    list(
+                        self.compact_list_state.clone(),
+                        cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
+                            CompactListRow::Project(row) => {
+                                this.render_compact_group_header(row, cx).into_any_element()
+                            }
+                            CompactListRow::Thread(row) => v_flex()
+                                .w_full()
+                                .child(this.render_compact_thread(row, cx))
+                                .when(row.separator, |list| {
+                                    list.child(
+                                        div()
+                                            .w_full()
+                                            .pl(px(crate::material::COMPACT_PAGE_INSET))
+                                            .child(
+                                                div()
+                                                    .w_full()
+                                                    .h(px(1.))
+                                                    .bg(cx.theme().border.opacity(0.6)),
+                                            ),
+                                    )
+                                })
+                                .into_any_element(),
+                            CompactListRow::BottomInset => div().h(px(24.)).into_any_element(),
+                        }),
+                    )
+                    .size_full(),
+                    crate::touch_scroll::Handle::List(self.compact_list_state.clone()),
+                ))
                 .into_any_element()
         };
 
@@ -2289,6 +2708,30 @@ impl SessionsSidebar {
             .on_action(cx.listener(Self::on_archive))
             .on_action(cx.listener(Self::on_delete))
             .child(self.render_compact_search(cx))
+            .child(self.render_feature_rows(cx))
+            .child(
+                h_flex()
+                    .flex_none()
+                    .px(px(COMPACT_PAGE_PADDING))
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(match layout {
+                                SidebarLayout::Flat => crate::tr!("sidebar.recent"),
+                                SidebarLayout::Grouped => crate::tr!("sidebar.by_project"),
+                            }),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "compact-layout-toggle".into())
+                            .child(self.render_layout_toggle(layout, cx)),
+                    ),
+            )
+            .when(!self.store.read(cx).threads_loading(), |list| {
+                list.child(self.pending_thread_rows(cx))
+            })
             .child(body)
             .into_any_element()
     }
@@ -2307,6 +2750,7 @@ impl SessionsSidebar {
                     crate::tr!("mobile.search_threads"),
                     cx,
                 )
+                .debug_selector(|| "compact-search".into())
                 .h(px(COMPACT_SEARCH_HEIGHT))
                 .items_center()
                 .gap(px(8.))
@@ -2338,24 +2782,26 @@ impl SessionsSidebar {
 
     fn render_compact_group_header(
         &self,
-        group: &ProjectGroup,
-        collapsed: bool,
+        row: &CompactProjectRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let project_id = group.project.id.clone();
-        let count = visible_threads(&group.sessions, &self.collapsed_parents).len();
+        let project_id = row.project_id.clone();
+        let collapsed = row.collapsed;
         crate::material::accessible_clickable(
             h_flex(),
-            gpui::SharedString::from(format!("compact-group-{project_id}")),
+            row.row_id.clone(),
             Role::Button,
-            crate::tr!("sidebar.project", name = group.project.name.clone()).into_owned(),
+            row.label.clone(),
             cx,
         )
         .aria_expanded(!collapsed)
+        .debug_selector(|| "compact-group-header".into())
+        // A project is a section of the thread list, so its header is the
+        // shared list caption — with the collapse affordance it also carries.
         .w_full()
-        .mt(px(20.))
-        .mb(px(6.))
-        .h(px(24.))
+        .px(px(COMPACT_PAGE_PADDING))
+        .pt(px(16.))
+        .pb(px(4.))
         .items_center()
         .gap(px(8.))
         .cursor_pointer()
@@ -2364,121 +2810,178 @@ impl SessionsSidebar {
                 store.toggle_project_collapsed(project_id.clone());
             });
         }))
-        .child(
-            Icon::new(IconName::Folder)
-                .size(px(16.))
-                .text_color(cx.theme().muted_foreground),
-        )
+        .text_size(px(13.))
+        .text_color(cx.theme().muted_foreground)
+        .child(Icon::new(IconName::Folder).size(px(14.)))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(14.))
-                .font_semibold()
-                .child(group.project.name.clone()),
+                .font_medium()
+                .child(row.name.clone()),
         )
-        .child(
-            div()
-                .flex_none()
-                .text_size(px(13.))
-                .text_color(cx.theme().muted_foreground)
-                .child(count.to_string()),
-        )
+        .child(div().flex_none().child(row.count.clone()))
         .child(
             Icon::new(if collapsed {
                 IconName::ChevronRight
             } else {
                 IconName::ChevronDown
             })
-            .size(px(16.))
-            .text_color(cx.theme().muted_foreground),
+            .size(px(14.)),
         )
     }
 
-    /// One 56pt thread row. No chevron, no persistent selection — only a
-    /// pressed tint; long press opens the shared thread context menu.
+    /// One 56pt thread row; disclosure toggles children without navigating.
+    /// Long press opens the shared thread context menu.
     fn render_compact_thread(
         &self,
-        meta: &SessionMeta,
-        sessions: &[SessionMeta],
-        flags: &HashMap<String, ThreadFlags>,
+        cached: &CompactThreadRow,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
-        let state =
-            self.thread_row_state(meta, sessions, flags, format!("compact-thread-{}", meta.id));
+        #[cfg(test)]
+        self.compact_rows_rendered
+            .set(self.compact_rows_rendered.get() + 1);
+        let meta = &cached.meta;
+        let state = &cached.state;
+        let working = cached.working;
+        let project_name = cached.project_name.clone();
         let session_id = state.session_id.clone();
-        let status = compact_status_line(&state, working, cx);
+        let status = compact_status_line(state, working, cx);
         let click_id = session_id.clone();
+        let disclosure_id = session_id.clone();
+        let unavailable = meta.parent_session_id.is_some() && !state.is_child;
 
-        let row = crate::material::accessible_clickable(
-            h_flex(),
-            gpui::SharedString::from(format!("compact-thread-row-{session_id}")),
-            Role::Button,
-            crate::tr!("sidebar.thread", title = meta.title.clone()).into_owned(),
-            cx,
-        )
-        .w_full()
-        .min_h(px(COMPACT_ROW_HEIGHT))
-        .items_center()
-        .gap(px(12.))
-        .py(px(8.))
-        .px(px(8.))
-        .rounded(crate::material::radius_card())
-        // Rows needing the user carry a 6% semantic wash; everything else sits
-        // on the paper with only a pressed tint.
-        .when(state.waiting_for_approval, |row| {
-            row.bg(cx.theme().warning.opacity(0.06))
-        })
-        .when(
-            state.waiting_for_input && !state.waiting_for_approval,
-            |row| row.bg(cx.theme().primary.opacity(0.06)),
-        )
-        .cursor_pointer()
-        .active(|s| s.bg(cx.theme().foreground.opacity(0.08)))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.store.update(cx, |store, _cx| {
-                store.select_session(click_id.clone());
-            });
-            this.window_state
-                .update(cx, |state, cx| state.open_thread(cx));
-        }))
-        .child(compact_status_glyph(&state, working, cx))
-        .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(16.))
-                        .line_height(px(21.))
-                        .when(state.show_unread, |title| title.font_semibold())
-                        .child(meta.title.clone()),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap(px(4.))
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .text_color(cx.theme().muted_foreground)
-                        .when_some(status, |line, (label, color)| {
-                            line.child(div().flex_none().text_color(color).child(label))
+        let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
+            .debug_selector({
+                let id = session_id.clone();
+                move || format!("compact-row-{id}")
+            })
+            .when(state.is_child, |row| {
+                row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
+            })
+            .when(
+                self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
+                |row| row.bg(cx.theme().list_active).aria_selected(true),
+            )
+            // Rows needing the user carry a 6% semantic wash; everything else sits
+            // on the paper with only hover and pressed tints.
+            .when(state.waiting_for_approval, |row| {
+                row.bg(cx.theme().warning.opacity(0.06))
+            })
+            .when(
+                state.waiting_for_input && !state.waiting_for_approval,
+                |row| row.bg(cx.theme().primary.opacity(0.06)),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.store.read(cx).session_loading()
+                    && this.store.read(cx).active_session_id().as_deref() == Some(click_id.as_str())
+                {
+                    return;
+                }
+                this.store.update(cx, |store, cx| {
+                    store.select_session(click_id.clone());
+                    cx.notify();
+                });
+                this.window_state
+                    .update(cx, |state, cx| state.open_thread(cx));
+            }))
+            .child(compact_status_glyph(state, working, cx))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(16.))
+                            .line_height(px(21.))
+                            .when(!state.is_child, |title| title.font_medium())
+                            .when(state.show_unread, |title| title.font_semibold())
+                            .debug_selector({
+                                let id = session_id.clone();
+                                move || format!("compact-title-{id}")
+                            })
+                            .child(cached.title.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(4.))
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .text_color(cx.theme().muted_foreground)
+                            .when(
+                                self.store.read(cx).session_has_pending_writes(&session_id),
+                                |line| line.child(crate::tr!("sidebar.pending_write")),
+                            )
+                            .when(unavailable, |line| {
+                                line.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .debug_selector(|| "compact-parent-unavailable".into())
+                                        .child(crate::tr!("sidebar.parent_unavailable")),
+                                )
                                 .child(div().flex_none().child("·"))
-                        })
-                        .child(
-                            div()
-                                .flex_none()
-                                .child(humanize_ago(now_secs().saturating_sub(meta.updated_at))),
-                        ),
-                ),
-        );
+                            })
+                            .when_some(project_name, |line, name| {
+                                line.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .debug_selector({
+                                            let name = name.clone();
+                                            move || format!("compact-project-{name}")
+                                        })
+                                        .child(name),
+                                )
+                                .child(div().flex_none().child("·"))
+                            })
+                            .when_some(status, |line, (label, color)| {
+                                line.child(div().flex_none().text_color(color).child(label))
+                                    .child(div().flex_none().child("·"))
+                            })
+                            .child(div().flex_none().child(cached.relative_time.clone())),
+                    ),
+            )
+            .when(state.has_direct_children(), |row| {
+                row.child(
+                    crate::material::accessible_clickable(
+                        h_flex(),
+                        cached.children_id.clone(),
+                        Role::Button,
+                        cached.children_label.clone(),
+                        cx,
+                    )
+                    .debug_selector({
+                        let id = session_id.clone();
+                        move || format!("compact-children-{id}")
+                    })
+                    .aria_expanded(!state.children_collapsed)
+                    .flex_none()
+                    .min_w(px(44.))
+                    .h(px(44.))
+                    .justify_center()
+                    .gap(px(2.))
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if !this.collapsed_parents.remove(&disclosure_id) {
+                            this.collapsed_parents.insert(disclosure_id.clone());
+                        }
+                        this.compact_model_dirty = true;
+                        cx.notify();
+                    }))
+                    .child(collapse_chevron(state.children_collapsed, cx))
+                    .child(cached.children_count.clone()),
+                )
+            });
         Self::thread_context_menu(
             row,
             session_id,
@@ -2678,7 +3181,14 @@ impl Render for SessionsSidebar {
                         .overflow_y_scrollbar()
                         .child(div().size_full().child(list_content))
                         .into_any_element();
-                    (self.render_flat_header(cx).into_any_element(), thread_list)
+                    (
+                        self.render_flat_header(cx).into_any_element(),
+                        crate::touch_scroll::register(
+                            thread_list,
+                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
+                        )
+                        .into_any_element(),
+                    )
                 } else {
                     let top_offsets = flat_thread_top_offsets(&visible, &flat_sessions);
                     let visible = visible
@@ -2725,7 +3235,14 @@ impl Render for SessionsSidebar {
                         .flex_1()
                         .min_h_0()
                         .into_any_element();
-                    (self.render_flat_header(cx).into_any_element(), thread_list)
+                    (
+                        self.render_flat_header(cx).into_any_element(),
+                        crate::touch_scroll::register(
+                            thread_list,
+                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
+                        )
+                        .into_any_element(),
+                    )
                 }
             }
         };
@@ -2751,8 +3268,22 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_start_draft_for_project))
             .child(self.render_app_row(window, cx))
             .child(self.render_search_row(cx))
+            .child(self.render_feature_rows(cx))
             .child(header)
-            .child(thread_list)
+            .child(if self.store.read(cx).threads_loading() {
+                if self.store.read(cx).pending_sessions().is_empty() {
+                    crate::material::loading_skeleton(cx)
+                } else {
+                    self.pending_thread_rows(cx)
+                }
+            } else {
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.pending_thread_rows(cx))
+                    .child(thread_list)
+                    .into_any_element()
+            })
             .child(self.render_footer(cx))
             .into_any_element()
     }
@@ -2928,7 +3459,7 @@ mod tests {
             state.sessions = vec![meta];
         }))
         .expect("seed sidebar host");
-        let store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));
@@ -2952,6 +3483,504 @@ mod tests {
         assert_eq!(title, "Original title");
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn compact_menu_dismissal_preserves_selection_and_clears_row_surface(cx: &mut TestAppContext) {
+        use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase};
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-menu-selection-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.clone());
+        let sessions = (0..12)
+            .map(|index| {
+                let mut meta = session(&format!("menu-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 1000 - index;
+                meta
+            })
+            .collect();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = sessions;
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let navigation = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (_, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), navigation.clone(), cx));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        // A remote host may not have sent status yet. Selection must repaint
+        // from the client notification without waiting for a host event.
+        host.shutdown_blocking().unwrap();
+        draw(cx);
+        let a = cx.debug_bounds("compact-row-menu-0").unwrap();
+        let b = cx.debug_bounds("compact-row-menu-10").unwrap();
+        let send = |cx: &mut VisualTestContext, id, phase, position| {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(id),
+                        phase,
+                        position,
+                        predicted_position: None,
+                        force: None,
+                    }),
+                    cx,
+                );
+            })
+        };
+        send(cx, 1, TouchPhase::Started, a.center());
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(801));
+        cx.run_until_parked();
+        send(cx, 1, TouchPhase::Ended, a.center());
+        draw(cx);
+        let menu = cx
+            .debug_bounds("tcode-popup-menu")
+            .expect("long press opens menu");
+        assert!(!menu.contains(&b.center()));
+        let selected = store.read_with(cx, |store, _| store.active_session_id());
+        let destination = navigation.read_with(cx, |state, _| state.destination());
+        send(cx, 2, TouchPhase::Started, b.center());
+        send(cx, 2, TouchPhase::Ended, b.center());
+        draw(cx);
+        assert!(cx.debug_bounds("tcode-popup-menu").is_none());
+        assert_eq!(
+            store.read_with(cx, |store, _| store.active_session_id()),
+            selected
+        );
+        assert_eq!(
+            navigation.read_with(cx, |state, _| state.destination()),
+            destination
+        );
+        let selected_surface = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
+            cx.update(|window, cx| {
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == bounds.scale(window.scale_factor())
+                        && quad.background == gpui::Background::from(cx.theme().list_active)
+                })
+            })
+        };
+        assert!(
+            !selected_surface(cx, a),
+            "dismissed A has no pressed or selected fill"
+        );
+        send(cx, 3, TouchPhase::Started, b.center());
+        send(cx, 3, TouchPhase::Ended, b.center());
+        draw(cx);
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.active_session_id())
+                .as_deref(),
+            Some("menu-10")
+        );
+        assert!(!selected_surface(cx, a));
+        assert!(selected_surface(cx, b), "selected surface follows B");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Exercise Recent and its persisted layout toggle at phone geometry,
+    /// returning whether By project draws a section header.
+    fn compact_list_has_project_headers(cx: &mut TestAppContext, projects: usize) -> bool {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-{projects}-project-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .expect("spawn sidebar test host");
+        let seeded: Vec<Project> = (0..projects)
+            .map(|index| Project::from_root(root.join(format!("project-{index}"))))
+            .collect();
+        let sessions = seeded
+            .iter()
+            .enumerate()
+            .map(|(index, project)| {
+                let mut meta = session(&format!("thread-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 100 + index as u64;
+                meta
+            })
+            .collect::<Vec<_>>();
+        let projects_seed = seeded.clone();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = projects_seed;
+            state.sessions = sessions;
+        }))
+        .expect("seed projects");
+
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (sidebar, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(393.), px(852.)));
+        sidebar.update(cx, |_, cx| {
+            cx.notify();
+        });
+        draw(cx);
+        assert!(
+            cx.debug_bounds("compact-thread-list").is_some(),
+            "the seeded threads are listed"
+        );
+        assert_eq!(
+            store.read_with(cx, |store, _| store.sidebar_layout()),
+            SidebarLayout::Flat
+        );
+        assert!(cx.debug_bounds("compact-group-header").is_none());
+        for index in 0..projects {
+            assert!(
+                cx.debug_bounds(if index == 0 {
+                    "compact-project-project-0"
+                } else {
+                    "compact-project-project-1"
+                })
+                .is_some(),
+                "Recent names each project in the subtitle"
+            );
+        }
+        if projects == 2 {
+            assert!(
+                cx.debug_bounds("compact-row-thread-1").unwrap().top()
+                    < cx.debug_bounds("compact-row-thread-0").unwrap().top(),
+                "last activity orders threads across projects"
+            );
+        }
+        let toggle = cx.debug_bounds("compact-layout-toggle").unwrap();
+        assert_eq!(toggle.size, size(px(44.), px(44.)));
+        cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            draw(cx);
+            if store.read_with(cx, |store, _| store.sidebar_layout()) == SidebarLayout::Grouped {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "layout change reaches the replica"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let headers = cx.debug_bounds("compact-group-header").is_some();
+        if projects > 1 {
+            for collapsed in [true, false] {
+                let header = cx.debug_bounds("compact-group-header").unwrap();
+                cx.simulate_click(header.center(), gpui::Modifiers::default());
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                    draw(cx);
+                    let any_collapsed = store.read_with(cx, |store, _| {
+                        seeded
+                            .iter()
+                            .any(|project| store.is_project_collapsed(&project.id))
+                    });
+                    if any_collapsed == collapsed {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "project toggle reaches the replica"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let visible = ["compact-row-thread-0", "compact-row-thread-1"]
+                    .into_iter()
+                    .filter(|selector| cx.debug_bounds(selector).is_some())
+                    .count();
+                assert_eq!(
+                    visible,
+                    if collapsed { 1 } else { 2 },
+                    "the folder action hides and restores its threads"
+                );
+            }
+        }
+
+        host.shutdown_blocking().expect("stop host");
+        let persisted = tcode_services::settings::SettingsStore::new(root.clone()).load();
+        assert_eq!(
+            persisted.sidebar_layout,
+            SidebarLayout::Grouped,
+            "the actual header action persists the shared choice"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        headers
+    }
+
+    /// A project header separates one project from the next. With a single
+    /// project there is nothing to separate, so the compact list shows its
+    /// threads directly; a second project brings the headers back.
+    #[gpui::test]
+    fn compact_recent_orders_projects_and_switches_to_persisted_grouped_view(
+        cx: &mut TestAppContext,
+    ) {
+        assert!(
+            !compact_list_has_project_headers(cx, 1),
+            "a single project needs no header to separate it from anything"
+        );
+        assert!(
+            compact_list_has_project_headers(cx, 2),
+            "two projects need their headers back"
+        );
+    }
+
+    #[gpui::test]
+    fn compact_scroll_reuses_model_and_renders_only_viewport(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        struct SlidingPage {
+            sidebar: Entity<SessionsSidebar>,
+            offset: gpui::Pixels,
+        }
+        impl Render for SlidingPage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().overflow_hidden().child(
+                    div()
+                        .absolute()
+                        .left(self.offset)
+                        .size_full()
+                        .child(self.sidebar.clone()),
+                )
+            }
+        }
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-virtual-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.join("project"));
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.sessions = (0..300)
+                .map(|index| {
+                    let mut meta = session(&format!("virtual-{index}"), None);
+                    meta.project_id = Some(project.id.clone());
+                    meta.updated_at = now_secs().saturating_sub(index);
+                    meta
+                })
+                .collect();
+            state.projects = vec![project];
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
+            sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
+            offset: px(0.),
+        });
+        let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
+        cx.simulate_resize(size(px(393.), px(852.)));
+        draw(cx);
+        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
+        assert_eq!(model.rows.len(), 301);
+        for (index, selector) in [
+            (0, "compact-row-virtual-0"),
+            (100, "compact-row-virtual-100"),
+            (200, "compact-row-virtual-200"),
+        ] {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.compact_rows_rendered.set(0);
+                sidebar.compact_list_state.scroll_to(gpui::ListOffset {
+                    item_ix: index,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            });
+            page.update(cx, |page, cx| {
+                page.offset = px(index as f32);
+                cx.notify();
+            });
+            draw(cx);
+            sidebar.read_with(cx, |sidebar, _| {
+                assert!(
+                    Rc::ptr_eq(&model, sidebar.compact_model.as_ref().unwrap()),
+                    "scrolling must not rebuild families or labels"
+                );
+                assert!(
+                    sidebar.compact_rows_rendered.get() < 40,
+                    "one phone viewport must not construct 300 rows: rendered {} at index {index}",
+                    sidebar.compact_rows_rendered.get()
+                );
+            });
+            assert!(cx.debug_bounds(selector).is_some());
+        }
+        store.update(cx, |_, cx| {
+            cx.emit(StoreChange {
+                topic: TopicKind::Index,
+            })
+        });
+        draw(cx);
+        sidebar.read_with(cx, |sidebar, _| {
+            assert!(
+                !Rc::ptr_eq(&model, sidebar.compact_model.as_ref().unwrap()),
+                "Index updates invalidate cached row state"
+            );
+            assert_eq!(
+                sidebar.compact_list_state.logical_scroll_top().item_ix,
+                200,
+                "store changes retain the visible thread anchor"
+            );
+        });
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn compact_families_keep_activity_order_indent_and_collapse(cx: &mut TestAppContext) {
+        use tcode_protocol::{
+            EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
+        };
+        cx.update(crate::theme::init);
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = Project::from_root(PathBuf::from("/project"));
+        let mut sessions = Vec::new();
+        for (id, parent, activity) in [
+            ("parent", None, 10),
+            ("older-child", Some("parent"), 20),
+            ("other", None, 30),
+            ("running-child", Some("parent"), 40),
+            ("orphan", Some("archived"), 5),
+            ("missing-parent-child", Some("missing"), 4),
+            ("archived", None, 1),
+        ] {
+            let mut meta = session(id, parent);
+            meta.project_id = Some(project.id.clone());
+            meta.updated_at = activity;
+            if id == "archived" {
+                meta.archived_at = Some(1);
+            }
+            sessions.push(meta);
+        }
+        let send = |topic, event| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        send(
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(Default::default()),
+        );
+        send(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                sessions,
+                projects: vec![project],
+                activity: HashMap::from([("running-child".into(), (true, false, false, false))]),
+            }),
+        );
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session("parent".into()));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
+            let settings = tcode_core::settings::Settings {
+                sidebar_layout: layout,
+                ..Default::default()
+            };
+            send(Topic::Settings, ServerEvent::SettingsSnapshot(settings));
+            cx.run_until_parked();
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.collapsed_parents = HashSet::from(["archived".into(), "missing".into()]);
+                cx.notify();
+            });
+            draw(cx);
+            assert!(store.read_with(cx, |store, _| store.turn_running_for("running-child")));
+            let parent = cx.debug_bounds("compact-row-parent").unwrap();
+            let running = cx.debug_bounds("compact-row-running-child").unwrap();
+            let older = cx.debug_bounds("compact-row-older-child").unwrap();
+            let other = cx.debug_bounds("compact-row-other").unwrap();
+            assert!(
+                parent.top() < running.top()
+                    && running.top() < older.top()
+                    && older.top() < other.top(),
+                "{layout:?}: families sort by maximum activity, children by their activity"
+            );
+            assert_eq!(
+                cx.debug_bounds("compact-title-running-child")
+                    .unwrap()
+                    .left()
+                    - cx.debug_bounds("compact-title-parent").unwrap().left(),
+                px(16.)
+            );
+            assert_eq!(
+                cx.debug_bounds("compact-title-older-child").unwrap().left(),
+                cx.debug_bounds("compact-title-running-child")
+                    .unwrap()
+                    .left()
+            );
+            assert_eq!(
+                cx.debug_bounds("compact-title-orphan").unwrap().left(),
+                cx.debug_bounds("compact-title-parent").unwrap().left()
+            );
+            assert!(cx.debug_bounds("compact-parent-unavailable").is_some());
+            assert!(
+                cx.debug_bounds("compact-row-missing-parent-child")
+                    .is_some()
+            );
+            let disclosure = cx.debug_bounds("compact-children-parent").unwrap();
+            cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(cx.debug_bounds("compact-row-running-child").is_none());
+            assert!(cx.debug_bounds("compact-row-older-child").is_none());
+            assert!(
+                cx.debug_bounds("compact-row-parent").unwrap().top()
+                    < cx.debug_bounds("compact-row-other").unwrap().top()
+            );
+            assert_eq!(
+                store
+                    .read_with(cx, |store, _| store.active_session_id())
+                    .as_deref(),
+                Some("parent"),
+                "disclosure must not select or navigate"
+            );
+            cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(cx.debug_bounds("compact-row-running-child").is_some());
+        }
     }
 
     #[test]
@@ -3028,7 +4057,7 @@ mod tests {
             state.sessions = sessions;
         }))
         .expect("seed auto-archive host");
-        let store = cx.new(|cx| WorkspaceStore::new_local(&host, cx));
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
 
         let window_state = cx.new(|_| WindowState::new(false));
         let sidebar = cx.new(|cx| SessionsSidebar::new(store, window_state.clone(), cx));

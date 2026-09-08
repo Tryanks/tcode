@@ -1,14 +1,11 @@
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use sha2::{Digest as _, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustls::pki_types::ServerName;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_channel::{Receiver, Sender};
 use async_tungstenite::WebSocketStream;
@@ -17,13 +14,18 @@ use serde::Deserialize;
 use smol::Async;
 use tungstenite::Message;
 
-pub use tcode_client::ConnectionState;
 pub use tcode_client::pairing::{
-    PairInvite, PairedHost, is_pairing_code, pair_url, parse_pair_url,
+    PairInvite, PairedHost, is_pairing_code, lan_origin, pair_url, parse_pair_url,
+};
+pub use tcode_client::{ConnectionFailure, ConnectionState};
+
+use tcode_client::{
+    outgoing::{Outgoing, OutgoingReceiver, subscription_key},
+    recovery::{Backoff, Wake},
 };
 
 pub struct RemoteClient {
-    pub to_host: Sender<String>,
+    pub to_host: Outgoing,
     pub from_host: Receiver<String>,
     pub state: Receiver<ConnectionState>,
 }
@@ -33,82 +35,84 @@ struct PairResponse {
     host_id: String,
     host_name: String,
     token: String,
-    fp: String,
 }
 
-pub fn pair(addr: &str, port: u16, code: &str, device_name: &str) -> Result<PairedHost, String> {
-    pair_pinned(addr, port, code, device_name, "")
-}
-
-pub fn pair_pinned(
-    addr: &str,
-    port: u16,
-    code: &str,
-    device_name: &str,
-    fingerprint: &str,
-) -> Result<PairedHost, String> {
+pub fn pair(origin: &str, code: &str, device_name: &str) -> Result<PairedHost, String> {
+    let origin = tcode_client::pairing::parse_origin(origin)?;
     if !is_pairing_code(code) || device_name.is_empty() || device_name.len() > 256 {
         return Err("invalid pairing request".into());
     }
     let body = serde_json::json!({ "code": code, "device_name": device_name }).to_string();
-    let (bytes, seen) = tls_http(addr, port, "POST", "/pair", &body, fingerprint)?;
+    let bytes = http(&origin, "POST", "/pair", &body)?;
     let response: PairResponse =
         serde_json::from_slice(&bytes).map_err(|_| "invalid pairing response")?;
-    if !same_fingerprint(&seen, &response.fp) {
-        return Err(CERT_CHANGED.into());
-    }
     Ok(PairedHost {
         host_id: response.host_id,
         name: response.host_name,
-        addrs: vec![addr.to_owned()],
-        port,
+        origin,
         token: response.token,
-        fingerprint: seen,
         last_connected_unix: None,
     })
 }
 
-/// Bounded HTTP/1.1 over TLS, also used by the loopback headless admin client.
-/// Empty pin is allowed only for explicit pairing / legacy migration.
-pub fn tls_http(
-    addr: &str,
-    port: u16,
-    method: &str,
-    path: &str,
-    body: &str,
-    pin: &str,
-) -> Result<(Vec<u8>, String), String> {
+/// Bounded HTTP/1.1; HTTPS origins use the standard WebPKI trust roots.
+pub fn http(origin: &str, method: &str, path: &str, body: &str) -> Result<Vec<u8>, String> {
     use std::io::{Read as _, Write as _};
     if !matches!(
         (method, path),
-        ("POST", "/pair") | ("GET", "/admin/pair") | ("GET", "/") | ("HEAD", "/")
+        ("POST", "/pair" | "/auth/setup" | "/auth/login")
+            | ("GET", "/auth/state" | "/admin/pair" | "/")
+            | ("HEAD", "/")
     ) || body.len() > 4096
     {
         return Err("invalid HTTP request".into());
     }
-    let (config, seen) = tls_client_config(pin)?;
+    let url = url::Url::parse(origin).map_err(|e| e.to_string())?;
+    let addr = url
+        .host_str()
+        .ok_or("missing host")?
+        .trim_matches(['[', ']']);
+    let port = url.port_or_known_default().ok_or("missing port")?;
     let socket = TcpStream::connect_timeout(&socket_addr(addr, port)?, Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     socket
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(
+            if matches!(path, "/auth/setup" | "/auth/login") {
+                60
+            } else {
+                5
+            },
+        )))
         .map_err(|e| e.to_string())?;
     socket
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
-    let session =
-        rustls::ClientConnection::new(config, ServerName::try_from("tcode.local").unwrap())
-            .map_err(|e| e.to_string())?;
-    let mut stream = rustls::StreamOwned::new(session, socket);
+    trait HttpStream: std::io::Read + std::io::Write {}
+    impl<T: std::io::Read + std::io::Write> HttpStream for T {}
+    let mut stream: Box<dyn HttpStream> = if url.scheme() == "https" {
+        let session = rustls::ClientConnection::new(
+            tls_client_config()?,
+            ServerName::try_from(addr.to_owned()).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Box::new(rustls::StreamOwned::new(session, socket))
+    } else if url.scheme() == "http" {
+        Box::new(socket)
+    } else {
+        return Err("unsupported scheme".into());
+    };
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         authority(addr, port),
         body.len()
     );
-    stream.write_all(request.as_bytes()).map_err(tls_error)?;
-    stream.flush().map_err(tls_error)?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
-    // The server closes its HTTP stream without TLS close_notify; accept that
-    // only when the complete Content-Length-delimited response was received.
+    // A tunnel may close TLS without close_notify. Require the complete
+    // Content-Length-delimited response before accepting such a close.
     let read = (&mut stream).take(65537).read_to_end(&mut bytes);
     if bytes.len() > 65536 {
         return Err("HTTP response too large".into());
@@ -118,7 +122,7 @@ pub fn tls_http(
         .position(|w| w == b"\r\n\r\n")
         .ok_or_else(|| {
             read.err()
-                .map(tls_error)
+                .map(|e| e.to_string())
                 .unwrap_or_else(|| "invalid HTTP response".into())
         })?;
     let head = std::str::from_utf8(&bytes[..split]).map_err(|_| "invalid HTTP response")?;
@@ -135,8 +139,7 @@ pub fn tls_http(
     if body.len() != length {
         return Err("incomplete HTTP response".into());
     }
-    let fingerprint = seen.lock().unwrap().clone();
-    Ok((body.to_vec(), fingerprint))
+    Ok(body.to_vec())
 }
 
 pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
@@ -144,12 +147,6 @@ pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
         Ok(bytes) => {
             let hosts: Vec<PairedHost> =
                 serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            for host in &hosts {
-                HOST_PATHS
-                    .lock()
-                    .unwrap()
-                    .insert(host.host_id.clone(), data_dir.to_owned());
-            }
             Ok(hosts)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -159,18 +156,7 @@ pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
 
 pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     fs::create_dir_all(data_dir)?;
-    // A UI may still hold its pre-migration record while updating last-used.
-    // Never erase a persisted TOFU pin when saving such a legacy record.
-    let existing = load_hosts(data_dir)?;
-    let mut merged = hosts.to_vec();
-    for host in &mut merged {
-        if host.fingerprint.is_empty()
-            && let Some(old) = existing.iter().find(|old| old.host_id == host.host_id)
-        {
-            host.fingerprint = old.fingerprint.clone();
-        }
-    }
-    let bytes = serde_json::to_vec_pretty(&merged).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec_pretty(hosts).map_err(io::Error::other)?;
     let temporary = data_dir.join("hosts.json.tmp");
     use std::io::Write as _;
     let mut options = fs::OpenOptions::new();
@@ -183,17 +169,11 @@ pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     let mut file = options.open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
-    for host in hosts {
-        HOST_PATHS
-            .lock()
-            .unwrap()
-            .insert(host.host_id.clone(), data_dir.to_owned());
-    }
     fs::rename(temporary, data_dir.join("hosts.json"))
 }
 
 pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
-    let (to_host, outgoing) = async_channel::unbounded();
+    let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     std::thread::Builder::new()
@@ -218,265 +198,499 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
 async fn connection_loop(
     mut host: PairedHost,
     device_name: String,
-    outgoing: Receiver<String>,
+    outgoing: OutgoingReceiver,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
 ) {
-    CERT_ERRORS.lock().unwrap().remove(&host.host_id);
     let mut buffered = VecDeque::<String>::new();
     let mut subscriptions = HashMap::<String, String>::new();
-    let mut attempt = 0_u32;
+    let mut backoff = Backoff::default();
+    let mut reason = None;
     while !outgoing.is_closed() && !incoming.is_closed() {
-        attempt = attempt.saturating_add(1);
-        let _ = state.send(ConnectionState::Reconnecting { attempt }).await;
-        let mut connected = None;
-        for address in host.addrs.clone() {
-            match open_websocket(&address, &mut host, &device_name).await {
-                Ok(websocket) => {
-                    connected = Some(websocket);
-                    break;
+        outgoing.discard_retained_writes(&mut buffered);
+        let _ = state
+            .send(ConnectionState::Reconnecting {
+                attempt: backoff.attempt(),
+                reason,
+            })
+            .await;
+        let mut stable_ms = 0;
+        let mut interrupted = None;
+        let opened = futures_lite::future::race(
+            async { Ok(race_addresses(&host, &device_name).await) },
+            async { Err(outgoing.wake.recv().await) },
+        )
+        .await;
+        let opened = match opened {
+            Ok(result) => result,
+            Err(wake) => {
+                if let Ok(Wake::Origin(origin)) = wake {
+                    host.origin = origin;
                 }
-                Err(error) if error.contains(CERT_CHANGED) => {
-                    CERT_ERRORS.lock().unwrap().insert(host.host_id.clone());
-                    let _ = state.send(ConnectionState::Offline).await;
-                    incoming.close();
-                    return;
-                }
-                Err(_) => log::debug!("remote connection attempt failed"),
+                continue;
             }
-        }
-        if let Some(mut websocket) = connected {
-            let mut ready = true;
-            for line in subscriptions.values() {
-                if websocket
-                    .send(Message::Text(line.trim_end().to_owned().into()))
+        };
+        let failure = match opened {
+            Ok(mut websocket) => {
+                let _ = state.send(ConnectionState::Syncing).await;
+                let mut failure = None;
+                for line in subscriptions.values() {
+                    if let Err(error) = send_interruptible(
+                        &mut websocket,
+                        Message::Text(line.trim_end().to_owned().into()),
+                        Instant::now()
+                            + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS),
+                        &outgoing,
+                        &mut interrupted,
+                    )
                     .await
-                    .is_err()
-                {
-                    ready = false;
-                    break;
-                }
-            }
-            if ready {
-                while let Some(line) = buffered.pop_front() {
-                    if subscription_key(&line).is_some() {
-                        continue;
-                    }
-                    if websocket
-                        .send(Message::Text(line.trim_end().to_owned().into()))
-                        .await
-                        .is_err()
                     {
-                        buffered.push_front(line);
-                        ready = false;
+                        failure = Some(error);
                         break;
                     }
                 }
+                if failure.is_none() {
+                    while let Some(line) = buffered.pop_front() {
+                        if subscription_key(&line).is_some() {
+                            continue;
+                        }
+                        if let Err(error) = send_interruptible(
+                            &mut websocket,
+                            Message::Text(line.trim_end().to_owned().into()),
+                            Instant::now()
+                                + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS),
+                            &outgoing,
+                            &mut interrupted,
+                        )
+                        .await
+                        {
+                            buffered.push_front(line);
+                            failure = Some(error);
+                            break;
+                        }
+                        outgoing.sent(&line);
+                    }
+                }
+                match failure {
+                    Some(error) => error,
+                    None => {
+                        let started = Instant::now();
+                        let (error, healthy, wake) = relay_connected(
+                            &mut websocket,
+                            &outgoing,
+                            &incoming,
+                            &mut subscriptions,
+                            &mut buffered,
+                            &state,
+                        )
+                        .await;
+                        if healthy {
+                            stable_ms = started.elapsed().as_millis() as u64;
+                        }
+                        if let Some(wake) = wake {
+                            if let Wake::Origin(origin) = wake {
+                                host.origin = origin;
+                            }
+                            continue;
+                        }
+                        error
+                    }
+                }
             }
-            if ready {
-                attempt = 0;
-                let _ = state.send(ConnectionState::Connected).await;
-                relay_connected(
-                    &mut websocket,
-                    &outgoing,
-                    &incoming,
-                    &mut subscriptions,
-                    &mut buffered,
-                )
+            Err(error) => error,
+        };
+        if let Some(wake) = interrupted {
+            if let Wake::Origin(origin) = wake {
+                host.origin = origin;
+            }
+            continue;
+        }
+        if failure.is_terminal() {
+            let _ = state
+                .send(ConnectionState::Offline { reason: failure })
                 .await;
-            }
+            incoming.close();
+            return;
         }
         if outgoing.is_closed() || incoming.is_closed() {
             break;
         }
-        let backoff_attempt = attempt.clamp(1, 6);
-        let seconds = (1_u64 << (backoff_attempt - 1)).min(30);
-        buffer_during_backoff(
+        reason = Some(failure);
+        let delay = backoff.failed(stable_ms, jitter_sample());
+        // Publish loss before sleeping, so the UI never claims this socket is alive.
+        let _ = state
+            .send(ConnectionState::Reconnecting {
+                attempt: backoff.attempt(),
+                reason,
+            })
+            .await;
+        if let Some(Wake::Origin(origin)) = buffer_during_backoff(
             &outgoing,
             &mut buffered,
             &mut subscriptions,
-            Duration::from_secs(seconds),
+            Duration::from_millis(delay),
         )
-        .await;
+        .await
+        {
+            host.origin = origin;
+        }
     }
-    let _ = state.send(ConnectionState::Offline).await;
+    let _ = state
+        .send(ConnectionState::Offline {
+            reason: ConnectionFailure::HostClosed,
+        })
+        .await;
     incoming.close();
 }
 
-async fn open_websocket(
-    address: &str,
-    host: &mut PairedHost,
+trait SocketStream: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send {}
+impl<T: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send> SocketStream
+    for T
+{
+}
+type WebSocket = WebSocketStream<Box<dyn SocketStream>>;
+
+fn connection_failure(error: String) -> ConnectionFailure {
+    log::debug!("remote connection failed: {error}");
+    ConnectionFailure::Unreachable
+}
+
+async fn race_addresses(
+    host: &PairedHost,
     device_name: &str,
-) -> Result<WebSocketStream<futures_rustls::client::TlsStream<Async<TcpStream>>>, String> {
-    // A foreground reconnect can still carry the UI's original legacy record.
-    // Consult the durable pin before allowing TOFU again.
-    if host.fingerprint.is_empty() {
-        let path = HOST_PATHS.lock().unwrap().get(&host.host_id).cloned();
-        if let Some(path) = path
-            && let Some(saved) = load_hosts(&path)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .find(|saved| saved.host_id == host.host_id)
-        {
-            host.fingerprint = saved.fingerprint;
-        }
-    }
-    let socket = socket_addr(address, host.port)?;
-    let (config, seen) = tls_client_config(&host.fingerprint)?;
-    let stream = futures_lite::future::race(
+) -> Result<WebSocket, ConnectionFailure> {
+    let url = url::Url::parse(&host.origin).map_err(|e| connection_failure(e.to_string()))?;
+    let name = url
+        .host_str()
+        .ok_or(ConnectionFailure::Unreachable)?
+        .trim_matches(['[', ']'])
+        .to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or(ConnectionFailure::Unreachable)?;
+    let addresses = futures_lite::future::race(
         async {
-            let tcp = Async::<TcpStream>::connect(socket)
+            smol::net::resolve((name.as_str(), port))
                 .await
-                .map_err(tls_error)?;
-            futures_rustls::TlsConnector::from(config)
-                .connect(ServerName::try_from("tcode.local").unwrap(), tcp)
-                .await
-                .map_err(tls_error)
+                .map_err(|e| connection_failure(e.to_string()))
         },
         async {
             smol::Timer::after(Duration::from_secs(5)).await;
-            Err("connection timed out".into())
+            Err(ConnectionFailure::Timeout)
         },
     )
     .await?;
-    if host.fingerprint.is_empty() {
-        persist_tofu_pin(host, &seen.lock().unwrap())?;
+    let mut attempts = futures_util::stream::FuturesUnordered::new();
+    for (index, address) in addresses.into_iter().enumerate() {
+        let url = &url;
+        attempts.push(async move {
+            smol::Timer::after(Duration::from_millis(250 * index as u64)).await;
+            futures_lite::future::race(open_websocket(address, url, host, device_name), async {
+                smol::Timer::after(Duration::from_secs(15)).await;
+                Err(ConnectionFailure::Timeout)
+            })
+            .await
+        });
     }
-    let url = format!("wss://{}/ws", authority(address, host.port));
-    let (mut websocket, _) = async_tungstenite::client_async(url, stream)
+    let mut failure = ConnectionFailure::Unreachable;
+    while let Some(result) = attempts.next().await {
+        match result {
+            Ok(socket) => return Ok(socket),
+            Err(error) if error.is_terminal() => return Err(error),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+async fn send_interruptible(
+    socket: &mut WebSocket,
+    message: Message,
+    deadline: Instant,
+    outgoing: &OutgoingReceiver,
+    interrupted: &mut Option<Wake>,
+) -> Result<(), ConnectionFailure> {
+    futures_lite::future::race(send_before(socket, message, deadline), async {
+        *interrupted = outgoing.wake.recv().await.ok();
+        Err(ConnectionFailure::Unreachable)
+    })
+    .await
+}
+
+async fn send_before(
+    socket: &mut WebSocket,
+    message: Message,
+    deadline: Instant,
+) -> Result<(), ConnectionFailure> {
+    let deadline = deadline
+        .min(Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS));
+    futures_lite::future::race(
+        async {
+            socket
+                .send(message)
+                .await
+                .map_err(|_| ConnectionFailure::Unreachable)
+        },
+        async {
+            smol::Timer::at(deadline).await;
+            Err(ConnectionFailure::Timeout)
+        },
+    )
+    .await
+}
+
+async fn open_websocket(
+    address: SocketAddr,
+    origin: &url::Url,
+    host: &PairedHost,
+    device_name: &str,
+) -> Result<WebSocket, ConnectionFailure> {
+    let tcp = Async::<TcpStream>::connect(address)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| connection_failure(e.to_string()))?;
+    let stream: Box<dyn SocketStream> = if origin.scheme() == "https" {
+        let name = origin
+            .host_str()
+            .ok_or(ConnectionFailure::Unreachable)?
+            .trim_matches(['[', ']'])
+            .to_owned();
+        Box::new(
+            futures_rustls::TlsConnector::from(tls_client_config().map_err(connection_failure)?)
+                .connect(
+                    ServerName::try_from(name).map_err(|e| connection_failure(e.to_string()))?,
+                    tcp,
+                )
+                .await
+                .map_err(|e| connection_failure(e.to_string()))?,
+        )
+    } else if origin.scheme() == "http" {
+        Box::new(tcp)
+    } else {
+        return Err(ConnectionFailure::Unreachable);
+    };
+    let mut url = origin.clone();
+    url.set_scheme(if origin.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    })
+    .map_err(|_| ConnectionFailure::Unreachable)?;
+    url.set_path("/ws");
+    let (mut websocket, _) = async_tungstenite::client_async(url.as_str(), stream)
+        .await
+        .map_err(|e| connection_failure(e.to_string()))?;
     let hello = serde_json::json!({
         "type": "hello",
-        "protocol_version": tcode_protocol::PROTOCOL_VERSION,
+        "protocol_version": 3,
+        "supported_versions": [3, tcode_protocol::PROTOCOL_VERSION],
         "token": host.token,
         "device_name": device_name,
     });
     websocket
         .send(Message::Text(hello.to_string().into()))
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| connection_failure(error.to_string()))?;
     match websocket.next().await {
         Some(Ok(Message::Text(text))) => {
-            let value: serde_json::Value =
-                serde_json::from_str(&text).map_err(|error| error.to_string())?;
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| connection_failure(error.to_string()))?;
             if value.get("type").and_then(serde_json::Value::as_str) == Some("hello_ok")
-                && value
-                    .get("protocol_version")
-                    .and_then(serde_json::Value::as_u64)
-                    == Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                && matches!(
+                    value
+                        .get("protocol_version")
+                        .and_then(serde_json::Value::as_u64),
+                    Some(3 | 4)
+                )
             {
                 Ok(websocket)
             } else {
-                Err("host rejected remote hello".into())
+                Err(if value["type"].as_str() == Some("hello_rejected") {
+                    ConnectionFailure::hello_rejected(value["reason"].as_str())
+                } else if value["type"].as_str() == Some("hello_ok") {
+                    ConnectionFailure::ProtocolMismatch
+                } else {
+                    ConnectionFailure::Unreachable
+                })
             }
         }
-        Some(Ok(_)) => Err("host sent a non-text hello response".into()),
-        Some(Err(error)) => Err(error.to_string()),
-        None => Err("host closed during hello".into()),
+        Some(Ok(Message::Close(_))) => Err(ConnectionFailure::HostClosed),
+        Some(Ok(_)) => Err(ConnectionFailure::Unreachable),
+        Some(Err(error)) => Err(connection_failure(error.to_string())),
+        None => Err(ConnectionFailure::HostClosed),
     }
-}
-
-fn persist_tofu_pin(host: &mut PairedHost, observed: &str) -> Result<(), String> {
-    // Two initial connections must not overwrite each other's first pin.
-    let _migration = PIN_MIGRATION.lock().unwrap();
-    let path = HOST_PATHS.lock().unwrap().get(&host.host_id).cloned();
-    if let Some(path) = path {
-        let mut hosts = load_hosts(&path).map_err(|e| e.to_string())?;
-        if let Some(saved) = hosts.iter_mut().find(|saved| saved.host_id == host.host_id) {
-            if !saved.fingerprint.is_empty() && !same_fingerprint(&saved.fingerprint, observed) {
-                return Err(CERT_CHANGED.into());
-            }
-            saved.fingerprint = observed.to_owned();
-        }
-        save_hosts(&path, &hosts).map_err(|e| e.to_string())?;
-    }
-    log::warn!("legacy paired host has no certificate pin; trusting first TLS connection");
-    host.fingerprint = observed.to_owned();
-    Ok(())
 }
 
 async fn relay_connected(
-    websocket: &mut WebSocketStream<futures_rustls::client::TlsStream<Async<TcpStream>>>,
-    outgoing: &Receiver<String>,
+    websocket: &mut WebSocket,
+    outgoing: &OutgoingReceiver,
     incoming: &Sender<String>,
     subscriptions: &mut HashMap<String, String>,
     buffered: &mut VecDeque<String>,
-) {
+    state: &Sender<ConnectionState>,
+) -> (ConnectionFailure, bool, Option<Wake>) {
+    let mut healthy = false;
+    let mut interrupted = None;
+    let mut connected = false;
+    let mut deadline =
+        Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS);
+    let mut probing = false;
+    let mut foreground_probe = false;
     loop {
         enum Input {
             Outgoing(Result<String, async_channel::RecvError>),
             WebSocket(Option<Result<Message, tungstenite::Error>>),
+            Timer,
+            Wake(Result<Wake, async_channel::RecvError>),
         }
         let input = {
+            let wake = outgoing.wake.recv().fuse();
             let outbound = outgoing.recv().fuse();
             let websocket_input = websocket.next().fuse();
-            futures_util::pin_mut!(outbound, websocket_input);
+            let timer = futures_util::FutureExt::fuse(smol::Timer::at(deadline));
+            futures_util::pin_mut!(outbound, websocket_input, timer, wake);
             futures_util::select! {
                 line = outbound => Input::Outgoing(line),
                 message = websocket_input => Input::WebSocket(message),
+                _ = timer => Input::Timer,
+                wake = wake => Input::Wake(wake),
             }
         };
-        match input {
+        if matches!(&input, Input::WebSocket(Some(Ok(message))) if !matches!(message, Message::Close(_)))
+        {
+            healthy = true;
+            probing = false;
+            foreground_probe = false;
+            deadline =
+                Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS);
+        }
+        let failure = match input {
+            Input::Wake(Ok(Wake::Probe)) => {
+                foreground_probe = true;
+                probing = true;
+                deadline = Instant::now() + Duration::from_secs(3);
+                send_interruptible(
+                    websocket,
+                    Message::Ping(Vec::new().into()),
+                    deadline,
+                    outgoing,
+                    &mut interrupted,
+                )
+                .await
+                .err()
+            }
+            Input::Wake(Ok(wake)) => return (ConnectionFailure::Unreachable, healthy, Some(wake)),
+            Input::Wake(Err(_)) => Some(ConnectionFailure::HostClosed),
+            Input::Timer if probing => Some(ConnectionFailure::Timeout),
+            Input::Timer => {
+                probing = true;
+                // Keep the silence window absolute so timer scheduling does not
+                // accumulate beyond the 10 + 20 second liveness budget.
+                deadline += Duration::from_millis(tcode_client::heartbeat::LIVENESS_REPLY_MS);
+                send_interruptible(
+                    websocket,
+                    Message::Ping(Vec::new().into()),
+                    deadline,
+                    outgoing,
+                    &mut interrupted,
+                )
+                .await
+                .err()
+            }
             Input::Outgoing(Ok(line)) => {
                 remember_subscription(&line, subscriptions);
-                if websocket
-                    .send(Message::Text(line.trim_end().to_owned().into()))
-                    .await
-                    .is_err()
-                {
-                    buffered.push_back(line);
-                    return;
+                let send_deadline = if probing {
+                    deadline
+                } else {
+                    Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS)
+                };
+                let failure = send_interruptible(
+                    websocket,
+                    Message::Text(line.trim_end().to_owned().into()),
+                    send_deadline,
+                    outgoing,
+                    &mut interrupted,
+                )
+                .await
+                .err();
+                if failure.is_some() {
+                    if subscription_key(&line).is_none() {
+                        buffered.push_back(line);
+                    }
+                } else {
+                    outgoing.sent(&line);
                 }
+                failure
             }
-            Input::Outgoing(Err(_)) => return,
+            Input::Outgoing(Err(_)) => Some(ConnectionFailure::HostClosed),
             Input::WebSocket(Some(Ok(Message::Text(line)))) => {
-                let mut line = line.to_string();
-                if !line.ends_with('\n') {
-                    line.push('\n');
+                if !connected {
+                    connected = true;
+                    let _ = state.send(ConnectionState::Connected).await;
                 }
-                if incoming.send(line).await.is_err() {
-                    return;
-                }
+                incoming
+                    .send(format!("{}\n", line.trim_end()))
+                    .await
+                    .err()
+                    .map(|_| ConnectionFailure::HostClosed)
             }
-            Input::WebSocket(Some(Ok(Message::Ping(payload)))) => {
-                if websocket.send(Message::Pong(payload)).await.is_err() {
-                    return;
-                }
+            Input::WebSocket(Some(Ok(Message::Ping(payload)))) => send_interruptible(
+                websocket,
+                Message::Pong(payload),
+                deadline,
+                outgoing,
+                &mut interrupted,
+            )
+            .await
+            .err(),
+            Input::WebSocket(Some(Ok(Message::Close(_))) | None) => {
+                Some(ConnectionFailure::HostClosed)
             }
-            Input::WebSocket(Some(Ok(Message::Close(_))) | Some(Err(_)) | None) => return,
-            Input::WebSocket(Some(Ok(_))) => {}
+            Input::WebSocket(Some(Err(_))) => Some(ConnectionFailure::Unreachable),
+            Input::WebSocket(Some(Ok(_))) => None,
+        };
+        if let Some(failure) = failure {
+            return (
+                failure,
+                healthy,
+                interrupted.or_else(|| foreground_probe.then_some(Wake::Reconnect)),
+            );
         }
     }
 }
 
 async fn buffer_during_backoff(
-    outgoing: &Receiver<String>,
+    outgoing: &OutgoingReceiver,
     buffered: &mut VecDeque<String>,
     subscriptions: &mut HashMap<String, String>,
     duration: Duration,
-) {
+) -> Option<Wake> {
     let deadline = futures_util::FutureExt::fuse(smol::Timer::after(duration));
     futures_util::pin_mut!(deadline);
     loop {
         enum Input {
             Line(Result<String, async_channel::RecvError>),
             Done,
+            Wake(Result<Wake, async_channel::RecvError>),
         }
         let input = {
+            let wake = outgoing.wake.recv().fuse();
             let line = outgoing.recv().fuse();
-            futures_util::pin_mut!(line);
+            futures_util::pin_mut!(line, wake);
             futures_util::select! {
                 line = line => Input::Line(line),
                 _ = deadline => Input::Done,
+                wake = wake => Input::Wake(wake),
             }
         };
         match input {
             Input::Line(Ok(line)) => {
                 remember_subscription(&line, subscriptions);
-                buffered.push_back(line);
+                if subscription_key(&line).is_none() {
+                    buffered.push_back(line);
+                }
             }
-            Input::Line(Err(_)) | Input::Done => return,
+            Input::Wake(wake) => return wake.ok(),
+            Input::Line(Err(_)) | Input::Done => return None,
         }
     }
 }
@@ -485,15 +699,6 @@ fn remember_subscription(line: &str, subscriptions: &mut HashMap<String, String>
     if let Some(key) = subscription_key(line) {
         subscriptions.insert(key, line.to_owned());
     }
-}
-
-fn subscription_key(line: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
-    let payload = value.get("payload")?;
-    if !matches!(payload.get("type")?.as_str()?, "subscribe" | "unsubscribe") {
-        return None;
-    }
-    serde_json::to_string(payload.get("content")?.get("topic")?).ok()
 }
 
 fn authority(address: &str, port: u16) -> String {
@@ -515,112 +720,24 @@ fn socket_addr(address: &str, port: u16) -> Result<SocketAddr, String> {
         .ok_or_else(|| "DNS returned no addresses".into())
 }
 
-pub const CERT_CHANGED: &str = "host certificate changed; pair again";
-static PIN_MIGRATION: Mutex<()> = Mutex::new(());
-static HOST_PATHS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static CERT_ERRORS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
-/// The shared ConnectionState stays transport-neutral; Offline carries this
-/// distinguishable reason through the native host's status accessor.
-pub fn certificate_changed(host_id: &str) -> bool {
-    CERT_ERRORS.lock().unwrap().contains(host_id)
-}
-
-fn tls_error(error: io::Error) -> String {
-    if error.to_string().contains(CERT_CHANGED) {
-        CERT_CHANGED.into()
-    } else {
-        "TLS connection failed".into()
-    }
-}
-
-fn same_fingerprint(left: &str, right: &str) -> bool {
-    tcode_client::pairing::valid_fingerprint(left)
-        && tcode_client::pairing::valid_fingerprint(right)
-        && left
-            .bytes()
-            .zip(right.bytes())
-            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-            == 0
-}
-
-struct PinVerifier {
-    pin: String,
-    seen: Arc<Mutex<String>>,
-}
-impl std::fmt::Debug for PinVerifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PinVerifier")
-    }
-}
-impl ServerCertVerifier for PinVerifier {
-    fn verify_server_cert(
-        &self,
-        cert: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        let fp: String = Sha256::digest(cert.as_ref())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        if !self.pin.is_empty() && !same_fingerprint(&fp, &self.pin) {
-            return Err(rustls::Error::General(CERT_CHANGED.into()));
-        }
-        *self.seen.lock().unwrap() = fp;
-        Ok(ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-type ObservedPin = Arc<Mutex<String>>;
-fn tls_client_config(pin: &str) -> Result<(Arc<rustls::ClientConfig>, ObservedPin), String> {
-    if !pin.is_empty() && !tcode_client::pairing::valid_fingerprint(pin) {
-        return Err("invalid certificate fingerprint".into());
-    }
-    let seen = Arc::new(Mutex::new(String::new()));
+fn tls_client_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|e| e.to_string())?
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(PinVerifier {
-        pin: pin.to_owned(),
-        seen: seen.clone(),
-    }))
+    .with_root_certificates(roots)
     .with_no_client_auth();
-    Ok((Arc::new(config), seen))
+    Ok(Arc::new(config))
+}
+
+fn jitter_sample() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Timing entropy decorrelates clients without adding a cryptographic RNG.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    f64::from(nanos % 1_000_001) / 1_000_000.
 }

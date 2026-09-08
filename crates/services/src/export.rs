@@ -13,8 +13,8 @@
 //! redacted.
 
 use std::fs;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
 
 use agent::{ItemContent, PlanStepStatus};
 use serde::{Deserialize, Serialize};
@@ -50,23 +50,54 @@ pub(crate) enum ReadExportError {
     Invalid(String),
 }
 
-/// Export `meta` and its persisted event log to `destination` atomically.
-pub fn export_thread(
+/// Render `meta` and its persisted event log into export bytes. Nothing is
+/// written: the client that asked owns the destination.
+pub fn render_thread(
     store: &SessionStore,
     meta: &SessionMeta,
-    destination: &Path,
     format: ThreadExportFormat,
-) -> io::Result<PathBuf> {
+) -> io::Result<Vec<u8>> {
     let event_log = store.read_event_log(&meta.id)?;
-    let bytes = match format {
-        ThreadExportFormat::Jsonl => render_jsonl(meta, &event_log)?,
+    match format {
+        ThreadExportFormat::Jsonl => render_jsonl(meta, &event_log),
         ThreadExportFormat::Markdown => {
             let events = parse_event_log(&event_log).map_err(invalid_data)?;
-            render_markdown(meta, &Timeline::fold_events(events)).into_bytes()
+            Ok(render_markdown(meta, &Timeline::fold_events(events)).into_bytes())
         }
+    }
+}
+
+/// IANA type for a rendered export, so a client can hand the bytes to a
+/// download or share sheet without re-deriving it from the extension.
+pub fn export_mime(format: ThreadExportFormat) -> &'static str {
+    match format {
+        ThreadExportFormat::Jsonl => "application/x-ndjson",
+        ThreadExportFormat::Markdown => "text/markdown",
+    }
+}
+
+/// A file name for `title` that is legal on every client OS we ship to, so the
+/// client never has to re-sanitize a host-authored title.
+pub fn export_file_name(title: &str, format: ThreadExportFormat) -> String {
+    let extension = match format {
+        ThreadExportFormat::Jsonl => "jsonl",
+        ThreadExportFormat::Markdown => "md",
     };
-    atomic_write(destination, &bytes)?;
-    Ok(destination.to_path_buf())
+    let sanitized: String = title
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            character if character.is_control() => '-',
+            character => character,
+        })
+        .collect();
+    let sanitized = sanitized.trim().trim_matches('.');
+    let stem: String = if sanitized.is_empty() {
+        "thread".into()
+    } else {
+        sanitized.chars().take(120).collect()
+    };
+    format!("{stem}.{extension}")
 }
 
 fn render_jsonl(meta: &SessionMeta, event_log: &[u8]) -> io::Result<Vec<u8>> {
@@ -224,24 +255,6 @@ fn attachment_references(timeline: &Timeline) -> Vec<String> {
     paths
 }
 
-fn atomic_write(destination: &Path, bytes: &[u8]) -> io::Result<()> {
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("thread-export");
-    let temporary = destination.with_file_name(format!(".{file_name}.tcode-tmp"));
-    let result = (|| {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, destination)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
 fn invalid_data(error: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
@@ -249,6 +262,7 @@ fn invalid_data(error: impl ToString) -> io::Error {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::path::PathBuf;
 
     use agent::{
         AgentEvent, ItemContent, ItemStatus, PlanStep, PlanStepStatus, ProviderKind, ThreadItem,
@@ -347,7 +361,11 @@ mod tests {
         let destination = SessionStore::open_at(destination_root.clone()).unwrap();
         let meta = fixture(&source);
         let export_path = source_root.join("thread.jsonl");
-        export_thread(&source, &meta, &export_path, ThreadExportFormat::Jsonl).unwrap();
+        fs::write(
+            &export_path,
+            render_thread(&source, &meta, ThreadExportFormat::Jsonl).unwrap(),
+        )
+        .unwrap();
         let exported = fs::read_to_string(&export_path).unwrap();
         let header: serde_json::Value =
             serde_json::from_str(exported.lines().next().unwrap()).unwrap();
@@ -396,11 +414,9 @@ mod tests {
         let root = temp_root("markdown");
         let store = SessionStore::open_at(root.clone()).unwrap();
         let meta = fixture(&store);
-        let first = root.join("first.md");
-        export_thread(&store, &meta, &first, ThreadExportFormat::Markdown).unwrap();
-        let first_bytes = fs::read(first).unwrap();
+        let rendered = render_thread(&store, &meta, ThreadExportFormat::Markdown).unwrap();
         assert_eq!(
-            String::from_utf8(first_bytes).unwrap(),
+            String::from_utf8(rendered).unwrap(),
             concat!(
                 "# Export fixture\n\n",
                 "- Format: tcode Markdown export v1\n",

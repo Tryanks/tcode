@@ -9,16 +9,16 @@ pub use tcode_protocol::{
     TerminalContextStatus as TerminalContext, TerminalSplitStatus as TerminalSplit,
 };
 
+mod projection;
+mod stored_output;
+pub(crate) use projection::{FRAME_INTERVAL, TerminalProjection, TerminalUpdate};
+pub(crate) use stored_output::render as render_stored_output;
+
 /// `TerminalDrawer` is a shared UI entity that swaps between conversations.
 /// Globally unique tab ids prevent its geometry, selection, bell, and event
 /// caches from aliasing two conversations whose first local tab would both be
 /// `1`.
 static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
-
-pub(crate) struct OutputReplay {
-    pub generation: u64,
-    pub bytes: std::collections::VecDeque<u8>,
-}
 
 pub struct TerminalEntry {
     pub id: u64,
@@ -33,15 +33,15 @@ pub struct TerminalWorkspace {
     next_context_id: u64,
 }
 
-/// Live terminal handles for local clients. Layout metadata travels in
-/// [`tcode_protocol::SessionStatus`] events; remote clients consume raw output
-/// bytes and maintain their own [`term::GridEmulator`].
+/// Host-private index from terminal id to its live PTY, so command dispatch and
+/// the grid projection can reach a terminal without walking every workspace.
+/// No client ever sees this: the grid itself is replicated over the pipe.
 #[derive(Clone, Default)]
-pub struct LocalTerminalRegistry {
+pub(crate) struct TerminalRegistry {
     handles: Arc<RwLock<HashMap<u64, Arc<term::Terminal>>>>,
 }
 
-impl LocalTerminalRegistry {
+impl TerminalRegistry {
     pub(crate) fn replace_from<'a>(
         &self,
         workspaces: impl IntoIterator<Item = &'a TerminalWorkspace>,
@@ -55,7 +55,7 @@ impl LocalTerminalRegistry {
         }
     }
 
-    pub fn terminal(&self, id: u64) -> Option<Arc<term::Terminal>> {
+    pub(crate) fn terminal(&self, id: u64) -> Option<Arc<term::Terminal>> {
         self.handles.read().unwrap().get(&id).cloned()
     }
 }
@@ -91,29 +91,6 @@ impl TerminalWorkspace {
         });
         self.active_id = Some(id);
         id
-    }
-
-    /// Combine serialized layout metadata with locally registered terminal handles.
-    pub fn from_replica(
-        status: &tcode_protocol::SessionStatus,
-        registry: &LocalTerminalRegistry,
-    ) -> Self {
-        Self {
-            terminals: status
-                .terminals
-                .iter()
-                .filter_map(|terminal| {
-                    registry.terminal(terminal.id).map(|handle| TerminalEntry {
-                        id: terminal.id,
-                        terminal: handle,
-                    })
-                })
-                .collect(),
-            active_id: status.active_terminal_id,
-            splits: status.terminal_splits.clone(),
-            contexts: status.terminal_contexts.clone(),
-            next_context_id: 1,
-        }
     }
 
     pub fn split_for(&self, terminal_id: u64) -> Option<TerminalSplit> {

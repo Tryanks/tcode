@@ -6,7 +6,7 @@ mod components;
 pub(crate) mod model;
 
 use components::images::PendingImage;
-#[cfg(all(feature = "desktop", target_os = "macos"))]
+#[cfg(all(feature = "voice", target_os = "macos"))]
 use components::voice::Voice;
 use model::*;
 
@@ -93,9 +93,22 @@ pub enum ComposerEvent {
     Submitted,
 }
 
+/// How far the draft field may grow before it scrolls. A compact window has to
+/// leave room for the keyboard, so it starts taller and stops sooner.
+fn auto_grow_rows(compact: bool) -> (usize, usize) {
+    if compact { (2, 5) } else { (1, 8) }
+}
+
+fn draft_placeholder(compact: bool) -> String {
+    if compact {
+        crate::tr!("mobile.message").into_owned()
+    } else {
+        crate::tr!("composer.placeholder").into_owned()
+    }
+}
+
 pub struct Composer {
     compact: bool,
-    placeholder_online: Option<bool>,
     workspace_store: Entity<WorkspaceStore>,
     input: Entity<TextareaState>,
     /// Dedicated free-form answer field shown inside an agent question card.
@@ -167,7 +180,7 @@ pub struct Composer {
     /// strip contains at least one scheduled row.
     scheduled_countdown_tick: Option<Task<()>>,
     /// Mic button + live dictation session (see `components::voice`).
-    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    #[cfg(all(feature = "voice", target_os = "macos"))]
     voice: Voice,
     _subscriptions: Vec<Subscription>,
 }
@@ -176,13 +189,51 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     fn interactive(&self, cx: &App) -> bool {
-        !self.compact
-            || *self.workspace_store.read(cx).connection_state()
-                == tcode_client::ConnectionState::Connected
+        !matches!(self.workspace_store.read(cx).connection_state(),
+            tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| input.focus(window, cx));
+        if !self.compact {
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_focus_handle(&self, cx: &App) -> gpui::FocusHandle {
+        self.input.read(cx).focus_handle(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn draft(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input
+            .update(cx, |input, cx| input.replace_all(text, window, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_compact(&self) -> bool {
+        self.compact
+    }
+
+    /// Follow the window onto the other layout. Updated in place on purpose: a
+    /// rebuilt composer would drop the draft, its selection and its pending
+    /// attachments, and the user only resized a window.
+    pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
+        if self.compact == compact {
+            return;
+        }
+        self.compact = compact;
+        let (min_rows, max_rows) = auto_grow_rows(compact);
+        // The placeholder has one owner in `render`; nudge it to re-apply there.
+        self.applied_placeholder.clear();
+        self.input
+            .update(cx, |input, cx| input.set_auto_grow(min_rows, max_rows, cx));
+        cx.notify();
     }
     pub fn new(
         workspace_store: Entity<WorkspaceStore>,
@@ -198,15 +249,15 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (min_rows, max_rows) = auto_grow_rows(compact);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(if compact { 2 } else { 1 }, if compact { 5 } else { 8 })
-                .submit_on_enter(!compact || !cfg!(any(target_os = "ios", target_os = "android")))
-                .placeholder(if compact {
-                    crate::tr!("mobile.message")
-                } else {
-                    crate::tr!("composer.placeholder")
-                })
+                .auto_grow(min_rows, max_rows)
+                // Whether Enter sends is an input-device question, not a width
+                // one: a wide tablet still types on glass, and a desktop window
+                // dragged narrow still has a hardware Enter key.
+                .submit_on_enter(!crate::window_seam::soft_keyboard())
+                .placeholder(draft_placeholder(compact))
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx).placeholder(crate::tr!("composer.search_models"))
@@ -267,7 +318,7 @@ impl Composer {
                     InputEvent::Change => {
                         // An edit that did not come from the transcript writer
                         // ends dictation (see `components::voice`).
-                        #[cfg(all(feature = "desktop", target_os = "macos"))]
+                        #[cfg(all(feature = "voice", target_os = "macos"))]
                         this.stop_dictation_on_user_edit(cx);
                         this.recompute_trigger(cx);
                         cx.notify();
@@ -332,7 +383,6 @@ impl Composer {
 
         Self {
             compact,
-            placeholder_online: None,
             workspace_store,
             input,
             user_input_custom,
@@ -364,7 +414,7 @@ impl Composer {
             image_load_generation: 0,
             pending_image_loads: 0,
             scheduled_countdown_tick: None,
-            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            #[cfg(all(feature = "voice", target_os = "macos"))]
             voice: Voice::new(),
             _subscriptions: subscriptions,
         }
@@ -385,7 +435,7 @@ impl Composer {
             return;
         };
         // The dictation anchor belongs to the text we are about to swap out.
-        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        #[cfg(all(feature = "voice", target_os = "macos"))]
         self.abort_dictation(cx);
         let cursor = incoming_text.len();
         self.input.update(cx, |state, cx| {
@@ -408,13 +458,15 @@ impl Composer {
         self.set_input_text(prefill, window, cx);
     }
 
-    /// Replace the composer text with `text`, caret at the end, focused.
+    /// Replace the composer text with `text`, caret at the end; focus in wide layout.
     fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
-            state.focus(window, cx);
+            if !self.compact {
+                state.focus(window, cx);
+            }
         });
         self.recompute_trigger(cx);
     }
@@ -435,7 +487,9 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(selection, cx);
-            state.focus(window, cx);
+            if !self.compact {
+                state.focus(window, cx);
+            }
         });
         self.recompute_trigger(cx);
     }
@@ -611,7 +665,7 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        #[cfg(all(feature = "voice", target_os = "macos"))]
         self.abort_dictation(cx);
         self.text_cache.clear_current();
         input.update(cx, |state, cx| state.set_value("", window, cx));
@@ -672,6 +726,7 @@ impl Composer {
         };
         // Keep the touch target larger than the visible circle.
         let button = crate::material::accessible_clickable(div(), id, Role::Button, label, cx)
+            .debug_selector(move || id.into())
             .size(px(44.))
             .flex()
             .items_center()
@@ -937,29 +992,39 @@ impl Render for Composer {
             .gap_1()
             .items_center();
 
-        #[cfg(all(feature = "desktop", target_os = "macos"))]
+        #[cfg(all(feature = "voice", target_os = "macos"))]
         let mic = if self.compact {
             None
         } else {
             self.render_mic_button(cx)
         };
-        #[cfg(not(all(feature = "desktop", target_os = "macos")))]
+        #[cfg(not(all(feature = "voice", target_os = "macos")))]
         let mic: Option<AnyElement> = None;
 
         let control_row = if self.compact {
             control_row_base
-                .flex_wrap()
-                .child(self.render_model_picker(cx))
-                .child(self.render_traits_picker(cx))
-                .child(div().flex_1())
-                .child(self.render_primary_action(turn_running, cx))
+                .flex_col()
                 .child(
                     h_flex()
                         .w_full()
-                        .flex_wrap()
+                        .min_w_0()
                         .gap_1()
+                        .items_center()
+                        .child(self.render_model_picker(cx))
+                        .child(self.render_traits_picker(cx))
+                        .child(div().flex_1())
+                        .child(self.render_primary_action(turn_running, cx)),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
                         .child(self.render_permission_picker(cx))
-                        .child(self.render_mode_chip(cx)),
+                        .child(self.render_mode_chip(cx))
+                        .child(div().flex_1())
+                        .child(self.render_context_meter(cx)),
                 )
         } else if compact {
             control_row_base
@@ -967,6 +1032,7 @@ impl Render for Composer {
                 .child(self.render_overflow_menu(cx))
                 .child(div().flex_1())
                 .children(mic)
+                .child(self.render_context_meter(cx))
                 .child(self.render_primary_action(turn_running, cx))
         } else {
             control_row_base
@@ -1010,8 +1076,10 @@ impl Render for Composer {
         // turn, so promising refinement there would misdescribe what Enter does.
         let desired_placeholder = if plan_ready_title.is_some() && self.refines_the_plan(cx) {
             crate::tr!("plan.refine_placeholder").into_owned()
+        } else if self.compact && !self.interactive(cx) {
+            crate::tr!("mobile.offline_message").into_owned()
         } else {
-            crate::tr!("composer.placeholder").into_owned()
+            draft_placeholder(self.compact)
         };
         if self.applied_placeholder != desired_placeholder {
             self.applied_placeholder = desired_placeholder.clone();
@@ -1095,19 +1163,9 @@ impl Render for Composer {
 
         // Focus swaps the hairline to primary in one frame. Geometry stays
         // fixed: focus never changes border width, radius, or layout.
-        if self.compact && self.placeholder_online != Some(self.interactive(cx)) {
-            self.placeholder_online = Some(self.interactive(cx));
-            let placeholder = if self.interactive(cx) {
-                crate::tr!("mobile.message")
-            } else {
-                crate::tr!("mobile.offline_message")
-            };
-            self.input.update(cx, |input, cx| {
-                input.set_placeholder(placeholder, window, cx)
-            });
-        }
         let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
+            .debug_selector(|| "composer-card".into())
             .w_full()
             .gap_1p5()
             .p(px(6.))
@@ -1144,7 +1202,7 @@ impl Render for Composer {
                 }
                 // Escape ends dictation (keeping the transcript) before it can
                 // mean anything else.
-                #[cfg(all(feature = "desktop", target_os = "macos"))]
+                #[cfg(all(feature = "voice", target_os = "macos"))]
                 if key == "escape" && this.stop_dictation(cx) {
                     cx.stop_propagation();
                     return;
@@ -1214,7 +1272,6 @@ impl Render for Composer {
             } else {
                 crate::chat::CONTENT_MIN_PADDING
             }))
-            .pt_1()
             .pb_2()
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
                 if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {

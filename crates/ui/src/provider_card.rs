@@ -6,7 +6,6 @@
 //! settings dialog, a transactional modal form.
 
 use crate::icon::Icon;
-#[cfg(feature = "desktop")]
 use crate::{
     icon::IconName,
     overlay::OverlayExt as _,
@@ -20,14 +19,12 @@ use crate::{
         switch::Switch,
     },
 };
-#[cfg(feature = "desktop")]
 use gpui::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Subscription, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui::{Styled as _, rgb};
-#[cfg(feature = "desktop")]
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
@@ -35,7 +32,6 @@ use agent::ProviderKind;
 /// Claude's official Clay brand color from Anthropic's media resources.
 pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
 
-#[cfg(feature = "desktop")]
 pub struct ProviderCard {
     store: Entity<WorkspaceStore>,
     /// The protocol this card's profile drives (glyph, shared model catalog /
@@ -49,7 +45,6 @@ pub struct ProviderCard {
     _subscription: Subscription,
 }
 
-#[cfg(feature = "desktop")]
 impl ProviderCard {
     pub fn new(
         store: Entity<WorkspaceStore>,
@@ -404,7 +399,6 @@ impl ProviderCard {
     }
 }
 
-#[cfg(feature = "desktop")]
 impl Render for ProviderCard {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex().w_full().child(self.render_header(cx))

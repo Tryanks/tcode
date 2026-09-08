@@ -1,22 +1,22 @@
-//! The right-panel "Preview" tab: an embedded browser (native `gpui-wry`
-//! WebView) with a chrome row, plus the bridge that lets the agent drive it
-//! through the preview MCP server.
+//! The right-panel "Preview" tab.
 //!
-//! One WebView is created lazily per conversation destination and cached;
-//! switching threads (or project drafts) shows that conversation's view and
-//! hides the others. The chrome row offers
-//! back/forward/reload (via raw `wry` `evaluate_script` / history), a URL entry,
-//! open-in-system-browser, and localhost dev-port quick-picks.
+//! The panel itself is shared by every client: the URL field, open-externally,
+//! copy-URL, the per-conversation URL/canvas state and the loading/error copy
+//! are ordinary replicated-store UI. What is native is the embedded browser —
+//! creating a `gpui-wry` child view, driving its history and JS, and snapshotting
+//! it — and that lives behind [`PREVIEW_BACKEND`].
 //!
-//! ## Platform support
+//! ## Where a backend exists
 //!
-//! macOS + Windows get the real WebView. **Linux does not**: lb-wry's
-//! `build_as_child` is X11-only there *and* requires a GTK main loop (`gtk::init`
-//! plus `gtk::main_iteration_do` pumped on the UI thread), while gpui's Linux
-//! backend runs calloop/xcb and never pumps GTK — the webview would panic at
-//! construction and could never be driven. So `wry`/`gpui-wry` are not even
-//! dependencies on Linux; the tab renders a placeholder and preview MCP tools
-//! report unavailable. The MCP server can still start.
+//! macOS, Windows and Android, and only with the `native-preview` feature. Linux is
+//! excluded on purpose: lb-wry's `build_as_child` is X11-only there *and*
+//! requires a GTK main loop (`gtk::init` plus `gtk::main_iteration_do` pumped on
+//! the UI thread), while gpui's Linux backend runs calloop/xcb and never pumps
+//! GTK — the webview would panic at construction and could never be driven.
+//! Android hosts activity-owned WebViews through JNI. iOS and the browser have
+//! no child-view seam. Those clients render
+//! the same panel with open-externally and copy-URL, and answer every automation
+//! request with an explicit "unsupported" rather than timing out.
 //!
 //! Windows creation is deliberately asynchronous. WebView2 construction is
 //! asynchronous underneath, but wry's synchronous `build_as_child` waits by
@@ -45,11 +45,58 @@
 //! conversation is selected, the command palette opens, or we leave the chat
 //! route. Other overlapping GPUI popovers can still be covered by the native view.
 
-#[cfg(any(not(target_os = "linux"), test))]
-use crate::window_state::Route;
-use preview_mcp::PreviewReply;
+use gpui::{
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
+};
+use gpui_base::{h_flex, v_flex};
+use tcode_protocol::PreviewResponse;
 
-#[cfg(any(not(target_os = "linux"), test))]
+use crate::material;
+use crate::store::WorkspaceStore;
+use crate::theme::ActiveTheme as _;
+use crate::widgets::button::{Button, ButtonVariants as _};
+use crate::widgets::input::{Input, InputEvent, InputState};
+use crate::widgets::menu::DropdownMenu as _;
+use crate::window_caption;
+use crate::window_state::{Route, WindowState};
+use crate::{icon::IconName, sizing::Sizable as _};
+
+/// Whether this build can embed a browser. Views ask before offering an action
+/// that needs one, so nothing renders an enabled control that cannot work.
+pub(crate) const PREVIEW_BACKEND: bool = cfg!(all(
+    feature = "native-preview",
+    any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "android"
+    )
+));
+
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+))]
+pub(crate) mod lifecycle;
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+))]
+mod load_error;
+
+/// The reply channel a broker request is answered on.
+type ReplyTx = async_channel::Sender<Result<PreviewResponse, String>>;
+
+// Only a build with a backend routes by these; the tests below pin the contract
+// on every target so a portable edit cannot quietly change it.
+#[cfg_attr(
+    not(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    )),
+    allow(dead_code)
+)]
 fn visible_preview_key(
     active_key: Option<&str>,
     route: Route,
@@ -64,7 +111,13 @@ fn visible_preview_key(
 /// Resolve an MCP request's physical session id to the stable WebView key.
 /// Only the active surface can be an unsent project draft; every background
 /// request therefore keys directly by its stored session id.
-#[cfg(any(not(target_os = "linux"), test))]
+#[cfg_attr(
+    not(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    )),
+    allow(dead_code)
+)]
 fn preview_key_for_session(
     requested_session_id: &str,
     active_session_id: Option<&str>,
@@ -77,1100 +130,13 @@ fn preview_key_for_session(
     }
 }
 
-/// The reply channel a broker request is answered on.
-type ReplyTx = async_channel::Sender<Result<PreviewReply, String>>;
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) mod lifecycle;
-#[cfg(not(target_os = "linux"))]
-mod load_error;
-
-#[cfg(not(target_os = "linux"))]
-pub use native::PreviewPanel;
-
-#[cfg(target_os = "linux")]
-pub use placeholder::PreviewPanel;
-
-#[cfg(not(target_os = "linux"))]
-mod native {
-    use std::rc::Rc;
-    use std::time::Duration;
-
-    use crate::theme::ActiveTheme as _;
-    use crate::widgets::button::{Button, ButtonVariants as _};
-    use crate::widgets::input::{Input, InputEvent, InputState};
-    use crate::{icon::IconName, sizing::Sizable as _};
-    use gpui::{
-        AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-        Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
-    };
-    use gpui_base::{h_flex, v_flex};
-    use preview_mcp::{PreviewOp, PreviewReply, js, ports};
-
-    use super::lifecycle::{Availability, BrowserLifecycle};
-    use super::{
-        ReplyTx, normalize_url, preview_key_for_session, unavailable_message, visible_preview_key,
-    };
-    use crate::store::WorkspaceStore;
-    use crate::window_caption;
-    use crate::window_state::WindowState;
-
-    const STARTING_MESSAGE: &str = "preview is starting; retry the operation shortly";
-
-    fn wait_timeout_message(pending: &[String]) -> String {
-        format!(
-            "preview_wait_for timed out; unmet conditions: {}",
-            pending.join(", ")
-        )
-    }
-
-    pub struct PreviewPanel {
-        store: Entity<WorkspaceStore>,
-        window_state: Entity<WindowState>,
-        lifecycle: Entity<BrowserLifecycle>,
-        /// The lifecycle holds this only weakly so an async Windows completion
-        /// cannot install after its owning panel has been dropped.
-        _lifecycle_owner: Rc<()>,
-        /// The shared address-bar input (reflects the active session's URL).
-        url_input: Entity<InputState>,
-        /// Session id whose URL is currently mirrored into `url_input`.
-        mirrored: Option<String>,
-        /// Discovered localhost dev-server ports (populated by the "Ports" button).
-        dev_ports: Vec<u16>,
-        /// Discards a completed scan when a newer click has superseded it.
-        port_scan_generation: u64,
-        _subscriptions: Vec<Subscription>,
-    }
-
-    impl PreviewPanel {
-        pub fn new(
-            store: Entity<WorkspaceStore>,
-            window_state: Entity<WindowState>,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) -> Self {
-            let url_input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
-            });
-            let lifecycle_owner = Rc::new(());
-            let lifecycle = cx.new(|_| BrowserLifecycle::new(Rc::downgrade(&lifecycle_owner)));
-            let subscriptions = vec![
-                cx.observe(&store, |this, _, cx| {
-                    // Native child views outlive GPUI layout nodes. Visibility
-                    // therefore follows WorkspaceStore directly, even while this
-                    // entity is no longer mounted in the right-panel tree.
-                    this.prune_deleted_webviews(cx);
-                    this.sync_visibility(cx);
-                    cx.notify();
-                }),
-                cx.observe(&lifecycle, |this, _, cx| {
-                    this.sync_visibility(cx);
-                    cx.notify();
-                }),
-                cx.subscribe_in(&url_input, window, Self::on_url_event),
-            ];
-            Self {
-                store,
-                window_state,
-                lifecycle,
-                _lifecycle_owner: lifecycle_owner,
-                url_input,
-                mirrored: None,
-                dev_ports: Vec::new(),
-                port_scan_generation: 0,
-                _subscriptions: subscriptions,
-            }
-        }
-
-        /// Reconcile the stable conversation key with the physical session id.
-        /// Draft -> stored-thread commits retain the same session id, so move
-        /// all cached browser state across that one key transition.
-        fn active_key(&mut self, cx: &mut Context<Self>) -> Option<String> {
-            let current = self.store.read(cx).preview_active_identity();
-            let reconciliation = self
-                .lifecycle
-                .update(cx, |lifecycle, _| lifecycle.reconcile_key(current));
-            if let Some(old_key) = reconciliation.migrated_from.as_deref()
-                && self.mirrored.as_deref() == Some(old_key)
-            {
-                self.mirrored = reconciliation.key.clone();
-            }
-            reconciliation.key
-        }
-
-        fn routed_key(&mut self, session_id: &str, cx: &mut Context<Self>) -> String {
-            let active_key = self.active_key(cx);
-            let active_session_id = self.store.read(cx).active_session_id();
-            preview_key_for_session(
-                session_id,
-                active_session_id.as_deref(),
-                active_key.as_deref(),
-            )
-        }
-
-        /// Hide native children that no longer belong to the visible Preview
-        /// panel. This deliberately never shows a child: an opening transition
-        /// may still have stale bounds until `render` mounts its GPUI owner.
-        /// `AppShell` calls this before it removes Preview from the layout tree.
-        pub fn sync_visibility(&mut self, cx: &mut Context<Self>) {
-            self.update_visibility(false, cx);
-        }
-
-        /// Full show/hide synchronization, called only while `PreviewPanel` is
-        /// mounted and has laid out the WebView owner for this frame.
-        fn sync_mounted_visibility(&mut self, cx: &mut Context<Self>) {
-            self.update_visibility(true, cx);
-        }
-
-        fn update_visibility(&mut self, allow_show: bool, cx: &mut Context<Self>) {
-            let active = self.active_key(cx);
-            let window_state = self.window_state.read(cx);
-            let visible = visible_preview_key(
-                active.as_deref(),
-                window_state.route,
-                window_state.palette_open,
-                self.store.read(cx).preview_panel_showing(),
-            )
-            .map(str::to_string);
-            self.lifecycle.update(cx, |lifecycle, cx| {
-                if allow_show {
-                    lifecycle.set_visible(visible.as_deref(), cx);
-                } else {
-                    lifecycle.hide_except(visible.as_deref(), cx);
-                }
-            });
-        }
-
-        pub(crate) fn lifecycle(&self) -> Entity<BrowserLifecycle> {
-            self.lifecycle.clone()
-        }
-
-        /// Get or lazily create the browser for one stable conversation key.
-        fn ensure_webview(
-            &mut self,
-            key: &str,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) -> Availability {
-            let initial_url = self.store.read(cx).preview_url(key);
-            self.lifecycle.update(cx, |lifecycle, cx| {
-                lifecycle.ensure(key, initial_url.as_deref(), window, cx)
-            })
-        }
-
-        fn drop_webview(&mut self, key: &str, cx: &mut Context<Self>) {
-            self.lifecycle
-                .update(cx, |lifecycle, cx| lifecycle.drop_view(key, cx));
-            if self.mirrored.as_deref() == Some(key) {
-                self.mirrored = None;
-            }
-        }
-
-        fn prune_deleted_webviews(&mut self, cx: &mut Context<Self>) {
-            let live = self.store.read(cx).preview_live_keys();
-            if self
-                .mirrored
-                .as_ref()
-                .is_some_and(|key| !live.contains(key))
-            {
-                self.mirrored = None;
-            }
-            self.lifecycle
-                .update(cx, |lifecycle, cx| lifecycle.prune(&live, cx));
-        }
-
-        /// Mirror a URL into the store, then navigate through the lifecycle.
-        fn navigate(
-            &mut self,
-            key: &str,
-            url: &str,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) -> Availability {
-            let url = normalize_url(&self.store.read(cx).rewrite_preview_url(url));
-            self.store
-                .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
-            let availability = self.lifecycle.update(cx, |lifecycle, cx| {
-                lifecycle.navigate(key, &url, window, cx)
-            });
-            self.sync_visibility(cx);
-            cx.notify();
-            availability
-        }
-
-        fn on_url_event(
-            &mut self,
-            input: &Entity<InputState>,
-            event: &InputEvent,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            if let InputEvent::PressEnter { .. } = event {
-                let url = input.read(cx).value().trim().to_string();
-                if !url.is_empty()
-                    && let Some(key) = self.active_key(cx)
-                {
-                    self.navigate(&key, &url, window, cx);
-                }
-            }
-        }
-
-        /// Run raw JS on the active WebView via history/reload (fire-and-forget).
-        fn eval_fire(&mut self, key: &str, script: &str, cx: &mut Context<Self>) {
-            self.lifecycle
-                .update(cx, |lifecycle, cx| lifecycle.eval_fire(key, script, cx));
-        }
-
-        fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-            if let Some(id) = self.active_key(cx)
-                && let Availability::Ready(view) = self.ensure_webview(&id, window, cx)
-            {
-                view.update(cx, |view, _| {
-                    if let Err(error) = view.back() {
-                        log::debug!("preview: failed to navigate back during teardown: {error}");
-                    }
-                });
-            }
-        }
-
-        fn go_forward(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.active_key(cx) {
-                self.eval_fire(&id, "history.forward();", cx);
-            }
-        }
-
-        fn reload(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.active_key(cx) {
-                self.eval_fire(&id, "location.reload();", cx);
-            }
-        }
-
-        /// Hand the current URL to the OS browser. `cx.open_url` is gpui's
-        /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`).
-        fn open_in_system_browser(&mut self, cx: &mut Context<Self>) {
-            if let Some(id) = self.active_key(cx)
-                && let Some(url) = self.store.read(cx).preview_url(&id)
-            {
-                cx.open_url(&url);
-            }
-        }
-
-        /// The chrome's X: close the Preview tab *and* drop this conversation's
-        /// WebView, so the page is torn down (scripts, media, sockets) rather
-        /// than kept running behind a closed panel. The next open or agent op
-        /// recreates a fresh webview on demand.
-        fn close_panel(&mut self, cx: &mut Context<Self>) {
-            if let Some(key) = self.active_key(cx) {
-                self.drop_webview(&key, cx);
-                self.store
-                    .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
-            }
-            // Un-mirror so a later reopen refreshes the address bar from the
-            // (now empty) URL map instead of showing the stale address.
-            self.mirrored = None;
-            self.store
-                .update(cx, |store, cx| store.close_preview_panel(cx));
-            cx.notify();
-        }
-
-        fn rescan_ports(&mut self, cx: &mut Context<Self>) {
-            self.port_scan_generation = self.port_scan_generation.wrapping_add(1);
-            let generation = self.port_scan_generation;
-            cx.spawn(async move |this, cx| {
-                let ports = cx
-                    .background_executor()
-                    .spawn(async { ports::scan_listening() })
-                    .await;
-                let _ = this.update(cx, |panel, cx| {
-                    if panel.port_scan_generation == generation {
-                        panel.dev_ports = ports;
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
-        }
-
-        /// Resolve one automation op from the MCP server against the active WebView.
-        /// Answers `reply` immediately for actions, or from the JS callback for
-        /// value-returning ops.
-        pub fn handle_op(
-            &mut self,
-            session_id: String,
-            op: PreviewOp,
-            reply: ReplyTx,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            let key = self.routed_key(&session_id, cx);
-            log::info!("preview: handling op {op:?} for session {session_id}");
-
-            // Gate on the Browser settings: a disabled browser rejects every op;
-            // `allow_evaluate` gates only `preview_evaluate`.
-            let browser = self.store.read(cx).preview_browser_settings();
-            if !browser.enabled {
-                let _ = reply.try_send(Err(crate::tr!("browser.disabled_error").into_owned()));
-                return;
-            }
-            if matches!(&op, PreviewOp::Evaluate { .. }) && !browser.allow_evaluate {
-                let _ = reply.try_send(Err(
-                    crate::tr!("browser.evaluate_disabled_error").into_owned()
-                ));
-                return;
-            }
-
-            match op {
-                PreviewOp::Open { url } => {
-                    self.store.update(cx, |store, cx| {
-                        store.open_preview_panel_for(&session_id, cx);
-                    });
-                    if let Some(url) = url.as_deref() {
-                        self.navigate(&key, url, window, cx);
-                    } else if let Some(home) = browser
-                        .home_url
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|home| !home.is_empty())
-                    {
-                        // No explicit target: fall back to the configured home URL.
-                        self.navigate(&key, home, window, cx);
-                    } else {
-                        self.ensure_webview(&key, window, cx);
-                        self.sync_visibility(cx);
-                    }
-                    if let Some(error) = self
-                        .lifecycle
-                        .read(cx)
-                        .unavailable_error()
-                        .map(str::to_string)
-                    {
-                        let _ = reply.try_send(Err(unavailable_message(&error)));
-                        return;
-                    }
-                    let payload = serde_json::json!({
-                        "ok": true,
-                        "url": self.store.read(cx).preview_url(&key),
-                        "note": "call preview_status for live page state once loaded; \
-                                 it reports load_error when the page failed to load",
-                    });
-                    let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
-                }
-                PreviewOp::Navigate { url } => {
-                    self.store.update(cx, |store, cx| {
-                        store.open_preview_panel_for(&session_id, cx);
-                    });
-                    self.navigate(&key, &url, window, cx);
-                    if let Some(error) = self
-                        .lifecycle
-                        .read(cx)
-                        .unavailable_error()
-                        .map(str::to_string)
-                    {
-                        let _ = reply.try_send(Err(unavailable_message(&error)));
-                        return;
-                    }
-                    let payload = serde_json::json!({
-                        "ok": true,
-                        "url": self.store.read(cx).preview_url(&key),
-                        "note": "page is loading; call preview_status for live state, \
-                                 which reports load_error when the page failed to load",
-                    });
-                    let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
-                }
-                PreviewOp::Status => self.status(&key, reply, window, cx),
-                PreviewOp::Snapshot => self.eval_json(&key, js::SNAPSHOT, reply, window, cx),
-                PreviewOp::Evaluate { js: expr } => {
-                    self.eval_json(&key, &js::evaluate(&expr), reply, window, cx)
-                }
-                PreviewOp::Click { selector } => {
-                    self.eval_json(&key, &js::click(&selector), reply, window, cx)
-                }
-                PreviewOp::Type { selector, text } => {
-                    self.eval_json(&key, &js::type_text(&selector, &text), reply, window, cx)
-                }
-                PreviewOp::Resize { width, height } => {
-                    self.store.update(cx, |store, cx| {
-                        store.open_preview_panel_for(&session_id, cx);
-                    });
-                    let payload = match (width, height) {
-                        (Some(width), Some(height)) => {
-                            self.store.update(cx, |store, cx| {
-                                store.set_preview_canvas(&key, Some((width, height)), cx);
-                            });
-                            serde_json::json!({
-                                "ok": true,
-                                "mode": "fixed",
-                                "width": width,
-                                "height": height,
-                                "note": "fixed canvas is clamped to the panel if larger",
-                            })
-                        }
-                        _ => {
-                            self.store.update(cx, |store, cx| {
-                                store.set_preview_canvas(&key, None, cx);
-                            });
-                            serde_json::json!({
-                                "ok": true,
-                                "mode": "fill",
-                                "note": "preview fills the available panel",
-                            })
-                        }
-                    };
-                    self.sync_visibility(cx);
-                    cx.notify();
-                    let _ = reply.try_send(Ok(PreviewReply::Json(payload)));
-                }
-                // `key` is the routed conversation key; bind the keyboard key
-                // apart so it cannot shadow it into `eval_json`'s session slot.
-                PreviewOp::Press {
-                    key: pressed,
-                    modifiers,
-                } => self.eval_json(&key, &js::press(&pressed, &modifiers), reply, window, cx),
-                PreviewOp::Scroll {
-                    delta_x,
-                    delta_y,
-                    selector,
-                } => self.eval_json(
-                    &key,
-                    &js::scroll(delta_x, delta_y, selector.as_deref()),
-                    reply,
-                    window,
-                    cx,
-                ),
-                PreviewOp::WaitFor {
-                    selector,
-                    text,
-                    url_includes,
-                    timeout_ms,
-                } => self.wait_for(
-                    &key,
-                    selector,
-                    text,
-                    url_includes.map(|url| self.store.read(cx).rewrite_preview_url(&url)),
-                    timeout_ms,
-                    reply,
-                    window,
-                    cx,
-                ),
-                PreviewOp::Screenshot => self.screenshot(&session_id, &key, reply, window, cx),
-            }
-        }
-
-        /// Add this conversation's canvas setting to the otherwise opaque page
-        /// status object returned by JavaScript.
-        fn status(
-            &mut self,
-            key: &str,
-            reply: ReplyTx,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            let canvas = self
-                .store
-                .read(cx)
-                .preview_canvas(key)
-                .map(|(width, height)| {
-                    serde_json::json!({
-                        "mode": "fixed",
-                        "width": width,
-                        "height": height,
-                    })
-                })
-                .unwrap_or_else(|| serde_json::json!({ "mode": "fill" }));
-            // The page cannot see a failed navigation, so the JS probe would
-            // keep describing whatever was on screen before it.
-            let load_error = self.lifecycle.read(cx).load_error(key, cx);
-            let (status_reply, status_result) = async_channel::bounded(1);
-            cx.spawn(async move |_, _| {
-                let result = match status_result.recv().await {
-                    Ok(Ok(PreviewReply::Json(mut value))) => {
-                        if let Some(object) = value.as_object_mut() {
-                            object.insert("canvas".into(), canvas);
-                            if let Some(load_error) = load_error {
-                                object.insert("load_error".into(), load_error.to_json());
-                            }
-                            Ok(PreviewReply::Json(value))
-                        } else {
-                            Err("preview status returned a non-object value".into())
-                        }
-                    }
-                    Ok(result) => result,
-                    Err(_) => Err("preview status evaluation was dropped".into()),
-                };
-                let _ = reply.send(result).await;
-            })
-            .detach();
-            self.eval_json(key, js::STATUS, status_reply, window, cx);
-        }
-
-        /// Poll a one-shot page probe every 250ms until it matches or reaches
-        /// its deadline. Each evaluation has its own watchdog because native
-        /// WebViews can drop callbacks during navigation.
-        #[allow(clippy::too_many_arguments)]
-        fn wait_for(
-            &mut self,
-            key: &str,
-            selector: Option<String>,
-            text: Option<String>,
-            url_includes: Option<String>,
-            timeout_ms: u64,
-            reply: ReplyTx,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            match self.ensure_webview(key, window, cx) {
-                Availability::Ready(_) => {}
-                Availability::Starting(_) => {
-                    let _ = reply.try_send(Err(STARTING_MESSAGE.into()));
-                    return;
-                }
-                Availability::Unavailable => {
-                    let error = self
-                        .lifecycle
-                        .read(cx)
-                        .unavailable_error()
-                        .unwrap_or_default()
-                        .to_string();
-                    let _ = reply.try_send(Err(unavailable_message(&error)));
-                    return;
-                }
-            }
-            let cold = !self.lifecycle.read(cx).is_warm(key);
-            let key = key.to_string();
-            let probe = js::wait_for_probe(
-                selector.as_deref(),
-                text.as_deref(),
-                url_includes.as_deref(),
-            );
-            let mut pending = Vec::new();
-            if selector.is_some() {
-                pending.push("selector".to_string());
-            }
-            if text.is_some() {
-                pending.push("text".to_string());
-            }
-            if url_includes.is_some() {
-                pending.push("urlIncludes".to_string());
-            }
-            cx.spawn(async move |this, cx| {
-                let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-                if cold {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(700))
-                        .await;
-                    if this
-                        .update(cx, |panel, cx| {
-                            panel.lifecycle.update(cx, |lifecycle, _| {
-                                lifecycle.mark_warm(&key);
-                            });
-                        })
-                        .is_err()
-                    {
-                        let _ = reply
-                            .send(Err("preview panel was dropped while waiting".into()))
-                            .await;
-                        return;
-                    }
-                }
-                loop {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() {
-                        let _ = reply.send(Err(wait_timeout_message(&pending))).await;
-                        return;
-                    }
-                    let (probe_reply, probe_result) = async_channel::bounded(1);
-                    // A failed navigation never changes the page, so waiting on
-                    // it can only time out; report the platform error instead.
-                    let Ok(failure) = this.update(cx, |panel, cx| {
-                        let failure = panel.lifecycle.read(cx).load_error(&key, cx);
-                        if failure.is_none() {
-                            panel.lifecycle.update(cx, |lifecycle, cx| {
-                                lifecycle.evaluate_ready(&key, &probe, probe_reply.clone(), cx);
-                            });
-                        }
-                        failure
-                    }) else {
-                        let _ = reply
-                            .send(Err("preview panel was dropped while waiting".into()))
-                            .await;
-                        return;
-                    };
-                    if let Some(failure) = failure {
-                        let _ = reply.send(Err(failure.describe())).await;
-                        return;
-                    }
-
-                    let watchdog_delay = remaining.min(Duration::from_secs(5));
-                    let watchdog_reply = probe_reply;
-                    let watchdog_error = if remaining <= Duration::from_secs(5) {
-                        wait_timeout_message(&pending)
-                    } else {
-                        "preview wait probe evaluation timed out".into()
-                    };
-                    let watchdog_timer = cx.background_executor().timer(watchdog_delay);
-                    cx.background_executor()
-                        .spawn(async move {
-                            watchdog_timer.await;
-                            let _ = watchdog_reply.try_send(Err(watchdog_error));
-                        })
-                        .detach();
-
-                    let value = match probe_result.recv().await {
-                        Ok(Ok(PreviewReply::Json(value))) => value,
-                        Ok(Ok(PreviewReply::Image { .. })) => {
-                            let _ = reply
-                                .send(Err("preview wait probe returned an image".into()))
-                                .await;
-                            return;
-                        }
-                        Ok(Err(error)) => {
-                            let _ = reply.send(Err(error)).await;
-                            return;
-                        }
-                        Err(_) => {
-                            let _ = reply
-                                .send(Err("preview wait probe evaluation was dropped".into()))
-                                .await;
-                            return;
-                        }
-                    };
-                    if value.get("matched").and_then(serde_json::Value::as_bool) == Some(true) {
-                        let _ = reply.send(Ok(PreviewReply::Json(value))).await;
-                        return;
-                    }
-                    pending = value
-                        .get("pending")
-                        .and_then(serde_json::Value::as_array)
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(serde_json::Value::as_str)
-                                .map(str::to_string)
-                                .collect()
-                        })
-                        .unwrap_or_else(|| pending.clone());
-                    cx.background_executor()
-                        .timer(Duration::from_millis(250))
-                        .await;
-                }
-            })
-            .detach();
-        }
-
-        /// Delegate value-returning evaluation to the lifecycle, which owns the
-        /// ready/warm ordering and native callback.
-        fn eval_json(
-            &mut self,
-            key: &str,
-            script: &str,
-            reply: ReplyTx,
-            window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            let initial_url = self.store.read(cx).preview_url(key);
-            self.lifecycle.update(cx, |lifecycle, cx| {
-                lifecycle.evaluate_json(key, initial_url.as_deref(), script, reply, window, cx);
-            });
-        }
-
-        /// Snapshot the native WKWebView in-process and answer with a base64 PNG.
-        ///
-        /// macOS only. Elsewhere the tool reports a normal MCP error rather than
-        /// pretending to have a portable native-webview snapshot implementation.
-        #[cfg(target_os = "macos")]
-        fn screenshot(
-            &mut self,
-            session_id: &str,
-            key: &str,
-            reply: ReplyTx,
-            _window: &mut Window,
-            cx: &mut Context<Self>,
-        ) {
-            use block2::RcBlock;
-            use gpui::px;
-            use objc2_app_kit::NSImage;
-            use objc2_foundation::NSError;
-            use objc2_web_kit::WKWebView;
-            use wry::WebViewExtMacOS as _;
-
-            let visible = {
-                let window_state = self.window_state.read(cx);
-                if self.store.read(cx).active_session_id().as_deref() != Some(session_id) {
-                    let _ = reply.try_send(Err(
-                        "preview is not visible; the user is viewing another conversation".into(),
-                    ));
-                    return;
-                }
-                visible_preview_key(
-                    Some(key),
-                    window_state.route,
-                    window_state.palette_open,
-                    self.store.read(cx).preview_panel_showing(),
-                ) == Some(key)
-            };
-            if !visible {
-                let _ = reply.try_send(Err(
-                    "preview is not visible; open the Preview panel before taking a screenshot"
-                        .into(),
-                ));
-                return;
-            }
-
-            let Some(view) = self.lifecycle.read(cx).ready_view(key) else {
-                let _ = reply.try_send(Err("preview browser is not open".into()));
-                return;
-            };
-            let wv_bounds = view.read(cx).bounds();
-            if wv_bounds.size.width <= px(0.) || wv_bounds.size.height <= px(0.) {
-                let _ = reply.try_send(Err("preview browser has no visible area".into()));
-                return;
-            }
-            let native = view.read(cx).raw().webview();
-            let webview: &WKWebView = &native;
-            let callback_reply = reply.clone();
-            let handler = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
-                let result = if let Some(image) = unsafe { image.as_ref() } {
-                    super::snapshot_reply(image)
-                } else if !error.is_null() {
-                    Err("WKWebView snapshot failed".into())
-                } else {
-                    Err("WKWebView snapshot returned no image".into())
-                };
-                let _ = callback_reply.try_send(result);
-            });
-            unsafe {
-                webview.takeSnapshotWithConfiguration_completionHandler(None, &handler);
-            }
-
-            cx.spawn(async move |_, cx| {
-                cx.background_executor().timer(Duration::from_secs(5)).await;
-                let _ = reply.try_send(Err("WKWebView snapshot timed out after 5 seconds".into()));
-            })
-            .detach();
-        }
-
-        /// See the macOS implementation: screen capture has no portable
-        /// equivalent, so this is a plain tool error off macOS.
-        #[cfg(not(target_os = "macos"))]
-        fn screenshot(
-            &mut self,
-            _session_id: &str,
-            _key: &str,
-            reply: ReplyTx,
-            _window: &mut Window,
-            _cx: &mut Context<Self>,
-        ) {
-            let _ = reply.try_send(Err(super::SCREENSHOT_UNSUPPORTED.into()));
-        }
-    }
-
-    impl Render for PreviewPanel {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            // When the embedded browser is turned off in Settings → Browser, hide
-            // the chrome and webview entirely and show a quiet placeholder.
-            if !self.store.read(cx).preview_browser_settings().enabled {
-                return v_flex()
-                    .size_full()
-                    .items_center()
-                    .justify_center()
-                    .px_8()
-                    .text_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("browser.disabled_panel"));
-            }
-            let active = self.active_key(cx);
-
-            if active != self.mirrored {
-                let value = active
-                    .as_ref()
-                    .and_then(|id| self.store.read(cx).preview_url(id))
-                    .unwrap_or_default();
-                self.url_input
-                    .update(cx, |state, cx| state.set_value(&value, window, cx));
-                self.mirrored = active.clone();
-            }
-
-            let body: AnyElement = match &active {
-                Some(id) => match self.ensure_webview(id, window, cx) {
-                    Availability::Ready(view) => {
-                        if let Some((width, height)) = self.store.read(cx).preview_canvas(id) {
-                            div()
-                                .flex()
-                                .flex_1()
-                                .min_h_0()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(width as f32))
-                                        .h(px(height as f32))
-                                        .max_w_full()
-                                        .max_h_full()
-                                        .child(view),
-                                )
-                                .into_any_element()
-                        } else {
-                            div().flex_1().min_h_0().child(view).into_any_element()
-                        }
-                    }
-                    Availability::Starting(_) => v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .px_8()
-                        .text_center()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Preview is starting…")
-                        .into_any_element(),
-                    Availability::Unavailable => v_flex()
-                        .flex_1()
-                        .gap_2()
-                        .items_center()
-                        .justify_center()
-                        .px_8()
-                        .text_center()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(crate::tr!("preview.unavailable"))
-                        .child(
-                            div()
-                                .text_size(gpui::px(13.))
-                                .child(crate::tr!("preview.unavailable_hint")),
-                        )
-                        .into_any_element(),
-                },
-                None => v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::tr!("preview.no_session"))
-                    .into_any_element(),
-            };
-
-            // `ensure_webview` creates children hidden; make the owning
-            // conversation visible only after the current layout owns it.
-            self.sync_mounted_visibility(cx);
-
-            v_flex()
-                .size_full()
-                .child(self.render_chrome(window, cx))
-                .children(self.render_port_row(cx))
-                .child(body)
-        }
-    }
-
-    impl PreviewPanel {
-        fn render_chrome(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-            // Windows: an open Preview tab is the rightmost column, so its
-            // chrome row hosts the caption buttons. The row is normally only as
-            // tall as its controls — pin it to the shell's 52px top strip and
-            // drop the trailing/vertical padding on the caption side so the
-            // buttons reach the window's true top-right corner.
-            let hosts_caption = {
-                let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
-                window_caption::hosts_caption_for_state(
-                    window_caption::CaptionSurface::Preview,
-                    self.window_state.read(cx).route,
-                    diff_open,
-                    right_tab,
-                )
-            };
-            h_flex()
-                .flex_none()
-                .w_full()
-                .gap_1()
-                .p_1()
-                .when(hosts_caption, |chrome| {
-                    chrome
-                        .h(px(window_caption::CAPTION_STRIP_HEIGHT))
-                        .pt_0()
-                        .pb_0()
-                        .pr_0()
-                })
-                .child(
-                    Button::new("preview-back")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::ArrowLeft)
-                        .tooltip(crate::tr!("preview.back"))
-                        .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
-                )
-                .child(
-                    Button::new("preview-forward")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::ArrowRight)
-                        .tooltip(crate::tr!("preview.forward"))
-                        .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
-                )
-                .child(
-                    Button::new("preview-reload")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Replace)
-                        .tooltip(crate::tr!("preview.reload"))
-                        .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
-                )
-                .child(div().flex_1().min_w_0().child(Input::new(&self.url_input)))
-                .child(
-                    Button::new("preview-ports")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Globe)
-                        .tooltip(crate::tr!("preview.scan_ports"))
-                        .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
-                )
-                .child(
-                    Button::new("preview-open-external")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::ExternalLink)
-                        .tooltip(crate::tr!("preview.open_external"))
-                        .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
-                )
-                .child(
-                    Button::new("preview-close")
-                        .ghost()
-                        .small()
-                        .compact()
-                        .icon(IconName::Close)
-                        .tooltip(crate::tr!("preview.close"))
-                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
-                )
-                .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
-        }
-
-        /// A row of quick-pick buttons for discovered localhost dev ports.
-        fn render_port_row(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-            if self.dev_ports.is_empty() {
-                return None;
-            }
-            let mut row = h_flex()
-                .flex_none()
-                .w_full()
-                .gap_1()
-                .px_1()
-                .pb_1()
-                .flex_wrap();
-            for port in self.dev_ports.clone() {
-                row = row.child(
-                    Button::new(("dev-port", port as usize))
-                        .outline()
-                        .small()
-                        .compact()
-                        .label(format!(":{port}"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let url = format!("http://localhost:{port}/");
-                            if let Some(key) = this.active_key(cx) {
-                                this.navigate(&key, &url, window, cx);
-                            }
-                        })),
-                );
-            }
-            Some(row)
-        }
-    }
-}
-
-/// Linux: no WebView (see the module docs). The tab still exists — it renders a
-/// muted placeholder — and the preview MCP server still starts, but every tool
-/// call answers with an error instead of driving a browser that cannot exist.
-#[cfg(target_os = "linux")]
-mod placeholder {
-    use crate::theme::ActiveTheme as _;
-    use gpui::{Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window};
-    use gpui_base::v_flex;
-    use preview_mcp::PreviewOp;
-
-    use super::ReplyTx;
-    use crate::store::WorkspaceStore;
-    use crate::window_state::WindowState;
-
-    pub struct PreviewPanel;
-
-    impl PreviewPanel {
-        pub fn new(
-            _store: Entity<WorkspaceStore>,
-            _window_state: Entity<WindowState>,
-            _window: &mut Window,
-            _cx: &mut Context<Self>,
-        ) -> Self {
-            Self
-        }
-
-        /// Every `preview_*` tool is unavailable here; the broker turns this
-        /// `Err` into a normal MCP tool error.
-        pub fn handle_op(
-            &mut self,
-            session_id: String,
-            op: PreviewOp,
-            reply: ReplyTx,
-            _window: &mut Window,
-            _cx: &mut Context<Self>,
-        ) {
-            log::info!(
-                "preview: rejecting op {op:?} for session {session_id} (unsupported on Linux)"
-            );
-            let _ = reply.try_send(Err(crate::tr!("preview.unsupported_linux").into_owned()));
-        }
-
-        pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
-    }
-
-    impl Render for PreviewPanel {
-        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("preview.unsupported_linux"))
-        }
-    }
-}
-
-/// The error `preview_screenshot` reports where native-webview snapshots have no
-/// implementation. Linux has no webview at all, so it never gets this far.
-#[cfg(not(target_os = "linux"))]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-const SCREENSHOT_UNSUPPORTED: &str = "preview_screenshot is only supported on macOS";
-
-#[cfg(target_os = "macos")]
-fn snapshot_reply(image: &objc2_app_kit::NSImage) -> Result<PreviewReply, String> {
-    use base64::Engine as _;
-    use objc2_core_foundation::{CFMutableData, CFString};
-    use objc2_image_io::CGImageDestination;
-
-    let cg_image =
-        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }
-            .ok_or_else(|| "failed to obtain CGImage from WKWebView snapshot".to_string())?;
-    let data = CFMutableData::new(None, 0)
-        .ok_or_else(|| "failed to allocate PNG destination data".to_string())?;
-    let png_type = CFString::from_static_str("public.png");
-    let destination = unsafe { CGImageDestination::with_data(&data, &png_type, 1, None) }
-        .ok_or_else(|| "failed to create PNG image destination".to_string())?;
-    unsafe {
-        destination.add_image(&cg_image, None);
-        if !destination.finalize() {
-            return Err("failed to finalize WKWebView snapshot PNG".into());
-        }
-    }
-    Ok(PreviewReply::Image {
-        mime: "image/png".into(),
-        data_base64: base64::engine::general_purpose::STANDARD.encode(data.to_vec()),
-    })
-}
-
 /// What an automation tool answers when the platform webview cannot be created
 /// (Windows without the WebView2 runtime): say so plainly, with the underlying
 /// error, rather than leaving the agent to guess why nothing happened.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+))]
 fn unavailable_message(err: &str) -> String {
     format!(
         "the preview browser is unavailable on this machine \
@@ -1178,8 +144,19 @@ fn unavailable_message(err: &str) -> String {
     )
 }
 
+/// An action on the current preview URL. The compact toolbar reaches these
+/// through its overflow menu, which addresses items by action rather than by
+/// callback.
+#[derive(gpui::Action, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[action(namespace = tcode_preview, no_json)]
+pub(crate) enum PreviewAction {
+    Close,
+    CopyUrl,
+    OpenExternal,
+    ScanPorts,
+}
+
 /// Add a scheme to a bare host/port (so `localhost:5173` becomes a real URL).
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn normalize_url(input: &str) -> String {
     let trimmed = input.trim();
     if trimmed.contains("://") || trimmed.starts_with("about:") {
@@ -1189,9 +166,538 @@ fn normalize_url(input: &str) -> String {
     }
 }
 
+pub struct PreviewPanel {
+    store: Entity<WorkspaceStore>,
+    window_state: Entity<WindowState>,
+    /// The shared address-bar input (reflects the active session's URL).
+    url_input: Entity<InputState>,
+    /// Session id whose URL is currently mirrored into `url_input`.
+    mirrored: Option<String>,
+    /// The last URL copied into the editor; preserve an unsent edit until the
+    /// actual page URL or conversation changes.
+    mirrored_url: Option<String>,
+    compact_overflow_open: bool,
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    /// Discovered localhost dev-server ports (populated by the "Ports" button).
+    dev_ports: Vec<u16>,
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    /// Discards a completed scan when a newer click has superseded it.
+    port_scan_generation: u64,
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    backend: backend::Backend,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl PreviewPanel {
+    pub fn new(
+        store: Entity<WorkspaceStore>,
+        window_state: Entity<WindowState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let url_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(crate::tr!("preview.url_placeholder"))
+        });
+        let subscriptions = vec![
+            cx.observe(&store, |this, _, cx| {
+                // Native child views outlive GPUI layout nodes. Visibility
+                // therefore follows WorkspaceStore directly, even while this
+                // entity is no longer mounted in the right-panel tree.
+                this.prune_deleted_webviews(cx);
+                this.sync_visibility(cx);
+                cx.notify();
+            }),
+            cx.observe(&window_state, |this, _, cx| {
+                this.sync_visibility(cx);
+                cx.notify();
+            }),
+            cx.subscribe_in(&url_input, window, Self::on_url_event),
+        ];
+        let mut panel = Self {
+            store: store.clone(),
+            window_state,
+            url_input,
+            mirrored: None,
+            mirrored_url: None,
+            compact_overflow_open: false,
+            #[cfg(all(
+                feature = "native-preview",
+                any(target_os = "macos", target_os = "windows", target_os = "android")
+            ))]
+            dev_ports: Vec::new(),
+            #[cfg(all(
+                feature = "native-preview",
+                any(target_os = "macos", target_os = "windows", target_os = "android")
+            ))]
+            port_scan_generation: 0,
+            #[cfg(all(
+                feature = "native-preview",
+                any(target_os = "macos", target_os = "windows", target_os = "android")
+            ))]
+            backend: backend::Backend::new(store.read(cx).preview_proxy(), cx),
+            _subscriptions: subscriptions,
+        };
+        panel.observe_backend(cx);
+        panel
+    }
+
+    /// The stable conversation key the chrome is currently addressing.
+    fn active_key(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let current = self.store.read(cx).preview_active_identity();
+        self.reconcile_active_key(current, cx)
+    }
+
+    /// Mirror a URL into the store, then navigate whatever backend exists.
+    fn navigate(&mut self, key: &str, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let url = normalize_url(url);
+        self.store
+            .update(cx, |store, cx| store.set_preview_url(key, url.clone(), cx));
+        self.navigate_backend(key, &url, window, cx);
+        self.sync_visibility(cx);
+        cx.notify();
+    }
+
+    fn on_url_event(
+        &mut self,
+        input: &Entity<InputState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let InputEvent::PressEnter { .. } = event {
+            let url = input.read(cx).value().trim().to_string();
+            if !url.is_empty()
+                && let Some(key) = self.active_key(cx)
+            {
+                self.navigate(&key, &url, window, cx);
+            }
+        }
+    }
+
+    #[cfg(all(
+        test,
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    pub(crate) fn url_field(&self, cx: &gpui::App) -> String {
+        self.url_input.read(cx).value().to_string()
+    }
+
+    fn active_url(&mut self, cx: &mut Context<Self>) -> Option<String> {
+        let key = self.active_key(cx)?;
+        self.store.read(cx).preview_url(&key)
+    }
+
+    /// Hand the current URL to the OS browser. `cx.open_url` is gpui's
+    /// cross-platform launcher (`open` / `ShellExecute` / `xdg-open`, and the
+    /// browser's own `window.open`).
+    fn open_in_system_browser(&mut self, cx: &mut Context<Self>) {
+        if let Some(url) = self.active_url(cx) {
+            cx.open_url(&url);
+        }
+    }
+
+    fn copy_url(&mut self, cx: &mut Context<Self>) {
+        if let Some(url) = self.active_url(cx) {
+            cx.write_to_clipboard(ClipboardItem::new_string(url));
+        }
+    }
+
+    /// Release the conversation's browser and chrome without changing layout.
+    /// Desktop close additionally collapses the panel; compact close stays at URL entry.
+    pub(crate) fn release_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.active_key(cx) {
+            self.drop_webview(&key, cx);
+            self.store
+                .update(cx, |store, cx| store.clear_preview_chrome(&key, cx));
+        }
+        // Un-mirror so a later reopen refreshes the address bar from the
+        // (now empty) URL map instead of showing the stale address.
+        self.mirrored = None;
+        cx.notify();
+    }
+
+    fn close_panel(&mut self, cx: &mut Context<Self>) {
+        self.release_preview(cx);
+        self.store
+            .update(cx, |store, cx| store.close_preview_panel(cx));
+        cx.notify();
+    }
+
+    fn render_chrome(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Windows: an open Preview tab is the rightmost column, so its
+        // chrome row hosts the caption buttons. The row is normally only as
+        // tall as its controls — pin it to the shell's 52px top strip and
+        // drop the trailing/vertical padding on the caption side so the
+        // buttons reach the window's true top-right corner.
+        let hosts_caption = {
+            let (diff_open, right_tab) = self.store.read(cx).window_caption_state();
+            window_caption::hosts_caption_for_state(
+                window_caption::CaptionSurface::Preview,
+                self.window_state.read(cx).route(),
+                diff_open,
+                right_tab,
+            )
+        };
+        // Port discovery scans *this* machine's listeners. Over a remote link
+        // those ports belong to the wrong computer, so the affordance is hidden
+        // rather than offering the user a list of their own dev servers as if
+        // they were the host's. A host URL typed into the field still works.
+        let offer_ports =
+            !cfg!(target_os = "android") && PREVIEW_BACKEND && !self.store.read(cx).is_remote();
+        // Compact: one toolbar row on the page inset, with 44pt touch targets.
+        // Close is a right-panel affordance — the Panel page's Back leaves it —
+        // so it is not drawn here at all.
+        let compact = self.window_state.read(cx).compact;
+        h_flex()
+            .flex_none()
+            .w_full()
+            .gap_1()
+            .p_1()
+            .when(compact, |chrome| {
+                chrome
+                    .h(px(material::TOUCH_TARGET))
+                    .py_0()
+                    .px(px(material::COMPACT_PAGE_INSET))
+                    .gap_2()
+            })
+            .when(hosts_caption, |chrome| {
+                chrome
+                    .h(px(window_caption::CAPTION_STRIP_HEIGHT))
+                    .pt_0()
+                    .pb_0()
+                    .pr_0()
+            })
+            // Back / forward / reload drive a page. Without a backend they are
+            // absent rather than present-but-dead.
+            .children(self.history_controls(cx))
+            .child(div().flex_1().min_w_0().child(Input::new(&self.url_input)))
+            // Compact: the address field is the row. Everything that acts *on*
+            // the current URL goes into one overflow menu rather than squeezing
+            // the field down to a word.
+            .when(compact, |chrome| {
+                let panel = cx.entity().downgrade();
+                chrome.child(
+                    material::toolbar_icon_button(
+                        "preview-overflow",
+                        IconName::Ellipsis,
+                        crate::tr!("mobile.more_actions"),
+                        true,
+                    )
+                    .dropdown_menu(move |menu, _, cx| {
+                        let _ = panel.update(cx, |panel, cx| {
+                            panel.compact_overflow_open = true;
+                            panel.sync_visibility(cx);
+                            cx.notify();
+                        });
+                        let panel = panel.clone();
+                        cx.on_release(move |_, cx| {
+                            let _ = panel.update(cx, |panel, cx| {
+                                panel.compact_overflow_open = false;
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                        menu.menu(
+                            crate::tr!("preview.close_compact").into_owned(),
+                            Box::new(PreviewAction::Close),
+                        )
+                        .menu(
+                            crate::tr!("preview.copy_url").into_owned(),
+                            Box::new(PreviewAction::CopyUrl),
+                        )
+                        .menu(
+                            crate::tr!("preview.open_external").into_owned(),
+                            Box::new(PreviewAction::OpenExternal),
+                        )
+                        .menu_with_enable(
+                            crate::tr!("preview.scan_ports").into_owned(),
+                            Box::new(PreviewAction::ScanPorts),
+                            offer_ports,
+                        )
+                    }),
+                )
+            })
+            .when(!compact && offer_ports, |chrome| {
+                chrome.child(
+                    material::toolbar_icon_button(
+                        "preview-ports",
+                        IconName::Globe,
+                        crate::tr!("preview.scan_ports"),
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.rescan_ports(cx))),
+                )
+            })
+            .when(!compact, |chrome| {
+                chrome
+                    .child(
+                        material::toolbar_icon_button(
+                            "preview-copy-url",
+                            IconName::Copy,
+                            crate::tr!("preview.copy_url"),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_url(cx))),
+                    )
+                    .child(
+                        material::toolbar_icon_button(
+                            "preview-open-external",
+                            IconName::ExternalLink,
+                            crate::tr!("preview.open_external"),
+                            false,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_in_system_browser(cx))),
+                    )
+            })
+            .when(!compact, |chrome| {
+                chrome.child(
+                    Button::new("preview-close")
+                        .ghost()
+                        .small()
+                        .compact()
+                        .icon(IconName::Close)
+                        .tooltip(crate::tr!("preview.close"))
+                        .on_click(cx.listener(|this, _, _, cx| this.close_panel(cx))),
+                )
+            })
+            .children(hosts_caption.then(|| window_caption::caption_controls(window, cx)))
+    }
+
+    pub(crate) fn on_preview_action(
+        &mut self,
+        action: &PreviewAction,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            PreviewAction::Close => self.release_preview(cx),
+            PreviewAction::CopyUrl => self.copy_url(cx),
+            PreviewAction::OpenExternal => self.open_in_system_browser(cx),
+            PreviewAction::ScanPorts => self.rescan_ports(cx),
+        }
+    }
+
+    fn render_note(&self, title: String, detail: Option<String>, cx: &Context<Self>) -> AnyElement {
+        v_flex()
+            .flex_1()
+            .gap_2()
+            .items_center()
+            .justify_center()
+            .px_8()
+            .text_center()
+            .text_color(cx.theme().muted_foreground)
+            .child(title)
+            .children(detail.map(|detail| div().text_size(px(13.)).child(detail)))
+            .into_any_element()
+    }
+}
+
+impl Render for PreviewPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // When the embedded browser is turned off in Settings → Browser, hide
+        // the chrome and webview entirely and show a quiet placeholder.
+        if !self.store.read(cx).preview_browser_settings().enabled {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .px_8()
+                .text_center()
+                .text_color(cx.theme().muted_foreground)
+                .child(crate::tr!("browser.disabled_panel"));
+        }
+        let active = self.active_key(cx);
+        let current_url = active
+            .as_ref()
+            .and_then(|id| self.store.read(cx).preview_url(id));
+        if active != self.mirrored || current_url != self.mirrored_url {
+            let value = current_url.clone().unwrap_or_default();
+            self.url_input
+                .update(cx, |state, cx| state.set_value(&value, window, cx));
+            self.mirrored = active.clone();
+            self.mirrored_url = current_url;
+        }
+
+        let body = self.render_body(active.as_deref(), window, cx);
+        v_flex()
+            .size_full()
+            .on_action(cx.listener(Self::on_preview_action))
+            .child(self.render_chrome(window, cx))
+            .children(self.render_port_row(cx))
+            .child(body)
+    }
+}
+
+#[cfg(not(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+)))]
+mod portable {
+    use tcode_protocol::PreviewRequest;
+
+    use super::*;
+
+    impl PreviewPanel {
+        pub(crate) fn set_compact_panel_selected(
+            &mut self,
+            _selected: bool,
+            _cx: &mut Context<Self>,
+        ) {
+        }
+
+        pub(super) fn observe_backend(&mut self, _cx: &mut Context<Self>) {}
+
+        pub(super) fn reconcile_active_key(
+            &mut self,
+            current: Option<(String, String)>,
+            _cx: &mut Context<Self>,
+        ) -> Option<String> {
+            current.map(|(_, key)| key)
+        }
+
+        pub(super) fn navigate_backend(
+            &mut self,
+            _key: &str,
+            _url: &str,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) {
+        }
+
+        pub(super) fn drop_webview(&mut self, key: &str, _cx: &mut Context<Self>) {
+            if self.mirrored.as_deref() == Some(key) {
+                self.mirrored = None;
+            }
+        }
+
+        pub(super) fn prune_deleted_webviews(&mut self, cx: &mut Context<Self>) {
+            let live = self.store.read(cx).preview_live_keys();
+            if self
+                .mirrored
+                .as_ref()
+                .is_some_and(|key| !live.contains(key))
+            {
+                self.mirrored = None;
+            }
+        }
+
+        pub(super) fn history_controls(&self, _cx: &mut Context<Self>) -> Vec<AnyElement> {
+            Vec::new()
+        }
+
+        pub(super) fn render_port_row(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
+            None
+        }
+
+        pub(super) fn rescan_ports(&mut self, _cx: &mut Context<Self>) {}
+
+        pub fn sync_visibility(&mut self, _cx: &mut Context<Self>) {}
+
+        pub(super) fn render_body(
+            &mut self,
+            active: Option<&str>,
+            _window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> AnyElement {
+            if active.is_none() {
+                return self.render_note(crate::tr!("preview.no_session").into_owned(), None, cx);
+            }
+            self.render_note(
+                crate::tr!("preview.no_backend").into_owned(),
+                Some(crate::tr!("preview.no_backend_hint").into_owned()),
+                cx,
+            )
+        }
+
+        /// Nothing here can drive a page. Answer immediately and explicitly:
+        /// a client that stayed silent would leave the agent's call to time out.
+        pub fn handle_op(
+            &mut self,
+            session_id: String,
+            op: PreviewRequest,
+            reply: ReplyTx,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) {
+            log::info!("preview: rejecting op {op:?} for session {session_id} (no backend)");
+            // Naming the client stops the agent retrying instead of waiting out
+            // a timeout it can never satisfy here.
+            let _ = reply.try_send(Err(crate::tr!("preview.unsupported_client").into_owned()));
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows", target_os = "android")
+))]
+mod backend;
+
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use tcode_protocol::PreviewRequest;
+
     use super::*;
+
+    /// A client with no embedded browser is still reachable over the preview
+    /// topic. It must answer, and say why, rather than let the agent's call sit
+    /// until it times out.
+    #[cfg(not(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    )))]
+    #[gpui::test]
+    fn a_client_without_a_backend_refuses_preview_requests_immediately(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+
+        let root = std::env::temp_dir().join(format!(
+            "tcode-preview-unsupported-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            tcode_services::store::SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .expect("spawn preview test host");
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (panel, cx) = cx.add_window_view(|window, cx| {
+            PreviewPanel::new(store.clone(), window_state.clone(), window, cx)
+        });
+        let cx: &mut gpui::VisualTestContext = cx;
+
+        let (reply, answers) = async_channel::bounded(1);
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.handle_op("session".into(), PreviewRequest::Status, reply, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let answer = answers
+            .try_recv()
+            .expect("an answer, not a dropped request");
+        assert_eq!(
+            answer,
+            Err(crate::tr!("preview.unsupported_client").into_owned())
+        );
+
+        host.shutdown_blocking().expect("stop host");
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn routed_session_uses_active_draft_key_only_for_the_active_surface() {
@@ -1252,3 +758,14 @@ mod tests {
         assert_eq!(visible_preview_key(None, Route::Chat, false, true), None);
     }
 }
+
+#[cfg(all(feature = "native-preview", target_os = "android"))]
+mod android;
+#[cfg(any(test, all(feature = "native-preview", target_os = "android")))]
+mod android_geometry;
+
+#[cfg(all(
+    feature = "native-preview",
+    any(target_os = "macos", target_os = "windows")
+))]
+mod proxy;

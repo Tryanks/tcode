@@ -6,6 +6,7 @@
 //! everything, including pending secrets. Favorite toggling is the one live
 //! exception — favorites are a global, not a `ProviderSettings` field.
 
+use crate::touch_scroll::TouchScrollExt as _;
 use std::collections::HashSet;
 
 use crate::overlay::{DialogButtons, OverlayExt as _};
@@ -875,14 +876,17 @@ impl ProviderDialog {
 }
 
 impl Render for ProviderDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The dialog's content_builder path has no built-in scroll, so cap and
-        // scroll the form body ourselves.
+        // scroll the form body ourselves — against the window, not a constant.
         div()
             .id("provider-dialog-body")
             .w_full()
-            .max_h(px(520.))
-            .overflow_y_scroll()
+            .max_h(crate::sizing::fit_viewport(
+                520.,
+                window.viewport_size().height,
+            ))
+            .touch_overflow_y_scroll()
             .child(
                 v_flex()
                     .w_full()

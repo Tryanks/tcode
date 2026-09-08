@@ -12,8 +12,10 @@ crate-type = ["cdylib", "rlib"]
 gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
 gpui-android = { path = "../platform/gpui-android" }
 log = "0.4"
-tcode-mobile = { path = "../mobile" }
-tcode-ui = { path = "../ui", default-features = false }
+tcode-client = { path = "../client" }
+tcode-remote = { path = "../remote", default-features = false, features = ["client"] }
+tcode-ui = { path = "../ui", default-features = false, features = ["native-preview"] }
+async-channel = "2"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }

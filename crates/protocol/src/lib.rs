@@ -9,26 +9,32 @@ mod event;
 mod preview;
 mod query;
 pub use preview::{PreviewRequest, PreviewResponse};
+pub mod terminal;
 mod wire;
 
 pub use command::{Command, CommandResponse, SettingsPatch, TerminalSelection, ThreadExportFormat};
 pub use event::{
-    AcpMarketplaceItem, EventEnvelope, GitActionRequest, GitStatusStatus, IndexSnapshot,
-    MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus, ProvidersStatus,
-    QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice, RuntimeNotification,
-    RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord, SessionStatus,
-    TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus, Topic,
+    AcpMarketplaceItem, EventEnvelope, ExternalImportState, ExternalImportStatus, GitActionRequest,
+    GitStatusStatus, IndexSnapshot, MergeWorktreeFailure, NoticeSeverity, ProviderVersionStatus,
+    ProvidersStatus, QueuedMessageStatus, RuntimeEffect, RuntimeError, RuntimeNotice,
+    RuntimeNotification, RuntimeOperationId, RuntimeToast, ServerEvent, SessionEventRecord,
+    SessionStatus, TcodeUpdateStatus, TerminalContextStatus, TerminalSplitStatus, TerminalStatus,
+    Topic,
 };
 pub use query::{
-    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, PathEntry, Query, QueryResponse,
-    RecentDir, SourceTool,
+    ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
+    HostingState, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, PathEntry, Query,
+    QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS,
+    SessionSearchHit, SourceTool,
 };
+pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
     ClientMessage, ClientPayload, HostMessage, ProtocolError, Subscription, decode_client_line,
     decode_host_line, encode_line,
 };
 
-pub const PROTOCOL_VERSION: u32 = 2;
+// Version 4 adds client-generated command deduplication keys.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 #[cfg(test)]
 mod tests;

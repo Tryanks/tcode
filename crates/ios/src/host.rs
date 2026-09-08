@@ -1,4 +1,4 @@
-//! UIKit services used by `tcode-mobile`.
+//! UIKit services behind this client's `ClientHost`.
 
 use std::{
     cell::RefCell,
@@ -7,9 +7,11 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use tcode_mobile::host::{BrowseDone, NativeHost, ScanDone};
+use tcode_client::host::{DiscoveredHost, HostFuture};
+use tcode_remote::NativeClientHost;
 
-use crate::entry::dispatch_to_app;
+type BrowseDone = Box<dyn FnOnce(Vec<DiscoveredHost>)>;
+type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
 
 thread_local! {
     static BROWSE_CALLBACKS: RefCell<HashMap<u64, BrowseDone>> = RefCell::new(HashMap::new());
@@ -20,37 +22,63 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 unsafe extern "C" {
     fn tcode_ios_host_device_name(destination: *mut u8, capacity: usize) -> usize;
+    fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
     fn tcode_ios_host_browse(request_id: u64);
 }
 
-pub(crate) fn native_host() -> NativeHost {
+pub(crate) fn native_host() -> (NativeClientHost, Option<String>) {
     let device_name = read_native_string(|destination, capacity| {
         // SAFETY: Swift writes no more than `capacity` bytes during the call.
         unsafe { tcode_ios_host_device_name(destination, capacity) }
     })
     .filter(|name| !name.trim().is_empty())
     .unwrap_or_else(|| "iPhone".into());
+    let system_locale = read_native_string(|destination, capacity| {
+        // SAFETY: Swift writes no more than `capacity` bytes during the call.
+        unsafe { tcode_ios_host_system_locale(destination, capacity) }
+    })
+    .filter(|locale| !locale.trim().is_empty());
 
-    NativeHost::from_env_with_device_name(device_name)
-        .with_browser(|done, _cx| {
+    let host = NativeClientHost::from_env_with_device_name(device_name)
+        .with_browser(|| -> HostFuture<'static, Vec<DiscoveredHost>> {
+            let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
             BROWSE_CALLBACKS.with(|callbacks| {
-                callbacks.borrow_mut().insert(request_id, done);
+                callbacks.borrow_mut().insert(
+                    request_id,
+                    Box::new(move |hosts| {
+                        let _ = sender.try_send(hosts);
+                    }),
+                );
             });
             // SAFETY: Swift completes once on the main thread with bounded JSON.
             unsafe {
                 tcode_ios_host_browse(request_id);
             }
+            Box::pin(async move { receiver.recv().await.unwrap_or_default() })
         })
-        .with_qr_scanner(|done, _cx| {
+        .with_qr_scanner(|| -> HostFuture<'static, Result<String, String>> {
+            let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
             CAMERA_CALLBACKS.with(|callbacks| {
-                callbacks.borrow_mut().insert(request_id, done);
+                callbacks.borrow_mut().insert(
+                    request_id,
+                    Box::new(move |result| {
+                        let _ = sender.try_send(result);
+                    }),
+                );
             });
             // SAFETY: UIKit retains the id and completes the request exactly once.
             unsafe { tcode_ios_host_start_camera_scan(request_id) };
-        })
+            Box::pin(async move {
+                receiver
+                    .recv()
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()))
+            })
+        });
+    (host, system_locale)
 }
 
 /// Completes a one-shot AVFoundation QR scan from Swift.
@@ -74,7 +102,7 @@ pub extern "C" fn tcode_ios_camera_scan_completed(
     let result = value
         .filter(|value| !value.is_empty())
         .ok_or_else(|| error.unwrap_or_else(|| "此设备没有可用的相机".to_string()));
-    dispatch_to_app(move |cx| callback(result, cx));
+    callback(result);
 }
 
 fn read_native_string(read: impl Fn(*mut u8, usize) -> usize) -> Option<String> {
@@ -117,7 +145,7 @@ pub extern "C" fn tcode_ios_browse_completed(request_id: u64, bytes: *const u8, 
         None
     };
     let hosts = json
-        .map(|s| tcode_mobile::host::parse_discovered_hosts(&s))
+        .map(|s| tcode_client::host::parse_discovered_hosts(&s))
         .unwrap_or_default();
-    dispatch_to_app(move |cx| callback(hosts, cx));
+    callback(hosts);
 }
