@@ -139,62 +139,80 @@ fn missing_invalid_and_revoked_credentials_receive_407_for_http_and_connect() {
 
 #[test]
 fn connect_carries_verified_tls_bytes_without_interception() {
-    use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
-    let machine = Machine::new();
-    // This self-signed localhost identity is trusted only by this test client.
-    let certificate = CertificateDer::from(include_bytes!("fixtures/localhost.der").to_vec());
-    let key = PrivatePkcs8KeyDer::from(include_bytes!("fixtures/localhost-key.der").to_vec());
-    let server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![certificate.clone()], key.into())
-        .unwrap();
-    let origin = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = origin.local_addr().unwrap().port();
-    let origin = std::thread::spawn(move || {
-        let (stream, _) = origin.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+    for forwarded in [false, true] {
+        use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
+        let machine = Machine::new();
+        // This self-signed localhost identity is trusted only by this test client.
+        let certificate = CertificateDer::from(include_bytes!("fixtures/localhost.der").to_vec());
+        let key = PrivatePkcs8KeyDer::from(include_bytes!("fixtures/localhost-key.der").to_vec());
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], key.into())
             .unwrap();
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = origin.local_addr().unwrap().port();
+        let origin = std::thread::spawn(move || {
+            let (stream, _) = origin.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut tls = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(Arc::new(server_config)).unwrap(),
+                stream,
+            );
+            assert!(head(&mut tls).starts_with("GET /secure HTTP/1.1"));
+            tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nsecure")
+                .unwrap();
+            tls.conn.send_close_notify();
+            tls.flush().unwrap();
+        });
+        let mut routes = paired_preview(&machine);
+        let socket = if forwarded {
+            let intent = format!("https://localhost:{port}/secure");
+            let actual = routes.navigate(&intent).unwrap();
+            assert_eq!(routes.logical_url(&actual), intent);
+            let port = url::Url::parse(&actual).unwrap().port().unwrap();
+            let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            socket
+        } else {
+            let mut socket = machine.socket();
+            socket
+                .write_all(
+                    format!(
+                        "CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n{}\r\n",
+                        machine.auth
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            assert!(head(&mut socket).starts_with("HTTP/1.1 200 Connection Established"));
+            socket
+        };
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).unwrap();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
         let mut tls = rustls::StreamOwned::new(
-            rustls::ServerConnection::new(Arc::new(server_config)).unwrap(),
-            stream,
-        );
-        assert!(head(&mut tls).starts_with("GET /secure HTTP/1.1"));
-        tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nsecure")
-            .unwrap();
-        tls.conn.send_close_notify();
-        tls.flush().unwrap();
-    });
-    let mut socket = machine.socket();
-    socket
-        .write_all(
-            format!(
-                "CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n{}\r\n",
-                machine.auth
+            rustls::ClientConnection::new(
+                Arc::new(config),
+                ServerName::try_from("localhost").unwrap(),
             )
-            .as_bytes(),
-        )
-        .unwrap();
-    assert!(head(&mut socket).starts_with("HTTP/1.1 200 Connection Established"));
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(certificate).unwrap();
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    let mut tls = rustls::StreamOwned::new(
-        rustls::ClientConnection::new(Arc::new(config), ServerName::try_from("localhost").unwrap())
             .unwrap(),
-        socket,
-    );
-    tls.write_all(b"GET /secure HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .unwrap();
-    assert!(head(&mut tls).starts_with("HTTP/1.1 200 OK"));
-    let mut body = [0; 6];
-    tls.read_exact(&mut body).unwrap();
-    assert_eq!(&body, b"secure");
-    origin.join().unwrap();
+            socket,
+        );
+        tls.write_all(b"GET /secure HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        assert!(head(&mut tls).starts_with("HTTP/1.1 200 OK"));
+        let mut body = [0; 6];
+        tls.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"secure");
+        origin.join().unwrap();
+    }
 }
-
 #[test]
 fn pipelined_request_and_chunk_trailers_never_reach_origin() {
     let machine = Machine::new();
@@ -283,4 +301,229 @@ fn connect_preserves_half_close_and_host_shutdown_closes_active_tunnels() {
     let (_target, _) = listener.accept().unwrap();
     machine.server.take().unwrap().shutdown();
     assert_eq!(socket.read(&mut [0; 1]).unwrap(), 0);
+}
+
+fn paired_preview(machine: &Machine) -> tcode_remote::preview::PreviewRoutes {
+    let encoded = machine
+        .auth
+        .trim()
+        .strip_prefix("Proxy-Authorization: Basic ")
+        .unwrap();
+    let decoded = String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap();
+    tcode_remote::preview::PreviewRoutes::new(tcode_remote::client::PairedHost {
+        host_id: "fixture".into(),
+        name: "fixture".into(),
+        origin: format!("http://{}", machine.server.as_ref().unwrap().local_addr()),
+        token: decoded.strip_prefix("tcode:").unwrap().into(),
+        last_connected_unix: None,
+    })
+}
+
+#[test]
+fn browser_forward_routes_bytes_and_navigation_then_disposes_connections() {
+    let machine = Machine::new();
+    // The viewing machine already occupies the remote port. The mapped socket
+    // must be allocated elsewhere, including when a second browser opens it.
+    let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = destination.local_addr().unwrap().port();
+    let intent = format!("http://localhost:{port}/page?source=remote#fragment");
+    let mut routes = paired_preview(&machine);
+    let actual = routes.navigate(&intent).unwrap();
+    assert_ne!(
+        actual, intent,
+        "remote navigation must allocate a viewing endpoint"
+    );
+    let actual_url = url::Url::parse(&actual).unwrap();
+    assert_ne!(actual_url.port().unwrap(), port);
+    assert_eq!(routes.logical_url(&actual), intent);
+    assert_eq!(
+        routes.navigate(&intent).unwrap(),
+        actual,
+        "reload reuses the route"
+    );
+    assert_eq!(
+        routes.navigation(&actual).unwrap(),
+        actual,
+        "native reentry is not mapped twice"
+    );
+    let entered_collision = format!(
+        "http://localhost:{}/another-remote-port",
+        actual_url.port().unwrap()
+    );
+    assert_ne!(
+        routes.navigate(&entered_collision).unwrap(),
+        entered_collision,
+        "explicit remote intent must not be mistaken for native reentry"
+    );
+    let public = "https://example.com/public?viewer=direct";
+    assert_eq!(routes.navigate(public).unwrap(), public);
+    assert_eq!(routes.navigation(&actual).unwrap(), actual);
+    assert_eq!(
+        routes.external_url(&intent).as_deref(),
+        Some(actual.as_str())
+    );
+    let mut second = paired_preview(&machine);
+    assert_ne!(second.navigate(&intent).unwrap(), actual);
+    let mut browser = TcpStream::connect(("127.0.0.1", actual_url.port().unwrap())).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    // Opaque HTTP/WS-like bytes, including site authorization and binary bytes:
+    // the CONNECT client must not parse/rewrite/remove any of these.
+    let bytes = b"GET /page?source=remote HTTP/1.1\r\nHost: localhost:12345\r\nAuthorization: Basic site-only\r\nUpgrade: websocket\r\n\r\n\x00\xff\x81payload";
+    browser.write_all(bytes).unwrap();
+    let (mut remote, _) = destination.accept().unwrap();
+    remote
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut received = vec![0; bytes.len()];
+    remote.read_exact(&mut received).unwrap();
+    assert_eq!(received, bytes);
+    browser.shutdown(std::net::Shutdown::Write).unwrap();
+    assert_eq!(remote.read(&mut [0]).unwrap(), 0);
+    remote.write_all(b"remote after EOF").unwrap();
+    let mut reply = [0; 16];
+    browser.read_exact(&mut reply).unwrap();
+    assert_eq!(&reply, b"remote after EOF");
+    drop(routes);
+    assert_eq!(
+        browser.read(&mut [0]).unwrap(),
+        0,
+        "slot close must close accepted tunnels"
+    );
+    assert_eq!(remote.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn browser_forward_uses_paired_auth_and_preserves_ipv6_destination() {
+    let machine = Machine::new();
+    let destination = TcpListener::bind("[::1]:0").unwrap();
+    let intent = format!(
+        "http://[::1]:{}/ipv6",
+        destination.local_addr().unwrap().port()
+    );
+    let mut routes = paired_preview(&machine);
+    let actual = routes.navigate(&intent).unwrap();
+    let actual_url = url::Url::parse(&actual).unwrap();
+    assert_eq!(actual_url.host_str(), Some("[::1]"));
+    let mut browser = TcpStream::connect(("::1", actual_url.port().unwrap())).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    browser.write_all(b"IPv6 remote").unwrap();
+    let (mut remote, _) = destination.accept().unwrap();
+    remote
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = [0; 11];
+    remote.read_exact(&mut request).unwrap();
+    assert_eq!(&request, b"IPv6 remote");
+    drop(browser);
+    drop(remote);
+    drop(destination);
+    let mut browser = TcpStream::connect(("::1", actual_url.port().unwrap())).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert_eq!(browser.read(&mut [0]).unwrap(), 0);
+    assert!(routes.error().unwrap().contains("destination"));
+    routes.navigation(&actual).unwrap();
+    assert_eq!(
+        routes.error(),
+        None,
+        "native reload clears the previous attempt's error"
+    );
+    let server = machine.server.as_ref().unwrap();
+    server.revoke_device(&server.devices()[0].id).unwrap();
+    let mut browser = TcpStream::connect(("::1", actual_url.port().unwrap())).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert_eq!(browser.read(&mut [0]).unwrap(), 0);
+    assert!(routes.error().unwrap().contains("authentication"));
+}
+
+#[test]
+fn browser_top_level_cross_port_navigation_reaches_the_new_remote_listener() {
+    let machine = Machine::new();
+    let first = TcpListener::bind("127.0.0.1:0").unwrap();
+    let next = TcpListener::bind("[::1]:0").unwrap();
+    let mut routes = paired_preview(&machine);
+    let initial = format!(
+        "http://localhost:{}/start",
+        first.local_addr().unwrap().port()
+    );
+    routes.navigate(&initial).unwrap();
+    // An absolute Location header carries a new remote authority. It enters
+    // the same production navigation owner used by the WK delegate.
+    let redirect = format!(
+        "http://[::1]:{}/arrived?from=redirect",
+        next.local_addr().unwrap().port()
+    );
+    let actual = routes.navigation(&redirect).unwrap();
+    assert_eq!(routes.logical_url(&actual), redirect);
+    assert_eq!(routes.current_url(), Some(redirect.as_str()));
+    let url = url::Url::parse(&actual).unwrap();
+    let mut browser = TcpStream::connect(("::1", url.port().unwrap())).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    browser
+        .write_all(b"GET /arrived?from=redirect HTTP/1.1\r\nHost: fixture\r\n\r\n")
+        .unwrap();
+    let (mut remote, _) = next.accept().unwrap();
+    remote
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert!(head(&mut remote).starts_with("GET /arrived?from=redirect HTTP/1.1"));
+    remote.write_all(b"second remote port").unwrap();
+    let mut body = [0; 18];
+    browser.read_exact(&mut body).unwrap();
+    assert_eq!(&body, b"second remote port");
+    drop(routes);
+    assert_eq!(browser.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn browser_keepalive_shutdown_does_not_report_a_failed_navigation() {
+    let machine = Machine::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut routes = paired_preview(&machine);
+    let actual = routes
+        .navigate(&format!(
+            "http://localhost:{}/",
+            listener.local_addr().unwrap().port()
+        ))
+        .unwrap();
+    let port = url::Url::parse(&actual).unwrap().port().unwrap();
+    let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    browser
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let (mut remote, _) = listener.accept().unwrap();
+    remote
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    head(&mut remote);
+    remote
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        .unwrap();
+    drop(remote);
+    let mut response = String::new();
+    browser.read_to_string(&mut response).unwrap();
+    assert!(response.ends_with("ok"));
+    drop(browser);
+    // The task can finish after the reader gets EOF. A subsequent round trip
+    // through the same listener lets the executor process that completion.
+    let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    browser
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (mut remote, _) = listener.accept().unwrap();
+    remote.write_all(b"next").unwrap();
+    browser.read_exact(&mut [0; 4]).unwrap();
+    assert_eq!(routes.error(), None);
 }
