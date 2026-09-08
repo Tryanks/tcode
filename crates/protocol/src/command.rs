@@ -387,6 +387,59 @@ pub enum CommandResponse {
 }
 
 impl Command {
+    /// The thread whose state this command addresses, for delivery navigation.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::OrchestrateTurn { session_id, .. }
+            | Self::RunGitAction { session_id, .. }
+            | Self::SetActiveAcpAgent { session_id, .. }
+            | Self::SetTerminalHeight { session_id, .. }
+            | Self::ToggleTerminalPanel { session_id, .. }
+            | Self::CloseTerminalPanel { session_id, .. }
+            | Self::RestartTerminal { session_id, .. }
+            | Self::NewTerminal { session_id, .. }
+            | Self::SplitTerminal { session_id, .. }
+            | Self::ActivateTerminal { session_id, .. }
+            | Self::CloseTerminal { session_id, .. }
+            | Self::CaptureTerminalSelection { session_id, .. }
+            | Self::RemoveTerminalContext { session_id, .. }
+            | Self::AddReviewComment { session_id, .. }
+            | Self::RemoveReviewComment { session_id, .. }
+            | Self::ArchiveSession { session_id, .. }
+            | Self::UnarchiveSession { session_id, .. }
+            | Self::RenameSession { session_id, .. }
+            | Self::DeleteSession { session_id, .. }
+            | Self::MergeWorktree { session_id, .. }
+            | Self::MarkSessionUnread { session_id, .. }
+            | Self::SetDraftWorkspace { session_id, .. }
+            | Self::SendTurn { session_id, .. }
+            | Self::ScheduleTurn { session_id, .. }
+            | Self::ConfirmRelayAndSend { session_id, .. }
+            | Self::Steer { session_id, .. }
+            | Self::SteerQueued { session_id, .. }
+            | Self::DropQueued { session_id, .. }
+            | Self::Interrupt { session_id, .. }
+            | Self::RespondApproval { session_id, .. }
+            | Self::RespondUserInput { session_id, .. }
+            | Self::SetActiveModel { session_id, .. }
+            | Self::SetActiveOption { session_id, .. }
+            | Self::SelectUltrathink { session_id, .. }
+            | Self::SetInteractionMode { session_id, .. }
+            | Self::ToggleInteractionMode { session_id, .. }
+            | Self::ImplementPlan { session_id, .. }
+            | Self::DismissPlan { session_id, .. }
+            | Self::ImplementPlanInNewThread { session_id, .. }
+            | Self::SavePlanToWorkspace { session_id, .. }
+            | Self::DownloadPlan { session_id, .. }
+            | Self::LoadBranches { session_id, .. }
+            | Self::CheckoutBranch { session_id, .. }
+            | Self::SetActiveApprovalMode { session_id, .. }
+            | Self::RewindTurn { session_id, .. } => Some(session_id),
+            Self::ForkThread { id } => Some(id),
+            _ => None,
+        }
+    }
+
     /// Idempotent controls and reads do not need retained delivery.
     /// All other variants are retained writes, including settings assignments:
     /// repeating an old assignment after a newer one would undo user intent.

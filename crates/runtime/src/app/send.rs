@@ -651,14 +651,21 @@ impl AppState {
         self.reschedule_scheduled_wake(cx);
     }
 
-    pub fn interrupt(&mut self, target_id: &str, _cx: &mut HostCx) {
-        if let Some(ActiveSession {
+    pub fn interrupt(
+        &mut self,
+        target_id: &str,
+        _cx: &mut HostCx,
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
         }) = self.resident(target_id)
-        {
-            let _ = commands.try_send(SessionCommand::Interrupt);
-        }
+        else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::Interrupt)
+            .map_err(provider_command_error)
     }
 
     pub fn respond_approval(
@@ -667,35 +674,39 @@ impl AppState {
         request_id: String,
         decision: ApprovalDecision,
         _cx: &mut HostCx,
-    ) {
-        if let Some(session_id) = self
-            .resident(target_id)
-            .map(|session| session.meta.id.as_str())
-            .map(str::to_string)
-        {
-            let _ = self.respond_session_approval(&session_id, request_id, decision);
-        }
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        self.respond_session_approval(target_id, request_id, decision)
+            .map_err(provider_command_error)
     }
 
-    /// Answer a pending user-input request (Claude `AskUserQuestion` / Codex
-    /// `requestUserInput`). `answers` is keyed by [`UserInputQuestion::id`] with
-    /// string (single-select / free text) or string-array (multi-select) values.
+    /// Answer the host's pending user-input request, acknowledging only after
+    /// the provider command channel has accepted the answer.
     pub fn respond_user_input(
         &mut self,
         target_id: &str,
         request_id: String,
         answers: serde_json::Map<String, serde_json::Value>,
         _cx: &mut HostCx,
-    ) {
-        if let Some(ActiveSession {
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let Some(ActiveSession {
             runtime: Runtime::Live(commands),
             ..
         }) = self.resident(target_id)
-        {
-            let _ = commands.try_send(SessionCommand::RespondUserInput {
+        else {
+            return Err(provider_command_error("The provider is no longer running."));
+        };
+        commands
+            .try_send(SessionCommand::RespondUserInput {
                 request_id,
                 answers,
-            });
-        }
+            })
+            .map_err(provider_command_error)
+    }
+}
+
+fn provider_command_error(error: impl std::fmt::Display) -> tcode_protocol::ProtocolError {
+    tcode_protocol::ProtocolError {
+        code: "provider_unavailable".into(),
+        message: error.to_string(),
     }
 }

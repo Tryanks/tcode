@@ -5664,7 +5664,7 @@ fn stop_then_new_thread_keeps_the_first_message_visible() {
 
         // Stop. The provider reports an error and an interrupted turn while
         // preserving the complete multi-line error for later presentation.
-        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx);
+        state.host.interrupt(state.selected.as_deref().unwrap_or_default(), cx).expect("interrupt delivered");
         assert!(matches!(
             commands_a.try_recv(),
             Ok(SessionCommand::Interrupt)

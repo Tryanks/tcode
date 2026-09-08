@@ -297,6 +297,9 @@ enum CommandOutcome {
 }
 
 fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> CommandOutcome {
+    if let Err(error) = app.validate_command_target(&command) {
+        return CommandOutcome::Immediate(Err(error));
+    }
     let mut response = CommandResponse::Unit;
     match command {
         Command::TerminalInput { terminal_id, bytes } => {
@@ -481,17 +484,32 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         } => app.steer(&session_id, text, attachment_paths, cx),
         Command::SteerQueued { session_id, id } => app.steer_queued(&session_id, id, cx),
         Command::DropQueued { session_id, id } => app.drop_queued(&session_id, id, cx),
-        Command::Interrupt { session_id } => app.interrupt(&session_id, cx),
+        Command::Interrupt { session_id } => {
+            return CommandOutcome::Immediate(
+                app.interrupt(&session_id, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::RespondApproval {
             session_id,
             request_id,
             decision,
-        } => app.respond_approval(&session_id, request_id, decision, cx),
+        } => {
+            return CommandOutcome::Immediate(
+                app.respond_approval(&session_id, request_id, decision, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::RespondUserInput {
             session_id,
             request_id,
             answers,
-        } => app.respond_user_input(&session_id, request_id, answers, cx),
+        } => {
+            return CommandOutcome::Immediate(
+                app.respond_user_input(&session_id, request_id, answers, cx)
+                    .map(|()| CommandResponse::Unit),
+            );
+        }
         Command::SetActiveModel {
             session_id,
             provider,
@@ -698,6 +716,226 @@ mod tests {
             }
         }
         panic!("timed out waiting for host event");
+    }
+
+    #[test]
+    fn missing_session_send_is_rejected() {
+        let root = std::env::temp_dir().join(format!("tcode-rejected-{}", uuid::Uuid::new_v4()));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let error = host
+            .link()
+            .command_blocking(Command::SendTurn {
+                session_id: "missing".into(),
+                text: "must not disappear".into(),
+                attachment_paths: Vec::new(),
+            })
+            .expect_err("a missing session must reject the write");
+        assert_eq!(error.code, "unknown_session");
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_conversation_actions_are_rejected_over_the_pipe() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-stale-actions-{}", uuid::Uuid::new_v4()));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let link = host.link();
+        let CommandResponse::SessionId(Some(id)) = link
+            .command_blocking(Command::StartDraft {
+                project_id: "fixture".into(),
+                cwd: root.clone(),
+            })
+            .unwrap()
+        else {
+            panic!("draft id")
+        };
+        for (command, code) in [
+            (
+                Command::DeleteProfile {
+                    profile_id: "codex".into(),
+                },
+                "builtin_profile",
+            ),
+            (
+                Command::InstallAcpAgent {
+                    id: "nonexistent-registry-agent".into(),
+                },
+                "unknown_acp_agent",
+            ),
+            (
+                Command::MergeWorktree {
+                    session_id: id.clone(),
+                },
+                "no_worktree",
+            ),
+            (
+                Command::SplitTerminal {
+                    session_id: id.clone(),
+                    direction: tcode_core::ui::TerminalSplitDirection::Horizontal,
+                },
+                "terminal_split_unavailable",
+            ),
+            (
+                Command::CaptureTerminalSelection {
+                    session_id: id.clone(),
+                    terminal_id: 999,
+                    selection: None,
+                },
+                "no_selection",
+            ),
+            (
+                Command::RewindTurn {
+                    session_id: id.clone(),
+                    turn: 999,
+                    mode: agent::RewindMode::Files,
+                },
+                "rewind_unavailable",
+            ),
+            (
+                Command::RespondApproval {
+                    session_id: id.clone(),
+                    request_id: "gone".into(),
+                    decision: agent::ApprovalDecision::Approve,
+                },
+                "unknown_approval",
+            ),
+            (
+                Command::RespondApproval {
+                    session_id: id.clone(),
+                    request_id: "gone".into(),
+                    decision: agent::ApprovalDecision::Deny,
+                },
+                "unknown_approval",
+            ),
+            (
+                Command::RespondUserInput {
+                    session_id: id.clone(),
+                    request_id: "gone".into(),
+                    answers: Default::default(),
+                },
+                "unknown_user_input",
+            ),
+            (
+                Command::SteerQueued {
+                    session_id: id.clone(),
+                    id: 42,
+                },
+                "unknown_queued_message",
+            ),
+            (
+                Command::DropQueued {
+                    session_id: id.clone(),
+                    id: 42,
+                },
+                "unknown_queued_message",
+            ),
+            (
+                Command::Interrupt {
+                    session_id: id.clone(),
+                },
+                "no_running_turn",
+            ),
+            (
+                Command::ClearTerminal { terminal_id: 999 },
+                "unknown_terminal",
+            ),
+            (
+                Command::ActivateTerminal {
+                    session_id: id.clone(),
+                    terminal_id: 999,
+                },
+                "unknown_terminal",
+            ),
+            (
+                Command::RemoveTerminalContext {
+                    session_id: id.clone(),
+                    context_id: 999,
+                },
+                "unknown_terminal_context",
+            ),
+            (
+                Command::RemoveReviewComment {
+                    session_id: id.clone(),
+                    index: 0,
+                },
+                "unknown_review_comment",
+            ),
+            (
+                Command::ImplementPlan {
+                    session_id: id.clone(),
+                },
+                "unknown_plan",
+            ),
+            (
+                Command::DismissPlan {
+                    session_id: id.clone(),
+                },
+                "unknown_plan",
+            ),
+            (
+                Command::DeleteProject {
+                    project_id: "gone".into(),
+                },
+                "unknown_project",
+            ),
+            (
+                Command::DeleteProfile {
+                    profile_id: "gone".into(),
+                },
+                "unknown_profile",
+            ),
+            (
+                Command::RenameSession {
+                    session_id: "gone".into(),
+                    title: "lost".into(),
+                },
+                "unknown_session",
+            ),
+        ] {
+            let error = link
+                .command_blocking(command.clone())
+                .expect_err("stale action must reject");
+            assert_eq!(error.code, code, "{command:?}");
+        }
+        for command in [
+            Command::ScheduleTurn {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+                fire_at_unix_secs: 1,
+            },
+            Command::Steer {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+            },
+            Command::ConfirmRelayAndSend {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+            },
+            Command::OrchestrateTurn {
+                session_id: "gone".into(),
+                text: "hi".into(),
+                attachment_paths: Vec::new(),
+            },
+        ] {
+            assert_eq!(
+                link.command_blocking(command).unwrap_err().code,
+                "unknown_session"
+            );
+        }
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Export rendering is host work and delivery is the client's, so the query

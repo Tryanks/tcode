@@ -234,6 +234,7 @@ enum TerminalSpawnAction {
 mod acp;
 mod active_session;
 mod approvals;
+mod command_validation;
 mod events;
 mod git;
 mod history;
