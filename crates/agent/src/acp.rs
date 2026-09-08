@@ -1303,6 +1303,7 @@ async fn finish_turn(
     let (status, message, usage) = match outcome.result {
         Ok(response) => {
             let usage = response.usage.as_ref().map(|usage| TokenUsage {
+                freshness: crate::ContextFreshness::Current,
                 total_processed_tokens: Some(usage.total_tokens),
                 input_tokens: Some(usage.input_tokens),
                 cached_input_tokens: usage.cached_read_tokens,
@@ -1817,6 +1818,7 @@ impl State {
             }
             acp::SessionUpdate::UsageUpdate(usage) => {
                 let usage = TokenUsage {
+                    freshness: crate::ContextFreshness::Current,
                     used_tokens: Some(usage.used),
                     context_window: Some(usage.size),
                     cost_usd: usage

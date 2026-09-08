@@ -527,6 +527,17 @@ impl AppState {
     pub fn update_settings(&mut self, settings: Settings, cx: &mut HostCx) {
         self.enqueue_settings(&settings, cx);
         let language = settings.language.clone();
+        let changed: HashSet<_> = self
+            .providers
+            .provider_usage
+            .keys()
+            .chain(self.providers.usage_checking.iter())
+            .filter(|id| self.settings.resolved_profile(id) != settings.resolved_profile(id))
+            .cloned()
+            .collect();
+        for id in changed {
+            self.providers.invalidate_usage(&id);
+        }
         self.settings = settings;
         self.providers.provider_secret_names =
             provider_secret_names(&self.settings, &self.settings_store);

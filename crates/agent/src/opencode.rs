@@ -725,7 +725,9 @@ impl OpenCodeMapper {
                         .push((request_id.to_owned(), None));
                 }
             }
-            "session.compacted" => mapped.events.push(AgentEvent::ContextCompacted),
+            "session.compacted" => mapped
+                .events
+                .push(AgentEvent::ContextCompacted(Default::default())),
             _ => {}
         }
         mapped
@@ -903,6 +905,7 @@ impl OpenCodeMapper {
             aggregate.merge(usage);
         }
         let aggregate = TokenUsage {
+            freshness: crate::ContextFreshness::Current,
             total_processed_tokens: Some(self.cumulative_processed),
             ..aggregate
         };
@@ -1123,6 +1126,7 @@ fn usage_from_tokens(tokens: Option<&Value>) -> Option<TokenUsage> {
     let cache_read = crate::json_u64(tokens.pointer("/cache/read"));
     let cache_write = crate::json_u64(tokens.pointer("/cache/write")).unwrap_or(0);
     (input.is_some() || output.is_some() || cache_read.is_some()).then_some(TokenUsage {
+        freshness: crate::ContextFreshness::Current,
         input_tokens: input,
         cached_input_tokens: cache_read,
         output_tokens: output,

@@ -1085,7 +1085,7 @@ pub enum AgentEvent {
     },
     /// The provider compacted its context window (Claude `system/compact_boundary`;
     /// Codex `contextCompaction` item). Rendered as a "Context compacted" work-log row.
-    ContextCompacted,
+    ContextCompacted(Compaction),
     /// A tcode-level context-window change. This is never emitted by an adapter;
     /// the runtime persists it after the user message that selected the window.
     ContextWindowChanged {
@@ -1451,9 +1451,36 @@ pub enum ApprovalDecision {
     Option(String),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextFreshness {
+    /// Older logs lack provenance; their counts may be turn aggregates.
+    #[default]
+    Unknown,
+    Current,
+    LastKnown,
+    Compacting,
+    AwaitingObservation,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Compaction {
+    pub in_progress: bool,
+    pub trigger: Option<String>,
+    pub pre_tokens: Option<u64>,
+    /// Provider-reported compaction output size; not a new request observation.
+    pub post_tokens: Option<u64>,
+    pub dropped_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TokenUsage {
+    pub freshness: ContextFreshness,
+    /// Main-loop traffic for the completed turn, separate from occupancy.
+    pub turn_processed_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -1461,7 +1488,7 @@ pub struct TokenUsage {
     pub used_tokens: Option<u64>,
     pub context_window: Option<u64>,
     /// Cumulative tokens processed over the session's lifetime, if known (Codex
-    /// `thread/tokenUsage` running total; Claude accumulated per-turn usage).
+    /// `thread/tokenUsage` running total; timeline accumulation of Claude turns).
     /// Shown as "Total processed" in the context-meter popover.
     pub total_processed_tokens: Option<u64>,
     /// Provider-reported cost for this turn/message, in US dollars.
@@ -1473,6 +1500,7 @@ pub struct TokenUsage {
 impl TokenUsage {
     #[cfg(feature = "process")]
     fn merge(&mut self, usage: Self) {
+        self.freshness = usage.freshness;
         self.input_tokens = add_token_counts(self.input_tokens, usage.input_tokens);
         self.cached_input_tokens =
             add_token_counts(self.cached_input_tokens, usage.cached_input_tokens);
@@ -1866,5 +1894,40 @@ mod thread_item_serde_tests {
             serde_json::to_value(decoded).unwrap()["parent_item_id"],
             "spawn"
         );
+    }
+}
+
+#[cfg(test)]
+mod usage_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_and_usage_read_old_literal_records_without_inventing_provenance() {
+        let event: AgentEvent = serde_json::from_str(r#"{"type":"context_compacted"}"#).unwrap();
+        assert!(
+            matches!(event, AgentEvent::ContextCompacted(c) if !c.in_progress && c.pre_tokens.is_none())
+        );
+        let usage: TokenUsage = serde_json::from_str(
+            r#"{"used_tokens":4100000,"context_window":1000000,"total_processed_tokens":4100000}"#,
+        )
+        .unwrap();
+        assert_eq!(usage.freshness, ContextFreshness::Unknown);
+        assert_eq!(usage.total_processed_tokens, Some(4100000));
+        // Existing readers use a unit variant with this tag. Extra fields are
+        // additive and do not introduce an unknown protocol event tag.
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum LegacyEvent {
+            ContextCompacted,
+        }
+        let _: LegacyEvent = serde_json::from_str(r#"{"type":"context_compacted","in_progress":false,"trigger":"manual","pre_tokens":500}"#).unwrap();
+        let event = AgentEvent::ContextCompacted(Compaction {
+            trigger: Some("manual".into()),
+            pre_tokens: Some(500),
+            ..Default::default()
+        });
+        let wire = serde_json::to_value(event).unwrap();
+        assert_eq!(wire["type"], "context_compacted");
+        assert_eq!(wire["pre_tokens"], 500);
     }
 }

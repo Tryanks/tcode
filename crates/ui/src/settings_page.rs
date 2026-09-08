@@ -1638,12 +1638,7 @@ impl SettingsPage {
         let profiles: Vec<_> = store
             .enabled_profiles()
             .into_iter()
-            .filter(|profile| {
-                matches!(
-                    profile.kind,
-                    agent::ProviderKind::Codex | agent::ProviderKind::ClaudeCode
-                )
-            })
+            .filter(|profile| profile.supports_account_usage())
             .collect();
         let rows: Vec<(String, String, agent::ProviderKind, _, bool)> = profiles
             .iter()

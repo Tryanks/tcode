@@ -1562,7 +1562,9 @@ impl Actor {
                     }
                     Some("contextCompaction") => {
                         if method == "item/completed" {
-                            self.events.emit(AgentEvent::ContextCompacted).await;
+                            self.events
+                                .emit(AgentEvent::ContextCompacted(Default::default()))
+                                .await;
                         }
                         return;
                     }
@@ -2466,6 +2468,7 @@ fn map_usage(value: &Value) -> Option<TokenUsage> {
     // The session-cumulative running total lives in a sibling `total` object.
     let total_processed_tokens = value.pointer("/total/totalTokens").and_then(Value::as_u64);
     Some(TokenUsage {
+        freshness: crate::ContextFreshness::Current,
         context_window: value.get("modelContextWindow").and_then(Value::as_u64),
         total_processed_tokens,
         input_tokens: last.get("inputTokens").and_then(Value::as_u64),

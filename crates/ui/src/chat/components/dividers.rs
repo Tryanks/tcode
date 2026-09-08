@@ -30,7 +30,9 @@ fn divider(id: SharedString, label: String, tint: Hsla, cx: &App) -> AnyElement 
         .child(stub())
         .child(
             div()
-                .flex_none()
+                .min_w_0()
+                .flex_shrink_1()
+                .text_center()
                 .text_size(px(11.))
                 .text_color(tint)
                 .child(label),
@@ -85,10 +87,38 @@ pub(crate) fn model_change_divider(
 
 /// Context compaction rewrites what the model remembers, so it announces
 /// itself at model-swap prominence rather than hiding in the work log.
-pub(crate) fn context_compacted_divider(id: &str, cx: &App) -> AnyElement {
+pub(crate) fn context_compacted_divider(
+    id: &str,
+    metadata: Option<&agent::Compaction>,
+    cx: &App,
+) -> AnyElement {
+    let mut label = if metadata.is_some_and(|c| c.in_progress) {
+        crate::tr!("chat.context_compacting").into_owned()
+    } else {
+        crate::tr!("chat.context_compacted").into_owned()
+    };
+    if let Some(c) = metadata {
+        if let Some(trigger) = &c.trigger {
+            let trigger = match trigger.as_str() {
+                "manual" => crate::tr!("chat.context_manual").into_owned(),
+                "auto" => crate::tr!("chat.context_auto").into_owned(),
+                other => other.to_owned(),
+            };
+            label.push_str(&format!(" · {trigger}"));
+        }
+        if let Some(tokens) = c.pre_tokens {
+            label.push_str(&format!(
+                " · {}",
+                crate::tr!(
+                    "chat.context_pre_tokens",
+                    tokens = crate::context_meter::format_tokens(Some(tokens))
+                )
+            ));
+        }
+    }
     divider(
         SharedString::from(format!("context-compacted-{id}")),
-        crate::tr!("chat.context_compacted").into_owned(),
+        label,
         cx.theme().warning,
         cx,
     )
