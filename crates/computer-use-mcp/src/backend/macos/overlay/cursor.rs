@@ -109,11 +109,12 @@ impl CursorUi {
         self.set_kind(kind);
         let appkit_point = ax_screen_to_appkit(ax_point, display);
         if self.visible {
-            animate_window_origin(self.window, window_origin(appkit_point));
+            animate_window_origin(self.window, window_origin(appkit_point), ANIMATION_DURATION);
         } else {
             // A hidden panel has no on-screen position to slide from: land on
-            // the point, then reveal.
-            let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(appkit_point));
+            // the point, then reveal. A zero-duration frame animation also
+            // supersedes any animation still running when the panel was hidden.
+            animate_window_origin(self.window, window_origin(appkit_point), 0.0);
         }
         self.set_visible(visible);
     }
@@ -130,9 +131,9 @@ impl CursorUi {
         self.set_kind(OverlayActionKind::Drag);
         let from = ax_screen_to_appkit(from_ax, from_display);
         let to = ax_screen_to_appkit(to_ax, to_display);
-        let _ = send_void_point(self.window, c"setFrameOrigin:", window_origin(from));
+        animate_window_origin(self.window, window_origin(from), 0.0);
         self.set_visible(visible);
-        animate_window_origin(self.window, window_origin(to));
+        animate_window_origin(self.window, window_origin(to), ANIMATION_DURATION);
     }
 
     /// Must only be called from the process main queue.
@@ -197,7 +198,7 @@ fn cursor_path() -> Option<Id> {
     send_id(path, c"CGPath")
 }
 
-fn animate_window_origin(window: Id, origin: CGPoint) {
+fn animate_window_origin(window: Id, origin: CGPoint, duration: f64) {
     let Some(context_class) = class(c"NSAnimationContext") else {
         let _ = send_void_point(window, c"setFrameOrigin:", origin);
         return;
@@ -208,7 +209,7 @@ fn animate_window_origin(window: Id, origin: CGPoint) {
     }
 
     let animated = send_id(context_class, c"currentContext").is_some_and(|context| {
-        let duration_set = send_void_f64(context, c"setDuration:", ANIMATION_DURATION);
+        let duration_set = send_void_f64(context, c"setDuration:", duration);
         if let Some(timing) = timing_function() {
             let _ = send_void_id(context, c"setTimingFunction:", timing);
         }
@@ -309,7 +310,7 @@ pub(super) fn verify_native() -> u32 {
         visible
             && (frame.origin.x - initial.origin.x - 100.0).abs() < 1.0
             && (frame.origin.y - initial.origin.y + 300.0).abs() < 1.0,
-        "an older animation must not restore its endpoint after hide and new feedback"
+        "an older animation must not restore its endpoint after hide and new feedback: {frame:?}, initial {initial:?}, visible {visible}"
     );
     assert!(super::ffi::window_exists(number));
     let _ = send_void(cursor.window, c"close");
