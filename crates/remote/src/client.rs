@@ -207,6 +207,7 @@ async fn connection_loop(
     let mut backoff = Backoff::default();
     let mut reason = None;
     while !outgoing.is_closed() && !incoming.is_closed() {
+        outgoing.discard_retained_writes(&mut buffered);
         let _ = state
             .send(ConnectionState::Reconnecting {
                 attempt: backoff.attempt(),
@@ -237,7 +238,8 @@ async fn connection_loop(
                     if let Err(error) = send_interruptible(
                         &mut websocket,
                         Message::Text(line.trim_end().to_owned().into()),
-                        Instant::now() + Duration::from_secs(10),
+                        Instant::now()
+                            + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS),
                         &outgoing,
                         &mut interrupted,
                     )
@@ -255,7 +257,8 @@ async fn connection_loop(
                         if let Err(error) = send_interruptible(
                             &mut websocket,
                             Message::Text(line.trim_end().to_owned().into()),
-                            Instant::now() + Duration::from_secs(10),
+                            Instant::now()
+                                + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS),
                             &outgoing,
                             &mut interrupted,
                         )
@@ -419,7 +422,8 @@ async fn send_before(
     message: Message,
     deadline: Instant,
 ) -> Result<(), ConnectionFailure> {
-    let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
+    let deadline = deadline
+        .min(Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS));
     futures_lite::future::race(
         async {
             socket
@@ -477,7 +481,8 @@ async fn open_websocket(
         .map_err(|e| connection_failure(e.to_string()))?;
     let hello = serde_json::json!({
         "type": "hello",
-        "protocol_version": tcode_protocol::PROTOCOL_VERSION,
+        "protocol_version": 3,
+        "supported_versions": [3, tcode_protocol::PROTOCOL_VERSION],
         "token": host.token,
         "device_name": device_name,
     });
@@ -490,10 +495,12 @@ async fn open_websocket(
             let value: serde_json::Value = serde_json::from_str(&text)
                 .map_err(|error| connection_failure(error.to_string()))?;
             if value.get("type").and_then(serde_json::Value::as_str) == Some("hello_ok")
-                && value
-                    .get("protocol_version")
-                    .and_then(serde_json::Value::as_u64)
-                    == Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                && matches!(
+                    value
+                        .get("protocol_version")
+                        .and_then(serde_json::Value::as_u64),
+                    Some(3 | 4)
+                )
             {
                 Ok(websocket)
             } else {
@@ -524,7 +531,8 @@ async fn relay_connected(
     let mut healthy = false;
     let mut interrupted = None;
     let mut connected = false;
-    let mut deadline = Instant::now() + Duration::from_secs(10);
+    let mut deadline =
+        Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS);
     let mut probing = false;
     let mut foreground_probe = false;
     loop {
@@ -552,7 +560,8 @@ async fn relay_connected(
             healthy = true;
             probing = false;
             foreground_probe = false;
-            deadline = Instant::now() + Duration::from_secs(10);
+            deadline =
+                Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS);
         }
         let failure = match input {
             Input::Wake(Ok(Wake::Probe)) => {
@@ -576,7 +585,7 @@ async fn relay_connected(
                 probing = true;
                 // Keep the silence window absolute so timer scheduling does not
                 // accumulate beyond the 10 + 20 second liveness budget.
-                deadline += Duration::from_secs(20);
+                deadline += Duration::from_millis(tcode_client::heartbeat::LIVENESS_REPLY_MS);
                 send_interruptible(
                     websocket,
                     Message::Ping(Vec::new().into()),
@@ -592,7 +601,7 @@ async fn relay_connected(
                 let send_deadline = if probing {
                     deadline
                 } else {
-                    Instant::now() + Duration::from_secs(10)
+                    Instant::now() + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS)
                 };
                 let failure = send_interruptible(
                     websocket,

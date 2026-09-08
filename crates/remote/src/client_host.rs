@@ -139,6 +139,19 @@ impl ClientHost for NativeClientHost {
         self.write_prefs(&prefs);
     }
 
+    fn outbox_storage(&self, host_id: &str) -> Option<Arc<dyn tcode_client::outbox::Storage>> {
+        // Host IDs are opaque; encoding their bytes prevents path traversal.
+        let name: String = host_id
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Some(Arc::new(FileOutbox {
+            data_dir: self.data_dir.clone(),
+            name: format!("outbox-{name}.json"),
+        }))
+    }
+
     fn load_hosts(&self) -> Vec<PairedHost> {
         crate::client::load_hosts(&self.data_dir).unwrap_or_else(|error| {
             log::error!("could not read hosts.json: {error}");
@@ -393,6 +406,38 @@ fn write_private(data_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let mut file = options.open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+struct FileOutbox {
+    data_dir: PathBuf,
+    name: String,
+}
+
+impl tcode_client::outbox::Storage for FileOutbox {
+    fn load(&self) -> Result<Vec<tcode_client::outbox::Entry>, tcode_protocol::ProtocolError> {
+        match fs::read(self.data_dir.join(&self.name)) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(tcode_client::outbox::storage_error)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(tcode_client::outbox::storage_error(error)),
+        }
+    }
+    fn save(
+        &self,
+        entries: &[tcode_client::outbox::Entry],
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let bytes = serde_json::to_vec(entries).map_err(tcode_client::outbox::storage_error)?;
+        let temporary = format!("{}.tmp", self.name);
+        write_private(&self.data_dir, &temporary, &bytes)
+            .and_then(|()| {
+                fs::rename(
+                    self.data_dir.join(&temporary),
+                    self.data_dir.join(&self.name),
+                )
+            })
+            .map_err(tcode_client::outbox::storage_error)
+    }
 }
 
 #[cfg(test)]

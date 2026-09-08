@@ -8718,12 +8718,18 @@ name = "tcode-client"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "async-io",
+ "futures-lite",
+ "js-sys",
  "log",
  "serde",
  "serde_json",
  "smol",
  "tcode-protocol",
  "url",
+ "uuid",
+ "wasm-bindgen",
+ "web-time",
 ]
 
 [[package]]
@@ -8805,6 +8811,8 @@ dependencies = [
  "system-configuration-sys",
  "tcode-client",
  "tcode-protocol",
+ "tcode-runtime",
+ "tcode-services",
  "tungstenite",
  "url",
  "uuid",

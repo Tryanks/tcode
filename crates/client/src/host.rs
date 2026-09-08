@@ -103,6 +103,10 @@ pub trait ClientHost: 'static {
 
     fn save_preferences(&self, _preferences: &ClientPreferences) {}
 
+    fn outbox_storage(&self, _host_id: &str) -> Option<std::sync::Arc<dyn crate::outbox::Storage>> {
+        None
+    }
+
     fn load_hosts(&self) -> Vec<PairedHost>;
     fn save_hosts(&self, hosts: &[PairedHost]);
 

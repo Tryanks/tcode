@@ -55,6 +55,15 @@ impl ClientHost for WebHost {
         format!("Browser ({family})")
     }
 
+    fn outbox_storage(
+        &self,
+        host_id: &str,
+    ) -> Option<std::sync::Arc<dyn tcode_client::outbox::Storage>> {
+        Some(std::sync::Arc::new(WebOutbox(format!(
+            "tcode.outbox.{host_id}"
+        ))))
+    }
+
     fn load_hosts(&self) -> Vec<PairedHost> {
         storage()
             .and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
@@ -166,4 +175,29 @@ async fn pair(code: &str, device_name: &str) -> Result<PairedHost, String> {
     fetch(code, device_name)
         .await
         .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
+}
+
+struct WebOutbox(String);
+impl tcode_client::outbox::Storage for WebOutbox {
+    fn load(&self) -> Result<Vec<tcode_client::outbox::Entry>, tcode_protocol::ProtocolError> {
+        let storage = storage()
+            .ok_or_else(|| tcode_client::outbox::storage_error("localStorage unavailable"))?;
+        storage
+            .get_item(&self.0)
+            .map_err(|error| tcode_client::outbox::storage_error(js_error(error)))?
+            .map_or(Ok(Vec::new()), |json| {
+                serde_json::from_str(&json).map_err(tcode_client::outbox::storage_error)
+            })
+    }
+    fn save(
+        &self,
+        entries: &[tcode_client::outbox::Entry],
+    ) -> Result<(), tcode_protocol::ProtocolError> {
+        let storage = storage()
+            .ok_or_else(|| tcode_client::outbox::storage_error("localStorage unavailable"))?;
+        let json = serde_json::to_string(entries).map_err(tcode_client::outbox::storage_error)?;
+        storage
+            .set_item(&self.0, &json)
+            .map_err(|error| tcode_client::outbox::storage_error(js_error(error)))
+    }
 }

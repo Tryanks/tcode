@@ -1,5 +1,11 @@
 //! Application heartbeat policy for transports whose platform hides WebSocket Pong.
 
+pub const NATIVE_IDLE_MS: u64 = 10_000;
+pub const BROWSER_IDLE_MS: u64 = 15_000;
+pub const LIVENESS_REPLY_MS: u64 = 20_000;
+pub const QUERY_TIMEOUT_MS: u64 = 15_000;
+pub const COMMAND_TIMEOUT_MS: u64 = 30_000;
+
 pub struct Heartbeat {
     deadline_ms: u64,
     awaiting_reply: bool,
@@ -15,7 +21,7 @@ pub enum Tick {
 impl Heartbeat {
     pub fn new(now_ms: u64) -> Self {
         Self {
-            deadline_ms: now_ms.saturating_add(15_000),
+            deadline_ms: now_ms.saturating_add(BROWSER_IDLE_MS),
             awaiting_reply: false,
         }
     }
@@ -31,7 +37,7 @@ impl Heartbeat {
             Tick::Lost
         } else {
             self.awaiting_reply = true;
-            self.deadline_ms = now_ms.saturating_add(20_000);
+            self.deadline_ms = now_ms.saturating_add(LIVENESS_REPLY_MS);
             Tick::Ping
         }
     }

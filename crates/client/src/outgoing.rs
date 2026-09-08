@@ -125,6 +125,27 @@ impl OutgoingReceiver {
             self.receiver.recv().await?;
         }
     }
+    pub fn discard_retained_writes(&self, buffered: &mut VecDeque<String>) {
+        buffered.retain(|line| {
+            if retained_write(line) {
+                self.sent(line);
+                false
+            } else {
+                true
+            }
+        });
+        let mut queue = self.queue.lock().unwrap();
+        let lines = std::mem::take(&mut queue.lines);
+        for line in lines {
+            if retained_write(&line) {
+                queue.count -= 1;
+                queue.bytes -= line.len();
+            } else {
+                queue.lines.push_back(line);
+            }
+        }
+    }
+
     pub fn sent(&self, line: &str) {
         if subscription_key(line).is_none() {
             let mut queue = self.queue.lock().unwrap();
@@ -147,6 +168,12 @@ pub fn subscription_key(line: &str) -> Option<String> {
         return None;
     }
     serde_json::to_string(payload.get("content")?.get("topic")?).ok()
+}
+
+fn retained_write(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .is_some_and(|value| value.get("key").is_some_and(serde_json::Value::is_string))
 }
 
 #[cfg(test)]

@@ -191,6 +191,7 @@ async fn connection_loop(
         if outgoing.is_closed() {
             return;
         }
+        outgoing.discard_retained_writes(&mut buffered);
         let _ = state.try_send(ConnectionState::Reconnecting {
             attempt: backoff.attempt(),
             reason,
@@ -249,7 +250,7 @@ async fn connection_loop(
                         }
                     }
                     Input::Event(Event::Open) => {
-                        let hello = serde_json::json!({"type":"hello", "protocol_version":tcode_protocol::PROTOCOL_VERSION, "token":token, "device_name":device_name});
+                        let hello = serde_json::json!({"type":"hello", "protocol_version":3, "supported_versions":[3,tcode_protocol::PROTOCOL_VERSION], "token":token, "device_name":device_name});
                         if socket.send(&hello.to_string()).is_err() {
                             break;
                         }
@@ -260,8 +261,7 @@ async fn connection_loop(
                         let failure = if hello["type"].as_str() == Some("hello_rejected") {
                             Some(ConnectionFailure::hello_rejected(hello["reason"].as_str()))
                         } else if hello["type"].as_str() == Some("hello_ok")
-                            && hello["protocol_version"].as_u64()
-                                != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                            && !matches!(hello["protocol_version"].as_u64(), Some(3 | 4))
                         {
                             Some(ConnectionFailure::ProtocolMismatch)
                         } else {
@@ -290,8 +290,7 @@ async fn connection_loop(
                             break;
                         }
                         if hello["type"].as_str() != Some("hello_ok")
-                            || hello["protocol_version"].as_u64()
-                                != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
+                            || !matches!(hello["protocol_version"].as_u64(), Some(3 | 4))
                         {
                             break;
                         }
@@ -341,6 +340,7 @@ async fn connection_loop(
                             Tick::Ping => {
                                 // ID zero is reserved for transport probes; HostLink starts at one.
                                 let ping = tcode_protocol::ClientMessage {
+                                    key: None,
                                     id: 0,
                                     payload: tcode_protocol::ClientPayload::Query(
                                         tcode_protocol::Query::Ping,
@@ -355,7 +355,10 @@ async fn connection_loop(
                                 {
                                     break;
                                 }
-                                timer = Some(Timer::new(20000, tx.clone()));
+                                timer = Some(Timer::new(
+                                    tcode_client::heartbeat::LIVENESS_REPLY_MS as i32,
+                                    tx.clone(),
+                                ));
                             }
                             Tick::Lost => {
                                 reason = Some(ConnectionFailure::Timeout);
