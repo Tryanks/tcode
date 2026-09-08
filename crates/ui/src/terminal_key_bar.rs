@@ -12,7 +12,7 @@ use gpui::{
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{StyledExt as _, h_flex};
 use tcode_protocol::terminal::{
     KeyboardModes, TerminalMode,
     mappings::{self, Modifiers},
@@ -203,6 +203,7 @@ impl TerminalKeyBar {
         let label = label.into();
         let focus = self.terminal_focus.clone();
         material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
+            .debug_selector(move || id.into())
             .flex_none()
             .size(px(material::TOUCH_TARGET))
             .flex()
@@ -230,6 +231,7 @@ impl TerminalKeyBar {
     ) -> impl IntoElement {
         let focus = self.terminal_focus.clone();
         material::accessible_clickable(div(), id, Role::Button, accessibility_label, cx)
+            .debug_selector(move || id.into())
             .aria_selected(selected)
             .flex_none()
             .size(px(material::TOUCH_TARGET))
@@ -318,9 +320,9 @@ impl Render for TerminalKeyBar {
                 TerminalKey::Right,
             ),
         ];
-        let mut fixed = fixed;
+        let mut tail = h_flex().flex_none().pr(px(16.));
         for (id, label, translation, key) in arrows {
-            fixed = fixed.child(self.key_button(
+            tail = tail.child(self.key_button(
                 id,
                 label,
                 crate::tr!(translation).into_owned(),
@@ -345,7 +347,7 @@ impl Render for TerminalKeyBar {
                 TerminalKey::Control('d'),
             ),
         ] {
-            fixed = fixed.child(self.key_button(
+            tail = tail.child(self.key_button(
                 id,
                 label,
                 crate::tr!(translation).into_owned(),
@@ -354,9 +356,8 @@ impl Render for TerminalKeyBar {
             ));
         }
 
-        let mut symbols = h_flex().flex_none();
         for (id, symbol) in SYMBOL_KEYS {
-            symbols = symbols.child(self.key_button(
+            tail = tail.child(self.key_button(
                 id,
                 symbol.to_string(),
                 crate::tr!("terminal.key_symbol", symbol = symbol).into_owned(),
@@ -372,19 +373,23 @@ impl Render for TerminalKeyBar {
             .aria_label(crate::tr!("terminal.key_bar"))
             .flex_none()
             .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .h(px(KEY_BAR_HEIGHT))
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().popover)
             .child(fixed)
             .child(
-                v_flex()
-                    .id("terminal-key-symbol-scroll")
+                h_flex()
+                    .id("terminal-key-scroll")
+                    .debug_selector(|| "terminal-key-scroll".into())
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .overflow_y_hidden()
                     .touch_overflow_x_scroll()
-                    .child(symbols),
+                    .child(tail),
             )
     }
 }
@@ -506,6 +511,74 @@ mod tests {
             ),
             vec![0x1b]
         );
+    }
+
+    struct NarrowBarProbe {
+        width: f32,
+        bar: Entity<TerminalKeyBar>,
+    }
+
+    impl Render for NarrowBarProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::touch_scroll::root(div().w(px(self.width)).child(self.bar.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn phone_bar_scrolls_without_losing_pinned_keys_or_vertical_motion(cx: &mut TestAppContext) {
+        use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase, point};
+        cx.update(crate::theme::init);
+        for width in [360., 393.] {
+            let (_, cx) = cx.add_window_view(|_, cx| NarrowBarProbe {
+                width,
+                bar: cx.new(|cx| TerminalKeyBar::new(cx.focus_handle())),
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let viewport = cx.debug_bounds("terminal-key-scroll").unwrap();
+            let pinned = cx.debug_bounds("terminal-key-escape").unwrap();
+            let first = cx.debug_bounds("terminal-key-left").unwrap();
+            let last = cx.debug_bounds("terminal-key-underscore").unwrap();
+            assert_eq!(
+                cx.debug_bounds("terminal-key-bar").unwrap().size.width,
+                px(width)
+            );
+            assert_eq!(pinned.size.width, px(44.));
+            assert_eq!(pinned.size.height, px(44.));
+            assert!(
+                last.right() > viewport.right(),
+                "content must exceed the viewport"
+            );
+            assert!(viewport.right() <= px(width));
+            let send = |phase, x, y, cx: &mut VisualTestContext| {
+                cx.update(|window, cx| {
+                    window.dispatch_event(
+                        PlatformInput::Touch(TouchEvent {
+                            id: TouchId(1),
+                            phase,
+                            position: point(px(x), px(y)),
+                            predicted_position: None,
+                            force: None,
+                        }),
+                        cx,
+                    );
+                    let _ = window.draw(cx);
+                });
+            };
+            send(TouchPhase::Started, width - 20., 20., cx);
+            send(TouchPhase::Moved, 190., 20., cx);
+            send(TouchPhase::Cancelled, 190., 20., cx);
+            let moved = cx.debug_bounds("terminal-key-left").unwrap();
+            assert!(moved.left() < first.left(), "horizontal swipe must scroll");
+            assert_eq!(moved.top(), first.top());
+            assert_eq!(cx.debug_bounds("terminal-key-escape").unwrap(), pinned);
+            send(TouchPhase::Started, 190., 20., cx);
+            send(TouchPhase::Moved, width + 300., 20., cx);
+            send(TouchPhase::Cancelled, width + 300., 20., cx);
+            assert_eq!(cx.debug_bounds("terminal-key-left").unwrap(), first);
+
+        }
     }
 
     struct KeyBarProbe {

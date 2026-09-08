@@ -208,8 +208,17 @@ fn install(window: &mut Window) {
         if phase.capture()
             && let Some(mut capture) = registry(window, cx).take_scroll(event)
         {
+            let delta = event.delta.pixel_delta(window.line_height());
+            if let Handle::Scroll(handle) = &capture.target.handle {
+                let max = handle.max_offset();
+                // A horizontal strip must leave vertical gestures to the view
+                // underneath instead of swallowing them at its zero Y limit.
+                if max.x > px(0.) && max.y == px(0.) && delta.y.abs() > delta.x.abs() {
+                    return;
+                }
+            }
             let frame = registry(window, cx).frame;
-            capture.apply(event.delta.pixel_delta(window.line_height()), frame, cx);
+            capture.apply(delta, frame, cx);
             registry(window, cx).finish_scroll(capture, event.touch_phase);
             window.refresh();
             cx.stop_propagation();
