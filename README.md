@@ -115,12 +115,16 @@ tcode-headless serve --listen 0.0.0.0:47420 --name build-server
 tcode-headless pair      # prints a fresh connection code and QR code
 ```
 
-Release builds also serve the browser app at `http://<machine>:47420/`.
+Release builds also serve the browser app at `http://<machine>:47420/`. Set a
+password on first open, or preset it with `TCODE_PASSWORD`. Saved browser tokens
+skip login on later visits.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
-or the opening screen on a phone or a fresh browser tab. Add the machine with
-its connection code, or choose it under **Nearby machines**, then connect.
-In a browser, open the printed HTTP link.
+or the opening screen on a phone. Add the machine with its connection code, or
+choose it under **Nearby machines**, then connect. In a browser, open the
+printed HTTP link and log in with the password. The browser’s **Settings →
+Other devices** shows codes and QR codes for native clients and controls new
+pairings and device revocation.
 See [Use tcode from other devices](docs/remote.md) for the native-app and
 browser steps.
 

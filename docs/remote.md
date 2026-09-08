@@ -12,6 +12,7 @@ shorter introduction, see
 | --- | --- |
 | Machine | The computer where tcode runs providers and terminals and stores projects and threads. You can use the desktop app or `tcode-headless` there. |
 | Device | A desktop, phone, tablet or browser that opens a machine and sends actions to it. |
+| Browser password | Protects the web page served by `tcode-headless`. Set it on first open, or preset it with `TCODE_PASSWORD`. A successful login issues a device token. |
 | Adding a machine | Exchanging a single-use, six-digit connection code for a device token. A code expires after five minutes; five wrong attempts invalidate it. Generating a new code replaces the previous code. |
 | Connected device | One saved device record on the machine, with a name and a token that you can remove. |
 
@@ -71,9 +72,15 @@ does not serve the browser app.
      --data-dir "$HOME/.local/share/tcode-host"
    ```
 
-   Startup prints a connection code, its expiry, a
-   `tcode://pair` link and a terminal QR code. Release builds also print browser
-   HTTP URLs. Use an address reachable from your device, not `0.0.0.0`.
+   Startup prints `Browser: http://host:port/` without a code fragment and
+   **Set a password on first open** or **Password protected**. Open that URL
+   and set a password (at least eight characters, entered twice). It also prints
+   a connection code and QR for native desktop and phone clients. Use an address
+   reachable from your device, not `0.0.0.0`.
+
+   To preset the browser password, supply `serve --password PASSWORD` or set
+   `TCODE_PASSWORD` in the service environment. The CLI option takes precedence.
+   A preset updates the password on startup and keeps existing device tokens.
 5. Allow inbound TCP `47420` from your LAN or overlay. In another shell on the
    same machine, generate a new code when needed:
 
@@ -86,7 +93,12 @@ does not serve the browser app.
    address. Keep the listener reachable on loopback, as with the default
    wildcard bind. A listener bound only to a specific LAN address cannot answer
    this command.
-6. Open this machine from another device using the instructions below. To
+6. After browser login, open **Settings → Other devices** to view the code and
+   QR, generate a new code, list connected devices, or revoke a device. **Allow
+   other devices** controls native code pairing; it defaults to on and is saved
+   in the data directory. Disabling it does not stop web login or disconnect
+   already authorized devices. Use **Remove** to revoke their access.
+7. Open this machine from another device using the instructions below. To
    prepare projects with the local desktop UI, stop `tcode-headless` first and
    open the desktop app with the same data directory. Do not run two local tcode
    processes against the same directory.
@@ -98,7 +110,19 @@ tcode-headless --help
 ```
 
 Add the installed directory to your `PATH` to use that short command. Help is a
-top-level option; the `serve` and `pair` subcommands do not accept `--help`.
+top-level option; the subcommands do not accept `--help`.
+
+To change or reset the browser password, stop the headless process, then run:
+
+```sh
+tcode-headless set-password --data-dir /path/to/tcode-host --password NEW_PASSWORD
+```
+
+`TCODE_PASSWORD` also supplies the password for this command. Existing tokens
+remain valid by default, so saved phones and browsers remain connected. Add
+`--revoke-tokens` to invalidate every device token, then restart the host. Update
+any service preset too, or it will replace the password on the next startup.
+Do not run this command against a data directory used by a running process.
 
 ### Data directory
 
@@ -244,18 +268,25 @@ portrait returns to the stack with the same thread and draft. See
 ### From a browser
 
 1. Open the `Browser:` link printed by `tcode-headless`, for example
-   `http://192.168.1.10:47420/#code=123456`. The link carries the single-use
-   connection code and adds the machine automatically on first load.
-2. The browser exchanges the code, saves the device token, removes the fragment,
-   and opens Threads. Later visits reconnect with that token. If the code has
-   expired, generate a fresh code and enter it in the code-only form.
-3. The address stays fixed to the page's origin and nearby search is hidden.
+   `http://192.168.1.10:47420/`.
+2. On first open, set a password with at least eight characters and confirm it.
+   Later visits without a saved token show **Log in**. A successful login saves
+   a device token and opens Threads; a valid stored token skips the form.
+3. A rejected or revoked token returns to the login form. Five wrong passwords
+   lock browser login for five minutes. Code pairing for native clients remains
+   available during this password lockout.
+4. **Settings → Other devices** manages this headless machine's native pairing:
+   enable or disable new pairings, read its current six-digit code and QR,
+   generate a new code, and remove paired devices. The code can also be obtained
+   with `tcode-headless pair`. Phones and other desktop apps always use this code,
+   never the browser password.
+5. The address stays fixed to the page's origin and nearby search is hidden.
    Open another machine's URL to use that machine. Resizing the page switches
    between the shared wide and compact layouts.
 
 The browser stores machines and tokens in this origin's `localStorage` under
 `tcode.hosts`, and the last machine under `tcode.last_host`. Clearing site data
-means you must add the machine again. WebSockets follow the page's scheme:
+means you must log in with the password again. WebSockets follow the page's scheme:
 `ws://` for HTTP and `wss://` for HTTPS supplied by an external tunnel.
 
 ### Machine addresses
@@ -357,7 +388,9 @@ with a trusted LAN or VPN. Removing a connected device revokes its proxy access.
 ### Device tokens and storage
 
 Adding a device issues a random bearer device token. The machine's `remote.json`
-stores device names, IDs and token hashes, not raw tokens. Native apps store raw
+stores device names, IDs and token hashes, not raw tokens. For headless browser
+login it also stores a randomly salted PBKDF2-HMAC-SHA256 password hash with
+600,000 iterations; it never stores the password itself. Native apps store raw
 tokens and origins in `hosts.json` in their own data directory.
 Phone records are in the app's private data directory; Android uses its
 `filesDir`. Browser records use `localStorage` as described above.
@@ -391,8 +424,8 @@ edit that file while tcode is running: it holds the device list in memory.
 - **Tailscale HTTPS:** save its HTTPS origin when using its HTTPS forwarding.
   Native clients use standard trusted roots and hostname validation.
 
-The six-digit code and device-token authorization remain required through a
-tunnel or VPN. Protect tunnel access and your stored tokens. tcode does not
+Browser password login, native six-digit pairing codes, and device-token
+authorization keep the same behavior through a tunnel or VPN. Protect tunnel access and your stored tokens. tcode does not
 encrypt stored JSON or project files; preview servers and provider connections
 use their own transports.
 
@@ -400,12 +433,14 @@ use their own transports.
 
 | Symptom | Action |
 | --- | --- |
+| Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if saved devices should lose access. |
+| Native pairing is disabled | Enable **Allow other devices** in the logged-in browser’s **Settings → Other devices**. Web login is independent. |
 | Connection code is wrong or expired | Generate **New code** on the machine, or run `tcode-headless pair`. Codes expire after five minutes, after use, after five wrong attempts, or when replaced. Get a separate code for each device. |
 | Cannot reach the machine | Check that tcode is running, that the address is reachable from this device, and that the TCP port is allowed. Use the overlay address if no nearby machine appears. This device's `127.0.0.1` points to itself. |
 | `tcode-headless pair` cannot reach a running listener | Check its port and IPv4/IPv6 family. The listener must accept loopback connections; `pair` always uses loopback. |
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
 | Browser fails before adding the machine | Check the HTTP host or your HTTPS tunnel. Check that JavaScript and site storage are allowed. |
-| Connection rejected after adding the machine | Check whether the device was removed. Add the machine again with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
+| Connection rejected after adding the machine | Check whether the device was removed. Log in again in the browser, or add the native device with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
 | Preview cannot load a dev server | Check that the dev server runs on the machine, hosting is on, the device is still paired, and its WebView supports proxy routing. Use `localhost` for a machine-loopback server. |
 
 **Syncing… / 同步中** means the workspace is waiting for its baseline: applied

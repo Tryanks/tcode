@@ -1062,3 +1062,20 @@ linked CI workflow. For visual changes, also launch the affected surface and
 review both themes at its normal and narrow widths. Exercise keyboard focus,
 scrolling and the changed interaction. Capture the relevant states for the PR;
 unit or compile checks alone do not establish visual correctness.
+
+## Headless browser authentication and hosting
+
+The headless web page opens with a centered password form before the shared
+canvas starts. First open shows password and confirmation, with a minimum of
+eight characters; configured hosts show one password field. Inputs are masked,
+labels sit above full-width controls, and the primary action has a 44px minimum
+height. Errors stay in the form with an alert role; keyboard focus is visible.
+The page follows the browser light/dark preference and fits narrow viewports.
+A saved valid token skips login; rejected tokens return to the login form.
+
+In the browser, Settings → Other devices belongs to the attached machine. Its
+Allow other devices switch controls new native pairings, not web login. The
+current code, expiry and QR use the desktop hosting presentation, stacking on
+narrow screens. Paired devices and Remove remain visible when pairing is off.
+The listener owns this state and returns it over the authenticated pipe. Native
+Add a machine continues to show an address and six-digit connection code.
