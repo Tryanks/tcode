@@ -1,6 +1,6 @@
-# Contributing to tcode
+# Contributing to Tcode
 
-Thanks for taking the time. tcode is a small project — bug reports, UI polish and
+Thanks for taking the time. Tcode is a small project — bug reports, UI polish and
 new provider work are all welcome.
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -85,7 +85,7 @@ cargo run -p agent --example probe -- claude \
     "What color is this image? Reply with just the color." /tmp/smoke --image /tmp/blue.png
 ```
 
-`TCODE_DATA_DIR` points tcode at a throwaway profile (its own sessions, settings
+`TCODE_DATA_DIR` points Tcode at a throwaway profile (its own sessions, settings
 and installed ACP agents) — useful for demos, screenshots and trying a change
 without touching your real threads.
 

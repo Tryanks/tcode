@@ -120,7 +120,7 @@ async fn initialize(
             "id": 1,
             "method": "initialize",
             "params": {
-                "clientInfo": { "name": "tcode", "title": "tcode", "version": env!("CARGO_PKG_VERSION") },
+                "clientInfo": { "name": "tcode", "title": "Tcode", "version": env!("CARGO_PKG_VERSION") },
                 "capabilities": { "experimentalApi": true }
             }
         }),

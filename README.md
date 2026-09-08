@@ -88,7 +88,7 @@ speaks ACP.
 > ACP entries that duplicate a native integration are deliberately hidden from
 > the marketplace so each CLI has one clear, highest-fidelity path.
 
-## Use tcode from other devices
+## Use Tcode from other devices
 
 Tcode runs on the machine that holds your projects, starts your agents, and
 keeps your threads. You can open that machine from another desktop, a phone or
@@ -125,7 +125,7 @@ choose it under **Nearby machines**, then connect. In a browser, open the
 printed HTTP link and log in with the password. The browser’s **Settings →
 Other devices** shows codes and QR codes for native clients and controls new
 pairings and device revocation.
-See [Use tcode from other devices](docs/remote.md) for the native-app and
+See [Use Tcode from other devices](docs/remote.md) for the native-app and
 browser steps.
 
 **Security.** LAN connections use plain HTTP and WebSockets. Adding a machine

@@ -1,9 +1,13 @@
-# tcode design spec
+# Tcode design spec
 
-The visual and interaction contract for tcode. Update it deliberately when a
+The visual and interaction contract for Tcode. Update it deliberately when a
 product decision changes; historical design drafts are not additional rules.
 There is one shell, described here; **Compact layout** below covers the narrow
 end of it.
+
+The product display name is **Tcode**. The shared UI uses the existing `app.name`
+locale key for its standalone name. Commands, crate and bundle identifiers,
+URLs, file names and data directories retain lowercase `tcode`.
 
 ## One shell, one layout rule
 
@@ -515,7 +519,7 @@ pointer leaves. It is strictly transient state, never persisted, and command
 palette / dialogs / toasts still layer above it. Its own contents are identical
 in both states.
 
-1. App row: "tcode" bold 14px, channel pill ("DEV"). No collapse button — the
+1. App row: "Tcode" bold 14px, channel pill ("DEV"). No collapse button — the
    toggle lives in the chat header, since a collapsed sidebar has no width to
    host it.
 2. Search row: magnifier + "Search" muted + ⌘K (macOS) / Ctrl+K
@@ -852,14 +856,14 @@ Editable fields are seeded from the host's settings the first time a real
 snapshot exists, not from local defaults, and a field the user has since edited
 is never rewritten by a later snapshot.
 
-Provider profiles expose only applicable options. Pi defaults to no tcode
+Provider profiles expose only applicable options. Pi defaults to no Tcode
 permission extension; its Native approvals toggle enables the gate for
 supervised and auto-accept-edits sessions. Without it those stored modes take
 effect as Full access, while Read only uses pi's native tool filter. Trust
 project extensions adds `--approve` at launch. Pi has no MCP client; explicitly
 enabled orchestration or computer-use registrations produce an unavailable-tools
-warning. Using tcode from other devices is documented in
-[Use tcode from other devices](remote.md), and
+warning. Using Tcode from other devices is documented in
+[Use Tcode from other devices](remote.md), and
 permissions in [computer use](computer-use.md).
 
 Orchestrate uses one provider-neutral workflow, refreshed on each explicit
@@ -879,7 +883,7 @@ GPT-6 Astra and Claude Opus 5. The two Astra rows are separate role-specific
 profiles with different descriptions. Other models may still initiate `/orchestrate`.
 `collaborate` opens a read-only peer discussion, continued through `send`;
 `dispatch` assigns concrete work to execution models. Model selection considers
-the whole cross-provider fleet, preferring tcode Orchestrate to native subagents.
+the whole cross-provider fleet, preferring Tcode Orchestrate to native subagents.
 Each collaboration model can be switched on or off independently. Its switch
 controls whether it can be invited through `collaborate`, never whether it may
 serve as the main decision model. Turning every peer off still permits the main
@@ -1040,7 +1044,7 @@ parent is still visible, with the parent's scroll position and panels intact.
 Archiving a thread the user is not viewing changes nothing.
 
 Only a workspace with no projects at all reaches the empty page: centered
-"Add a project to get started" (15px semibold) over "tcode works inside a
+"Add a project to get started" (15px semibold) over "Tcode works inside a
 project folder. Add one to open its first thread." (13px muted) and an
 **Add project** button. No composer is rendered. The same page, titled "Pick a
 thread to continue" over a list of recent projects, covers the moment before a

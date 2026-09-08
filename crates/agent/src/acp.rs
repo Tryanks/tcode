@@ -654,7 +654,7 @@ async fn handshake(
                             )
                             .client_info(
                                 acp::Implementation::new("tcode", env!("CARGO_PKG_VERSION"))
-                                    .title("tcode"),
+                                    .title("Tcode"),
                             ),
                     )
                     .block_task()
@@ -692,12 +692,12 @@ async fn handshake(
     let mcp_servers = mcp_servers(&registrations, &caps);
     if !registrations.is_empty() && mcp_servers.is_empty() {
         log::info!(
-            "acp[{}]: no mcpCapabilities.http; tcode MCP servers are not registered",
+            "acp[{}]: no mcpCapabilities.http; Tcode MCP servers are not registered",
             agent.id
         );
         let _ = events
             .send(AgentEvent::Warning { message: format!(
-                "{} does not support HTTP MCP servers; tcode MCP tools are unavailable in this session",
+                "{} does not support HTTP MCP servers; Tcode MCP tools are unavailable in this session",
                 agent.name
             ) })
             .await;

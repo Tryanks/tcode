@@ -379,7 +379,7 @@ impl SessionActor for OpenCodeActor {
             SessionCommand::Rewind { .. } => {
                 self.events
                     .emit(AgentEvent::Warning {
-                        message: "OpenCode rewind is not exposed by tcode's native adapter".into(),
+                        message: "OpenCode rewind is not exposed by Tcode's native adapter".into(),
                     })
                     .await;
                 Ok(())
@@ -478,7 +478,7 @@ impl OpenCodeActor {
         for request_id in pending {
             let _ = self.server.http.post_json(
                 &format!("/permission/{request_id}/reply"),
-                &json!({"reply":"reject","message":"tcode session closed"}),
+                &json!({"reply":"reject","message":"Tcode session closed"}),
             );
         }
         self.server.stop();
@@ -1709,12 +1709,12 @@ fn opencode_config_content(
         Some(inline) => {
             let config: Value = serde_json::from_str(&inline).map_err(|err| {
                 AgentError::Protocol(format!(
-                    "cannot merge tcode MCP servers into OPENCODE_CONFIG_CONTENT: {err}"
+                    "cannot merge Tcode MCP servers into OPENCODE_CONFIG_CONTENT: {err}"
                 ))
             })?;
             if !config.is_object() {
                 return Err(AgentError::Protocol(
-                    "cannot merge tcode MCP servers into non-object OPENCODE_CONFIG_CONTENT".into(),
+                    "cannot merge Tcode MCP servers into non-object OPENCODE_CONFIG_CONTENT".into(),
                 ));
             }
             config

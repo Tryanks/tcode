@@ -1603,7 +1603,7 @@ impl WorkspaceStore {
             .clone()
             .filter(|name| !name.trim().is_empty())
             .or_else(|| self.client_host.as_ref().map(|host| host.device_name()))
-            .unwrap_or_else(|| "tcode".into())
+            .unwrap_or_else(|| crate::tr!("app.name").into_owned())
     }
 
     pub fn set_client_device_name(&mut self, name: Option<String>) {
@@ -1832,7 +1832,7 @@ impl WorkspaceStore {
         match self.session_status_replica.as_ref() {
             Some(status) if status.draft => crate::tr!("chat.new_thread").into_owned(),
             Some(status) => status.title.clone(),
-            None => "tcode".to_string(),
+            None => crate::tr!("app.name").into_owned(),
         }
     }
 

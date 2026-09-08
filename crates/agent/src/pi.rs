@@ -330,7 +330,7 @@ async fn run_actor(
         actor.events
             .emit(AgentEvent::Warning {
                 message: format!(
-                    "pi has no MCP client of its own, so tcode's {} tools are unavailable in this session",
+                    "pi has no MCP client of its own, so Tcode's {} tools are unavailable in this session",
                     unattached.join(", ")
                 ),
             })
@@ -501,7 +501,7 @@ impl SessionActor for PiActor {
             SessionCommand::Rewind { .. } => {
                 self.events
                     .emit(AgentEvent::Warning {
-                        message: "pi rewind is not exposed by tcode's native adapter".into(),
+                        message: "pi rewind is not exposed by Tcode's native adapter".into(),
                     })
                     .await;
                 Ok(())

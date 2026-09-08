@@ -12,7 +12,7 @@
         android:enableOnBackInvokedCallback="false"
         android:hasCode="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="tcode"
+        android:label="Tcode"
         android:supportsRtl="true"
         android:theme="@style/Theme.Tcode"
         android:usesCleartextTraffic="true">

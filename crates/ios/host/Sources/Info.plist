@@ -30,9 +30,9 @@
     <key>NSBonjourServices</key>
     <array><string>_tcode._tcp</string></array>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>查找同一网络中的 tcode 执行端以进行配对。</string>
+    <string>查找同一网络中的 Tcode 执行端以进行配对。</string>
     <key>NSCameraUsageDescription</key>
-    <string>Scan a QR code to pair with a tcode host.</string>
+    <string>Scan a QR code to pair with a Tcode host.</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

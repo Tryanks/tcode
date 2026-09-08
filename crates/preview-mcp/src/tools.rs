@@ -198,7 +198,7 @@ impl PreviewTools {
     }
 
     #[tool(
-        description = "Open the tcode preview browser, optionally at a URL, and return its status. \
+        description = "Open the Tcode preview browser, optionally at a URL, and return its status. \
                        For browser work, call preview_status first and call preview_open if no automation-capable preview is attached before concluding the browser is unavailable. \
                        Do not fall back to Chrome, Playwright, or another browser merely because the preview is initially closed or a first call fails; fall back only when preview_open explicitly reports unsupported or unavailable."
     )]
@@ -206,7 +206,7 @@ impl PreviewTools {
         self.run(PreviewOp::Open { url: params.url }).await
     }
 
-    #[tool(description = "Navigate the tcode preview browser to a URL and return its status.")]
+    #[tool(description = "Navigate the Tcode preview browser to a URL and return its status.")]
     async fn preview_navigate(
         &self,
         Parameters(params): Parameters<NavigateParams>,
@@ -363,7 +363,7 @@ impl ServerHandler for PreviewTools {
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "Drive the tcode embedded preview browser: open/navigate URLs, inspect and \
+                "Drive the Tcode embedded preview browser: open/navigate URLs, inspect and \
                  automate the page, resize its canvas, press keys, scroll, wait for page \
                  conditions, and capture screenshots. For browser work, call preview_status first \
                  and preview_open when no automation-capable preview is attached; use another \

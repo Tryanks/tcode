@@ -441,7 +441,7 @@ pub fn set_password(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|value| value["host_name"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| "tcode".into());
+        .unwrap_or_else(|| "Tcode".into());
     AuthStore::open(data_dir, &name)?.set_password(password, revoke_tokens)
 }
 

@@ -194,7 +194,7 @@ impl ComputerUseTools {
     #[tool(
         description = "Find and rank desktop window roots, returning @rN references; call this before observe_ui when the target is not the frontmost window. \
                        This server exposes desktop windows only, so use the tcode_preview tools for web pages. \
-                       On macOS, grant Accessibility for all tools and Screen Recording for screenshots in tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
+                       On macOS, grant Accessibility for all tools and Screen Recording for screenshots in Tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
     )]
     async fn find_roots(&self, Parameters(params): Parameters<RootFilters>) -> CallToolResult {
         let permissions = permissions();
@@ -231,7 +231,7 @@ impl ComputerUseTools {
                        Use find_roots → observe_ui, query that cached state with search_ui/expand_ui/inspect_ui, then use act_ui/wait_for and observe again; those cached queries do not touch the live UI. \
                        Every @e ref belongs to its producing state_id; observations are immutable and kept in a bounded LRU (default 8), so an evicted or stale state or a ref from another state requires a fresh observe_ui. \
                        This server exposes desktop windows only, so use the tcode_preview tools for web pages. \
-                       On macOS, grant Accessibility for all tools and Screen Recording for screenshots in tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
+                       On macOS, grant Accessibility for all tools and Screen Recording for screenshots in Tcode Settings → Computer Use; Windows needs no permissions, and other platforms are unsupported."
     )]
     async fn observe_ui(&self, Parameters(params): Parameters<ObserveUiParams>) -> CallToolResult {
         let permissions = permissions();
@@ -749,12 +749,12 @@ fn permission_gate(
 ) -> Option<CallToolResult> {
     if needs_accessibility && !permissions.accessibility {
         return Some(tool_error(
-            "Accessibility permission is missing; grant it in tcode Settings → Computer Use.",
+            "Accessibility permission is missing; grant it in Tcode Settings → Computer Use.",
         ));
     }
     if needs_screen_recording && !permissions.screen_recording {
         return Some(tool_error(
-            "Screen Recording permission is missing; grant it in tcode Settings → Computer Use.",
+            "Screen Recording permission is missing; grant it in Tcode Settings → Computer Use.",
         ));
     }
     None
