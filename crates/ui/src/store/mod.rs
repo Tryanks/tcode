@@ -2850,15 +2850,14 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
 
         let (to_host, outgoing) = async_channel::unbounded();
-        let (_incoming, from_host) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let _pump = cx
+            .background_executor
+            .spawn(async move { pump_link.pump().await });
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(
-                tcode_client::HostLink::new(to_host, from_host),
-                WorkspaceAttachment::Local,
-                None,
-                false,
-                cx,
-            )
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, false, cx)
         });
         workspace.update(cx, |store, _| {
             store.selected_session_id = Some("large".into());
@@ -2867,9 +2866,10 @@ mod tests {
             store.session_status_replica = Some(status);
         });
         while outgoing.try_recv().is_ok() {}
-        workspace.update(cx, |store, cx| store.load_earlier_messages(cx));
+        workspace.update(cx, |store, cx| store.prefetch_earlier_messages(cx));
         cx.run_until_parked();
-        let request = tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+        let mut request =
+            tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
         assert!(matches!(
             request.payload,
             tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
@@ -2887,6 +2887,74 @@ mod tests {
             outgoing.try_recv().is_err(),
             "scrolling while loading must not queue another page"
         );
+
+        for page in 0..3 {
+            let before = 1800 - page * 200;
+            assert!(matches!(
+                request.payload,
+                tcode_protocol::ClientPayload::Query(tcode_protocol::Query::SessionHistoryPage {
+                    before: requested_before,
+                    limit: 200,
+                    ..
+                }) if requested_before == before
+            ));
+            let records = (0..100)
+                .flat_map(|turn| {
+                    let turn_id = format!("{page}-{turn}");
+                    [
+                        agent::AgentEvent::TurnStarted {
+                            turn_id: turn_id.clone(),
+                        }
+                        .into(),
+                        agent::AgentEvent::TurnCompleted {
+                            turn_id,
+                            status: agent::TurnStatus::Completed,
+                            usage: None,
+                        }
+                        .into(),
+                    ]
+                })
+                .collect();
+            incoming
+                .try_send(
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::QueryResult {
+                        id: request.id,
+                        result: Ok(tcode_protocol::QueryResponse::SessionHistoryPage {
+                            records,
+                            from: before - 200,
+                            truncated: false,
+                        }),
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            wait_until(cx, &workspace, "prefetched page applied", |cx| {
+                workspace.read_with(cx, |store, _| store.session_from["large"] == before - 200)
+            });
+            assert!(
+                outgoing.try_recv().is_err(),
+                "yield between automatic pages"
+            );
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(250));
+            cx.run_until_parked();
+            if page < 2 {
+                wait_until(cx, &workspace, "next prefetch request", |_| {
+                    !outgoing.is_empty()
+                });
+                request =
+                    tcode_protocol::decode_client_line(&outgoing.try_recv().unwrap()).unwrap();
+            }
+        }
+        assert!(
+            outgoing.try_recv().is_err(),
+            "stop after warming 600 events"
+        );
+        workspace.read_with(cx, |store, _| {
+            assert_eq!(store.session_from["large"], 1200);
+            assert_eq!(store.session_records["large"].len(), 600);
+            assert!(!store.history_loading());
+        });
     }
 
     fn test_host(store: SessionStore) -> SpawnedHost {

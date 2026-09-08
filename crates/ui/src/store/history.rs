@@ -25,7 +25,15 @@ impl WorkspaceStore {
         }
     }
 
+    pub(crate) fn prefetch_earlier_messages(&mut self, cx: &mut Context<Self>) {
+        self.load_history_pages(600, false, cx);
+    }
+
     pub(crate) fn load_earlier_messages(&mut self, cx: &mut Context<Self>) {
+        self.load_history_pages(0, false, cx);
+    }
+
+    fn load_history_pages(&mut self, remaining: usize, pause: bool, cx: &mut Context<Self>) {
         if self.history_task.is_some() || !self.history_available() || self.session_loading() {
             return;
         }
@@ -35,6 +43,11 @@ impl WorkspaceStore {
         let host = self.host.clone();
         self.history_error = None;
         self.history_task = Some(cx.spawn(async move |this, cx| {
+            if pause {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+            }
             let result = host
                 .query(Query::SessionHistoryPage {
                     session_id: session_id.clone(),
@@ -46,12 +59,14 @@ impl WorkspaceStore {
                 if store.selection_generation != generation {
                     return false;
                 }
+                let mut remaining = remaining;
                 match result {
                     Ok(QueryResponse::SessionHistoryPage { records, from, .. })
                         if from < before
                             && from + records.len() as u64 == before
                             && store.session_from.get(&session_id) == Some(&before) =>
                     {
+                        remaining = remaining.saturating_sub(records.len());
                         let previous_turns = store
                             .session_replica
                             .as_ref()
@@ -84,6 +99,10 @@ impl WorkspaceStore {
                 let failed = store.history_error.is_some();
                 if !failed {
                     store.history_task = None;
+                    if remaining > 0 {
+                        // Reserve the request gate while yielding between pages.
+                        store.load_history_pages(remaining, true, cx);
+                    }
                     store.load_pending_chat_history(cx);
                 }
                 cx.notify();

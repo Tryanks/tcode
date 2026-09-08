@@ -174,13 +174,15 @@ conversation.
 ## Timeline history
 
 A newly opened conversation starts with the last 200 event records. Earlier
-history loads silently and automatically when the viewport top is within two viewport heights of the first
-loaded record (the first 20 rows before geometry is known). Only one page of
-at most 200 records loads at a time; leaving the conversation cancels it. While
-loading, a 24pt row above the loaded range shows only a small centered spinner.
-There is no load control, end-of-history message, or page-error feedback. Failed
-pages are logged and retried when the prefetch condition is met again, with at
-most one retry per five seconds.
+history loads silently and automatically when the viewport top is within six
+viewport heights of the first loaded record (the first 20 rows before geometry
+is known). Only one page of at most 200 records loads at a time; automatic
+prefetch warms 600 events, yielding briefly between pages. Leaving the
+conversation cancels the sequence. While loading, a 24pt row above the loaded
+range shows only a small centered spinner. There is no load control,
+end-of-history message, or page-error feedback. Failed pages are logged and
+retried when the prefetch condition is met again, with at most one retry per
+five seconds.
 
 Prepending preserves the visible turn and its offset in pixels. Existing list
 measurements and markdown state remain resident; only new or changed turns need

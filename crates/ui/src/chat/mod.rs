@@ -366,7 +366,7 @@ pub struct ChatView {
 fn history_prefetch_due(list: &ListState, first_visible: usize) -> bool {
     let height = list.viewport_bounds().size.height;
     if height > px(0.) {
-        -list.scroll_px_offset_for_scrollbar().y <= height * 2.
+        -list.scroll_px_offset_for_scrollbar().y <= height * 6.
     } else {
         first_visible < 20
     }
@@ -419,7 +419,7 @@ impl ChatView {
                         && !chat.list_state.is_following_tail()
                     {
                         chat.workspace_store
-                            .update(cx, |store, cx| store.load_earlier_messages(cx));
+                            .update(cx, |store, cx| store.prefetch_earlier_messages(cx));
                     }
                     chat.set_markdown_visible_turns(visible_turns, cx);
                 });
@@ -3270,7 +3270,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn history_prefetch_starts_two_screens_before_the_top(cx: &mut TestAppContext) {
+    fn history_prefetch_starts_six_screens_before_the_top(cx: &mut TestAppContext) {
         use super::history_prefetch_due;
         use gpui::{FollowMode, ListAlignment, ListState, px};
         let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(60));
@@ -3284,12 +3284,12 @@ mod tests {
         let height = list.viewport_bounds().size.height;
         assert!(height > px(0.));
         list.set_follow_mode(FollowMode::Normal);
-        list.set_offset_from_scrollbar(gpui::point(px(0.), -(height * 2. + px(1.))));
+        list.set_offset_from_scrollbar(gpui::point(px(0.), -(height * 6. + px(1.))));
         assert!(!history_prefetch_due(
             &list,
             list.logical_scroll_top().item_ix
         ));
-        list.set_offset_from_scrollbar(gpui::point(px(0.), -height * 2.));
+        list.set_offset_from_scrollbar(gpui::point(px(0.), -height * 6.));
         assert!(list.logical_scroll_top().item_ix > 0);
         assert!(history_prefetch_due(
             &list,
