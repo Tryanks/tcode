@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_composer_shows_context_usage(cx: &mut TestAppContext) {
+    fn compact_composer_keeps_effort_and_settings_visible(cx: &mut TestAppContext) {
         use gpui::px;
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let mut timeline = synthetic_markdown_timeline(1);
@@ -3499,7 +3499,7 @@ mod tests {
                         label: "Reasoning effort".into(),
                         options: vec![agent::SelectOption {
                             value: "xhigh".into(),
-                            label: "Extra high reasoning effort".into(),
+                            label: "Extra High".into(),
                             description: None,
                         }],
                         default_value: Some("xhigh".into()),
@@ -3539,6 +3539,10 @@ mod tests {
                     .expect("compact context meter");
                 let model = cx.debug_bounds("model-picker").expect("model picker");
                 let send = cx.debug_bounds("send-message").expect("send button");
+                let card = cx.debug_bounds("composer-card").expect("input card");
+                let drawer = cx
+                    .debug_bounds("composer-settings-drawer")
+                    .expect("attached settings drawer");
                 assert_eq!(
                     send.top(),
                     model.top(),
@@ -3549,17 +3553,18 @@ mod tests {
                 assert_eq!(effort.top(), model.top(), "Effort sits on the model row");
                 assert!(permission.right() <= mode.left() && mode.right() <= meter.left());
                 assert!(permission.left() >= px(0.) && meter.right() <= px(width));
-                assert!(model.right() <= effort.left() && effort.right() <= send.left());
+                assert!(
+                    model.right() <= effort.left() && effort.right() <= send.left(),
+                    "controls overlap at {width}: model={model:?}, effort={effort:?}, send={send:?}"
+                );
+                assert!(send.right() <= card.right());
                 assert!(effort.size.width >= px(44.) && effort.size.height >= px(44.));
                 assert!(
-                    meter.top() >= send.bottom(),
-                    "meter belongs to the second row"
+                    drawer.top() >= card.bottom(),
+                    "settings sit below the input card"
                 );
-                assert_eq!(
-                    meter.right(),
-                    send.right(),
-                    "meter aligns with trailing Send edge"
-                );
+                assert!(permission.left() >= drawer.left() && meter.right() <= drawer.right());
+                assert!(meter.top() >= drawer.top() && meter.bottom() <= drawer.bottom());
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
             }
         }
