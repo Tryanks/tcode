@@ -1239,6 +1239,7 @@ fn nav_bar(
 /// Back control labelled with the parent destination's short fixed label.
 fn back_button(id: &'static str, parent: SharedString, cx: &App) -> gpui::Stateful<Div> {
     crate::material::accessible_clickable(h_flex(), id, Role::Button, parent.clone(), cx)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .flex_none()
         .h(px(44.))
         .pl(px(4.))
@@ -1276,6 +1277,7 @@ fn nav_icon_button(
 ) -> gpui::Stateful<Div> {
     let theme = cx.theme();
     crate::material::accessible_clickable(div(), id, Role::Button, aria_label.into(), cx)
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .size(px(44.))
         .flex_none()
         .flex()
@@ -3361,6 +3363,61 @@ mod tests {
     #[gpui::test]
     fn wide_project_choice_opens_a_focused_draft(cx: &mut TestAppContext) {
         new_thread_from_projects(cx, 2, false);
+    }
+
+    #[gpui::test]
+    fn header_controls_activate_after_pointer_jitter_without_dragging(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (shell, host, cx) = mount(cx);
+        for (topic, event) in [
+            (
+                Topic::Index,
+                ServerEvent::IndexSnapshot(IndexSnapshot {
+                    title_generating: Default::default(),
+                    activity: Default::default(),
+                    sessions: Vec::new(),
+                    projects: Vec::new(),
+                }),
+            ),
+            (
+                Topic::Settings,
+                ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+        ] {
+            host.incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        for (width, selector) in [(1024., "toggle-sidebar"), (393., "compact-search")] {
+            resize(cx, width);
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            let start = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("missing {selector}"))
+                .center();
+            let end = start + gpui::point(px(1.), px(1.));
+            cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
+            // TestWindow rejects native window moves, so a leaked press fails here.
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
+            cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
+            state.read_with(cx, |state, _| {
+                if width >= 900. {
+                    assert!(state.sidebar_collapsed);
+                } else {
+                    assert!(state.palette_open);
+                }
+            });
+        }
     }
 
     fn mount(cx: &mut TestAppContext) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {

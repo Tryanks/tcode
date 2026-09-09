@@ -151,7 +151,9 @@ so startup never exposes a default white/black window or decorative backdrop.
   edge reveals the sidebar as an **overlay** (see Sidebar below).
 - Window top is seamless: no app titlebar — the sidebar's first row (traffic
   lights inset 74px, wordmark + channel pill) and the chat header (52px) form
-  the top strip; both are window-drag areas.
+  the top strip; both are window-drag areas. Header controls, including compact
+  navigation and split buttons, consume left mouse presses so clicking them
+  with slight pointer movement does not start a window drag.
 - Chat content column: max-width 720px, centered, ≥24px horizontal padding
   (must reflow, never clip, when the diff panel narrows the chat region).
 - Composer: floating opaque card with the shared composer radius, a hairline
