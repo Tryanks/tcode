@@ -651,6 +651,12 @@ platform pays that inset.
   disclosure rather than disappearing.
 - Assistant Markdown follows the prose typography above. Streaming follows the
   latest output only while the reader remains near the bottom.
+  File images load from the attached host on every client, resolving relative
+  paths against the thread's working directory. File URLs use the same loader;
+  HTTP(S) images load through the client's HTTP implementation. This applies to
+  standalone images and images mixed with text. Standalone images fit within
+  the available width and a 240pt height limit, preserving their aspect ratio
+  without cropping. Images mixed with text retain their line-height sizing.
 - User messages: right-aligned bubble, muted bg, radius 12, max-width 75%.
 - A confirmed provider handoff inserts a subtle centered divider chip before
   the next user bubble: “Relayed from X to Y”. The injected handoff transcript

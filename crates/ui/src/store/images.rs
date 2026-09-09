@@ -52,3 +52,106 @@ pub(crate) fn host_image(path: PathBuf) -> ImageSource {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown::{MarkdownState, MarkdownView};
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, Window, div, px,
+    };
+    use tcode_protocol::{ClientPayload, HostMessage, decode_client_line, encode_line};
+
+    struct ImageMessage {
+        markdown: Entity<MarkdownState>,
+        cwd: PathBuf,
+    }
+
+    impl Render for ImageMessage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(320.))
+                .child(MarkdownView::new(&self.markdown).base_dir(self.cwd.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn markdown_block_and_inline_images_read_files_from_the_host(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        cx.update(|cx| {
+            cx.set_global(HostImages {
+                link: Some(link.clone()),
+                namespace: 1,
+            });
+        });
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        // These paths exist only on the scripted host, never on the viewing client.
+        let cwd = std::env::current_dir().unwrap().join("host-only-images");
+        let (view, cx) = cx.add_window_view(|_, cx| ImageMessage {
+            markdown: cx.new(|cx| MarkdownState::new("", cx)),
+            cwd: cwd.clone(),
+        });
+        for inline in [false, true] {
+            let suffix = if inline { "inline" } else { "block" };
+            let absolute = cwd.join(format!("absolute-{suffix}.png"));
+            let relative = format!("relative-{suffix}.png");
+            let file_url_path = cwd.join(format!("file image-{suffix}.png"));
+            let cases = [
+                (absolute.display().to_string(), absolute),
+                (relative.clone(), cwd.join(relative)),
+                (
+                    url::Url::from_file_path(&file_url_path).unwrap().into(),
+                    file_url_path,
+                ),
+            ];
+            for (uri, expected_path) in cases {
+                let mut markdown = format!("![sample](<{uri}>)");
+                if inline {
+                    markdown = format!("Before {markdown} after");
+                }
+                view.update(cx, |view, cx| {
+                    view.markdown
+                        .update(cx, |state, cx| state.set_text(&markdown, cx));
+                });
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                let request = decode_client_line(
+                    &requests
+                        .try_recv()
+                        .expect("Markdown image must query its host"),
+                )
+                .unwrap();
+                assert_eq!(
+                    request.payload,
+                    ClientPayload::Query(Query::ReadFileBytes {
+                        path: expected_path
+                    }),
+                    "{markdown}",
+                );
+                replies
+                    .send_blocking(
+                        encode_line(&HostMessage::QueryResult {
+                            id: request.id,
+                            result: Ok(QueryResponse::FileBytes(
+                                include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
+                            )),
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                cx.run_until_parked();
+            }
+        }
+    }
+}

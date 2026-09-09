@@ -495,10 +495,11 @@ fn render_paragraph(
             .children(images.enumerate().map(move |(ix, image)| {
                 let title = image.title();
                 let view = view.clone();
-                img(image.url.clone())
+                img(view.read(cx).image_source(&image.url))
                     .id(ix)
                     .object_fit(ObjectFit::Contain)
                     .max_w(relative(1.))
+                    .max_h(px(240.))
                     .min_w(px(15.))
                     .min_h(px(15.))
                     .when_some(image.link.clone(), |this, link| {

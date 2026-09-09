@@ -145,10 +145,14 @@ fn connect_carries_verified_tls_bytes_without_interception() {
         // This self-signed localhost identity is trusted only by this test client.
         let certificate = CertificateDer::from(include_bytes!("fixtures/localhost.der").to_vec());
         let key = PrivatePkcs8KeyDer::from(include_bytes!("fixtures/localhost-key.der").to_vec());
-        let server_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![certificate.clone()], key.into())
-            .unwrap();
+        let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate.clone()], key.into())
+        .unwrap();
         let origin = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = origin.local_addr().unwrap().port();
         let origin = std::thread::spawn(move || {
@@ -193,9 +197,13 @@ fn connect_carries_verified_tls_bytes_without_interception() {
         };
         let mut roots = rustls::RootCertStore::empty();
         roots.add(certificate).unwrap();
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         let mut tls = rustls::StreamOwned::new(
             rustls::ClientConnection::new(
                 Arc::new(config),

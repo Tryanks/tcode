@@ -145,8 +145,9 @@ impl InlineFlow {
         link: &Option<LinkMark>,
         title: &str,
         size: Size<Pixels>,
+        cx: &App,
     ) -> AnyElement {
-        img(url.clone())
+        img(view.read(cx).image_source(url))
             .id(ix)
             .object_fit(ObjectFit::Contain)
             .max_w(relative(1.))
@@ -203,7 +204,7 @@ impl Element for InlineFlow {
             .enumerate()
             .map(|(ix, item)| match item {
                 MeasureItem::Image { url } => Some(inline_image_size_for_line(
-                    intrinsic_image_size(ix, url, window, cx),
+                    intrinsic_image_size(ix, url, &self.view, window, cx),
                     line_height,
                 )),
                 MeasureItem::Text { .. } => None,
@@ -333,6 +334,7 @@ impl Element for InlineFlow {
                         link,
                         title,
                         fragment_size,
+                        cx,
                     );
                     element.prepaint_as_root(
                         bounds.origin + origin,
@@ -602,10 +604,11 @@ fn line_ranges(
 fn intrinsic_image_size(
     ix: usize,
     url: &SharedUri,
+    view: &Entity<MarkdownState>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<Size<Pixels>> {
-    let mut image = img(url.clone())
+    let mut image = img(view.read(cx).image_source(url))
         .id(ix)
         .object_fit(ObjectFit::Contain)
         .max_w(relative(1.))

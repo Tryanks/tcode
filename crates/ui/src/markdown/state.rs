@@ -7,8 +7,8 @@ use std::{
 };
 
 use gpui::{
-    Bounds, Context, FocusHandle, IntoElement, ListAlignment, ListState, ParentElement as _,
-    Pixels, Point, Render, SharedString, Styled as _, Window, px,
+    Bounds, Context, FocusHandle, ImageSource, IntoElement, ListAlignment, ListState,
+    ParentElement as _, Pixels, Point, Render, SharedString, SharedUri, Styled as _, Window, px,
 };
 use gpui_base::{ElementExt as _, v_flex};
 
@@ -169,6 +169,37 @@ impl MarkdownState {
 
     pub(super) fn resolve_link(&self, url: &str) -> LinkTarget {
         self.link_targets.resolve(url, self.base_dir())
+    }
+
+    /// Markdown file images belong to the attached host, including relative paths.
+    /// Do not check the client's filesystem before asking that host for the bytes.
+    pub(super) fn image_source(&self, uri: &SharedUri) -> ImageSource {
+        let path = PathBuf::from(uri.as_ref());
+        if path.is_absolute() {
+            return crate::store::host_image(path);
+        }
+        if let Ok(url) = url::Url::parse(uri.as_ref()) {
+            if url.scheme() == "file"
+                && let Ok(path) = percent_encoding::percent_decode_str(url.path()).decode_utf8()
+            {
+                // Decode the host's path without the viewing platform's filesystem rules.
+                let path = match url.host_str() {
+                    Some(host) => format!("//{host}{path}"),
+                    None => path.into_owned(),
+                };
+                let path = path
+                    .strip_prefix('/')
+                    .filter(|path| path.as_bytes().get(1) == Some(&b':'))
+                    .unwrap_or(&path);
+                return crate::store::host_image(PathBuf::from(path));
+            }
+            return uri.clone().into();
+        }
+        let path = match self.base_dir() {
+            Some(base_dir) => base_dir.join(path),
+            None => path,
+        };
+        crate::store::host_image(path)
     }
 
     pub(super) fn set_pending_context_link(
