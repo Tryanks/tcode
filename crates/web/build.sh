@@ -19,6 +19,6 @@ if command -v wasm-opt >/dev/null 2>&1; then
 else
   echo 'Notice: wasm-opt unavailable; keeping the unoptimized wasm-bindgen output.' >&2
 fi
-cp "${SCRIPT_DIR}/static/index.html" "${DIST_DIR}/index.html"
+cp "${SCRIPT_DIR}/static/index.html" "${SCRIPT_DIR}/static/auth.mjs" "${DIST_DIR}/"
 python3 "${SCRIPT_DIR}/build_auth.py"
 printf 'Built browser bundle: %s\n' "${DIST_DIR}"
