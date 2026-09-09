@@ -106,6 +106,7 @@ impl AppState {
                 | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
+                | Command::RegenerateSessionTitle { .. }
                 | Command::DeleteSession { .. }
                 | Command::MarkSessionUnread { .. }
                 | Command::ForkThread { .. }

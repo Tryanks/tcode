@@ -858,13 +858,13 @@ fn provider_diagnostics_with_zero_output_tokens_are_not_titles() {
 
 #[test]
 fn title_prompt_treats_the_request_as_bounded_json_data() {
-    let escaped = title_generation_prompt("line one\nline two", true);
+    let escaped = title_generation_prompt("line one\nline two", None, true);
     assert!(escaped.contains("untrusted source text"));
     assert!(escaped.contains("original image attachments"));
     assert!(escaped.contains("\\n"), "the request is JSON escaped");
 
     let source = "界".repeat(TITLE_SOURCE_MAX_CHARS + 20);
-    let prompt = title_generation_prompt(&source, false);
+    let prompt = title_generation_prompt(&source, None, false);
     assert!(prompt.contains("untrusted source text"));
     assert!(!prompt.contains(&"界".repeat(TITLE_SOURCE_MAX_CHARS + 1)));
     assert!(prompt.contains(&format!("{}…", "界".repeat(TITLE_SOURCE_MAX_CHARS))));
@@ -973,6 +973,305 @@ fn late_ai_title_does_not_overwrite_a_manual_rename() {
         state.apply_generated_title(&id, "AI generated title", "Late replacement", cx);
         assert_eq!(state.sessions[0].title, "My manual title");
     });
+}
+
+#[test]
+fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
+    for outcome in ["generated", "cached", "renamed", "deleted", "failed"] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-regenerate-title");
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.title = "Old title".into();
+        let id = meta.id.clone();
+        store.upsert_meta(&meta).unwrap();
+        let image = store.root().join("qr.png");
+        fs::write(&image, [1, 2, 3]).unwrap();
+        for (item_id, content) in [
+            (
+                "user",
+                ItemContent::UserMessage {
+                    text: "hidden instructions\nImprove QR sharing".into(),
+                    context_len: Some("hidden instructions\n".len()),
+                    attachments: vec![image.to_string_lossy().into_owned()],
+                },
+            ),
+            (
+                "assistant",
+                ItemContent::AssistantMessage {
+                    text: "The QR link expires too soon".into(),
+                },
+            ),
+        ] {
+            store
+                .append_event(
+                    &id,
+                    1,
+                    &AgentEvent::ItemCompleted(ThreadItem {
+                        id: item_id.into(),
+                        parent_item_id: None,
+                        content,
+                    }),
+                )
+                .unwrap();
+        }
+        let scripted = scripted_provider(ProviderKind::Codex);
+        let state = cx.new_entity({
+            let mut state = TestClientState::new((*store).clone());
+            state.ai_title_generation_enabled = true;
+            state.set_provider_launcher_for_test(scripted.launcher);
+            state
+        });
+        if outcome == "cached" {
+            state.update(cx, |state, cx| {
+                state.record_event(
+                    &id,
+                    &AgentEvent::ItemCompleted(ThreadItem {
+                        id: "latest".into(),
+                        parent_item_id: None,
+                        content: ItemContent::UserMessage {
+                            text: "Include link expiration".into(),
+                            context_len: None,
+                            attachments: Vec::new(),
+                        },
+                    }),
+                    cx,
+                );
+            });
+        }
+        // No selected or resident session. The cached case also covers an accepted
+        // message captured before its queued disk write has completed.
+        for request_id in [1, 2] {
+            state.dispatch_command(
+                cx,
+                request_id,
+                Command::RegenerateSessionTitle {
+                    session_id: id.clone(),
+                },
+            );
+        }
+        cx.run_until_parked();
+        let prompt = match scripted.commands.try_recv().unwrap() {
+            SessionCommand::SendTurn {
+                text, attachments, ..
+            } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].data_base64, "AQID");
+                text
+            }
+            other => panic!("expected a title request, got {other:?}"),
+        };
+        assert!(
+            scripted.commands.try_recv().is_err(),
+            "duplicate requests must coalesce"
+        );
+        assert!(prompt.contains("Old title"));
+        let context: String =
+            serde_json::from_str(prompt.split_once("Conversation JSON: ").unwrap().1).unwrap();
+        let mut expected_context = "USER:\nImprove QR sharing\n[Attachments: qr.png]\n\nASSISTANT:\nThe QR link expires too soon".to_string();
+        if outcome == "cached" {
+            expected_context.push_str("\n\nUSER:\nInclude link expiration");
+        }
+        assert_eq!(context, expected_context);
+        assert!(cx.drain_outgoing().iter().any(|message| matches!(
+            message,
+            HostMessage::Event(EventEnvelope { event: ServerEvent::IndexSnapshot(snapshot), .. })
+                if snapshot.title_generating.contains(&id)
+        )), "pending state must reach other clients");
+
+        match outcome {
+            "renamed" => state.dispatch_command(
+                cx,
+                3,
+                Command::RenameSession {
+                    session_id: id.clone(),
+                    title: "My title".into(),
+                },
+            ),
+            "deleted" => state.dispatch_command(
+                cx,
+                3,
+                Command::DeleteSession {
+                    session_id: id.clone(),
+                    remove_worktree: false,
+                },
+            ),
+            _ => {}
+        }
+        if outcome == "failed" {
+            scripted
+                .events
+                .try_send(AgentEvent::Error {
+                    message: "unavailable".into(),
+                    fatal: true,
+                })
+                .unwrap();
+        } else {
+            scripted
+                .events
+                .try_send(AgentEvent::ItemCompleted(ThreadItem {
+                    id: "title".into(),
+                    parent_item_id: None,
+                    content: ItemContent::AssistantMessage {
+                        text: "Improve QR Sharing".into(),
+                    },
+                }))
+                .unwrap();
+            scripted
+                .events
+                .try_send(AgentEvent::TurnCompleted {
+                    turn_id: "title-turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                })
+                .unwrap();
+        }
+        scripted
+            .events
+            .try_send(AgentEvent::SessionClosed { reason: None })
+            .unwrap();
+        cx.run_until_parked();
+        state.read(|state| {
+            assert!(!state.index_snapshot().title_generating.contains(&id));
+            let title = state
+                .sessions
+                .iter()
+                .find(|meta| meta.id == id)
+                .map(|meta| meta.title.as_str());
+            let expected = match outcome {
+                "generated" | "cached" => Some("Improve QR Sharing"),
+                "renamed" => Some("My title"),
+                "deleted" => None,
+                "failed" => Some("Old title"),
+                _ => unreachable!(),
+            };
+            assert_eq!(title, expected, "{outcome}");
+            let persisted = store.load_index().into_iter().find(|meta| meta.id == id);
+            assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
+        });
+        if outcome == "failed" {
+            assert!(cx.drain_outgoing().iter().any(|message| matches!(
+                message,
+                HostMessage::Event(EventEnvelope {
+                    event: ServerEvent::Runtime(RuntimeEvent::Error(
+                        RuntimeError::TitleGenerationFailed
+                    )),
+                    ..
+                })
+            )));
+        }
+    }
+}
+
+#[test]
+fn title_regeneration_rejects_empty_history_without_calling_the_provider() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-empty-title");
+    let meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+    let id = meta.id.clone();
+    store.upsert_meta(&meta).unwrap();
+    let scripted = scripted_provider(ProviderKind::Codex);
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*store).clone());
+        state.ai_title_generation_enabled = true;
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::RegenerateSessionTitle {
+            session_id: id.clone(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(scripted.commands.try_recv().is_err());
+    state.read(|state| {
+        assert!(!state.index_snapshot().title_generating.contains(&id));
+        assert_eq!(state.sessions[0].title, meta.title);
+    });
+    assert!(cx.drain_outgoing().iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            event: ServerEvent::Runtime(RuntimeEvent::Error(RuntimeError::TitleGenerationEmpty)),
+            ..
+        })
+    )));
+}
+
+#[test]
+fn title_regeneration_context_keeps_the_original_goal_and_recent_messages() {
+    let item = |id: &str, content| {
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: id.into(),
+            parent_item_id: None,
+            content,
+        })
+    };
+    let first = format!("hidden\nOriginal QR sharing goal {}", "界".repeat(3_000));
+    let timeline = Timeline::fold_events([
+        item(
+            "first",
+            ItemContent::UserMessage {
+                text: first,
+                context_len: Some("hidden\n".len()),
+                attachments: vec!["/images/first.png".into()],
+            },
+        ),
+        item(
+            "reasoning",
+            ItemContent::Reasoning {
+                text: "private reasoning".into(),
+            },
+        ),
+        item(
+            "command",
+            ItemContent::CommandExecution {
+                command: "cargo test".into(),
+                output: "tool output".into(),
+                exit_code: Some(0),
+                status: ItemStatus::Completed,
+            },
+        ),
+        item(
+            "middle",
+            ItemContent::AssistantMessage {
+                text: "intermediate details ".repeat(1_000),
+            },
+        ),
+        item(
+            "latest",
+            ItemContent::UserMessage {
+                text: "Focus on QR expiration".into(),
+                context_len: None,
+                attachments: (1..=4).map(|i| format!("/images/recent-{i}.png")).collect(),
+            },
+        ),
+        item(
+            "answer",
+            ItemContent::AssistantMessage {
+                text: "Make shared QR links last longer".into(),
+            },
+        ),
+    ]);
+    let (context, images) = title_regeneration_context(&timeline);
+    assert!(context.starts_with("USER:\nOriginal QR sharing goal"));
+    assert!(context.contains("[Earlier content truncated]"));
+    assert!(context.contains("USER:\nFocus on QR expiration"));
+    assert!(context.ends_with("ASSISTANT:\nMake shared QR links last longer"));
+    assert!(!context.contains("hidden"));
+    assert!(!context.contains("private reasoning"));
+    assert!(!context.contains("tool output"));
+    assert!(context.chars().count() <= 8_000);
+    assert_eq!(
+        images,
+        [
+            "/images/first.png",
+            "/images/recent-4.png",
+            "/images/recent-3.png",
+            "/images/recent-2.png"
+        ]
+        .map(PathBuf::from)
+    );
 }
 
 #[test]
@@ -1573,7 +1872,7 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
     };
     assert_eq!(
         title_prompt,
-        title_generation_prompt("执行某某任务", false),
+        title_generation_prompt("执行某某任务", None, false),
         "the hidden orchestrate prefix must not be sent to the title model"
     );
 
