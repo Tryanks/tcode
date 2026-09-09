@@ -267,7 +267,7 @@ settings:
     description: "当出现步骤时自动打开右侧的计划和任务面板。"
   live_command_panel:
     title: "实时命令面板"
-    description: "命令执行时自动展开其面板并实时显示输出，完成后自动收起。"
+    description: "智能体工作时自动展开最新命令的输出。"
   provider_updates:
     title: "提供方更新检查"
     description: "启动时检查 Tcode 和提供方 CLI 的新版本。"

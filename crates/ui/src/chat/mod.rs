@@ -82,6 +82,9 @@ const COMMAND_PANEL_DEBOUNCE: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutoActivityExpansion {
+    Manual {
+        expanded: bool,
+    },
     Expanded {
         visible_since: Instant,
     },
@@ -166,6 +169,18 @@ impl AutoActivityExpansions {
         recency: AutoActivityRecency,
         now: Instant,
     ) -> AutoActivityObservation {
+        let current = self
+            .entries_by_session
+            .get(session_key)
+            .and_then(|entries| entries.get(key))
+            .copied();
+        if let Some(AutoActivityExpansion::Manual { expanded }) = current {
+            return AutoActivityObservation {
+                expanded,
+                collapse: None,
+            };
+        }
+
         if !enabled {
             if let Some(entries) = self.entries_by_session.get_mut(session_key) {
                 entries.remove(key);
@@ -207,19 +222,12 @@ impl AutoActivityExpansions {
             };
         }
 
-        let current = self
-            .entries_by_session
-            .get(session_key)
-            .and_then(|entries| entries.get(key))
-            .copied();
+        let visible_since = match current {
+            Some(AutoActivityExpansion::Expanded { visible_since })
+            | Some(AutoActivityExpansion::CollapsePending { visible_since, .. }) => visible_since,
+            _ => now,
+        };
         if recency == AutoActivityRecency::Latest {
-            let visible_since = match current {
-                Some(AutoActivityExpansion::Expanded { visible_since })
-                | Some(AutoActivityExpansion::CollapsePending { visible_since, .. }) => {
-                    visible_since
-                }
-                Some(AutoActivityExpansion::Collapsed) | None => now,
-            };
             self.insert(
                 session_key,
                 key,
@@ -231,9 +239,7 @@ impl AutoActivityExpansions {
             };
         }
 
-        let visible_since = match current {
-            Some(AutoActivityExpansion::Expanded { visible_since }) => visible_since,
-            None => now,
+        match current {
             Some(AutoActivityExpansion::CollapsePending { .. }) => {
                 return AutoActivityObservation {
                     expanded: true,
@@ -246,7 +252,8 @@ impl AutoActivityExpansions {
                     collapse: None,
                 };
             }
-        };
+            _ => {}
+        }
         let remaining = AUTO_ACTIVITY_MIN_VISIBILITY
             .saturating_sub(now.saturating_duration_since(visible_since));
         if remaining.is_zero() {
@@ -340,7 +347,7 @@ pub struct ChatView {
     next_md_build_generation: u64,
     markdown_visible_turns: Range<usize>,
     markdown_scroll_top: Option<usize>,
-    /// Open/closed keys for collapsibles (work logs, activity rows, cards, files).
+    /// Open/closed keys for collapsibles other than activity details.
     expanded: HashSet<String>,
     auto_activity_expansions: AutoActivityExpansions,
     command_panels: RefCell<CommandPanelCache>,
@@ -915,6 +922,29 @@ impl ChatView {
         if !self.expanded.remove(key) {
             self.expanded.insert(key.to_string());
         }
+        self.remeasure_expanded(turn, cx);
+    }
+
+    fn toggle_activity_expanded(
+        &mut self,
+        turn: usize,
+        key: &str,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session_key) = self.session_key.as_deref() {
+            self.auto_activity_expansions.insert(
+                session_key,
+                key,
+                AutoActivityExpansion::Manual {
+                    expanded: !expanded,
+                },
+            );
+        }
+        self.remeasure_expanded(turn, cx);
+    }
+
+    fn remeasure_expanded(&mut self, turn: usize, cx: &mut Context<Self>) {
         // Refresh the cached turn fingerprint immediately; the direct remeasure
         // below covers collapsibles whose state is intentionally not fingerprinted.
         self.sync_markdown_states(cx);
@@ -1534,15 +1564,14 @@ impl ChatView {
                 for (file_index, row) in live_edit_rows(changes, cwd).iter().enumerate() {
                     let key = format!("activity-{}-file-{file_index}", entry.id);
                     let enabled = auto_expand && row.counts.is_some();
-                    let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx)
-                        || self.expanded.contains(&key);
+                    let expanded = self.auto_activity_expanded(turn, &key, enabled, recency, cx);
                     let toggle_key = key.clone();
                     rows.push(components::changed_files::file_edit_row(
                         &key,
                         row,
                         expanded,
                         cx.listener(move |this, _, _, cx| {
-                            this.toggle_expanded(turn, &toggle_key, cx);
+                            this.toggle_activity_expanded(turn, &toggle_key, expanded, cx);
                         }),
                         cx,
                     ));
@@ -1585,8 +1614,7 @@ impl ChatView {
         );
         let auto_enabled =
             auto_expand && is_command && self.workspace_store.read(cx).live_command_panel();
-        let auto_expanded = self.auto_activity_expanded(turn, &key, auto_enabled, recency, cx);
-        let expanded = auto_expanded || self.expanded.contains(&key);
+        let expanded = self.auto_activity_expanded(turn, &key, auto_enabled, recency, cx);
         let command_detail = if expanded {
             match &entry.content {
                 EntryContent::Item(ItemContent::CommandExecution {
@@ -1623,7 +1651,7 @@ impl ChatView {
             expanded,
             command_detail,
             cx.listener(move |this, _, _, cx| {
-                this.toggle_expanded(turn, &click_key, cx);
+                this.toggle_activity_expanded(turn, &click_key, expanded, cx);
             }),
             cx,
         )
@@ -3349,6 +3377,107 @@ mod tests {
         );
         assert!(!revisited.expanded);
         assert_eq!(revisited.collapse, None);
+    }
+
+    #[gpui::test]
+    fn manually_collapsed_activity_stays_closed_while_new_activity_opens(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, px, size};
+
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        let command = ItemContent::CommandExecution {
+            command: "echo hello".into(),
+            output: "hello\n".into(),
+            exit_code: Some(0),
+            status: ItemStatus::Completed,
+        };
+        let file_edit = ItemContent::FileChange {
+            changes: vec![agent::FileChange {
+                path: "src/lib.rs".into(),
+                kind: agent::FileChangeKind::Modify,
+                diff: Some("@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n".into()),
+            }],
+            status: ItemStatus::Completed,
+        };
+        for (item, selector, detail_selector) in [
+            (command, "activity-row", "activity-detail"),
+            (file_edit, "file-edit-row", "file-edit-diff"),
+        ] {
+            let mut timeline = Timeline::default();
+            // Render a live turn without starting the perpetual timeline ticker.
+            timeline.turns = vec![TurnMeta {
+                running: true,
+                ..TurnMeta::default()
+            }];
+            timeline.entries = vec![
+                entry("user", user_item("go")),
+                entry("first", EntryContent::Item(item.clone())),
+            ];
+            let (store, window_state, session_id) = seed_chat(cx, timeline.clone());
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                ChatView::new(store.clone(), window_state, window, cx)
+            });
+            cx.simulate_resize(size(px(1_024.), px(900.)));
+            draw(cx);
+
+            assert!(cx.debug_bounds(detail_selector).is_some());
+            let header = cx.debug_bounds(selector).expect("activity toggle");
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(
+                cx.debug_bounds(detail_selector).is_none(),
+                "{selector} did not close"
+            );
+
+            let mut updated = item.clone();
+            match &mut updated {
+                ItemContent::CommandExecution { output, .. } => output.push_str("more output\n"),
+                ItemContent::FileChange { changes, .. } => {
+                    changes[0]
+                        .diff
+                        .as_mut()
+                        .unwrap()
+                        .push_str("+fn another() {}\n");
+                }
+                _ => unreachable!(),
+            }
+            timeline.entries[1] = entry("first", EntryContent::Item(updated));
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw(cx);
+            assert!(
+                cx.debug_bounds(detail_selector).is_none(),
+                "{selector} reopened on an activity update"
+            );
+
+            let header = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(cx.debug_bounds(detail_selector).is_some());
+            let header = cx.debug_bounds(selector).unwrap();
+            cx.simulate_click(header.center(), gpui::Modifiers::default());
+            draw(cx);
+            assert!(cx.debug_bounds(detail_selector).is_none());
+
+            timeline
+                .entries
+                .push(entry("next", EntryContent::Item(item)));
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id.clone(), timeline.clone(), cx);
+                cx.notify();
+            });
+            draw(cx);
+            assert!(
+                cx.debug_bounds(detail_selector).is_some(),
+                "the next {selector} did not open automatically"
+            );
+        }
     }
 
     #[test]
