@@ -115,6 +115,7 @@ final class GPUIHostViewController: UIViewController {
         view.backgroundColor = UIColor(named: "LaunchBackground")?.resolvedColor(
             with: UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
         )
+        view.window?.backgroundColor = view.backgroundColor
         setNeedsStatusBarAppearanceUpdate()
     }
 

@@ -437,14 +437,17 @@ impl ChatView {
             vec![
                 cx.observe_in(&workspace_store, window, |this, store, window, cx| {
                     this.sync_markdown_states(cx);
-                    // Opening the terminal (button, palette, or any other route
-                    // through the store) should hand keyboard focus to it, so the
-                    // user can type a command without clicking into the panel.
+                    // Desktop can type immediately after opening the terminal.
+                    // On software-keyboard devices this also runs during restore,
+                    // so wait for a tap on the grid before raising the keyboard.
                     let open = store.read(cx).panel_state().terminal_open;
                     if open && !this.terminal_was_open {
                         let drawer = this.terminal_drawer.clone();
                         window.defer(cx, move |window, cx| {
-                            gpui::Focusable::focus_handle(drawer.read(cx), cx).focus(window, cx);
+                            if !crate::window_seam::uses_soft_keyboard(cx) {
+                                gpui::Focusable::focus_handle(drawer.read(cx), cx)
+                                    .focus(window, cx);
+                            }
                         });
                     }
                     this.terminal_was_open = open;

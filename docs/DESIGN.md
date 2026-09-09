@@ -365,10 +365,18 @@ indicator or a software keyboard can cover part of it. Those edges belong to the
 There is one safe content rectangle, shared by pages, the palette, dialogs and
 toasts. Bottom avoidance is **max(safe area, keyboard)**, never their sum — a
 keyboard that already covers the home indicator does not need it counted twice.
-Backgrounds paint edge to edge; only interactive content is constrained, and
+Backgrounds paint edge to edge: safe-area bands use the opaque T0 theme canvas,
+not the near-white T1 reading surface. Only interactive content is constrained, and
 only once. The browser canvas is already resized around its on-screen keyboard,
 so the client adds no inset of its own there and takes its size from the actual
 canvas.
+
+On iOS and Android the native host observes the resolved application theme,
+including an explicit light/dark choice that differs from the system. Status-bar
+icons, Android navigation controls, and the native fallback canvas follow that
+choice at startup and during live theme changes. System bars remain transparent
+over the shared shell's edge-to-edge background; native hosts do not add content
+padding or resize it again for the keyboard.
 
 Insets change without a timer: the platform schedules a frame when they move, so
 the layout follows the keyboard immediately.
@@ -1070,11 +1078,16 @@ dispatch response.
 
 The workspace does not sit on a blank page. When no conversation is open — at
 launch, or because the thread on screen was archived or deleted — it opens the
-new-thread draft of the project the user last interacted with. In wide layout
-the composer is focused and ready. Compact conversations start unfocused,
-including restored conversations and drafts; only tapping the composer focuses
-it. Compact navigation away from or between conversations blurs the focused
-element and dismisses the software keyboard. "Last interacted" is set by user navigation only (opening a thread,
+new-thread draft of the project the user last interacted with. With a hardware
+keyboard in wide layout the composer is focused and ready. Compact conversations
+and software-keyboard devices at every width start unfocused, including restored
+conversations and drafts; only tapping the composer focuses it. Navigation away
+from or between conversations on these devices blurs the focused element and
+dismisses the software keyboard. Rotation or resizing alone neither focuses nor
+blurs the composer; active editing keeps its focus. Composer text prefill does
+not open the software keyboard. Restoring an open terminal also waits for an
+explicit tap on its grid before opening the keyboard. "Last interacted" is set by user navigation only
+(opening a thread,
 starting a draft); background model activity and archive timestamps never move
 it, and it is persisted, so a launch lands where the user left off. A remembered
 project that no longer exists falls back to the first project in the sidebar.
