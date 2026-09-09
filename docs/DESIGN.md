@@ -660,6 +660,11 @@ platform pays that inset.
   standalone images and images mixed with text. Standalone images fit within
   the available width and a 720pt height limit, preserving their aspect ratio
   without cropping. Images mixed with text retain their line-height sizing.
+  Clicking a displayed image opens the shared image lightbox, for both standalone
+  images and images mixed with text. Images wrapped in a link keep their link action.
+  Images are keyboard-focusable controls with the shared focus ring. Enter and
+  Space activate them; their accessible name uses the image title or alt text,
+  falling back to the link destination or a localized “Open image” label.
   Links to image files render as rounded badges with a leading image icon and
   the link label, the same subtle background as changed-file badges, a border,
   and a hover state. Badges wrap with surrounding prose; long labels truncate
@@ -1186,6 +1191,9 @@ so it remains legible over both paper and carbon surfaces without shifting
 layout. Component-library controls retain their native focus treatment. Hidden
 row actions must enter the normal tab order and reveal themselves when focused,
 not depend on pointer hover.
+
+Tab and Shift+Tab move through focusable controls when the focused surface does
+not handle the key itself. Navigation stays within the active popup's focus trap.
 
 Interactive surfaces expose the semantic role that matches their behavior
 (button, tab, switch, menu item, option, or terminal) and a localized accessible

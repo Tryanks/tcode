@@ -57,9 +57,10 @@ pub(crate) fn host_image(path: PathBuf) -> ImageSource {
 mod tests {
     use super::*;
     use crate::markdown::{MarkdownState, MarkdownView};
+    use crate::overlay::OverlayExt as _;
     use gpui::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, Window, div, px,
+        AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyUpEvent,
+        Keystroke, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, px,
     };
     use tcode_protocol::{ClientPayload, HostMessage, decode_client_line, encode_line};
 
@@ -71,6 +72,8 @@ mod tests {
     impl Render for ImageMessage {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
+                .id("image-message")
+                .tab_index(0)
                 .w(px(320.))
                 .child(MarkdownView::new(&self.markdown).base_dir(self.cwd.clone()))
         }
@@ -157,6 +160,54 @@ mod tests {
                     )
                     .unwrap();
                 cx.run_until_parked();
+            }
+
+            cx.update(|window, cx| {
+                window.blur(cx);
+                window.focus_next(cx);
+            });
+            cx.simulate_keystrokes("tab");
+            let image_focus = cx.update(|window, cx| {
+                _ = window.draw(cx);
+                window
+                    .focused(cx)
+                    .expect("the displayed image is a tab stop")
+            });
+            cx.simulate_keystrokes("shift-tab");
+            cx.update(|window, _| assert!(!image_focus.is_focused(window)));
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, _| assert!(image_focus.is_focused(window)));
+            for key in ["enter", "space"] {
+                cx.simulate_keystrokes(key);
+                cx.simulate_event(KeyUpEvent {
+                    keystroke: Keystroke::parse(key).unwrap(),
+                });
+                cx.run_until_parked();
+                cx.update(|window, _| {
+                    assert!(
+                        !image_focus.is_focused(window),
+                        "{key} must move focus into the image lightbox"
+                    );
+                });
+                for navigation in ["tab", "shift-tab"] {
+                    cx.simulate_keystrokes(navigation);
+                    cx.update(|window, cx| {
+                        assert!(
+                            gpui_base::active_focus_trap(window, cx)
+                                .expect("the lightbox traps focus")
+                                .contains_focused(window, cx),
+                            "{navigation} must keep focus inside the lightbox"
+                        );
+                    });
+                }
+                cx.update(|window, cx| {
+                    window.close_dialog(cx);
+                    assert!(
+                        image_focus.is_focused(window),
+                        "closing the lightbox must restore image focus"
+                    );
+                    _ = window.draw(cx);
+                });
             }
         }
 

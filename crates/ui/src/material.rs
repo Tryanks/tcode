@@ -399,16 +399,16 @@ pub(crate) fn tracked_uppercase(text: &str) -> Div {
 
 /// Gives a raw clickable surface the same keyboard and accessibility treatment
 /// as the component-library controls. GPUI automatically maps Enter/Space to
-/// `on_click` for a focused clickable div; this helper supplies the tab stop,
+/// `on_click` for a focused clickable element; this helper supplies the tab stop,
 /// semantic role/name, and a keyboard-only outline that remains legible in
 /// both themes without changing layout.
-pub fn accessible_clickable(
-    el: Div,
+pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
+    el: E,
     id: impl Into<ElementId>,
     role: Role,
     label: impl Into<SharedString>,
     cx: &App,
-) -> Stateful<Div> {
+) -> Stateful<E> {
     let ring = cx.theme().ring.opacity(if cx.theme().mode.is_dark() {
         0.72
     } else {

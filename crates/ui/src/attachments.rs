@@ -8,7 +8,7 @@ use tcode_core::attachments::AttachError;
 /// Open an image as a window-level lightbox. The dialog lives on the Root
 /// layer, so its backdrop covers the whole window and it inherits
 /// backdrop-click / Escape / `x` dismissal. Shared by the composer's pending
-/// strip, sent-message thumbnails and Markdown image-link badges.
+/// strip, sent-message thumbnails, Markdown images and image-link badges.
 pub(crate) fn open_image_lightbox(
     source: ImageSource,
     title: String,

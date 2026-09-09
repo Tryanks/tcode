@@ -143,6 +143,39 @@ impl Render for OverlayHost {
         div()
             .relative()
             .size_full()
+            .on_key_down(|event, window, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if event.keystroke.key == "tab"
+                    && !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && !modifiers.function
+                {
+                    let step = |window: &mut Window, cx: &mut App| {
+                        if modifiers.shift {
+                            window.focus_prev(cx);
+                        } else {
+                            window.focus_next(cx);
+                        }
+                    };
+                    let before = window.focused(cx);
+                    let trap = gpui_base::active_focus_trap(window, cx);
+                    step(window, cx);
+                    if let Some(trap) = trap {
+                        let first = window.focused(cx);
+                        while !trap.contains_focused(window, cx) {
+                            step(window, cx);
+                            if window.focused(cx) == first {
+                                if let Some(before) = before {
+                                    before.focus(window, cx);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                }
+            })
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
