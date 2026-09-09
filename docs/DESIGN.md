@@ -586,8 +586,10 @@ in both states.
    Rename in both layouts. It uses the original request and recent conversation
    to name the subject and desired outcome. While a title request is pending on
    the host, the action reads **Regenerating… / 正在重新生成…** and is disabled
-   on every connected client. The existing title stays visible; a manual rename
-   wins over a late result. Failure preserves the title and shows an error.
+   on every connected client. A small spinner appears beside the existing title
+   at both widths. Regeneration preserves the thread's activity timestamp and
+   list position; a manual rename wins over a late result. Failure preserves the
+   title and shows an error.
    On hover, time swaps to the archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after

@@ -738,14 +738,23 @@ impl AppState {
         generated: &str,
         cx: &mut HostCx,
     ) {
-        let fallback_is_current = self
+        if generated == fallback {
+            return;
+        }
+        let Some(mut meta) = self
             .sessions
             .iter()
-            .find(|meta| meta.id == session_id)
-            .is_some_and(|meta| meta.title == fallback);
-        if fallback_is_current && generated != fallback {
-            self.rename_session(session_id, generated, cx);
+            .find(|meta| meta.id == session_id && meta.title == fallback)
+            .cloned()
+        else {
+            return;
+        };
+        // Naming is metadata, not activity; keep the thread's current timestamp.
+        meta.title = generated.to_string();
+        if let Some(session) = self.resident_mut(session_id) {
+            session.meta.title = meta.title.clone();
         }
+        self.persist_meta(&meta, cx);
     }
 }
 

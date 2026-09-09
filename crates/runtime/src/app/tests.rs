@@ -982,6 +982,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
         let store = TestStore::new("tcode-regenerate-title");
         let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
         meta.title = "Old title".into();
+        meta.updated_at = 123;
         let id = meta.id.clone();
         store.upsert_meta(&meta).unwrap();
         let image = store.root().join("qr.png");
@@ -1147,6 +1148,10 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             assert_eq!(title, expected, "{outcome}");
             let persisted = store.load_index().into_iter().find(|meta| meta.id == id);
             assert_eq!(persisted.as_ref().map(|meta| meta.title.as_str()), expected);
+            if matches!(outcome, "generated" | "cached" | "failed") {
+                assert_eq!(state.sessions[0].updated_at, 123, "{outcome}");
+                assert_eq!(persisted.unwrap().updated_at, 123, "{outcome}");
+            }
         });
         if outcome == "failed" {
             assert!(cx.drain_outgoing().iter().any(|message| matches!(
