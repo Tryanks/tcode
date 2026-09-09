@@ -1418,7 +1418,6 @@ impl AppState {
                 self.ensure_started(session_id, cx);
             }
             self.refresh_git_status(session_id, cx);
-            self.preview_draft_or_persist_active(session_id, cx);
             self.reschedule_scheduled_wake(cx);
             return;
         }
