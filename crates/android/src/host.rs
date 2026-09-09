@@ -99,6 +99,23 @@ impl JavaBridge {
         })
     }
 
+    fn set_app_background_dark(&self, dark: bool) {
+        let object = self.object.clone();
+        self.app.run_on_java_main_thread(Box::new(move || {
+            if let Err(error) = object.with_env(|env, activity| {
+                env.call_method(
+                    activity,
+                    "gpuiSetAppBackgroundDark",
+                    "(Z)V",
+                    &[JValue::Bool(u8::from(dark))],
+                )?;
+                Ok(())
+            }) {
+                log::error!("Android system bar appearance JNI call failed: {error}");
+            }
+        }));
+    }
+
     fn start_camera(&self, request_id: u64) {
         let object = self.object.clone();
         self.app.run_on_java_main_thread(Box::new(move || {
@@ -123,6 +140,13 @@ pub(crate) fn native_host(
     cx: &mut App,
 ) -> Result<(NativeClientHost, Option<String>), String> {
     let bridge = JavaBridge::new(app)?;
+    let appearance_bridge = bridge.clone();
+    // Keep system chrome in sync with explicit app themes as well as system mode.
+    cx.observe_global::<tcode_ui::theme::Theme>(move |cx| {
+        appearance_bridge
+            .set_app_background_dark(cx.global::<tcode_ui::theme::Theme>().mode.is_dark());
+    })
+    .detach();
     let data_dir = bridge
         .object
         .call_string("gpuiDataDir")?

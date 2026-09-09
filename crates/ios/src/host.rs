@@ -21,13 +21,21 @@ thread_local! {
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 unsafe extern "C" {
+    fn tcode_ios_host_set_app_background_dark(dark: u8);
     fn tcode_ios_host_device_name(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
     fn tcode_ios_host_browse(request_id: u64);
 }
 
-pub(crate) fn native_host() -> (NativeClientHost, Option<String>) {
+pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<String>) {
+    // Native chrome follows the resolved app theme, which may differ from UIKit.
+    cx.observe_global::<tcode_ui::theme::Theme>(|cx| {
+        let dark = cx.global::<tcode_ui::theme::Theme>().mode.is_dark();
+        // SAFETY: GPUI's foreground observer runs on the UIKit main thread.
+        unsafe { tcode_ios_host_set_app_background_dark(u8::from(dark)) };
+    })
+    .detach();
     let device_name = read_native_string(|destination, capacity| {
         // SAFETY: Swift writes no more than `capacity` bytes during the call.
         unsafe { tcode_ios_host_device_name(destination, capacity) }

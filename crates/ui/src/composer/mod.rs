@@ -194,7 +194,7 @@ impl Composer {
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.compact {
+        if !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
     }
@@ -458,13 +458,14 @@ impl Composer {
         self.set_input_text(prefill, window, cx);
     }
 
-    /// Replace the composer text with `text`, caret at the end; focus in wide layout.
+    /// Replace the composer text with `text`, caret at the end.
+    /// Software-keyboard devices wait for an explicit tap to focus.
     fn set_input_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         let cursor = text.len();
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
-            if !self.compact {
+            if !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
                 state.focus(window, cx);
             }
         });
@@ -487,7 +488,7 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(selection, cx);
-            if !self.compact {
+            if !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
                 state.focus(window, cx);
             }
         });

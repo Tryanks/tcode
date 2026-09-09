@@ -38,6 +38,7 @@ public final class GpuiActivity extends NativeActivity {
 
     public PreviewHost previewHost;
     private GpuiInputView inputView;
+    private Boolean appBackgroundDark;
     private boolean keyboardVisible;
     private boolean keyboardShowPending;
     private long cameraRequest;
@@ -124,8 +125,9 @@ public final class GpuiActivity extends NativeActivity {
     @SuppressWarnings("deprecation")
     private void configureEdgeToEdgeWindow() {
         Window window = getWindow();
-        boolean lightAppearance = (getResources().getConfiguration().uiMode
-                & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_YES;
+        boolean lightAppearance = appBackgroundDark != null ? !appBackgroundDark
+                : (getResources().getConfiguration().uiMode
+                    & Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_YES;
         window.setStatusBarColor(Color.TRANSPARENT);
         window.setNavigationBarColor(Color.TRANSPARENT);
         if (Build.VERSION.SDK_INT >= 29) {
@@ -151,6 +153,17 @@ public final class GpuiActivity extends NativeActivity {
             }
             window.getDecorView().setSystemUiVisibility(visibility);
         }
+    }
+
+    /** GPUI resolves app preferences independently of Android's system appearance. */
+    public void gpuiSetAppBackgroundDark(boolean dark) {
+        appBackgroundDark = dark;
+        Configuration configuration = new Configuration(getResources().getConfiguration());
+        configuration.uiMode = (configuration.uiMode & ~Configuration.UI_MODE_NIGHT_MASK)
+                | (dark ? Configuration.UI_MODE_NIGHT_YES : Configuration.UI_MODE_NIGHT_NO);
+        int canvas = createConfigurationContext(configuration).getColor(R.color.canvas);
+        getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(canvas));
+        configureEdgeToEdgeWindow();
     }
 
     @SuppressWarnings("deprecation")
