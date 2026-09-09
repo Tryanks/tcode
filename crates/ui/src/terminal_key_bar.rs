@@ -397,7 +397,7 @@ impl Render for TerminalKeyBar {
 }
 
 pub(crate) fn should_show_terminal_key_bar(terminal_focused: bool, cx: &App) -> bool {
-    crate::window_seam::soft_keyboard_for_key_bar(cx) && terminal_focused
+    crate::window_seam::uses_soft_keyboard(cx) && terminal_focused
 }
 
 #[cfg(test)]

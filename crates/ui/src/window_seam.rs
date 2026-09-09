@@ -144,7 +144,7 @@ pub const fn soft_keyboard() -> bool {
     cfg!(any(target_os = "ios", target_os = "android"))
 }
 
-pub(crate) fn soft_keyboard_for_key_bar(_cx: &App) -> bool {
+pub(crate) fn uses_soft_keyboard(_cx: &App) -> bool {
     #[cfg(test)]
     if let Some(override_) = _cx.try_global::<SoftKeyboardOverride>() {
         return override_.0;

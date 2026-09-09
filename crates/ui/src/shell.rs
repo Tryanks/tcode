@@ -353,7 +353,7 @@ impl AppShell {
             // gets the same push or pop out of it.
             cx.observe_in(&window_state, window, |this, _, window, cx| {
                 if this.mounted != this.window_state.read(cx).history() {
-                    this.blur_compact_navigation(window, cx);
+                    this.blur_navigation(window, cx);
                 }
                 this.sync_nav(NavMotion::Animated, cx);
                 this.schedule_navigation_save(cx);
@@ -595,7 +595,7 @@ impl AppShell {
             log::error!("this client cannot reach {target:?}");
             return;
         }
-        self.blur_compact_navigation(window, cx);
+        self.blur_navigation(window, cx);
         self.attach(target, window, cx);
     }
 
@@ -660,7 +660,7 @@ impl AppShell {
                     && attachment.observed_session_id != selected
                 {
                     attachment.observed_session_id = selected.clone();
-                    this.blur_compact_navigation(window, cx);
+                    this.blur_navigation(window, cx);
                     if selected.is_some() {
                         this.window_state
                             .update(cx, |state, cx| state.leave_route_for_chat(cx));
@@ -895,8 +895,8 @@ impl AppShell {
         self.mounted.extend(pushed);
     }
 
-    fn blur_compact_navigation(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compact(cx) {
+    fn blur_navigation(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compact(cx) || crate::window_seam::uses_soft_keyboard(cx) {
             window.blur(cx);
         }
     }
@@ -918,7 +918,7 @@ impl AppShell {
         {
             self.pending_navigation_restore = None;
         }
-        self.blur_compact_navigation(window, cx);
+        self.blur_navigation(window, cx);
         if self.compact(cx) {
             self.go(Destination::Thread, cx);
         } else {
@@ -1817,7 +1817,7 @@ impl AppShell {
         }
         div()
             .size_full()
-            .bg(crate::material::content_surface(cx))
+            .bg(crate::material::opaque_canvas(cx))
             .pt(seam.top)
             .pb(seam.bottom)
             .pl(seam.left)
@@ -2470,6 +2470,21 @@ mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
+        mount_restored_at_width(cx, history, machine_exists, 393., "plan")
+    }
+
+    fn mount_restored_at_width<'a>(
+        cx: &'a mut TestAppContext,
+        history: &[&str],
+        machine_exists: bool,
+        width: f32,
+        panel: &str,
+    ) -> (
+        Entity<AppShell>,
+        MountedShell,
+        Rc<ReturningClient>,
+        &'a mut VisualTestContext,
+    ) {
         cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
@@ -2492,7 +2507,7 @@ mod tests {
                     "history": history,
                     "host_id": "last-host",
                     "session_id": "thread-a",
-                    "panel": "plan"
+                    "panel": panel
                 })),
                 ..Default::default()
             }),
@@ -2501,7 +2516,7 @@ mod tests {
             outbox: None,
         });
         let setup_client = client.clone();
-        let window = cx.open_window(size(px(393.), px(852.)), move |window, cx| {
+        let window = cx.open_window(size(px(width), px(852.)), move |window, cx| {
             let state = cx.new(|_| WindowState::new(false));
             AppShell::new(
                 state,
@@ -3046,6 +3061,147 @@ mod tests {
         cx.update(|window, _| assert!(focus.is_focused(window)));
     }
 
+    #[gpui::test]
+    fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        let (shell, host, _, cx) = mount_restored_at_width(
+            cx,
+            &["hosts", "threads", "thread", "panel"],
+            true,
+            1024.,
+            "terminal",
+        );
+        restore_index(&shell, &host, true, cx);
+        let mut status = session_status("thread-a", std::path::Path::new("/project"));
+        status.terminal_open = true;
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: "thread-a".into(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(status),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        await_restore_update(&shell, cx, |store| store.chat_active_session().is_some());
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::Settings,
+                    event: ServerEvent::SettingsSnapshot(Default::default()),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        host.incoming
+            .try_send(
+                encode_line(&HostMessage::Event(EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionEvents {
+                        session_id: "thread-a".into(),
+                    },
+                    event: ServerEvent::SessionSnapshot {
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
+                        from: 0,
+                        records: vec![],
+                    },
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        assert!(store_of(&shell, cx).read_with(cx, |store, _| store.panel_state().terminal_open));
+        cx.executor().advance_clock(Duration::from_secs(1));
+        draw(cx);
+        cx.update(|window, cx| {
+            assert!(
+                window.focused(cx).is_none(),
+                "a restored terminal must not steal focus after navigation has blurred"
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn software_keyboard_wide_cold_restore_stays_unfocused(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        let (shell, host, _, cx) =
+            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        let focus = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        for width in [1024., 393., 1024.] {
+            resize(cx, width);
+            cx.update(|window, _| assert!(!focus.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn software_keyboard_navigation_stays_unfocused_at_both_widths(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        let (shell, _host, cx) = mount(cx);
+        let store = store_of(&shell, cx);
+        let focus = shell.read_with(cx, |shell, cx| {
+            shell
+                .attachment
+                .as_ref()
+                .unwrap()
+                .chat
+                .read(cx)
+                .composer()
+                .read(cx)
+                .input_focus_handle(cx)
+        });
+        for width in [1024., 393., 1024.] {
+            resize(cx, width);
+            for id in ["thread-1", "thread-2"] {
+                cx.update(|window, cx| {
+                    focus.focus(window, cx);
+                    store.update(cx, |store, _| store.select_session(id.into()));
+                    shell
+                        .read(cx)
+                        .window_state()
+                        .update(cx, |_, cx| cx.emit(OpenThread));
+                });
+                draw(cx);
+                cx.update(|window, _| {
+                    assert!(
+                        !focus.is_focused(window),
+                        "navigation must dismiss the software keyboard at width {width}"
+                    )
+                });
+            }
+        }
+        // A user who is editing keeps focus through reflows and ordinary frames.
+        cx.update(|window, cx| focus.focus(window, cx));
+        for width in [393., 1024., 393.] {
+            resize(cx, width);
+            draw(cx);
+            cx.update(|window, _| assert!(focus.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn software_keyboard_wide_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        new_thread_from_projects(cx, 2, false);
+    }
+
     fn new_thread_from_projects(cx: &mut TestAppContext, project_count: usize, compact: bool) {
         use tcode_core::project::Project;
         use tcode_runtime::pipe::{HostServices, spawn_host};
@@ -3154,7 +3310,29 @@ mod tests {
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            cx.update(|window, _| assert_eq!(focus.is_focused(window), !compact));
+            cx.update(|window, cx| {
+                assert_eq!(
+                    focus.is_focused(window),
+                    !compact && !crate::window_seam::uses_soft_keyboard(cx)
+                )
+            });
+            if cx.update(|_, cx| crate::window_seam::uses_soft_keyboard(cx)) {
+                let card = cx.debug_bounds("composer-card").expect("draft composer");
+                cx.simulate_click(
+                    gpui::point(card.center().x, card.top() + px(24.)),
+                    gpui::Modifiers::default(),
+                );
+                draw(cx);
+                cx.update(|window, _| {
+                    assert!(focus.is_focused(window), "explicit composer tap focuses")
+                });
+                for width in [393., 1024.] {
+                    resize(cx, width);
+                    cx.update(|window, _| {
+                        assert!(focus.is_focused(window), "rotation preserves editing focus")
+                    });
+                }
+            }
             let selected = store.read_with(cx, |store, _| store.active_session_id());
             assert!(selected.is_some());
             if reopen {

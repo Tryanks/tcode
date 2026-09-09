@@ -326,3 +326,8 @@ func startHostBrowse(_ requestID: UInt64) {
         browse.start()
     }
 }
+
+@_cdecl("tcode_ios_host_set_app_background_dark")
+public func tcodeHostSetAppBackgroundDark(_ dark: UInt8) {
+    GPUIHostBridge.controller?.setAppBackgroundDark(dark != 0)
+}
