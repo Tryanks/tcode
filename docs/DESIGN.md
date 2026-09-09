@@ -111,6 +111,11 @@ Separate reading regions with space and material contrast; use faded or inset
 hairlines where a rule is needed. Hover and focus must not change geometry.
 Diff additions and deletions use the success and danger colors consistently.
 
+The window root supplies the active theme's foreground color and UI font to
+the shell, dialogs and toasts. Overlay text inherits these defaults, including
+when switching between light and dark mode; explicit semantic colors and
+monospace text override them where needed.
+
 ## Window material
 
 The persistent main window uses native backdrop material: macOS keeps its
