@@ -359,6 +359,7 @@ enum PendingRequest {
     TurnStart,
     Interrupt,
     Steer { request_id: String, text: String },
+    SubagentMetadata { parent_id: String },
 }
 
 struct PendingElicitation {
@@ -1226,6 +1227,14 @@ impl Actor {
                 .await;
         } else if let Some(id) = value.get("id").and_then(Value::as_i64) {
             let pending = self.pending_requests.remove(&id);
+            if let Some(PendingRequest::SubagentMetadata { parent_id }) = &pending {
+                if let Some(thread) = value.pointer("/result/thread") {
+                    self.update_subagent_metadata(parent_id, thread).await;
+                } else {
+                    log::warn!("Codex child metadata unavailable for {parent_id}: {value}");
+                }
+                return;
+            }
             if let Some(error) = value.get("error") {
                 self.events
                     .emit(AgentEvent::Error {
@@ -1779,8 +1788,8 @@ impl Actor {
                     path.to_owned(),
                 )
             });
-        // spawn_agent only carries overrides; a child without them inherits the
-        // parent thread's model and effort.
+        // Activity notifications can arrive without a spawn ToolCall. Missing
+        // arguments do not establish inheritance; read the child's own metadata.
         let override_str = |key: &str| {
             spawn_input
                 .and_then(|input| input.get(key))
@@ -1788,9 +1797,10 @@ impl Actor {
                 .filter(|text| !text.is_empty())
                 .map(str::to_owned)
         };
-        let model = override_str("model").or_else(|| self.model.clone());
-        let effort = override_str("reasoning_effort").or_else(|| self.effort.clone());
+        let model = override_str("model");
+        let effort = override_str("reasoning_effort").or_else(|| override_str("reasoningEffort"));
         let child_item_id = format!("{parent_id}:{thread_id}");
+        let needs_metadata = !self.subagents.contains_key(&parent_id);
         let subagent = self
             .subagents
             .entry(parent_id.clone())
@@ -1829,7 +1839,7 @@ impl Actor {
 
         let child = ThreadItem {
             id: subagent.child_item_id,
-            parent_item_id: Some(parent_id),
+            parent_item_id: Some(parent_id.clone()),
             content: ItemContent::Subagent {
                 agent_type: subagent.agent_type,
                 description: match kind {
@@ -1850,6 +1860,60 @@ impl Actor {
             _ => AgentEvent::ItemUpdated(child),
         };
         self.events.emit(event).await;
+        if needs_metadata
+            && let Err(error) = self.request(
+                "thread/read",
+                json!({ "threadId": thread_id, "includeTurns": false }),
+                PendingRequest::SubagentMetadata { parent_id },
+            )
+        {
+            log::warn!("Could not read Codex child metadata: {error}");
+        }
+    }
+
+    async fn update_subagent_metadata(&mut self, parent_id: &str, thread: &Value) {
+        let Some(subagent) = self.subagents.get_mut(parent_id) else {
+            return;
+        };
+        subagent.model = thread
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        subagent.effort = thread
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let Some(parent) = self.items.get_mut(parent_id) else {
+            return;
+        };
+        let ItemContent::Subagent { model, effort, .. } = &mut parent.content else {
+            return;
+        };
+        model.clone_from(&subagent.model);
+        effort.clone_from(&subagent.effort);
+        let mut child = parent.clone();
+        child.id.clone_from(&subagent.child_item_id);
+        child.parent_item_id = Some(parent_id.to_owned());
+        if let ItemContent::Subagent {
+            description,
+            status,
+            ..
+        } = &mut child.content
+        {
+            *description = match status {
+                ItemStatus::InProgress => "child thread started",
+                ItemStatus::Completed => "child thread completed",
+                ItemStatus::Interrupted => "child thread interrupted",
+                _ => "child thread",
+            }
+            .into();
+        }
+        // A metadata reply can follow completion. Update both labels without
+        // reopening the child or replacing its terminal status and summary.
+        self.events
+            .emit(AgentEvent::ItemUpdated(parent.clone()))
+            .await;
+        self.events.emit(AgentEvent::ItemUpdated(child)).await;
     }
 
     /// Settle every outstanding native user-input request and MCP elicitation
@@ -1920,6 +1984,7 @@ fn pending_name(request: Option<&PendingRequest>) -> &'static str {
         Some(PendingRequest::TurnStart) => "turn/start",
         Some(PendingRequest::Interrupt) => "turn/interrupt",
         Some(PendingRequest::Steer { .. }) => "turn/steer",
+        Some(PendingRequest::SubagentMetadata { .. }) => "thread/read",
         None => "unknown",
     }
 }
@@ -3436,6 +3501,104 @@ mod tests {
     }
 
     #[test]
+    fn subagent_labels_use_child_metadata_without_changing_lifecycle() {
+        smol::block_on(async {
+            for (kind, expected_status) in [
+                ("started", ItemStatus::InProgress),
+                ("completed", ItemStatus::Completed),
+                ("interrupted", ItemStatus::Interrupted),
+            ] {
+                let (mut actor, events) = test_actor();
+                actor.model = Some("gpt-6-astra".into());
+                actor.effort = Some("low".into());
+                let activity = |kind| {
+                    json!({"item": {
+                        "type": "subAgentActivity", "id": "spawn",
+                        "agentThreadId": "child", "agentPath": "/root/header_mouse",
+                        "kind": kind
+                    }})
+                };
+                actor
+                    .handle_notification("item/started", &activity("started"))
+                    .await;
+                for _ in 0..2 {
+                    let event = events.try_recv().unwrap();
+                    assert!(
+                        matches!(
+                            event,
+                            AgentEvent::ItemUpdated(ThreadItem {
+                                content: ItemContent::Subagent {
+                                    model: None,
+                                    effort: None,
+                                    ..
+                                },
+                                ..
+                            }) | AgentEvent::ItemStarted(ThreadItem {
+                                content: ItemContent::Subagent {
+                                    model: None,
+                                    effort: None,
+                                    ..
+                                },
+                                ..
+                            })
+                        ),
+                        "unknown child metadata must not borrow the parent's model: {event:?}"
+                    );
+                }
+                let ChildOutput::Line(request) = actor.lines.recv().await.unwrap() else {
+                    panic!("expected thread metadata request");
+                };
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], "thread/read");
+                assert_eq!(
+                    request["params"],
+                    json!({"threadId": "child", "includeTurns": false})
+                );
+                if kind != "started" {
+                    actor
+                        .handle_notification("item/completed", &activity(kind))
+                        .await;
+                    while events.try_recv().is_ok() {}
+                }
+                actor
+                    .handle_line(
+                        &json!({"id": request["id"], "result": {"thread": {
+                            "id": "child", "model": "gpt-5.6-sol", "reasoningEffort": "high"
+                        }}})
+                        .to_string(),
+                    )
+                    .await;
+                for (id, parent) in [("spawn", None), ("spawn:child", Some("spawn"))] {
+                    let AgentEvent::ItemUpdated(item) = events.try_recv().unwrap() else {
+                        panic!("expected label update");
+                    };
+                    assert_eq!(item.id, id);
+                    assert_eq!(item.parent_item_id.as_deref(), parent);
+                    assert!(matches!(item.content,
+                        ItemContent::Subagent { model: Some(model), effort: Some(effort), status, .. }
+                        if model == "gpt-5.6-sol" && effort == "high" && status == expected_status
+                    ));
+                }
+                assert!(events.try_recv().is_err());
+                if kind == "started" {
+                    actor
+                        .handle_notification("item/completed", &activity("completed"))
+                        .await;
+                    for _ in 0..2 {
+                        assert!(
+                            matches!(events.try_recv().unwrap(), AgentEvent::ItemCompleted(ThreadItem {
+                            content: ItemContent::Subagent { model: Some(model), effort: Some(effort), status: ItemStatus::Completed, .. }, ..
+                        }) if model == "gpt-5.6-sol" && effort == "high")
+                        );
+                    }
+                }
+                let _ = actor.child.kill();
+                let _ = actor.child.wait();
+            }
+        });
+    }
+
+    #[test]
     fn codex_0150_subagent_activity_uses_v2_fields_and_thread_identity() {
         smol::block_on(async {
             let (mut actor, events) = test_actor();
@@ -3460,20 +3623,19 @@ mod tests {
                 "kind": "started"
             }});
             actor.handle_notification("item/started", &started).await;
-            // Effort comes from the spawn override; the model is inherited from
-            // the parent thread because spawn_agent did not override it.
+            // Keep the explicit effort while the child's model is still unknown.
             assert!(matches!(
                 events.recv().await.unwrap(),
                 AgentEvent::ItemUpdated(ThreadItem {
                     id,
                     content: ItemContent::Subagent {
                         status: ItemStatus::InProgress,
-                        model: Some(model),
+                        model: None,
                         effort: Some(effort),
                         ..
                     },
                     ..
-                }) if id == "call_spawn" && model == "gpt-5-codex" && effort == "high"
+                }) if id == "call_spawn" && effort == "high"
             ));
 
             assert!(matches!(
