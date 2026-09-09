@@ -626,6 +626,114 @@ pub struct SessionsSidebar {
 }
 
 impl SessionsSidebar {
+    /// Use the same filters, disclosures and ordering as the rendered list,
+    /// including rows outside the scroll viewport.
+    fn navigation_threads(&mut self, cx: &mut Context<Self>) -> Vec<String> {
+        if self.compact(cx) {
+            return self
+                .compact_model(cx)
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    CompactListRow::Thread(row) => Some(row.meta.id.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
+
+        let store = self.store.read(cx);
+        let mut ids = Vec::new();
+        match store.sidebar_layout() {
+            SidebarLayout::Flat => {
+                let sessions = store.flat_sessions();
+                let flags = sessions
+                    .iter()
+                    .map(|meta| {
+                        (
+                            meta.id.clone(),
+                            ThreadFlags {
+                                waiting_for_approval: store.pending_approval_for(&meta.id),
+                                waiting_for_input: store.pending_user_input_for(&meta.id),
+                                working: store.turn_running_for(&meta.id),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect();
+                let (active, settled) = partition_settled(&sessions);
+                let mut rows = flat_visible_threads(
+                    &active,
+                    &self.collapsed_parents,
+                    self.project_filter.as_deref(),
+                    &flags,
+                    store.thread_sort(),
+                );
+                if self.expanded_settled.contains("recent") {
+                    rows.extend(flat_visible_threads(
+                        &settled,
+                        &self.collapsed_parents,
+                        self.project_filter.as_deref(),
+                        &flags,
+                        store.thread_sort(),
+                    ));
+                }
+                ids.extend(rows.into_iter().map(|meta| meta.id.clone()));
+            }
+            SidebarLayout::Grouped => {
+                for group in store.grouped_sessions() {
+                    let project_id = &group.project.id;
+                    if store.is_project_collapsed(project_id) {
+                        continue;
+                    }
+                    let (active, settled) = partition_settled(&group.sessions);
+                    let mut rows = visible_threads(&active, &self.collapsed_parents);
+                    if !self.expanded_groups.contains(project_id) {
+                        rows.truncate(THREADS_COLLAPSED_LIMIT);
+                    }
+                    if self.expanded_settled.contains(project_id) {
+                        rows.extend(visible_threads(&settled, &self.collapsed_parents));
+                    }
+                    ids.extend(rows.into_iter().map(|meta| meta.id.clone()));
+                }
+            }
+        }
+        ids
+    }
+
+    pub(crate) fn navigate_thread(
+        &mut self,
+        action: &crate::shortcut::NavigateThread,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::shortcut::NavigateThread;
+
+        let threads = self.navigation_threads(cx);
+        if threads.is_empty() {
+            return false;
+        }
+        let active = self.store.read(cx).active_session_id();
+        let current = threads.iter().position(|id| Some(id) == active.as_ref());
+        let index = match action {
+            NavigateThread::Index(index) => *index,
+            NavigateThread::Next => current.map_or(0, |index| (index + 1) % threads.len()),
+            NavigateThread::Previous => current.map_or(threads.len() - 1, |index| {
+                (index + threads.len() - 1) % threads.len()
+            }),
+        };
+        if let Some(id) = threads.get(index) {
+            self.compact_model_dirty = true;
+            self.store.update(cx, |store, cx| {
+                store.select_session(id.clone());
+                cx.notify();
+            });
+            self.window_state
+                .update(cx, |state, cx| state.open_thread(cx));
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     fn compact(&self, cx: &gpui::App) -> bool {
         self.window_state.read(cx).compact
     }
@@ -3784,12 +3892,20 @@ mod tests {
                     "sidebar-thread-settled"
                 };
                 assert!(cx.debug_bounds(row).is_none(), "settled starts collapsed");
+                assert_eq!(
+                    sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
+                    ["active"]
+                );
                 let header = cx.debug_bounds(key).unwrap();
                 cx.simulate_click(header.center(), gpui::Modifiers::default());
                 draw(cx);
                 assert!(
                     cx.debug_bounds(row).is_some(),
                     "expansion exposes settled thread"
+                );
+                assert_eq!(
+                    sidebar.update(cx, |sidebar, cx| sidebar.navigation_threads(cx)),
+                    ["active", "settled"]
                 );
                 let header = cx.debug_bounds(key).unwrap();
                 cx.simulate_click(header.center(), gpui::Modifiers::default());

@@ -995,6 +995,25 @@ fn current_shell(cx: &App) -> Option<Entity<AppShell>> {
     cx.try_global::<ShellBackTarget>()?.shell.upgrade()
 }
 
+/// App-level dispatch also reaches the shell when no child has keyboard focus.
+pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut App) {
+    let Some(shell) = current_shell(cx) else {
+        return;
+    };
+    shell.update(cx, |shell, cx| {
+        if let Some(attachment) = &shell.attachment
+            && attachment
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.navigate_thread(action, cx))
+        {
+            shell.window_state.update(cx, |state, cx| {
+                state.close_palette(cx);
+                state.go(Destination::Thread, cx);
+            });
+        }
+    });
+}
+
 /// Point this window at another host.
 pub(crate) fn switch_current(target: AttachmentTarget, window: &mut Window, cx: &mut App) {
     let Some(shell) = current_shell(cx) else {
@@ -3624,6 +3643,122 @@ mod tests {
 
     fn store_of(shell: &Entity<AppShell>, cx: &VisualTestContext) -> Entity<WorkspaceStore> {
         shell.read_with(cx, |shell, _| shell.store().expect("attached"))
+    }
+
+    #[gpui::test]
+    fn thread_shortcuts_follow_list_order_and_leave_model_picker_numbers_alone(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        cx.update(crate::shortcut::init);
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tmp")
+            .join(format!(
+                "thread-shortcuts-{}",
+                tcode_services::store::now_millis()
+            ));
+        let disk = tcode_services::store::SessionStore::open_at(root.clone()).unwrap();
+        let project = tcode_core::project::Project::from_root(root.join("project"));
+        let sessions = [("third", 10), ("first", 30), ("second", 20)]
+            .into_iter()
+            .map(|(id, updated_at)| {
+                let mut meta = tcode_core::project::SessionMeta::new(
+                    agent::ProviderKind::Codex,
+                    project.root.clone(),
+                    None,
+                );
+                meta.id = id.into();
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = updated_at;
+                meta
+            })
+            .collect();
+        let host =
+            tcode_runtime::pipe::spawn_host(disk, tcode_runtime::pipe::HostServices::default())
+                .unwrap();
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.projects = vec![project];
+            state.sessions = sessions;
+            state.settings.auto_archive_disabled = true;
+        }))
+        .unwrap();
+        let (shell, _transport, cx) = mount(cx);
+        cx.update(|window, cx| set_back_target(window.window_handle(), &shell, cx));
+        let store = store_of(&shell, cx);
+        store.update(cx, |store, cx| {
+            *store = WorkspaceStore::new(host.link(), cx);
+            store.select_session("first".into());
+        });
+        await_restore_update(&shell, cx, |store| !store.chat_loading());
+        resize(cx, 1200.);
+        draw(cx);
+
+        let picker = cx.debug_bounds("model-picker").expect("model picker");
+        cx.simulate_click(picker.center(), gpui::Modifiers::default());
+        draw(cx);
+        cx.simulate_keystrokes("ctrl-2");
+        draw(cx);
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.active_session_id())
+                .as_deref(),
+            Some("first"),
+            "model picker must keep number keys"
+        );
+        cx.simulate_keystrokes("escape");
+        draw(cx);
+
+        for (keys, expected) in [
+            ("ctrl-2", "second"),
+            ("ctrl-tab", "third"),
+            ("ctrl-tab", "first"),
+            ("ctrl-shift-tab", "third"),
+            ("ctrl-9", "third"),
+            ("ctrl-1", "first"),
+        ] {
+            cx.simulate_keystrokes(keys);
+            await_restore_update(&shell, cx, |store| !store.chat_loading());
+            assert_eq!(
+                store
+                    .read_with(cx, |store, _| store.active_session_id())
+                    .as_deref(),
+                Some(expected),
+                "{keys}"
+            );
+        }
+        assert_eq!(
+            store.read_with(cx, |store, _| store.composer_state().interaction_mode),
+            agent::InteractionMode::Build,
+            "Ctrl+Shift+Tab must not toggle the composer's mode"
+        );
+        cx.update(|window, cx| window.blur(cx));
+        draw(cx);
+        cx.simulate_keystrokes("ctrl-2");
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.active_session_id())
+                .as_deref(),
+            Some("second"),
+            "shortcuts work without a focused input"
+        );
+        shell.update(cx, |shell, cx| shell.go(Destination::Settings, cx));
+        draw(cx);
+        cx.simulate_keystrokes("ctrl-1");
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.destination(cx)),
+            Destination::Thread
+        );
+        resize(cx, 393.);
+        cx.simulate_keystrokes("ctrl-tab");
+        assert_eq!(
+            store
+                .read_with(cx, |store, _| store.active_session_id())
+                .as_deref(),
+            Some("second"),
+            "compact navigation uses the same shortcuts"
+        );
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Resizing a window is a layout decision and nothing else: it must not
