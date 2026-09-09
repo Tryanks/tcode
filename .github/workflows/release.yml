@@ -336,8 +336,8 @@ jobs:
 
           - **Windows**: Microsoft Edge WebView2 Runtime is required. It is included with Windows 11.
           - **Linux**: requires ALSA, Fontconfig, Wayland/X11 client libraries, libgbm, the Vulkan loader, and a working Vulkan ICD/graphics driver.
-          - **Android**: the arm64 APK is a debug build signed with Gradle's default debug keystore.
-          - **iOS**: the arm64 IPA is unsigned and must be re-signed with an Apple provisioning profile before installation.
+          - **Android**: the arm64 APK is a release build signed with Gradle's debug keystore; the signing key may change between releases, so uninstall a previous build if the install is rejected.
+          - **iOS**: not published yet.
 
           Packages are uploaded as soon as each platform build completes. macOS artifacts are
           architecture-specific. Windows MSI/NSIS and Linux AppImage packages are not currently
@@ -544,14 +544,14 @@ jobs:
           retention-days: 14
 
   package-android:
-    name: Android arm64 debug
+    name: Android arm64
     needs: setup
     runs-on: ubuntu-24.04
     env:
       CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_NDK_PLATFORM: 26
       VERSION: ${{ needs.setup.outputs.version }}
+      TCODE_BUILD_VERSION: ${{ needs.setup.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -582,80 +582,29 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
           cargo install cargo-ndk --locked
 
-      - name: Build Android debug APK
-        run: |
-          cargo ndk -t arm64-v8a build -p tcode-android --locked \
-            --config 'profile.dev.package.gpui-kit-assets.debug-assertions=false' \
-            --config 'profile.dev.package.rust-embed.debug-assertions=false'
-          crates/android/host/build.sh
+      # Release profile, stripped native library, R8; signed with Gradle's debug
+      # keystore until a release key exists (see docs/android-apk-size.md).
+      - name: Build Android release APK
+        run: crates/android/host/build.sh --release
 
       - name: Package Android APK
         run: |
           mkdir -p dist
-          cp crates/android/host/app/build/outputs/apk/debug/app-debug.apk \
-            "dist/tcode-${VERSION}-android-arm64-debug.apk"
+          cp crates/android/host/app/build/outputs/apk/release/app-release.apk \
+            "dist/tcode-${VERSION}-android-arm64.apk"
           ls -lh dist
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v7
         with:
-          name: package-android-arm64-debug
+          name: package-android-arm64
           path: dist/*.apk
-          if-no-files-found: error
-          retention-days: 14
-
-  package-ios:
-    name: iOS arm64 unsigned
-    needs: setup
-    runs-on: macos-26
-    env:
-      CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      VERSION: ${{ needs.setup.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.setup.outputs.tag }}
-
-      - name: Install stable Rust target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios
-
-      - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-ios-arm64
-
-      - name: Install xcodegen
-        run: brew install xcodegen
-
-      - name: Build unsigned iOS app
-        run: |
-          IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build -p tcode-ios --target aarch64-apple-ios --locked \
-            --config 'profile.dev.package.gpui-kit-assets.debug-assertions=false' \
-            --config 'profile.dev.package.rust-embed.debug-assertions=false'
-          crates/ios/host/build.sh --device
-
-      - name: Package unsigned iOS IPA
-        run: |
-          mkdir -p dist/Payload
-          cp -R crates/ios/host/build/Build/Products/Debug-iphoneos/Tcode.app dist/Payload/Tcode.app
-          (cd dist && zip -qry "tcode-${VERSION}-ios-arm64-unsigned.ipa" Payload)
-          rm -rf dist/Payload
-          ls -lh dist
-
-      - name: Upload packaged artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: package-ios-arm64-unsigned
-          path: dist/*.ipa
           if-no-files-found: error
           retention-days: 14
 
   finalize:
     name: Publish release checksums
-    needs: [setup, package, package-headless, package-android, package-ios]
+    needs: [setup, package, package-headless, package-android]
     runs-on: ubuntu-24.04
     steps:
       - name: Download all packages
