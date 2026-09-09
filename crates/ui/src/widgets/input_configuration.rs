@@ -1,18 +1,33 @@
 //! Adds native keyboard intent to the upstream editor's input handler.
 use gpui::{
-    App, Bounds, ClipboardItem, ElementInputHandler, EntityInputHandler, InputHandler, Pixels,
-    Point, TextInputAction, TextInputConfiguration, UTF16Selection, Window,
+    App, Bounds, ClipboardItem, ElementInputHandler, Entity, InputHandler, Pixels, Point,
+    TextInputAction, TextInputConfiguration, UTF16Selection, Window,
 };
+use gpui_base::input::{InputBaseState, InputModeKind, RopeExt as _};
 use std::ops::Range;
 
-// The pinned gpui-base editor does not report keyboard configuration. Keep its
-// editing/selection implementation while supplying the field's native intent.
-pub(super) struct ConfiguredInput<V> {
-    pub inner: ElementInputHandler<V>,
-    pub multi_line: bool,
+// Supply the native selection/length hooks and keyboard intent missing upstream.
+pub(super) struct ConfiguredInput<M: InputModeKind> {
+    inner: ElementInputHandler<InputBaseState<M>>,
+    entity: Entity<InputBaseState<M>>,
+    multi_line: bool,
 }
 
-impl<V: EntityInputHandler> InputHandler for ConfiguredInput<V> {
+impl<M: InputModeKind> ConfiguredInput<M> {
+    pub fn new(
+        bounds: Bounds<Pixels>,
+        entity: Entity<InputBaseState<M>>,
+        multi_line: bool,
+    ) -> Self {
+        Self {
+            inner: ElementInputHandler::new(bounds, entity.clone()),
+            entity,
+            multi_line,
+        }
+    }
+}
+
+impl<M: InputModeKind> InputHandler for ConfiguredInput<M> {
     fn selected_text_range(
         &mut self,
         ignore_disabled_input: bool,
@@ -86,16 +101,23 @@ impl<V: EntityInputHandler> InputHandler for ConfiguredInput<V> {
     fn set_selected_text_range(
         &mut self,
         range_utf16: Range<usize>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut App,
     ) {
-        self.inner.set_selected_text_range(range_utf16, window, cx)
+        self.entity.update(cx, |state, cx| {
+            let text = state.text();
+            let range = text.offset_utf16_to_offset(range_utf16.start)
+                ..text.offset_utf16_to_offset(range_utf16.end);
+            if state.selected_range() != range {
+                state.set_selected_range(range, cx);
+            }
+        });
     }
     fn element_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
         self.inner.element_bounds(window, cx)
     }
-    fn text_length_utf16(&mut self, window: &mut Window, cx: &mut App) -> Option<usize> {
-        self.inner.text_length_utf16(window, cx)
+    fn text_length_utf16(&mut self, _window: &mut Window, cx: &mut App) -> Option<usize> {
+        Some(self.entity.read(cx).text().len_utf16())
     }
     fn apple_press_and_hold_enabled(&mut self) -> bool {
         self.inner.apple_press_and_hold_enabled()
@@ -125,5 +147,31 @@ impl<V: EntityInputHandler> InputHandler for ConfiguredInput<V> {
             TextInputAction::Done
         };
         configuration
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use gpui_base::input::TextareaState;
+
+    #[gpui::test]
+    fn native_selection_replaces_the_word_after_an_emoji(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (input, cx) = cx.add_window_view(|window, cx| {
+            TextareaState::new(window, cx).default_value("😀 exmple here")
+        });
+        cx.update(|window, cx| {
+            let mut handler = ConfiguredInput::new(Bounds::default(), input.clone(), true);
+            assert_eq!(handler.text_length_utf16(window, cx), Some(14));
+            handler.set_selected_text_range(3..9, window, cx);
+            handler.replace_text_in_range(None, "example", window, cx);
+            assert_eq!(input.read(cx).value(), "😀 example here");
+            assert_eq!(
+                handler.selected_text_range(true, window, cx).unwrap().range,
+                10..10
+            );
+        });
     }
 }

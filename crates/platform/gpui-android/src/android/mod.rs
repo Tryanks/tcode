@@ -14,8 +14,8 @@ pub(crate) use platform::AndroidPlatform;
 #[doc(hidden)]
 pub use host::{
     commit_text as jni_commit_text, delete_backward as jni_delete_backward,
-    finish_composing_text as jni_finish_composing_text, key_event as jni_key_event,
-    on_back as jni_on_back, on_insets as jni_on_insets,
+    finish_composing_text as jni_finish_composing_text, input_state as jni_input_state,
+    key_event as jni_key_event, on_back as jni_on_back, on_insets as jni_on_insets,
     set_composing_text as jni_set_composing_text,
 };
 

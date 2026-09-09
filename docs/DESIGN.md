@@ -93,6 +93,10 @@ selection, including while an IME composing region is active. Multiline fields
 request a newline key from Android IMEs; plain Enter inserts a line break in
 the composer. Single-line fields keep a Done action that invokes their existing
 submit or next-step behavior. Modified hardware Enter bindings are unchanged.
+Android keyboard suggestions replace the complete word or composing region,
+including corrections after moving the cursor. The keyboard's text and selection
+follow composer clears, restored drafts and app edits; delayed keyboard updates
+must not restore text that was already sent.
 The centered chat/composer column is 720px wide at most. Desktop prose and
 composer text use 13.5px type with a 21px line height; metadata is smaller and
 muted, with monospace for paths, command text and numeric evidence.
