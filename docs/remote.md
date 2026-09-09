@@ -551,14 +551,14 @@ reported as unreachable.
   externally, copy, type the value). Prepare projects and provider installations
   on the machine. See
   [capability-appropriate UI](DESIGN.md#capability-appropriate-ui).
-- Mobile release artifacts are development builds: the Android arm64 APK is a
-  debug build, and the iOS arm64 IPA is an unsigned debug build. Re-sign the IPA
-  with your own signing identity and provisioning profile before device
-  installation. For Android, enable USB debugging and authorize your computer,
-  then replace `VERSION` with the downloaded release version:
+- The Android arm64 APK is a release build signed with Gradle's debug key, so
+  the key may change between releases; uninstall the previous build if an
+  install is rejected. iOS is not published yet; build it from source with
+  `crates/ios/host/build.sh`. For Android, enable USB debugging and authorize
+  your computer, then replace `VERSION` with the downloaded release version:
 
   ```sh
-  adb install -r tcode-VERSION-android-arm64-debug.apk
+  adb install -r tcode-VERSION-android-arm64.apk
   ```
 
 ## History replay limits
