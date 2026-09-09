@@ -503,7 +503,7 @@ fn render_paragraph(
                     .id(ix)
                     .object_fit(ObjectFit::Contain)
                     .max_w(relative(1.))
-                    .max_h(px(240.))
+                    .max_h(px(720.))
                     .min_w(px(15.))
                     .min_h(px(15.))
                     .when_some(image.link.clone(), |this, link| {

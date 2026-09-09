@@ -212,9 +212,9 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     )
 }
 
-/// The scrim behind a bottom sheet, at the `overlay` token's values
+/// The scrim behind modal overlays, at the `overlay` token's values
 /// (`themes/tcode.json`: `#1F232852` light, `#00000080` dark). Passing the ink
-/// `foreground` through in dark mode would *lighten* the page behind the sheet
+/// `foreground` through in dark mode would *lighten* the page behind the overlay
 /// instead of pushing it back, so the dark scrim is black.
 pub fn scrim(progress: f32, cx: &App) -> Hsla {
     if cx.theme().mode.is_dark() {

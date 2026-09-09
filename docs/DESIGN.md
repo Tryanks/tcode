@@ -120,6 +120,9 @@ the shell, dialogs and toasts. Overlay text inherits these defaults, including
 when switching between light and dark mode; explicit semantic colors and
 monospace text override them where needed.
 
+Dialog backdrops, including the image lightbox, use the shared dimming scrim
+from the command palette and sheets. They darken the page in both themes.
+
 ## Window material
 
 The persistent main window uses native backdrop material: macOS keeps its
@@ -655,7 +658,7 @@ platform pays that inset.
   paths against the thread's working directory. File URLs use the same loader;
   HTTP(S) images load through the client's HTTP implementation. This applies to
   standalone images and images mixed with text. Standalone images fit within
-  the available width and a 240pt height limit, preserving their aspect ratio
+  the available width and a 720pt height limit, preserving their aspect ratio
   without cropping. Images mixed with text retain their line-height sizing.
   Links to image files render as rounded badges with a leading image icon and
   the link label, the same subtle background as changed-file badges, a border,
@@ -664,6 +667,9 @@ platform pays that inset.
   26pt high in 28pt rows, or 38pt high in 44pt rows in compact layouts, leaving
   space between stacked badges. They open the shared image lightbox,
   loading host files through the attached host. Other links retain prose styling.
+  The lightbox is up to 1200pt wide, capped to the viewport with at least 16pt side
+  margins, and its image is limited to 75% of the window height. Short windows
+  shrink the image further to leave room for the dialog header and padding.
 - User messages: right-aligned bubble, muted bg, radius 12, max-width 75%.
 - A confirmed provider handoff inserts a subtle centered divider chip before
   the next user bubble: “Relayed from X to Y”. The injected handoff transcript

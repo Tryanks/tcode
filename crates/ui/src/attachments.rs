@@ -17,11 +17,11 @@ pub(crate) fn open_image_lightbox(
 ) {
     window.open_dialog(cx, move |builder, window, cx| {
         let viewport = window.viewport_size();
-        let width = (viewport.width - px(160.)).clamp(px(320.), px(760.));
-        let max_h = viewport.height * 0.65;
+        // Leave room for the dialog header, padding and bottom margin in short windows.
+        let max_h = (viewport.height * 0.75).min(viewport.height * 0.9 - px(96.));
         let source = source.clone();
         builder
-            .w(width)
+            .w(px(1200.))
             .rounded(crate::material::radius_overlay())
             .bg(cx.theme().popover)
             .border_1()
