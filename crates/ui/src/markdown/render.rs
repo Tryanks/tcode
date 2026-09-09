@@ -474,7 +474,11 @@ fn render_paragraph(
         .children
         .iter()
         .any(|child| !child.text.is_empty());
-    if has_image && has_text {
+    let has_image_link = paragraph
+        .children
+        .iter()
+        .any(|child| super::image_link::for_node(child).is_some());
+    if (has_image && has_text) || has_image_link {
         return InlineFlow::new(
             id.to_string(),
             view.clone(),
@@ -621,6 +625,21 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
             });
         };
     for child in &paragraph.children {
+        if let Some(link) = super::image_link::for_node(child) {
+            flush_text(
+                &mut items,
+                &mut text,
+                &mut links,
+                &mut highlights,
+                &mut fonts,
+                &mut segment_state,
+            );
+            items.push(InlineFlowItem::ImageLink {
+                url: link.url.clone(),
+                label: child.text.clone(),
+            });
+            continue;
+        }
         if let Some(image) = &child.image {
             flush_text(
                 &mut items,

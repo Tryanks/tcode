@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn markdown_block_and_inline_images_read_files_from_the_host(cx: &mut TestAppContext) {
+    fn markdown_images_and_badge_previews_read_files_from_the_host(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
         let (to_host, requests) = async_channel::unbounded();
@@ -96,10 +96,16 @@ mod tests {
         });
         // These paths exist only on the scripted host, never on the viewing client.
         let cwd = std::env::current_dir().unwrap().join("host-only-images");
-        let (view, cx) = cx.add_window_view(|_, cx| ImageMessage {
-            markdown: cx.new(|cx| MarkdownState::new("", cx)),
-            cwd: cwd.clone(),
+        let mut message = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| ImageMessage {
+                markdown: cx.new(|cx| MarkdownState::new("", cx)),
+                cwd: cwd.clone(),
+            });
+            message = Some(view.clone());
+            crate::overlay::OverlayHost::new(view, window, cx)
         });
+        let view = message.unwrap();
         for inline in [false, true] {
             let suffix = if inline { "inline" } else { "block" };
             let absolute = cwd.join(format!("absolute-{suffix}.png"));
@@ -153,5 +159,37 @@ mod tests {
                 cx.run_until_parked();
             }
         }
+
+        view.update(cx, |view, cx| {
+            view.markdown.update(cx, |state, cx| {
+                state.set_text("[Screenshot](preview.png)", cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            requests.is_empty(),
+            "a badge loads its image only when opened"
+        );
+        cx.simulate_click(gpui::point(px(40.), px(14.)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = decode_client_line(
+            &requests
+                .try_recv()
+                .expect("clicking the image badge must read its host image"),
+        )
+        .unwrap();
+        assert_eq!(
+            request.payload,
+            ClientPayload::Query(Query::ReadFileBytes {
+                path: cwd.join("preview.png")
+            })
+        );
+        assert!(
+            cx.opened_url().is_none(),
+            "host image badges must open in the app"
+        );
     }
 }

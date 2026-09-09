@@ -1,4 +1,4 @@
-//! Mixed text/image inline layout adapted from gpui-component's Apache-2.0
+//! Mixed text, image and badge inline layout adapted from gpui-component's Apache-2.0
 //! `text/inline_flow.rs` implementation.
 
 use std::{
@@ -23,7 +23,7 @@ use super::{
     state::MarkdownState,
 };
 
-const IMAGE_LEN: usize = 1;
+const ELEMENT_LEN: usize = 1;
 const INLINE_CODE_PADDING_X: Pixels = px(3.);
 const INLINE_CODE_PADDING_Y: Pixels = px(1.);
 
@@ -61,6 +61,10 @@ pub(super) enum InlineFlowItem {
         link: Option<LinkMark>,
         title: String,
     },
+    ImageLink {
+        url: SharedString,
+        label: SharedString,
+    },
 }
 
 #[derive(Default)]
@@ -87,7 +91,7 @@ enum PositionedFragment {
         font_overrides: Vec<(Range<usize>, SharedString)>,
         code_style: Option<InlineCodeStyle>,
     },
-    Image {
+    Element {
         item_ix: usize,
         origin: gpui::Point<Pixels>,
         size: Size<Pixels>,
@@ -102,9 +106,8 @@ enum MeasureItem {
         font_overrides: Vec<(Range<usize>, SharedString)>,
         code_style: Option<InlineCodeStyle>,
     },
-    Image {
-        url: SharedUri,
-    },
+    Image,
+    ImageLink,
 }
 
 struct LineFragmentLayout {
@@ -122,7 +125,7 @@ enum LineFragmentKind {
         font_overrides: Vec<(Range<usize>, SharedString)>,
         code_style: Option<InlineCodeStyle>,
     },
-    Image,
+    Element,
 }
 
 impl InlineFlow {
@@ -199,15 +202,28 @@ impl Element for InlineFlow {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let measure_items = self.items.iter().map(MeasureItem::from).collect::<Vec<_>>();
         let line_height = window.line_height();
-        let image_sizes = measure_items
+        let element_sizes = self
+            .items
             .iter()
             .enumerate()
             .map(|(ix, item)| match item {
-                MeasureItem::Image { url } => Some(inline_image_size_for_line(
+                InlineFlowItem::Image { url, .. } => Some(inline_image_size_for_line(
                     intrinsic_image_size(ix, url, &self.view, window, cx),
                     line_height,
                 )),
-                MeasureItem::Text { .. } => None,
+                InlineFlowItem::ImageLink { url, label } => {
+                    let mut badge = super::image_link::badge(
+                        ix,
+                        self.view.clone(),
+                        url.clone(),
+                        label.clone(),
+                        window,
+                        cx,
+                    )
+                    .into_any_element();
+                    Some(badge.layout_as_root(AvailableSpace::min_size(), window, cx))
+                }
+                InlineFlowItem::Text { .. } => None,
             })
             .collect::<Vec<_>>();
         let state = InlineFlowLayoutState::default();
@@ -223,9 +239,22 @@ impl Element for InlineFlow {
                 } else {
                     None
                 };
+                let element_sizes = element_sizes
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, measured)| {
+                        let mut measured = *measured;
+                        if matches!(measure_items[ix], MeasureItem::ImageLink)
+                            && let (Some(size), Some(width)) = (&mut measured, wrap_width)
+                        {
+                            size.width = size.width.min(width);
+                        }
+                        measured
+                    })
+                    .collect::<Vec<_>>();
                 let layout = layout_flow(
                     &measure_items,
-                    &image_sizes,
+                    &element_sizes,
                     &text_style,
                     wrap_width,
                     window,
@@ -316,26 +345,34 @@ impl Element for InlineFlow {
                     );
                     elements.push(element);
                 }
-                PositionedFragment::Image {
+                PositionedFragment::Element {
                     item_ix,
                     origin,
                     size: fragment_size,
                 } => {
-                    let InlineFlowItem::Image {
-                        url, link, title, ..
-                    } = &self.items[item_ix]
-                    else {
-                        continue;
+                    let mut element = match &self.items[item_ix] {
+                        InlineFlowItem::Image { url, link, title } => Self::image_element(
+                            elements.len(),
+                            self.view.clone(),
+                            url,
+                            link,
+                            title,
+                            fragment_size,
+                            cx,
+                        ),
+                        InlineFlowItem::ImageLink { url, label } => super::image_link::badge(
+                            item_ix,
+                            self.view.clone(),
+                            url.clone(),
+                            label.clone(),
+                            window,
+                            cx,
+                        )
+                        .w(fragment_size.width)
+                        .h(fragment_size.height)
+                        .into_any_element(),
+                        InlineFlowItem::Text { .. } => unreachable!(),
                     };
-                    let mut element = Self::image_element(
-                        elements.len(),
-                        self.view.clone(),
-                        url,
-                        link,
-                        title,
-                        fragment_size,
-                        cx,
-                    );
                     element.prepaint_as_root(
                         bounds.origin + origin,
                         size(
@@ -385,7 +422,8 @@ impl From<&InlineFlowItem> for MeasureItem {
                 font_overrides: font_overrides.clone(),
                 code_style: code_style.clone(),
             },
-            InlineFlowItem::Image { url, .. } => Self::Image { url: url.clone() },
+            InlineFlowItem::Image { .. } => Self::Image,
+            InlineFlowItem::ImageLink { .. } => Self::ImageLink,
         }
     }
 }
@@ -394,14 +432,14 @@ impl MeasureItem {
     fn len(&self) -> usize {
         match self {
             Self::Text { text, .. } => text.len(),
-            Self::Image { .. } => IMAGE_LEN,
+            Self::Image | Self::ImageLink => ELEMENT_LEN,
         }
     }
 }
 
 fn layout_flow(
     items: &[MeasureItem],
-    image_sizes: &[Option<Size<Pixels>>],
+    element_sizes: &[Option<Size<Pixels>>],
     text_style: &TextStyle,
     wrap_width: Option<Pixels>,
     window: &mut Window,
@@ -415,7 +453,7 @@ fn layout_flow(
     let mut fragments = Vec::new();
     let mut max_width = Pixels::ZERO;
     let mut y = Pixels::ZERO;
-    for line_range in line_ranges(items, image_sizes, text_style, wrap_width, window) {
+    for line_range in line_ranges(items, element_sizes, text_style, wrap_width, window) {
         let mut line_fragments = Vec::new();
         let mut line_width = Pixels::ZERO;
         let mut actual_line_height = line_height;
@@ -489,17 +527,17 @@ fn layout_flow(
                         });
                     }
                 }
-                MeasureItem::Image { .. } => {
+                MeasureItem::Image | MeasureItem::ImageLink => {
                     if line_range.start <= item_start && item_end <= line_range.end {
                         let image_size =
-                            image_sizes[item_ix].unwrap_or(size(line_height, line_height));
+                            element_sizes[item_ix].unwrap_or(size(line_height, line_height));
                         line_width += image_size.width;
                         actual_line_height = actual_line_height.max(image_size.height);
                         line_fragments.push(LineFragmentLayout {
                             item_ix,
-                            kind: LineFragmentKind::Image,
+                            kind: LineFragmentKind::Element,
                             size: image_size,
-                            source_range: 0..IMAGE_LEN,
+                            source_range: 0..ELEMENT_LEN,
                         });
                     }
                 }
@@ -527,7 +565,7 @@ fn layout_flow(
                     font_overrides,
                     code_style,
                 },
-                LineFragmentKind::Image => PositionedFragment::Image {
+                LineFragmentKind::Element => PositionedFragment::Element {
                     item_ix: fragment.item_ix,
                     origin,
                     size: fragment.size,
@@ -547,7 +585,7 @@ fn layout_flow(
 
 fn line_ranges(
     items: &[MeasureItem],
-    image_sizes: &[Option<Size<Pixels>>],
+    element_sizes: &[Option<Size<Pixels>>],
     text_style: &TextStyle,
     wrap_width: Option<Pixels>,
     window: &mut Window,
@@ -575,8 +613,8 @@ fn line_ranges(
                 WrapLineFragment::element(width, text.len())
             }
             MeasureItem::Text { text, .. } => WrapLineFragment::text(text),
-            MeasureItem::Image { .. } => {
-                WrapLineFragment::element(image_sizes[ix].unwrap_or_default().width, IMAGE_LEN)
+            MeasureItem::Image | MeasureItem::ImageLink => {
+                WrapLineFragment::element(element_sizes[ix].unwrap_or_default().width, ELEMENT_LEN)
             }
         })
         .collect::<Vec<_>>();
