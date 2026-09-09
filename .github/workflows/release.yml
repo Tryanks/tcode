@@ -422,7 +422,7 @@ jobs:
             crates/web/dist/tcode_web_bg.wasm \
             -o crates/web/dist/tcode_web_bg.optimized.wasm
           mv crates/web/dist/tcode_web_bg.optimized.wasm crates/web/dist/tcode_web_bg.wasm
-          cp crates/web/static/index.html crates/web/dist/index.html
+          cp crates/web/static/index.html crates/web/static/auth.mjs crates/web/dist/
           ls -lh crates/web/dist
 
       - name: Upload browser bundle
