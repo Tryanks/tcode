@@ -61,7 +61,7 @@ tcode-core = { path = "../core", default-features = false }
 tcode-protocol = { path = "../protocol", default-features = false }
 qrcode = { version = "0.14", default-features = false }
 gpui = { package = "gpui-pre", version = "0.3.1" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "9d9bd9bfa9b4c3af25475078458b3e3c7abd2981" } # 0.6.0 on crates.io pulls an unused gpui-pre-platform that breaks iOS/Android; switch back once 0.6.1 ships
+gpui-base = "0.6.1"
 gpui-component-assets = { package = "gpui-kit-assets", version = "0.6.0" }
 gpui-component-macros = "0.6.0"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
