@@ -2182,6 +2182,10 @@ impl SessionsSidebar {
                 is_active,
                 cx,
             )
+            .debug_selector({
+                let id = session_id.clone();
+                move || format!("sidebar-thread-{id}")
+            })
             .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
             .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
             .px_2()
