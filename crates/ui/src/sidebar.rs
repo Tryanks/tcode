@@ -1183,17 +1183,6 @@ impl SessionsSidebar {
                 .text_color(cx.theme().sidebar_foreground)
                 .child(crate::tr!("app.name")),
         )
-        .child(
-            div()
-                .px_1()
-                .py(px(1.))
-                .rounded_sm()
-                .bg(cx.theme().muted)
-                .text_color(cx.theme().muted_foreground)
-                .text_size(px(9.))
-                .font_semibold()
-                .child("DEV"),
-        )
         // The collapse toggle lives in the chat header (`crate::chat`), not
         // here: collapsing takes the sidebar to zero width, so a control that
         // rode the sidebar would take itself off screen.

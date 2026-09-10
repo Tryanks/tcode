@@ -202,7 +202,7 @@ impl Composer {
         let trigger = Button::new("model-picker")
             .debug_selector(|| "model-picker".into())
             .when(self.compact, |button| {
-                button.w_full().max_w(px(160.)).min_w_0()
+                button.w_full().max_w(px(160.)).min_w_0().overflow_hidden()
             })
             .ghost()
             .compact()
@@ -212,7 +212,7 @@ impl Composer {
             .rounded(crate::material::radius_input())
             .child(
                 h_flex()
-                    .when(self.compact, |el| el.w_full().min_w_0())
+                    .when(self.compact, |el| el.w_full().min_w_0().overflow_hidden())
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
