@@ -907,6 +907,14 @@ Editable fields are seeded from the host's settings the first time a real
 snapshot exists, not from local defaults, and a field the user has since edited
 is never rewritten by a later snapshot.
 
+Archived Threads lists each archived thread as a row under its project's
+caption, with Unarchive and a danger Delete permanently. The list is paged at 50
+rows: a muted caption above it reads the shown range out of the total, and
+Previous/Next sit at the right of the same row, each disabled at its end. A
+project spanning a page boundary repeats its caption on the next page. The same
+row ends with a danger **Delete all**, which always confirms — the skip-confirm
+preference does not apply to deleting every archived thread at once.
+
 Provider profiles expose only applicable options. Pi defaults to no Tcode
 permission extension; its Native approvals toggle enables the gate for
 supervised and auto-accept-edits sessions. Without it those stored modes take
