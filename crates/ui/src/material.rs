@@ -203,16 +203,13 @@ pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
 
 /// Shared wordmark.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
-    gpui_base::h_flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .text_size(px(14.))
-                .font_bold()
-                .text_color(cx.theme().sidebar_foreground)
-                .child(crate::tr!("app.name")),
-        )
+    gpui_base::h_flex().items_center().gap_2().child(
+        div()
+            .text_size(px(14.))
+            .font_bold()
+            .text_color(cx.theme().sidebar_foreground)
+            .child(crate::tr!("app.name")),
+    )
 }
 
 /// The scrim behind a bottom sheet, at the `overlay` token's values
