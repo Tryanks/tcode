@@ -4958,7 +4958,7 @@ fn park_active_retains_idle_live_provider() {
 }
 
 #[test]
-fn select_session_readopts_idle_resident_without_shutdown() {
+fn select_session_readopts_idle_resident_without_changing_recency_or_shutdown() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-idle-resident-readopt-test");
     let store = (*test_store).clone();
@@ -4966,7 +4966,10 @@ fn select_session_readopts_idle_resident_without_shutdown() {
     let (commands, actor) = smol::channel::unbounded();
     let mut session = live_session(ProviderKind::ClaudeCode, commands);
     session.meta.id = "idle-resident".into();
+    let updated_at = now_secs() - 3600;
+    session.meta.updated_at = updated_at;
     let meta = session.meta.clone();
+    test_store.upsert_meta(&meta).unwrap();
 
     state.update(cx, |state, cx| {
         state.sessions.push(meta);
@@ -4976,11 +4979,15 @@ fn select_session_readopts_idle_resident_without_shutdown() {
 
         let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
+        assert_eq!(active.meta.updated_at, updated_at);
+        assert_eq!(state.sessions[0].updated_at, updated_at);
         assert!(matches!(active.runtime, Runtime::Live(_)));
         assert!(active.idle_since.is_none());
         assert!(!state.residents.parked.contains_key("idle-resident"));
         assert!(actor.try_recv().is_err(), "re-adoption sent Shutdown");
     });
+    cx.run_until_parked();
+    assert_eq!(test_store.load_index()[0].updated_at, updated_at);
 }
 
 #[test]
