@@ -201,29 +201,15 @@ pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
     list
 }
 
-/// Shared wordmark and DEV channel badge.
+/// Shared wordmark.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
-    gpui_base::h_flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .text_size(px(14.))
-                .font_bold()
-                .text_color(cx.theme().sidebar_foreground)
-                .child(crate::tr!("app.name")),
-        )
-        .child(
-            div()
-                .px_1()
-                .py(px(1.))
-                .rounded_sm()
-                .bg(cx.theme().muted)
-                .text_color(cx.theme().muted_foreground)
-                .text_size(px(9.))
-                .font_semibold()
-                .child("DEV"),
-        )
+    gpui_base::h_flex().items_center().gap_2().child(
+        div()
+            .text_size(px(14.))
+            .font_bold()
+            .text_color(cx.theme().sidebar_foreground)
+            .child(crate::tr!("app.name")),
+    )
 }
 
 /// The scrim behind a bottom sheet, at the `overlay` token's values
