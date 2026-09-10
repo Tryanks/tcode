@@ -201,7 +201,7 @@ pub fn plain_list(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
     list
 }
 
-/// Shared wordmark and DEV channel badge.
+/// Shared wordmark.
 pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     gpui_base::h_flex()
         .items_center()
@@ -212,17 +212,6 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
                 .font_bold()
                 .text_color(cx.theme().sidebar_foreground)
                 .child(crate::tr!("app.name")),
-        )
-        .child(
-            div()
-                .px_1()
-                .py(px(1.))
-                .rounded_sm()
-                .bg(cx.theme().muted)
-                .text_color(cx.theme().muted_foreground)
-                .text_size(px(9.))
-                .font_semibold()
-                .child("DEV"),
         )
 }
 
