@@ -31,6 +31,7 @@ use crate::time::{humanize_ago, now_secs};
 use crate::window_caption;
 use crate::window_drag_area;
 use crate::window_state::WindowState;
+use tcode_core::project::SessionMeta;
 use tcode_core::settings::{
     DEFAULT_AUTO_ARCHIVE_KEEP_COUNT, DEFAULT_AUTO_ARCHIVE_MAX_IDLE_DAYS, FallbackReviewSettings,
     TitleGenerationSettings,
@@ -43,6 +44,19 @@ const TRAFFIC_LIGHT_INSET: f32 = 80.;
 const TRAFFIC_LIGHT_INSET: f32 = 8.;
 
 const NAV_WIDTH: f32 = 255.;
+/// Archived rows rendered per page. Each row carries two buttons with click
+/// listeners, so the whole list is unaffordable once thousands are archived.
+const ARCHIVED_PER_PAGE: usize = 50;
+
+/// Clamp `page` so its first row still exists and return `(page, start, end)`
+/// for the rows it covers. `total == 0` yields the empty range on page 0.
+fn page_bounds(total: usize, page: usize, per_page: usize) -> (usize, usize, usize) {
+    let last_page = total.saturating_sub(1) / per_page.max(1);
+    let page = page.min(last_page);
+    let start = page * per_page;
+    (page, start, start.saturating_add(per_page).min(total))
+}
+
 /// Max width of the settings content column — matches the chat timeline column
 /// (`chat::CONTENT_MAX_WIDTH`) so the reading measure is identical across routes.
 const CONTENT_MAX_WIDTH: f32 = 768.;
@@ -306,6 +320,8 @@ pub struct SettingsPage {
     home_url_input: SettingsInput,
     auto_archive_idle_input: SettingsInput,
     auto_archive_keep_input: SettingsInput,
+    /// Zero-based page shown by the Archived Threads list.
+    archived_page: usize,
     /// Whether the editable fields have been seeded from the host's settings.
     /// A portable client renders before its first snapshot arrives, and the
     /// local defaults it starts with must never be shown as the host's answer.
@@ -500,6 +516,7 @@ impl SettingsPage {
             home_url_input: SettingsInput::new(home_url_input.clone()),
             auto_archive_idle_input: SettingsInput::new(auto_archive_idle_input.clone()),
             auto_archive_keep_input: SettingsInput::new(auto_archive_keep_input.clone()),
+            archived_page: 0,
             hydrated: false,
             #[cfg(all(feature = "local-permissions", target_os = "macos"))]
             local_permissions,
@@ -1968,16 +1985,87 @@ impl SettingsPage {
                 );
         }
 
+        let flat: Vec<(SharedString, SessionMeta)> = groups
+            .into_iter()
+            .flat_map(|group| {
+                let project_name = SharedString::from(group.project.name);
+                group
+                    .sessions
+                    .into_iter()
+                    .map(move |meta| (project_name.clone(), meta))
+            })
+            .collect();
+        let total = flat.len();
+        let (page, start, end) = page_bounds(total, self.archived_page, ARCHIVED_PER_PAGE);
+        self.archived_page = page;
+
         let now = now_secs();
-        let mut key = 0usize;
         let mut col = v_flex()
             .gap(px(20.))
             .child(controls)
+            .child(
+                gpui_base::h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(crate::tr!(
+                                "settings.archived_range",
+                                from = start + 1,
+                                to = end,
+                                count = total
+                            )),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("archived-prev")
+                            .outline()
+                            .small()
+                            .label(crate::tr!("settings.archived_prev"))
+                            .disabled(page == 0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.archived_page = this.archived_page.saturating_sub(1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("archived-next")
+                            .outline()
+                            .small()
+                            .label(crate::tr!("settings.archived_next"))
+                            .disabled(end >= total)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.archived_page += 1;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("archived-delete-all")
+                            .danger()
+                            .small()
+                            .label(crate::tr!("settings.archived_delete_all"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_delete_all_archived(total, window, cx);
+                            })),
+                    ),
+            )
             .child(self.section_label(crate::tr!("settings.archived_section"), cx));
-        for group in groups {
+        {
+            let mut group_name: Option<SharedString> = None;
             let mut rows: Vec<AnyElement> = Vec::new();
-            for meta in &group.sessions {
-                key += 1;
+            for (offset, (project_name, meta)) in flat[start..end].iter().enumerate() {
+                if group_name.as_ref() != Some(project_name)
+                    && let Some(previous) = group_name.replace(project_name.clone())
+                {
+                    col = col.child(
+                        v_flex()
+                            .child(self.section_label(previous, cx))
+                            .child(self.grouped_plain(std::mem::take(&mut rows), cx)),
+                    );
+                }
+                let key = start + offset;
                 let archived_at = meta.archived_at.unwrap_or(meta.created_at);
                 let archived_when = humanize_ago(now.saturating_sub(archived_at));
                 let created_when = humanize_ago(now.saturating_sub(meta.created_at));
@@ -2023,11 +2111,13 @@ impl SettingsPage {
                         .into_any_element(),
                 );
             }
-            col = col.child(
-                v_flex()
-                    .child(self.section_label(group.project.name.clone(), cx))
-                    .child(self.grouped_plain(rows, cx)),
-            );
+            if let Some(previous) = group_name {
+                col = col.child(
+                    v_flex()
+                        .child(self.section_label(previous, cx))
+                        .child(self.grouped_plain(rows, cx)),
+                );
+            }
         }
         col
     }
@@ -2059,6 +2149,48 @@ impl SettingsPage {
                 .on_ok(move |_, _, cx| {
                     store.update(cx, |store, _cx| {
                         store.delete_session(session_id.clone(), false);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Bulk permanent delete. Always confirms, whatever
+    /// `skip_delete_confirmation` says — this destroys every archived thread.
+    fn confirm_delete_all_archived(
+        &self,
+        total: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        window.open_alert_dialog(cx, move |alert, _, cx| {
+            let alert = alert.bg(cx.theme().popover);
+            let store = store.clone();
+            alert
+                .title(crate::tr!(
+                    "settings.archived_delete_all_title",
+                    count = total
+                ))
+                .description(crate::tr!("settings.archived_delete_all_description"))
+                .button_props(
+                    DialogButtons::default()
+                        .ok_variant(ButtonVariant::Danger)
+                        .ok_text(crate::tr!("settings.delete_permanently"))
+                        .cancel_text(crate::tr!("settings.cancel"))
+                        .show_cancel(true),
+                )
+                .on_ok(move |_, _, cx| {
+                    store.update(cx, |store, _cx| {
+                        let ids: Vec<String> = store
+                            .archived_groups()
+                            .into_iter()
+                            .flat_map(|group| group.sessions.into_iter().map(|meta| meta.id))
+                            .collect();
+                        // ponytail: one DeleteSession command per thread; add a bulk command if thousands feel slow.
+                        for id in ids {
+                            store.delete_session(id, false);
+                        }
                     });
                     true
                 })
@@ -2789,6 +2921,18 @@ mod tests {
                 "unexpected applicability for {section:?} under {capabilities:?}"
             );
         }
+    }
+
+    #[test]
+    fn archived_page_bounds_clamp_to_the_last_populated_page() {
+        assert_eq!(page_bounds(0, 3, 50), (0, 0, 0), "empty list has no pages");
+        assert_eq!(page_bounds(100, 1, 50), (1, 50, 100), "exact multiple");
+        assert_eq!(page_bounds(120, 2, 50), (2, 100, 120), "last partial page");
+        assert_eq!(
+            page_bounds(120, 9, 50),
+            (2, 100, 120),
+            "a page past the end shows the last page instead of an empty one"
+        );
     }
 
     #[test]
