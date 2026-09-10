@@ -23,7 +23,7 @@ struct BenchRoot {
 impl Render for BenchRoot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
         TimedMarkdown {
-            inner: MarkdownView::new(&self.markdown),
+            inner: MarkdownView::new(&self.markdown).selectable(true),
             construction_time: self.construction_time.clone(),
         }
     }
@@ -114,6 +114,10 @@ struct RenderHarness {
 
 impl RenderHarness {
     fn new(document: &str) -> Self {
+        Self::with_width(document, None)
+    }
+
+    fn with_width(document: &str, width: Option<Pixels>) -> Self {
         let mut cx = initialized_context();
         let document = document.to_owned();
         let state = cx.new(|cx| MarkdownState::new(&document, cx));
@@ -124,6 +128,9 @@ impl RenderHarness {
             markdown: root_state,
             construction_time: root_construction_time,
         });
+        if let Some(width) = width {
+            cx.simulate_window_resize(window.into(), gpui::size(width, gpui::px(844.)));
+        }
         let root = window.root(&mut cx).expect("benchmark window has a root");
         let mut harness = Self {
             root,
@@ -195,6 +202,22 @@ fn realistic_markdown(target_bytes: usize) -> String {
         out.is_ascii(),
         "100-byte streaming boundaries must be valid UTF-8"
     );
+    out
+}
+
+/// Long assistant prose that wraps heavily at phone width: the timeline
+/// scrolling case from issue #371, where per-character selection geometry
+/// dominated frame time.
+fn long_prose_markdown(paragraphs: usize) -> String {
+    let sentence = "The renderer must stay responsive while a long explanation streams in, so every paragraph here wraps across many visual lines on a narrow screen. ";
+    let mut out = String::new();
+    for ix in 0..paragraphs {
+        out.push_str(&format!("Paragraph {ix}: "));
+        for _ in 0..10 {
+            out.push_str(sentence);
+        }
+        out.push_str("\n\n");
+    }
     out
 }
 
@@ -298,6 +321,14 @@ fn print_measurement_table(documents: &[(usize, String)]) {
             );
         }
     }
+    let phone = long_prose_markdown(40);
+    let mut render = RenderHarness::with_width(&phone, Some(gpui::px(390.)));
+    let frames = time_repeated(|| render.draw(), 15);
+    println!(
+        "phone_390px_long_prose\t{}\t-\t-\t-\t-\t-\t-\t{:.3}",
+        phone.len(),
+        milliseconds(percentile(&frames, 0.50))
+    );
     println!(
         "parse includes set_text's same-size String copy, selection reset, and notify; render_root includes MarkdownView request-layout registration"
     );
