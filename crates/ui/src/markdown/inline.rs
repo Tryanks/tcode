@@ -13,7 +13,7 @@ use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, Window, point, px, quad,
+    StyledText, TextLayout, Window, WrappedLineLayout, point, px, quad,
 };
 
 use super::{
@@ -105,46 +105,16 @@ impl Inline {
     }
 
     fn text_line_bounds(
-        &self,
         text_layout: &TextLayout,
         mask_bounds: Bounds<Pixels>,
     ) -> Vec<Bounds<Pixels>> {
-        let line_height = text_layout.line_height();
-        let mut lines = Vec::new();
-        let mut current_y = None;
-        let mut current: Option<Bounds<Pixels>> = None;
-        for (position, next_position) in
-            character_positions(&self.text, |offset| text_layout.position_for_index(offset))
-        {
-            let Some(pos) = position else {
-                continue;
-            };
-            let mut width = line_height / 2.;
-            if let Some(next_pos) = next_position
-                && next_pos.y == pos.y
-            {
-                width = next_pos.x - pos.x;
-            }
-            let bounds = Bounds::from_corners(pos, point(pos.x + width, pos.y + line_height))
-                .intersect(&mask_bounds);
-            if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
-                if current_y == Some(pos.y) {
-                    if let Some(current) = current.as_mut() {
-                        *current = current.union(&bounds);
-                    }
-                } else {
-                    if let Some(current) = current.take() {
-                        lines.push(current);
-                    }
-                    current_y = Some(pos.y);
-                    current = Some(bounds);
-                }
-            }
-        }
-        if let Some(current) = current {
-            lines.push(current);
-        }
-        lines
+        let lines = text_layout.line_layouts();
+        wrapped_line_bounds(
+            lines.iter().map(Arc::as_ref),
+            text_layout.bounds().origin,
+            text_layout.line_height(),
+            mask_bounds,
+        )
     }
 
     fn paint_selection(
@@ -303,7 +273,8 @@ impl Element for Inline {
         let selectable = self.view.read(cx).is_selectable();
         let selection = selectable
             .then(|| {
-                let text_bounds = self.text_line_bounds(&text_layout, window.content_mask().bounds);
+                let text_bounds =
+                    Self::text_line_bounds(&text_layout, window.content_mask().bounds);
                 let adapter = self.view.read(cx).selection_adapter.clone();
                 let projection = adapter.update_run(
                     self.text.clone(),
@@ -426,42 +397,120 @@ impl Element for Inline {
     }
 }
 
-// Adjacent characters share a boundary; querying it twice is particularly costly
-// for long wrapped paragraphs because GPUI searches their shaped lines each time.
-fn character_positions<T: Copy>(
-    text: &str,
-    mut lookup: impl FnMut(usize) -> Option<T>,
-) -> impl Iterator<Item = (Option<T>, Option<T>)> {
-    let first = lookup(0);
-    text.char_indices()
-        .scan(first, move |position, (offset, c)| {
-            let next = lookup(offset + c.len_utf8());
-            Some((std::mem::replace(position, next), next))
-        })
+/// One rect per visual (wrapped) line, covering that line's text extent. The
+/// selection engine only hit-tests these, so per-character geometry cost
+/// O(chars × glyphs) on every paint and bought nothing.
+///
+/// Mirrors the coordinate model of `TextLayout::position_for_index`: y starts at
+/// `origin.y` and advances by `line_height` per visual line, and every visual
+/// line starts at `origin.x`.
+fn wrapped_line_bounds<'a>(
+    lines: impl IntoIterator<Item = &'a WrappedLineLayout>,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+    mask_bounds: Bounds<Pixels>,
+) -> Vec<Bounds<Pixels>> {
+    let mut rects = Vec::new();
+    let mut y = origin.y;
+    for line in lines {
+        let mut start_x = px(0.);
+        let boundary_xs = line.wrap_boundaries.iter().map(|boundary| {
+            line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix]
+                .position
+                .x
+        });
+        for end_x in boundary_xs.chain([line.unwrapped_layout.width]) {
+            let rect = Bounds::from_corners(
+                point(origin.x, y),
+                point(origin.x + end_x - start_x, y + line_height),
+            )
+            .intersect(&mask_bounds);
+            if rect.size.width > px(0.) && rect.size.height > px(0.) {
+                rects.push(rect);
+            }
+            start_x = end_x;
+            y += line_height;
+        }
+    }
+    rects
 }
 
 #[cfg(test)]
 mod tests {
-    use super::character_positions;
+    use super::*;
+    use gpui::{Render, TestAppContext, TextRun, VisualTestContext, div, size};
 
-    #[test]
-    fn selection_geometry_looks_up_each_utf8_boundary_once() {
-        let mut queried = Vec::new();
-        let positions = character_positions("a中🙂b", |offset| {
-            queried.push(offset);
-            // A missing layout boundary must not shift subsequent characters.
-            (offset != 4).then_some(offset)
-        })
-        .collect::<Vec<_>>();
-        assert_eq!(queried, [0, 1, 4, 8, 9]);
-        assert_eq!(
-            positions,
-            [
-                (Some(0), Some(1)),
-                (Some(1), None),
-                (None, Some(8)),
-                (Some(8), Some(9)),
-            ]
+    struct Root;
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn text_bounds_cover_one_rect_per_visual_line(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let (_, cx) = cx.add_window_view(|_, _| Root);
+        let cx: &mut VisualTestContext = cx;
+
+        let text: SharedString =
+            "the quick brown fox jumps over the lazy dog again and again\nsecond".into();
+        let font_size = px(14.);
+        let wrap_width = px(120.);
+        let line_height = px(20.);
+        let origin = point(px(10.), px(30.));
+
+        let lines = cx.update(|window, _| {
+            let run = TextRun {
+                len: text.len(),
+                font: window.text_style().font(),
+                color: gpui::black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            window
+                .text_system()
+                .shape_text(text.clone(), font_size, &[run], Some(wrap_width), None)
+                .unwrap()
+        });
+
+        let visual_lines: usize = lines.iter().map(|l| l.wrap_boundaries.len() + 1).sum();
+        assert!(
+            visual_lines > lines.len(),
+            "test needs at least one wrap boundary, got {visual_lines} visual lines \
+             across {} hard lines",
+            lines.len()
         );
+        assert_eq!(lines.len(), 2, "test needs the '\\n' to split two lines");
+
+        let huge = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(1000.)));
+        let rects =
+            wrapped_line_bounds(lines.iter().map(|line| &***line), origin, line_height, huge);
+        assert_eq!(rects.len(), visual_lines);
+        for (ix, rect) in rects.iter().enumerate() {
+            assert_eq!(rect.origin.x, origin.x);
+            assert_eq!(rect.origin.y, origin.y + line_height * ix as f32);
+            assert_eq!(rect.size.height, line_height);
+            assert!(rect.size.width > px(0.));
+            assert!(rect.size.width <= wrap_width + px(0.5), "{rect:?}");
+        }
+
+        // A mask that excludes the last visual line drops its rect.
+        let clipped = Bounds::new(
+            point(px(0.), px(0.)),
+            size(
+                px(1000.),
+                origin.y + line_height * (visual_lines - 1) as f32,
+            ),
+        );
+        let rects = wrapped_line_bounds(
+            lines.iter().map(|line| &***line),
+            origin,
+            line_height,
+            clipped,
+        );
+        assert_eq!(rects.len(), visual_lines - 1);
     }
 }
