@@ -1004,29 +1004,9 @@ impl Render for Composer {
 
         let control_row = if self.compact {
             control_row_base
-                .flex_col()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .items_center()
-                        .child(self.render_model_picker(cx))
-                        .child(self.render_traits_picker(cx))
-                        .child(div().flex_1())
-                        .child(self.render_primary_action(turn_running, cx)),
-                )
-                .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .items_center()
-                        .child(self.render_permission_picker(cx))
-                        .child(self.render_mode_chip(cx))
-                        .child(div().flex_1())
-                        .child(self.render_context_meter(cx)),
-                )
+                .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
+                .child(self.render_traits_picker(cx))
+                .child(self.render_primary_action(turn_running, cx))
         } else if compact {
             control_row_base
                 .child(self.render_model_picker(cx))
@@ -1300,7 +1280,26 @@ impl Render for Composer {
                     })
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_queue_strip(cx))
-                    .child(card)
+                    .child(v_flex().w_full().child(card).when(self.compact, |el| {
+                        el.child(
+                            h_flex()
+                                .debug_selector(|| "composer-settings-drawer".into())
+                                .mx_2()
+                                .px_1()
+                                .min_w_0()
+                                .gap_1()
+                                .items_center()
+                                .rounded_b(px(12.))
+                                .border_1()
+                                .border_t_0()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().muted)
+                                .child(self.render_permission_picker(cx))
+                                .child(self.render_mode_chip(cx))
+                                .child(div().flex_1())
+                                .child(self.render_context_meter(cx)),
+                        )
+                    }))
                     .when(!self.compact, |el| {
                         el.children(self.render_checkout_row(cx))
                     }),
