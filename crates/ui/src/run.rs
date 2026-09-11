@@ -103,6 +103,18 @@ pub fn run_shell(
     seam: WindowSeam,
     options: ShellOptions,
 ) -> (WindowHandle<OverlayHost>, Entity<AppShell>) {
+    // Browser bootstrap supplies its Fetch client; native image URLs need an HTTP client too.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let client = reqwest::Client::builder()
+            .use_rustls_tls()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to initialize image HTTP client");
+        cx.set_http_client(std::sync::Arc::new(reqwest_client::ReqwestClient::from(
+            client,
+        )));
+    }
     crate::i18n::set_platform_system_locale(options.system_locale.as_deref());
     let language = host.load_preferences().language;
     crate::i18n::apply_locale(match language.as_deref() {

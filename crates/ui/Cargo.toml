@@ -55,6 +55,7 @@ pasteboard-image = ["dep:objc2-app-kit", "dep:objc2-foundation"]
 
 [dependencies]
 url = "2"
+percent-encoding = "2"
 agent = { path = "../agent", default-features = false }
 tcode-client = { path = "../client" }
 tcode-core = { path = "../core", default-features = false }
@@ -86,6 +87,9 @@ web-time = "1"
 # browser green even if a wasm-facing crate turns the feature on.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 tcode-remote = { path = "../remote", default-features = false, optional = true }
+reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.3" }
+# Android apps do not have the Unix certificate files used by native-roots discovery.
+reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls-webpki-roots"] }
 
 # The preview backend exists only where a system webview can be embedded as a
 # child of the GPUI window, so its whole dependency set is target-scoped.

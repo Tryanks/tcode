@@ -1,24 +1,27 @@
 //! Attachment presentation with core-owned validation semantics and localized errors.
 
-use std::path::PathBuf;
-
 use crate::overlay::OverlayExt as _;
 use crate::theme::ActiveTheme as _;
-use gpui::{App, ParentElement as _, Styled as _, Window, div, img, px};
+use gpui::{App, ImageSource, ParentElement as _, Styled as _, Window, div, img, px};
 use tcode_core::attachments::AttachError;
 
 /// Open an image as a window-level lightbox. The dialog lives on the Root
 /// layer, so its backdrop covers the whole window and it inherits
 /// backdrop-click / Escape / `x` dismissal. Shared by the composer's pending
-/// strip and the chat timeline's sent-message thumbnails.
-pub(crate) fn open_image_lightbox(path: PathBuf, title: String, window: &mut Window, cx: &mut App) {
+/// strip, sent-message thumbnails, Markdown images and image-link badges.
+pub(crate) fn open_image_lightbox(
+    source: ImageSource,
+    title: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
     window.open_dialog(cx, move |builder, window, cx| {
         let viewport = window.viewport_size();
-        let width = (viewport.width - px(160.)).clamp(px(320.), px(760.));
-        let max_h = viewport.height * 0.65;
-        let path = path.clone();
+        // Leave room for the dialog header, padding and bottom margin in short windows.
+        let max_h = (viewport.height * 0.75).min(viewport.height * 0.9 - px(96.));
+        let source = source.clone();
         builder
-            .w(width)
+            .w(px(1200.))
             .rounded(crate::material::radius_overlay())
             .bg(cx.theme().popover)
             .border_1()
@@ -28,7 +31,7 @@ pub(crate) fn open_image_lightbox(path: PathBuf, title: String, window: &mut Win
             .content(move |content_el, _, _| {
                 content_el.child(
                     div().w_full().flex().items_center().justify_center().child(
-                        img(crate::store::host_image(path.clone()))
+                        img(source.clone())
                             .max_w_full()
                             .max_h(max_h)
                             .rounded(crate::material::radius_card()),

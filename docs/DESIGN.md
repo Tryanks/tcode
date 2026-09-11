@@ -120,6 +120,9 @@ the shell, dialogs and toasts. Overlay text inherits these defaults, including
 when switching between light and dark mode; explicit semantic colors and
 monospace text override them where needed.
 
+Dialog backdrops, including the image lightbox, use the shared dimming scrim
+from the command palette and sheets. They darken the page in both themes.
+
 ## Window material
 
 The persistent main window uses native backdrop material: macOS keeps its
@@ -651,6 +654,27 @@ platform pays that inset.
   disclosure rather than disappearing.
 - Assistant Markdown follows the prose typography above. Streaming follows the
   latest output only while the reader remains near the bottom.
+  File images load from the attached host on every client, resolving relative
+  paths against the thread's working directory. File URLs use the same loader;
+  HTTP(S) images load through the client's HTTP implementation. This applies to
+  standalone images and images mixed with text. Standalone images fit within
+  the available width and a 720pt height limit, preserving their aspect ratio
+  without cropping. Images mixed with text retain their line-height sizing.
+  Clicking a displayed image opens the shared image lightbox, for both standalone
+  images and images mixed with text. Images wrapped in a link keep their link action.
+  Images are keyboard-focusable controls with the shared focus ring. Enter and
+  Space activate them; their accessible name uses the image title or alt text,
+  falling back to the link destination or a localized “Open image” label.
+  Links to image files render as rounded badges with a leading image icon and
+  the link label, the same subtle background as changed-file badges, a border,
+  and a hover state. Badges wrap with surrounding prose; long labels truncate
+  to the available width. Badges are
+  26pt high in 28pt rows, or 38pt high in 44pt rows in compact layouts, leaving
+  space between stacked badges. They open the shared image lightbox,
+  loading host files through the attached host. Other links retain prose styling.
+  The lightbox is up to 1200pt wide, capped to the viewport with at least 16pt side
+  margins, and its image is limited to 75% of the window height. Short windows
+  shrink the image further to leave room for the dialog header and padding.
 - User messages: right-aligned bubble, muted bg, radius 12, max-width 75%.
 - A confirmed provider handoff inserts a subtle centered divider chip before
   the next user bubble: “Relayed from X to Y”. The injected handoff transcript
@@ -1185,6 +1209,9 @@ so it remains legible over both paper and carbon surfaces without shifting
 layout. Component-library controls retain their native focus treatment. Hidden
 row actions must enter the normal tab order and reveal themselves when focused,
 not depend on pointer hover.
+
+Tab and Shift+Tab move through focusable controls when the focused surface does
+not handle the key itself. Navigation stays within the active popup's focus trap.
 
 Interactive surfaces expose the semantic role that matches their behavior
 (button, tab, switch, menu item, option, or terminal) and a localized accessible

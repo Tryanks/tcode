@@ -371,13 +371,10 @@ impl RenderOnce for Dialog {
         let content = self
             .content
             .map(|builder| builder(DialogContent::new(), window, cx));
-        let backdrop = div().absolute().size_full().when(self.overlay, |el| {
-            el.bg(cx.theme().foreground.opacity(if cx.theme().mode.is_dark() {
-                0.32
-            } else {
-                0.18
-            }))
-        });
+        let backdrop = div()
+            .absolute()
+            .size_full()
+            .when(self.overlay, |el| el.bg(crate::material::scrim(1., cx)));
         let popup = div()
             .id(("tcode-dialog", self.layer))
             .absolute()

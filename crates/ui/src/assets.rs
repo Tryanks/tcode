@@ -22,6 +22,10 @@ const DM_SANS_PATH: &str = "fonts/DMSans[wght].ttf";
 /// Extra SVG icons bundled by tcode (not shipped by gpui-component).
 const EXTRA_ICONS: &[(&str, &[u8])] = &[
     (
+        "icons/image.svg",
+        include_bytes!("../../../assets/icons/image.svg"),
+    ),
+    (
         "icons/archive.svg",
         include_bytes!("../../../assets/icons/archive.svg"),
     ),

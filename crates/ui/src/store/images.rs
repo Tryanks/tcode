@@ -52,3 +52,195 @@ pub(crate) fn host_image(path: PathBuf) -> ImageSource {
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown::{MarkdownState, MarkdownView};
+    use crate::overlay::OverlayExt as _;
+    use gpui::{
+        AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyUpEvent,
+        Keystroke, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, px,
+    };
+    use tcode_protocol::{ClientPayload, HostMessage, decode_client_line, encode_line};
+
+    struct ImageMessage {
+        markdown: Entity<MarkdownState>,
+        cwd: PathBuf,
+    }
+
+    impl Render for ImageMessage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("image-message")
+                .tab_index(0)
+                .w(px(320.))
+                .child(MarkdownView::new(&self.markdown).base_dir(self.cwd.clone()))
+        }
+    }
+
+    #[gpui::test]
+    fn markdown_images_and_badge_previews_read_files_from_the_host(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        cx.update(crate::markdown::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        cx.update(|cx| {
+            cx.set_global(HostImages {
+                link: Some(link.clone()),
+                namespace: 1,
+            });
+        });
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        // These paths exist only on the scripted host, never on the viewing client.
+        let cwd = std::env::current_dir().unwrap().join("host-only-images");
+        let mut message = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| ImageMessage {
+                markdown: cx.new(|cx| MarkdownState::new("", cx)),
+                cwd: cwd.clone(),
+            });
+            message = Some(view.clone());
+            crate::overlay::OverlayHost::new(view, window, cx)
+        });
+        let view = message.unwrap();
+        for inline in [false, true] {
+            let suffix = if inline { "inline" } else { "block" };
+            let absolute = cwd.join(format!("absolute-{suffix}.png"));
+            let relative = format!("relative-{suffix}.png");
+            let file_url_path = cwd.join(format!("file image-{suffix}.png"));
+            let cases = [
+                (absolute.display().to_string(), absolute),
+                (relative.clone(), cwd.join(relative)),
+                (
+                    url::Url::from_file_path(&file_url_path).unwrap().into(),
+                    file_url_path,
+                ),
+            ];
+            for (uri, expected_path) in cases {
+                let mut markdown = format!("![sample](<{uri}>)");
+                if inline {
+                    markdown = format!("Before {markdown} after");
+                }
+                view.update(cx, |view, cx| {
+                    view.markdown
+                        .update(cx, |state, cx| state.set_text(&markdown, cx));
+                });
+                cx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                cx.run_until_parked();
+                let request = decode_client_line(
+                    &requests
+                        .try_recv()
+                        .expect("Markdown image must query its host"),
+                )
+                .unwrap();
+                assert_eq!(
+                    request.payload,
+                    ClientPayload::Query(Query::ReadFileBytes {
+                        path: expected_path
+                    }),
+                    "{markdown}",
+                );
+                replies
+                    .send_blocking(
+                        encode_line(&HostMessage::QueryResult {
+                            id: request.id,
+                            result: Ok(QueryResponse::FileBytes(
+                                include_bytes!("../../../../assets/icons/app/tcode.png").to_vec(),
+                            )),
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                cx.run_until_parked();
+            }
+
+            cx.update(|window, cx| {
+                window.blur(cx);
+                window.focus_next(cx);
+            });
+            cx.simulate_keystrokes("tab");
+            let image_focus = cx.update(|window, cx| {
+                _ = window.draw(cx);
+                window
+                    .focused(cx)
+                    .expect("the displayed image is a tab stop")
+            });
+            cx.simulate_keystrokes("shift-tab");
+            cx.update(|window, _| assert!(!image_focus.is_focused(window)));
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, _| assert!(image_focus.is_focused(window)));
+            for key in ["enter", "space"] {
+                cx.simulate_keystrokes(key);
+                cx.simulate_event(KeyUpEvent {
+                    keystroke: Keystroke::parse(key).unwrap(),
+                });
+                cx.run_until_parked();
+                cx.update(|window, _| {
+                    assert!(
+                        !image_focus.is_focused(window),
+                        "{key} must move focus into the image lightbox"
+                    );
+                });
+                for navigation in ["tab", "shift-tab"] {
+                    cx.simulate_keystrokes(navigation);
+                    cx.update(|window, cx| {
+                        assert!(
+                            gpui_base::active_focus_trap(window, cx)
+                                .expect("the lightbox traps focus")
+                                .contains_focused(window, cx),
+                            "{navigation} must keep focus inside the lightbox"
+                        );
+                    });
+                }
+                cx.update(|window, cx| {
+                    window.close_dialog(cx);
+                    assert!(
+                        image_focus.is_focused(window),
+                        "closing the lightbox must restore image focus"
+                    );
+                    _ = window.draw(cx);
+                });
+            }
+        }
+
+        view.update(cx, |view, cx| {
+            view.markdown.update(cx, |state, cx| {
+                state.set_text("[Screenshot](preview.png)", cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            requests.is_empty(),
+            "a badge loads its image only when opened"
+        );
+        cx.simulate_click(gpui::point(px(40.), px(14.)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let request = decode_client_line(
+            &requests
+                .try_recv()
+                .expect("clicking the image badge must read its host image"),
+        )
+        .unwrap();
+        assert_eq!(
+            request.payload,
+            ClientPayload::Query(Query::ReadFileBytes {
+                path: cwd.join("preview.png")
+            })
+        );
+        assert!(
+            cx.opened_url().is_none(),
+            "host image badges must open in the app"
+        );
+    }
+}
