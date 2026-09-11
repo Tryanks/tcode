@@ -13,8 +13,10 @@ use gpui::{
 use gpui_base::{ElementExt as _, v_flex};
 use tcode_protocol::{
     STORED_OUTPUT_COLS,
-    terminal::{TerminalCell, TerminalFrame, TerminalRow, TerminalStyle},
+    terminal::{CellWidth, TerminalCell, TerminalFrame, TerminalRow, TerminalStyle},
 };
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::highlight;
 use crate::store::terminal::TerminalModel;
@@ -331,6 +333,7 @@ fn command_model(
     cols: u16,
     command_theme: Option<&CommandTheme>,
 ) -> (TerminalModel, usize) {
+    let cols = cols.max(2);
     let command = clamp_command(command, cols);
     let highlights = command_theme
         .map(|theme| highlight::highlight_source(&command, "bash", &theme.highlight_theme))
@@ -339,16 +342,17 @@ fn command_model(
     let mut styles = vec![TerminalStyle::default()];
     let mut visible = vec![TerminalRow::default()];
     let mut col = 0usize;
-    for (offset, ch) in command.char_indices() {
-        if ch == '\r' {
-            continue;
-        }
-        if ch == '\n' {
+    for (offset, text) in command.grapheme_indices(true) {
+        if text == "\n" {
             visible.push(TerminalRow::default());
             col = 0;
             continue;
         }
-        if col == usize::from(cols) {
+        let width = text.width().min(2);
+        if width == 0 {
+            continue;
+        }
+        if col + width > usize::from(cols) {
             visible.push(TerminalRow::default());
             col = 0;
         }
@@ -367,16 +371,25 @@ fn command_model(
                 (styles.len() - 1) as u16
             }
         };
-        visible
-            .last_mut()
-            .expect("a row is always open")
-            .cells
-            .push(TerminalCell {
-                text: ch.to_string(),
+        let cells = &mut visible.last_mut().expect("a row is always open").cells;
+        cells.push(TerminalCell {
+            text: text.to_string(),
+            style,
+            width: if width == 2 {
+                CellWidth::Wide
+            } else {
+                CellWidth::Narrow
+            },
+            ..TerminalCell::default()
+        });
+        if width == 2 {
+            cells.push(TerminalCell {
                 style,
+                width: CellWidth::Spacer,
                 ..TerminalCell::default()
             });
-        col += 1;
+        }
+        col += width;
     }
 
     let rows = visible.len().max(1);
@@ -410,36 +423,32 @@ fn faded_command_rgb(foreground: Hsla, background: Hsla) -> (u8, u8, u8) {
 }
 
 fn clamp_command(command: &str, cols: u16) -> String {
-    let cols = usize::from(cols);
+    let cols = usize::from(cols.max(2));
+    let command = command.replace('\r', "");
     let mut result = String::new();
     let mut row = 0;
     let mut col = 0;
-    let mut chars = command.chars().filter(|ch| *ch != '\r').peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\n' {
-            if row + 1 == MAX_COMMAND_ROWS && chars.peek().is_some() {
-                result.push('…');
-                break;
+    for text in command.graphemes(true) {
+        let width = text.width().min(2);
+        let next_row = text == "\n" || col + width > cols;
+        if next_row && row + 1 == MAX_COMMAND_ROWS {
+            // Make room on the last visible row without splitting a grapheme
+            // or putting the ellipsis onto a fifth row.
+            if col == cols {
+                let (offset, _) = result.grapheme_indices(true).next_back().unwrap();
+                result.truncate(offset);
             }
-            result.push('\n');
-            row += 1;
-            col = 0;
-            continue;
-        }
-        if col == cols {
-            row += 1;
-            col = 0;
-        }
-        if row == MAX_COMMAND_ROWS {
             result.push('…');
             break;
         }
-        if row + 1 == MAX_COMMAND_ROWS && col + 1 == cols && chars.peek().is_some() {
-            result.push('…');
-            break;
+        if next_row {
+            row += 1;
+            col = 0;
         }
-        result.push(ch);
-        col += 1;
+        result.push_str(text);
+        if text != "\n" {
+            col += width;
+        }
     }
     result
 }
@@ -587,6 +596,50 @@ mod tests {
             panic!("command keyword should use truecolor foreground");
         };
         assert_eq!((r, g, b), expected);
+    }
+
+    #[test]
+    fn command_cjk_uses_two_columns_without_overlapping_following_text() {
+        let (model, rows) = command_model("a中文b", 8, Some(&dark_command_theme()));
+        assert_eq!(rows, 1);
+        for (col, text, width) in [
+            (0, "a", CellWidth::Narrow),
+            (1, "中", CellWidth::Wide),
+            (2, "", CellWidth::Spacer),
+            (3, "文", CellWidth::Wide),
+            (4, "", CellWidth::Spacer),
+            (5, "b", CellWidth::Narrow),
+        ] {
+            let cell = model.cell(0, col).expect("command cell");
+            assert_eq!((cell.text.as_str(), cell.width), (text, width));
+        }
+        let paint = layout_grid(&model, palette(), false, None, false, false);
+        assert!(paint.text_runs.iter().any(|run| run.start_col == 3));
+        assert!(paint.text_runs.iter().any(|run| run.start_col == 5));
+    }
+
+    #[test]
+    fn command_wraps_whole_graphemes_and_keeps_ellipsis_in_four_rows() {
+        let (model, rows) = command_model("abc中文e\u{301}👩‍💻z", 4, None);
+        assert_eq!(rows, 3);
+        for (row, col, text) in [
+            (0, 2, "c"),
+            (1, 0, "中"),
+            (1, 2, "文"),
+            (2, 0, "e\u{301}"),
+            (2, 1, "👩‍💻"),
+            (2, 3, "z"),
+        ] {
+            assert_eq!(model.cell(row, col).unwrap().text, text);
+        }
+
+        for command in ["中文".repeat(5), "中文\n".repeat(5)] {
+            let (model, rows) = command_model(&command, 4, None);
+            assert_eq!(rows, MAX_COMMAND_ROWS);
+            assert_eq!(model.cell(3, 0).unwrap().text, "中");
+            assert_eq!(model.cell(3, 2).unwrap().text, "…");
+            assert!(model.cell(3, 3).is_none_or(|cell| cell.text.is_empty()));
+        }
     }
 
     #[test]
