@@ -144,6 +144,8 @@ impl Render for OverlayHost {
             .relative()
             .size_full()
             .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .font_family(cx.theme().font_family.clone())
             .child(self.view.clone())
             .when(!dialogs.is_empty(), |root| {
                 root.child(
