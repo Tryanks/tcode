@@ -202,7 +202,7 @@ impl Composer {
         let trigger = Button::new("model-picker")
             .debug_selector(|| "model-picker".into())
             .when(self.compact, |button| {
-                button.max_w(px(160.)).min_w_0().overflow_hidden()
+                button.w_full().max_w(px(160.)).min_w_0().overflow_hidden()
             })
             .ghost()
             .compact()
@@ -212,7 +212,7 @@ impl Composer {
             .rounded(crate::material::radius_input())
             .child(
                 h_flex()
-                    .when(self.compact, |el| el.min_w_0().overflow_hidden())
+                    .when(self.compact, |el| el.w_full().min_w_0().overflow_hidden())
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
@@ -286,7 +286,17 @@ impl Composer {
         };
         let selections = composer.active_option_selections;
         let ultrathink_armed = composer.ultrathink_armed;
-        let Some(label) = traits_chip_label(&spec, &selections, ultrathink_armed) else {
+        // Keep the effort value readable on phones; the sheet still exposes
+        // every parameter, including context capacity and service tier.
+        let mut chip_spec = spec.clone();
+        if self.compact
+            && let Some(effort) = spec.options.iter().find(|option| {
+                matches!(option, OptionDescriptor::Select { id, .. } if id == "reasoningEffort")
+            })
+        {
+            chip_spec.options = vec![effort.clone()];
+        }
+        let Some(label) = traits_chip_label(&chip_spec, &selections, ultrathink_armed) else {
             return div().into_any_element();
         };
         let muted = cx.theme().muted_foreground;
@@ -302,9 +312,6 @@ impl Composer {
 
         let trigger = Button::new("traits-chip")
             .debug_selector(|| "traits-chip".into())
-            .when(self.compact, |button| {
-                button.max_w(px(80.)).overflow_hidden()
-            })
             .ghost()
             .compact()
             .h(px(28.))
@@ -313,16 +320,11 @@ impl Composer {
             .rounded(crate::material::radius_chip())
             .child(
                 h_flex()
-                    .when(self.compact, |el| el.min_w_0().overflow_hidden())
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .text_color(muted)
-                    .child(
-                        div()
-                            .when(self.compact, |el| el.min_w_0().truncate())
-                            .child(label),
-                    )
+                    .child(div().whitespace_nowrap().child(label))
                     .child(Icon::new(IconName::ChevronDown).xsmall().text_color(muted)),
             );
 
@@ -465,9 +467,6 @@ impl Composer {
 
         let trigger = Button::new("permission-chip")
             .debug_selector(|| "permission-chip".into())
-            .when(self.compact, |button| {
-                button.max_w(px(96.)).overflow_hidden()
-            })
             .ghost()
             .compact()
             .h(px(28.))

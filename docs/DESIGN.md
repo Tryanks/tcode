@@ -232,8 +232,8 @@ content and history paging preserve the reading anchor while paused. Following
 resumes only when the reader scrolls back to the bottom (within one pixel) or
 clicks the pill. Opening a conversation starts at the tail.
 
-The timeline uses the space above the composer's measured height; the two-row
-compact composer never overlays its last row. Vertical breathing room belongs
+The timeline uses the space above the composer's measured height, including its
+attached compact settings drawer, and never overlaps it. Vertical breathing room belongs
 to the timeline container, outside the list's scroll extent, so captured touch,
 wheel and tail following agree on the bottom. The shell reserves the window's
 safe-area/IME inset once. The running-status row remains fully visible above the
@@ -704,12 +704,15 @@ platform pays that inset.
 The composer holds the draft plus removable attachment, terminal-context and
 review-comment chips. Its controls select the provider/model, model parameters,
 approval mode and Build/Plan mode, subject to provider capabilities. Context
-usage comes from the live session. Compact controls use two non-wrapping rows:
-the model picker, the standalone model-parameters (reasoning-effort) chip and
-Send above; approval mode and Build/Plan below, with the
-context ring at the trailing edge of the second row. The ring keeps a 44pt hit
-target opening its details sheet. Option labels truncate when space is tight;
-both rows fit at 360pt in English and Simplified Chinese.
+usage comes from the live session. Compact composers keep the model picker,
+the full reasoning-effort value and Send on one non-wrapping row inside the
+input card. Other model parameters remain in the effort chip's details sheet.
+An always-visible drawer attaches directly below the card, inset 8pt on each
+side with a muted fill and rounded bottom corners. It holds the access picker,
+Build/Plan toggle and a trailing context ring. These controls keep 44pt touch
+targets; access and context open their details sheets. The model name may
+truncate when space is tight, while the effort value stays fully visible.
+The card and drawer fit at 360pt in English and Simplified Chinese.
 The context details distinguish the latest main-conversation request from
 processed traffic. Claude occupancy is the latest input plus cache-read and
 cache-creation tokens; generated output and repeated requests do not inflate it.
@@ -746,9 +749,9 @@ button and changes the empty primary action to Implement. In Plan mode any
 sendable draft (text, images, terminal context, or review comments) uses Refine
 and the refine placeholder; in Build mode the composer keeps its ordinary Send
 affordance, because a typed message there is an ordinary build turn.
-At compact widths the overflow Build/Plan row is interactive (it toggles like the
-full-width chip and closes the popover); the permission row stays display-only,
-since its full-width counterpart is an explicit picker.
+The compact drawer's Build/Plan control toggles in place; its access control
+opens the approval-mode picker. Narrow desktop composers retain their overflow
+popover, where Build/Plan toggles and closes the popover and access is a summary.
 
 Model picker popover: left rail = favorites star + provider
 glyphs; search input; rows = model name (✓ current) + provider subtitle,
