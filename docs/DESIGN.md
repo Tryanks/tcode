@@ -859,6 +859,10 @@ emulator and answers with one finished screen. The panel shows the plain text
 until the answer arrives, keeps the answer per width, and asks again once a
 width change settles.
 
+The command above that output uses the same cell geometry: CJK and other wide
+graphemes occupy two columns, combining marks stay with their base, and wrapping
+never splits a grapheme. Its four-row limit includes the truncation ellipsis.
+
 The Preview tab exists on every client. Its URL field, open-in-system-browser
 and copy-URL work everywhere; the embedded browser, history, JS automation and
 screenshots need a system webview. macOS, Windows and Android builds have

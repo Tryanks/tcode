@@ -69,6 +69,11 @@ impl Render for Gallery {
         );
         let mut command_expanded = command_collapsed.clone();
         command_expanded.id = "gallery-s03-activity-command-expanded".into();
+        if let EntryContent::Item(ItemContent::CommandExecution { command, .. }) =
+            &mut command_expanded.content
+        {
+            *command = "/bin/zsh -lc \"git switch main\ngit merge --no-ff fix/raw-upload-streaming -m 'fix: 合入原始数据流式上传与自动续票'\ngit push origin main\"".into();
+        }
         let tool = entry(
             "gallery-s03-activity-tool-call",
             ItemContent::ToolCall {

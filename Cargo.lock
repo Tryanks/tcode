@@ -9017,6 +9017,8 @@ dependencies = [
  "tcode-services",
  "tcode-voice",
  "tempfile",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
  "web-time",
  "webview2-com",
