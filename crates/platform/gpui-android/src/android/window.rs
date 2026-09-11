@@ -107,6 +107,7 @@ pub(crate) struct AndroidWindowInner {
     frame_requested: Cell<bool>,
     forced_frame_requested: Cell<bool>,
     keyboard_tap: Cell<Option<Point<Pixels>>>,
+    input_sync: RefCell<crate::text_input::InputSync>,
 }
 
 #[derive(Clone)]
@@ -162,6 +163,7 @@ impl AndroidWindow {
             frame_requested: Cell::new(true),
             forced_frame_requested: Cell::new(true),
             keyboard_tap: Cell::new(None),
+            input_sync: RefCell::new(Default::default()),
         })))
     }
 
@@ -325,6 +327,26 @@ impl AndroidWindow {
 
     pub(crate) fn handle_host_event(&self, event: host::HostEvent) {
         match event {
+            host::HostEvent::InputState {
+                revision,
+                serial,
+                state,
+            } => {
+                self.sync_input_state(false);
+                let old = {
+                    let mut sync = self.0.input_sync.borrow_mut();
+                    if sync.accept(revision, serial) {
+                        sync.state.clone()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(old) = old {
+                    self.with_input_handler(|handler| state.apply(&old, handler));
+                    self.0.input_sync.borrow_mut().state = Some(state);
+                }
+                self.sync_input_state(true);
+            }
             host::HostEvent::CommitText(text) => {
                 self.with_input_handler(|handler| {
                     handler.replace_text_in_range(None, &text);
@@ -388,6 +410,19 @@ impl AndroidWindow {
             callback(&mut handler);
             self.0.state.borrow_mut().input_handler = Some(handler);
             self.schedule_frame();
+        }
+    }
+
+    // Query outside GPUI's draw callback, when its window can be borrowed again.
+    fn sync_input_state(&self, force: bool) {
+        let mut handler = self.0.state.borrow_mut().input_handler.take();
+        let state = handler
+            .as_mut()
+            .and_then(crate::text_input::TextInputState::read);
+        self.0.state.borrow_mut().input_handler = handler;
+        let mut sync = self.0.input_sync.borrow_mut();
+        if sync.observe(state) || force {
+            host::sync_input(sync.revision, sync.serial, sync.state.clone());
         }
     }
 
@@ -572,6 +607,7 @@ impl AndroidWindow {
             });
             self.0.callbacks.borrow_mut().request_frame = Some(callback);
         }
+        self.sync_input_state(false);
         if let Some(position) = self.0.keyboard_tap.take() {
             self.with_input_handler(|handler| {
                 if handler

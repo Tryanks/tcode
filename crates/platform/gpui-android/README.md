@@ -52,8 +52,12 @@ callbacks to this backend. Rust calls activity methods on Android's Java UI
 thread; incoming callbacks are queued for the native activity/GPUI thread.
 Keep the method signatures at these two ends synchronized.
 
-Committed and composing text is applied through `PlatformInputHandler` using
-UTF-16 ranges. Hardware/IME key events become GPUI `KeyDown`/`KeyUp` events.
+Editable fields publish Android's text, selection and composing region after
+each completed IME batch. GPUI applies the changed UTF-16 range and sends its
+state back after app edits, cursor moves and draft clears. Revision and edit
+serial checks prevent delayed updates from restoring stale text. Terminal
+handlers keep the committed-text and control-key path because they expose no
+editable buffer. Hardware/IME key events become GPUI `KeyDown`/`KeyUp` events.
 System-bar, display-cutout, and IME geometry becomes `WindowInsets`. A GPUI
 window back handler takes precedence; `set_back_callback` exposes otherwise
 unhandled system back actions to the host application.
@@ -88,6 +92,18 @@ The script builds the arm64 Rust library and Gradle Debug APK. Set
 the script's defaults are Homebrew paths. `CARGO_NDK_PLATFORM` defaults to 26.
 The debug build embeds the shared font/SVG assets so it does not depend on
 source paths from the development machine.
+
+The keyboard bridge has device tests using Android's real `BaseInputConnection`.
+With an emulator or device attached, run from `crates/android/host`:
+
+```sh
+./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.tryanks.tcode.GpuiInputConnectionTest
+```
+
+These cover batched word replacement, composing regions, selection, Unicode
+deletion and retired connections. Native range/synchronization tests run with
+`cargo test -p gpui-android --lib --locked` from the repository root.
 
 For testing performance on a phone, run `crates/android/host/build.sh --release`.
 This uses the `android-release` Cargo profile: optimization level 3, fat LTO,

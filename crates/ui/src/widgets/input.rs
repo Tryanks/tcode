@@ -214,13 +214,11 @@ impl RenderOnce for Input {
                             let bounds = input_entity.read(cx).text_bounds().unwrap_or(bounds);
                             window.handle_input(
                                 &focus,
-                                input_configuration::ConfiguredInput {
-                                    inner: gpui::ElementInputHandler::new(
-                                        bounds,
-                                        input_entity.clone(),
-                                    ),
+                                input_configuration::ConfiguredInput::new(
+                                    bounds,
+                                    input_entity.clone(),
                                     multi_line,
-                                },
+                                ),
                                 cx,
                             );
                         },

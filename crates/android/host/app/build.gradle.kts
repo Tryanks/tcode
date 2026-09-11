@@ -10,6 +10,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = System.getenv("TCODE_BUILD_VERSION") ?: "0.1.0"
+        testInstrumentationRunner = "android.test.InstrumentationTestRunner"
         ndk { abiFilters += "arm64-v8a" }
     }
 
@@ -30,6 +31,8 @@ android {
 }
 
 dependencies {
+    // The device provides the platform test runner; only its compile stubs are needed here.
+    androidTestCompileOnly(files("${android.sdkDirectory}/platforms/android-${android.compileSdk}/optional/android.test.base.jar"))
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.core:core:1.15.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
