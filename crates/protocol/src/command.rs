@@ -220,6 +220,12 @@ pub enum Command {
     PatchSettings {
         patch: SettingsPatch,
     },
+    SettleSession {
+        session_id: String,
+    },
+    MakeSessionActive {
+        session_id: String,
+    },
     ArchiveSession {
         session_id: String,
     },
@@ -405,6 +411,8 @@ impl Command {
             | Self::RemoveTerminalContext { session_id, .. }
             | Self::AddReviewComment { session_id, .. }
             | Self::RemoveReviewComment { session_id, .. }
+            | Self::SettleSession { session_id, .. }
+            | Self::MakeSessionActive { session_id, .. }
             | Self::ArchiveSession { session_id, .. }
             | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }

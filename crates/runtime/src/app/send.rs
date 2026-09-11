@@ -49,6 +49,7 @@ impl AppState {
         let should_start = matches!(active.runtime, Runtime::Idle)
             && !(active.draft
                 && matches!(active.draft_workspace, WorkspaceMode::NewWorktree { .. }));
+        self.reactivate_session(target_id, cx);
         if should_start {
             // Starting now keeps the in-memory session parkable/resident across
             // navigation. Eligibility prevents the future turn from being sent
@@ -235,6 +236,7 @@ impl AppState {
         // The first send on a draft materializes it into a real (persisted)
         // session so the sidebar row appears; the provider then starts below.
         self.commit_draft(target_id, cx);
+        self.reactivate_session(target_id, cx);
 
         let Some(active) = self.resident_mut(target_id) else {
             return;
@@ -530,6 +532,7 @@ impl AppState {
         attachments: &[Attachment],
         cx: &mut HostCx,
     ) -> String {
+        self.reactivate_session(session_id, cx);
         let request_id = format!(
             "local-steer-{}",
             cx.delivery_key
