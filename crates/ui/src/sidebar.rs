@@ -20,9 +20,9 @@ use gpui::{
     Action, AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _,
     IntoElement, ListAlignment, ListState, ParentElement as _, Render, Role, SharedString,
     SpringAnimation, SpringConfig, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, list, prelude::FluentBuilder as _, px,
+    Window, canvas, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_protocol::ThreadExportFormat;
 
@@ -2171,6 +2171,10 @@ impl SessionsSidebar {
                 is_active,
                 cx,
             )
+            .debug_selector({
+                let id = session_id.clone();
+                move || format!("sidebar-thread-{id}")
+            })
             .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
             .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
             .px_2()
@@ -2413,6 +2417,35 @@ fn proceed_delete(
 const COMPACT_PAGE_PADDING: f32 = 16.;
 const COMPACT_SEARCH_HEIGHT: f32 = 40.;
 
+fn thread_list_scrollbar(
+    id: &'static str,
+    state: &ListState,
+    estimated_row_height: f32,
+) -> impl IntoElement {
+    let list = state.clone();
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            canvas(
+                move |_, _, _| {
+                    // GPUI clears height hints on the first layout and width changes.
+                    // Seed after list layout so dragging includes unmeasured rows.
+                    if list.is_scrolled_to_end().is_none()
+                        && list.max_offset_for_scrollbar().y > px(0.)
+                    {
+                        list.clone()
+                            .with_uniform_item_height(px(estimated_row_height));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(Scrollbar::vertical(state).id(id))
+}
+
 impl SessionsSidebar {
     /// Store changes and local disclosures invalidate the model. Scroll and
     /// navigation-animation frames only clone the shared snapshot; ListState
@@ -2636,7 +2669,7 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
-    fn render_compact(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_compact(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         #[cfg(test)]
         self.compact_rows_rendered.set(0);
         let model = self.compact_model(cx);
@@ -2665,6 +2698,7 @@ impl SessionsSidebar {
                 .debug_selector(|| "compact-thread-list".into())
                 .flex_1()
                 .min_h_0()
+                .relative()
                 .child(crate::touch_scroll::register(
                     list(
                         self.compact_list_state.clone(),
@@ -2695,6 +2729,13 @@ impl SessionsSidebar {
                     .size_full(),
                     crate::touch_scroll::Handle::List(self.compact_list_state.clone()),
                 ))
+                .when(!window.is_inspector_picking(cx), |list| {
+                    list.child(thread_list_scrollbar(
+                        "compact-thread-scrollbar",
+                        &self.compact_list_state,
+                        58.,
+                    ))
+                })
                 .into_any_element()
         };
 
@@ -3065,7 +3106,7 @@ fn compact_status_line(
 impl Render for SessionsSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.compact(cx) {
-            return self.render_compact(cx);
+            return self.render_compact(window, cx);
         }
         if let Some((count, days, keep)) = self.startup_archive_dialog.take() {
             // Deferred: opening a dialog walks the window `Root`, which is an
@@ -3240,11 +3281,22 @@ impl Render for SessionsSidebar {
                         .into_any_element();
                     (
                         self.render_flat_header(cx).into_any_element(),
-                        crate::touch_scroll::register(
-                            thread_list,
-                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
-                        )
-                        .into_any_element(),
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(crate::touch_scroll::register(
+                                thread_list,
+                                crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
+                            ))
+                            .when(!window.is_inspector_picking(cx), |list| {
+                                list.child(thread_list_scrollbar(
+                                    "flat-thread-scrollbar",
+                                    &self.flat_list_state,
+                                    FLAT_ROOT_ROW_HEIGHT,
+                                ))
+                            })
+                            .into_any_element(),
                     )
                 }
             }
@@ -3883,6 +3935,96 @@ mod tests {
             compact_list_has_project_headers(cx, 2),
             "two projects need their headers back"
         );
+    }
+
+    #[gpui::test]
+    fn thread_list_scrollbar_drags_without_selecting_a_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-sidebar-scrollbar-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.join("project"));
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.sessions = (0..60)
+                .map(|index| {
+                    let mut meta = session(&format!("scrollbar-{index}"), None);
+                    meta.project_id = Some(project.id.clone());
+                    meta.updated_at = now_secs().saturating_sub(index);
+                    meta
+                })
+                .collect();
+            state.projects = vec![project];
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+
+        for compact in [false, true] {
+            window_state.update(cx, |state, cx| {
+                state.compact = compact;
+                cx.notify();
+            });
+            cx.simulate_resize(size(px(if compact { 393. } else { 300. }), px(800.)));
+            draw(cx);
+            let list = sidebar.read_with(cx, |sidebar, _| {
+                if compact {
+                    sidebar.compact_list_state.clone()
+                } else {
+                    sidebar.flat_list_state.clone()
+                }
+            });
+            let selected = store.read_with(cx, |store, _| store.active_session_id());
+            let viewport = list.viewport_bounds();
+            let thumb = gpui::point(viewport.right() - px(5.), viewport.top() + px(8.));
+            cx.simulate_mouse_move(thumb, None, gpui::Modifiers::default());
+            draw(cx);
+            cx.simulate_event(gpui::MouseDownEvent {
+                position: thumb,
+                button: gpui::MouseButton::Left,
+                ..Default::default()
+            });
+            let target = gpui::point(thumb.x, viewport.bottom() - px(8.));
+            cx.simulate_mouse_move(
+                target,
+                Some(gpui::MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_event(gpui::MouseUpEvent {
+                position: target,
+                button: gpui::MouseButton::Left,
+                ..Default::default()
+            });
+            draw(cx);
+            assert_eq!(
+                list.is_scrolled_to_end(),
+                Some(true),
+                "dragging to the bottom must reach the last thread, compact={compact}"
+            );
+            let last = cx
+                .debug_bounds(if compact {
+                    "compact-row-scrollbar-59"
+                } else {
+                    "sidebar-thread-scrollbar-59"
+                })
+                .expect("last thread is rendered after dragging to the bottom");
+            assert!(last.bottom() <= viewport.bottom(), "last thread is clipped");
+            assert_eq!(
+                store.read_with(cx, |store, _| store.active_session_id()),
+                selected,
+                "dragging must not activate a thread under the scrollbar"
+            );
+        }
+        host.shutdown_blocking().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
