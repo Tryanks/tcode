@@ -165,6 +165,35 @@ mod jni_exports {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeInputState(
+        mut env: JNIEnv,
+        _activity: JObject,
+        revision: jlong,
+        serial: jlong,
+        text: JString,
+        selection_start: jint,
+        selection_end: jint,
+        composing_start: jint,
+        composing_end: jint,
+    ) {
+        if let Ok(text) = env.get_string(&text) {
+            let selection = selection_start.min(selection_end).max(0) as usize
+                ..selection_start.max(selection_end).max(0) as usize;
+            let marked = (composing_start >= 0 && composing_end > composing_start)
+                .then_some(composing_start as usize..composing_end as usize);
+            gpui_android::jni_input_state(
+                revision as u64,
+                serial as u64,
+                gpui_android::TextInputState {
+                    text: text.into(),
+                    selection,
+                    marked,
+                },
+            );
+        }
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeKeyEvent(
         _env: JNIEnv,
         _activity: JObject,

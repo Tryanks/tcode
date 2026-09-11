@@ -1,3 +1,4 @@
+use crate::text_input::TextInputState;
 use android_activity::AndroidApp;
 use gpui::TextInputConfiguration;
 use jni::{
@@ -13,6 +14,11 @@ pub(crate) enum HostEvent {
     SetComposingText(String),
     FinishComposing,
     DeleteBackward,
+    InputState {
+        revision: u64,
+        serial: u64,
+        state: TextInputState,
+    },
     Key {
         key_code: i32,
         down: bool,
@@ -50,13 +56,17 @@ pub(crate) fn drain() -> Vec<HostEvent> {
 enum OwnedArgument {
     Bool(bool),
     Int(i32),
+    Long(u64),
+    Text(Option<String>),
 }
 
 impl OwnedArgument {
-    fn as_jvalue(&self) -> JValue<'static, 'static> {
+    fn as_jvalue<'a>(&self, text: &'a JObject<'a>) -> JValue<'a, 'a> {
         match self {
             Self::Bool(value) => JValue::Bool(u8::from(*value)),
             Self::Int(value) => JValue::Int(*value),
+            Self::Long(value) => JValue::Long(*value as i64),
+            Self::Text(_) => JValue::Object(text),
         }
     }
 }
@@ -78,9 +88,25 @@ fn with_activity(method: &'static str, signature: &'static str, args: Vec<OwnedA
         };
         // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
         let activity = unsafe { JObject::from_raw(callback_app.activity_as_ptr().cast()) };
+        let strings = args
+            .iter()
+            .map(|arg| match arg {
+                OwnedArgument::Text(Some(text)) => env.new_string(text).map(JObject::from),
+                _ => Ok(JObject::null()),
+            })
+            .collect::<jni::errors::Result<Vec<_>>>();
+        let strings = match strings {
+            Ok(strings) => strings,
+            Err(error) => {
+                log::error!("JNI {method} string allocation failed: {error}");
+                let _ = env.exception_clear();
+                return;
+            }
+        };
         let args = args
             .iter()
-            .map(OwnedArgument::as_jvalue)
+            .zip(&strings)
+            .map(|(arg, text)| arg.as_jvalue(text))
             .collect::<Vec<_>>();
         if let Err(error) = env.call_method(&activity, method, signature, &args) {
             log::error!("JNI {method} failed: {error}");
@@ -185,6 +211,32 @@ pub fn finish_composing_text() {
 
 pub fn delete_backward() {
     enqueue(HostEvent::DeleteBackward);
+}
+
+pub fn input_state(revision: u64, serial: u64, state: TextInputState) {
+    enqueue(HostEvent::InputState {
+        revision,
+        serial,
+        state,
+    });
+}
+
+pub(crate) fn sync_input(revision: u64, serial: u64, state: Option<TextInputState>) {
+    let selection = state.as_ref().map_or(0..0, |state| state.selection.clone());
+    let marked = state.as_ref().and_then(|state| state.marked.clone());
+    with_activity(
+        "gpuiSyncInput",
+        "(JJLjava/lang/String;IIII)V",
+        vec![
+            OwnedArgument::Long(revision),
+            OwnedArgument::Long(serial),
+            OwnedArgument::Text(state.map(|state| state.text)),
+            OwnedArgument::Int(selection.start as i32),
+            OwnedArgument::Int(selection.end as i32),
+            OwnedArgument::Int(marked.as_ref().map_or(-1, |range| range.start as i32)),
+            OwnedArgument::Int(marked.as_ref().map_or(-1, |range| range.end as i32)),
+        ],
+    );
 }
 
 pub fn key_event(key_code: i32, down: bool, unicode_code_point: i32, meta_state: i32) {

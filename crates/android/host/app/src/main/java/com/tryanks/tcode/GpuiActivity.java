@@ -15,7 +15,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.Selection;
 import android.text.SpannableStringBuilder;
+import android.text.method.TextKeyListener;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -64,6 +66,8 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeSetComposingText(String text);
     private native void nativeFinishComposingText();
     private native void nativeDeleteBackward();
+    private native void nativeInputState(long revision, long serial, String text,
+            int selectionStart, int selectionEnd, int composingStart, int composingEnd);
     private native void nativeKeyEvent(int keyCode, boolean down, int unicodeCodePoint, int metaState);
     private native void nativeOnInsets(int left, int top, int right, int bottom, int imeBottom);
     private native void nativeOnBack(boolean enabled);
@@ -234,6 +238,12 @@ public final class GpuiActivity extends NativeActivity {
         ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE)).restartInput(inputView);
     }
 
+    public void gpuiSyncInput(long revision, long serial, String text,
+            int selectionStart, int selectionEnd, int composingStart, int composingEnd) {
+        inputView.syncInput(revision, serial, text, selectionStart, selectionEnd,
+                composingStart, composingEnd);
+    }
+
     public int[] gpuiRasterizeEmoji(int glyph, float size) throws java.io.IOException {
         return SystemEmoji.rasterize(glyph, size);
     }
@@ -319,10 +329,47 @@ public final class GpuiActivity extends NativeActivity {
         private int inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
         private int imeOptions = EditorInfo.IME_ACTION_NONE;
         private final Editable editable = new SpannableStringBuilder();
+        private GpuiInputConnection connection;
+        private boolean textEditable;
+        private long revision;
+        private long serial;
 
         GpuiInputView(Context context) {
             super(context);
+            Selection.setSelection(editable, 0);
             if (Build.VERSION.SDK_INT >= 33) setAutoHandwritingEnabled(false);
+        }
+
+        void syncInput(long nextRevision, long acknowledgedSerial, String text,
+                int selectionStart, int selectionEnd, int composingStart, int composingEnd) {
+            // A frame acknowledging an earlier keystroke must not undo newer IME edits.
+            // A new revision is an app edit (send, paste, cursor move, or focus change).
+            if (nextRevision < revision || (nextRevision == revision && acknowledgedSerial < serial)) return;
+            boolean externalEdit = nextRevision != revision;
+            revision = nextRevision;
+            textEditable = text != null;
+            String value = textEditable ? text : "";
+            if (!value.contentEquals(editable)) editable.replace(0, editable.length(), value);
+            BaseInputConnection.removeComposingSpans(editable);
+            if (composingStart >= 0) {
+                new BaseInputConnection(this, true) {
+                    @Override public Editable getEditable() { return editable; }
+                }.setComposingRegion(composingStart, composingEnd);
+            }
+            Selection.setSelection(editable, selectionStart, selectionEnd);
+            if (connection != null) connection.rememberState();
+            InputMethodManager manager = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (externalEdit) manager.restartInput(this);
+            manager.updateSelection(this, selectionStart, selectionEnd, composingStart, composingEnd);
+        }
+
+        private void publishInput(GpuiInputConnection.State state) {
+            if (!textEditable) return;
+            nativeInputState(revision, ++serial, state.text(), state.selectionStart(), state.selectionEnd(),
+                    state.composingStart(), state.composingEnd());
+            ((InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE))
+                    .updateSelection(this, state.selectionStart(), state.selectionEnd(),
+                            state.composingStart(), state.composingEnd());
         }
 
         void configure(boolean autocorrect, int autocapitalize, boolean suggestions, int action, boolean multiLine) {
@@ -352,38 +399,56 @@ public final class GpuiActivity extends NativeActivity {
         public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
             outAttrs.inputType = inputType;
             outAttrs.imeOptions = imeOptions | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
-            outAttrs.initialSelStart = editable.length();
-            outAttrs.initialSelEnd = editable.length();
-            return new BaseInputConnection(this, true) {
-                @Override public Editable getEditable() { return editable; }
+            outAttrs.initialSelStart = Selection.getSelectionStart(editable);
+            outAttrs.initialSelEnd = Selection.getSelectionEnd(editable);
+            if (connection != null) connection.closeConnection();
+            connection = new GpuiInputConnection(this, editable, this::publishInput) {
                 @Override public boolean commitText(CharSequence text, int cursor) {
-                    nativeCommitText(text == null ? "" : text.toString());
+                    if (getEditable() == null) return false;
+                    if (!textEditable) nativeCommitText(text.toString());
                     return super.commitText(text, cursor);
                 }
                 @Override public boolean setComposingText(CharSequence text, int cursor) {
-                    nativeSetComposingText(text == null ? "" : text.toString());
+                    if (getEditable() == null) return false;
+                    if (!textEditable) nativeSetComposingText(text.toString());
                     return super.setComposingText(text, cursor);
                 }
                 @Override public boolean finishComposingText() {
-                    nativeFinishComposingText(); return super.finishComposingText();
+                    if (getEditable() == null) return false;
+                    if (!textEditable) nativeFinishComposingText();
+                    return super.finishComposingText();
                 }
                 @Override public boolean deleteSurroundingText(int before, int after) {
-                    if (before > 0) nativeDeleteBackward();
+                    if (getEditable() == null) return false;
+                    if (!textEditable && before > 0) nativeDeleteBackward();
                     return super.deleteSurroundingText(before, after);
                 }
                 @Override public boolean deleteSurroundingTextInCodePoints(int before, int after) {
-                    if (before > 0) nativeDeleteBackward();
+                    if (getEditable() == null) return false;
+                    if (!textEditable && before > 0) nativeDeleteBackward();
                     return super.deleteSurroundingTextInCodePoints(before, after);
                 }
                 @Override public boolean sendKeyEvent(KeyEvent event) {
+                    if (getEditable() == null) return false;
+                    if (textEditable && event.getKeyCode() == KeyEvent.KEYCODE_DEL
+                            && event.hasNoModifiers()) {
+                        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                            TextKeyListener.getInstance().onKeyDown(GpuiInputView.this, editable,
+                                    event.getKeyCode(), event);
+                            publishChanges();
+                        }
+                        return true;
+                    }
                     forwardKeyEvent(event); return true;
                 }
                 @Override public boolean performEditorAction(int actionCode) {
+                    if (getEditable() == null) return false;
                     nativeKeyEvent(KeyEvent.KEYCODE_ENTER, true, '\n', 0);
                     nativeKeyEvent(KeyEvent.KEYCODE_ENTER, false, '\n', 0);
                     return true;
                 }
             };
+            return connection;
         }
 
         @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
