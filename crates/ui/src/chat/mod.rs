@@ -29,7 +29,7 @@ use gpui::{
     ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, list, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{Scrollbar, StyledExt as _, h_flex, v_flex};
 
 use tcode_core::git::GitAction;
 use tcode_core::session::{
@@ -2780,11 +2780,15 @@ impl Render for ChatView {
             v_flex()
                 .flex_1()
                 .min_h_0()
+                .relative()
                 .py_4()
                 .child(crate::touch_scroll::register(
                     timeline,
                     crate::touch_scroll::Handle::List(self.list_state.clone()),
                 ))
+                .when(!window.is_inspector_picking(cx), |timeline| {
+                    timeline.child(Scrollbar::vertical(&self.list_state).id("timeline-scrollbar"))
+                })
                 .into_any_element()
         };
 
@@ -3712,6 +3716,66 @@ mod tests {
                 assert!(meter.top() >= drawer.top() && meter.bottom() <= drawer.bottom());
                 assert!(meter.size.width >= px(44.) && meter.size.height >= px(44.));
             }
+        }
+    }
+
+    #[gpui::test]
+    fn timeline_scrollbar_drag_pauses_tail_following(cx: &mut TestAppContext) {
+        use gpui::{
+            Context, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Render,
+            Window, point, px,
+        };
+
+        struct ChatRoot(Entity<ChatView>);
+        impl Render for ChatRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::touch_scroll::root(self.0.clone())
+            }
+        }
+
+        for (width, height) in [(393., 852.), (1024., 768.)] {
+            let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+            window_state.update(cx, |state, _| state.compact = width < 900.);
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                ChatRoot(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+            });
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let list = view.read_with(cx, |view, cx| view.0.read(cx).list_state.clone());
+            let viewport = list.viewport_bounds();
+            let tail = list.scroll_px_offset_for_scrollbar().y;
+            assert!(list.is_following_tail());
+            assert!(list.max_offset_for_scrollbar().y > viewport.size.height);
+
+            let thumb = point(viewport.right() - px(5.), viewport.bottom() - px(8.));
+            cx.simulate_mouse_move(thumb, None, Modifiers::default());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            cx.simulate_event(MouseDownEvent {
+                position: thumb,
+                button: MouseButton::Left,
+                ..Default::default()
+            });
+            let target = point(thumb.x, viewport.center().y);
+            cx.simulate_mouse_move(target, Some(MouseButton::Left), Modifiers::default());
+            cx.simulate_event(MouseUpEvent {
+                position: target,
+                button: MouseButton::Left,
+                ..Default::default()
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            assert!(
+                list.scroll_px_offset_for_scrollbar().y > tail + viewport.size.height,
+                "dragging the visible scrollbar must scroll the conversation at width {width}"
+            );
+            assert!(!list.is_following_tail());
         }
     }
 

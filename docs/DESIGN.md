@@ -241,6 +241,17 @@ composer at the end, including when the keyboard opens or closes.
 
 ## Scrolling contract
 
+The conversation timeline overlays a vertical scrollbar at its right edge,
+using the shared theme's hover/scroll visibility. Its track follows the list's
+viewport, excluding the timeline padding and composer. Dragging it moves the
+conversation and pauses tail-following when the reader leaves the bottom.
+
+Thread lists also overlay the shared vertical scrollbar, in Recent and By
+project at both layout widths. Each scrollbar follows its list's viewport and
+scroll position; headers, search controls and footers stay outside its track.
+Virtualized lists estimate offscreen row heights so the thumb represents the
+whole list from the first frame; measured heights refine that estimate.
+
 Potentially unbounded content always has its own resolved-height viewport and a
 separate, non-shrinking content column. Headers, search fields, footers and
 actions stay outside that viewport. This applies to the sidebar project list,
