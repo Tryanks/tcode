@@ -3186,7 +3186,6 @@ impl SessionsSidebar {
                                 truncated_sidebar_label()
                                     .text_size(px(16.))
                                     .line_height(px(21.))
-                                    
                                     .when(!state.is_child, |title| title.font_medium())
                                     .when(state.show_unread, |title| title.font_semibold())
                                     .debug_selector({
