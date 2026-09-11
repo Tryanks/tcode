@@ -590,6 +590,10 @@ platform pays that inset.
   the muted activity summary.
 - Subagent capsules use a spinner while active, then a compact lifecycle chip:
   green for completed, amber for interrupted, and red for failed or declined.
+  Their model and reasoning-effort labels describe the child configuration.
+  Unknown values stay hidden until child metadata arrives; missing spawn
+  arguments never justify displaying the parent's model. A later metadata
+  update preserves the child's current lifecycle status.
 - Turn activity uses collapsible "Work Log" sections. A compact disclosure
   header reveals transparent activity rows
   (muted status icon + one-line command/tool/subagent/reasoning summary).
