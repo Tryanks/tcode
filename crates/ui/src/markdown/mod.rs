@@ -4,6 +4,7 @@
 //! `crates/ui/src/text` implementation. Parsing and highlighting use tcode's
 //! rushdown IR and syntect bridge.
 
+mod image_link;
 mod inline;
 mod inline_flow;
 mod link_target;

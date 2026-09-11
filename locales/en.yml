@@ -94,6 +94,7 @@ chat:
   rewind_conversation_done: "Claude Code restored the conversation. The original prompt is ready to edit."
   rewind_files_done: "Claude Code restored the tracked files."
 markdown:
+  open_image: "Open image"
   link_open: "Open link"
   link_copy_address: "Copy link address"
   link_copy_text: "Copy link text"

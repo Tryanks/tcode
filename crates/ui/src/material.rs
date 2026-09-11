@@ -212,9 +212,9 @@ pub fn brand_wordmark(cx: &App) -> impl IntoElement {
     )
 }
 
-/// The scrim behind a bottom sheet, at the `overlay` token's values
+/// The scrim behind modal overlays, at the `overlay` token's values
 /// (`themes/tcode.json`: `#1F232852` light, `#00000080` dark). Passing the ink
-/// `foreground` through in dark mode would *lighten* the page behind the sheet
+/// `foreground` through in dark mode would *lighten* the page behind the overlay
 /// instead of pushing it back, so the dark scrim is black.
 pub fn scrim(progress: f32, cx: &App) -> Hsla {
     if cx.theme().mode.is_dark() {
@@ -399,16 +399,16 @@ pub(crate) fn tracked_uppercase(text: &str) -> Div {
 
 /// Gives a raw clickable surface the same keyboard and accessibility treatment
 /// as the component-library controls. GPUI automatically maps Enter/Space to
-/// `on_click` for a focused clickable div; this helper supplies the tab stop,
+/// `on_click` for a focused clickable element; this helper supplies the tab stop,
 /// semantic role/name, and a keyboard-only outline that remains legible in
 /// both themes without changing layout.
-pub fn accessible_clickable(
-    el: Div,
+pub fn accessible_clickable<E: gpui::Element + gpui::InteractiveElement>(
+    el: E,
     id: impl Into<ElementId>,
     role: Role,
     label: impl Into<SharedString>,
     cx: &App,
-) -> Stateful<Div> {
+) -> Stateful<E> {
     let ring = cx.theme().ring.opacity(if cx.theme().mode.is_dark() {
         0.72
     } else {

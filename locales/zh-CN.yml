@@ -94,6 +94,7 @@ chat:
   rewind_conversation_done: "Claude Code 已恢复对话，原始提示已放回输入框，可编辑后重发。"
   rewind_files_done: "Claude Code 已恢复其跟踪的文件。"
 markdown:
+  open_image: "打开图片"
   link_open: "打开链接"
   link_copy_address: "复制链接地址"
   link_copy_text: "复制链接文字"

@@ -19,10 +19,10 @@ use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
-    LayoutId, ListSizingBehavior, ListState, ObjectFit, ParentElement as _, Pixels, ScrollHandle,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Style, Styled as _,
-    StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px, relative,
-    rems, size,
+    LayoutId, ListSizingBehavior, ListState, ObjectFit, ParentElement as _, Pixels, Role,
+    ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Style,
+    Styled as _, StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px,
+    relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -474,7 +474,11 @@ fn render_paragraph(
         .children
         .iter()
         .any(|child| !child.text.is_empty());
-    if has_image && has_text {
+    let has_image_link = paragraph
+        .children
+        .iter()
+        .any(|child| super::image_link::for_node(child).is_some());
+    if (has_image && has_text) || has_image_link {
         return InlineFlow::new(
             id.to_string(),
             view.clone(),
@@ -494,27 +498,50 @@ fn render_paragraph(
             .gap_1()
             .children(images.enumerate().map(move |(ix, image)| {
                 let title = image.title();
+                let tooltip_title = title.clone();
                 let view = view.clone();
-                img(image.url.clone())
-                    .id(ix)
+                let source = view.read(cx).image_source(&image.url);
+                let link = image.link.clone();
+                let label = if !title.trim().is_empty() {
+                    title.clone()
+                } else if let Some(link) = &link {
+                    link.url.to_string()
+                } else {
+                    crate::tr!("markdown.open_image").into_owned()
+                };
+                let role = if link.is_some() {
+                    Role::Link
+                } else {
+                    Role::Button
+                };
+                crate::material::accessible_clickable(img(source.clone()), ix, role, label, cx)
                     .object_fit(ObjectFit::Contain)
                     .max_w(relative(1.))
+                    .max_h(px(720.))
                     .min_w(px(15.))
                     .min_h(px(15.))
-                    .when_some(image.link.clone(), |this, link| {
-                        let title = title.clone();
-                        this.cursor_pointer()
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(title.clone()).build(window, cx)
-                            })
-                            .on_click(move |_, window, cx| {
-                                gpui_base::TextSelection::end(window, cx);
-                                cx.stop_propagation();
-                                match view.read(cx).resolve_link(&link.url) {
-                                    LinkTarget::Web(url) => cx.open_url(&url),
-                                    LinkTarget::Local(path) => cx.open_with_system(&path),
-                                }
-                            })
+                    .cursor_pointer()
+                    .when(link.is_some(), |image| {
+                        image.tooltip(move |window, cx| {
+                            Tooltip::new(tooltip_title.clone()).build(window, cx)
+                        })
+                    })
+                    .on_click(move |_, window, cx| {
+                        gpui_base::TextSelection::end(window, cx);
+                        cx.stop_propagation();
+                        if let Some(link) = &link {
+                            match view.read(cx).resolve_link(&link.url) {
+                                LinkTarget::Web(url) => cx.open_url(&url),
+                                LinkTarget::Local(path) => cx.open_with_system(&path),
+                            }
+                        } else {
+                            crate::attachments::open_image_lightbox(
+                                source.clone(),
+                                title.clone(),
+                                window,
+                                cx,
+                            );
+                        }
                     })
             }))
             .into_any_element();
@@ -620,6 +647,21 @@ fn inline_flow_items(paragraph: &Paragraph, cx: &mut App) -> Vec<InlineFlowItem>
             });
         };
     for child in &paragraph.children {
+        if let Some(link) = super::image_link::for_node(child) {
+            flush_text(
+                &mut items,
+                &mut text,
+                &mut links,
+                &mut highlights,
+                &mut fonts,
+                &mut segment_state,
+            );
+            items.push(InlineFlowItem::ImageLink {
+                url: link.url.clone(),
+                label: child.text.clone(),
+            });
+            continue;
+        }
         if let Some(image) = &child.image {
             flush_text(
                 &mut items,

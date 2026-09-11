@@ -334,6 +334,11 @@ impl Composer {
         let Some(image) = self.pending_images.get(index) else {
             return;
         };
-        crate::attachments::open_image_lightbox(image.path.clone(), image.name.clone(), window, cx);
+        crate::attachments::open_image_lightbox(
+            crate::store::host_image(image.path.clone()),
+            image.name.clone(),
+            window,
+            cx,
+        );
     }
 }
