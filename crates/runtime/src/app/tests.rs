@@ -3124,7 +3124,7 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
 }
 
 #[test]
-fn orchestrate_send_unarchives_the_child() {
+fn orchestrate_send_reactivates_the_child_and_its_settled_parent() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-orchestrate-send-unarchive-test");
     let store = (*test_store).clone();
@@ -3136,6 +3136,11 @@ fn orchestrate_send_unarchives_the_child() {
         child.meta.id = "child".into();
         child.meta.parent_session_id = Some("parent".into());
         child.meta.archived_at = Some(1);
+        child.meta.settled_at = Some(1);
+        let mut parent = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
+        parent.id = "parent".into();
+        parent.settled_at = Some(1);
+        state.sessions.push(parent);
         child.turn_in_flight = true;
         state.sessions.push(child.meta.clone());
         state.residents.parked.insert(child.meta.id.clone(), child);
@@ -3152,6 +3157,8 @@ fn orchestrate_send_unarchives_the_child() {
             cx,
         );
         assert!(response.try_recv().unwrap().is_ok());
+        assert!(state.find_meta("child").unwrap().settled_at.is_none());
+        assert!(state.find_meta("parent").unwrap().settled_at.is_none());
         assert!(
             state.find_meta("child").unwrap().archived_at.is_none(),
             "send should revive an archived child"
@@ -6843,4 +6850,202 @@ fn computer_use_registrations_survive_stop_but_are_replaced_after_provider_shutd
         state.host.shutdown_all(cx);
         assert!(state.host.mcp.computer_use_registrations.is_empty());
     });
+}
+
+#[test]
+fn settled_commands_persist_without_closing_the_selected_conversation() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-settled-lifecycle");
+    let store = (*test_store).clone();
+    for (id, parent) in [
+        ("parent", None),
+        ("child", Some("parent")),
+        ("sibling", Some("parent")),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, store.root().clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_string);
+        store.upsert_meta(&meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new(store.clone()));
+    state.update(cx, |state, cx| state.select_session("parent", cx));
+    cx.run_until_parked();
+    state.dispatch_command(
+        cx,
+        1,
+        Command::SettleSession {
+            session_id: "parent".into(),
+        },
+    );
+    cx.run_until_parked();
+    state.read(|state| {
+        assert_eq!(state.active_session_id(), Some("parent"));
+        assert!(state.resident("parent").is_some());
+        assert!(
+            state
+                .sessions
+                .iter()
+                .all(|meta| meta.settled_at.is_some() && meta.archived_at.is_none())
+        );
+    });
+    let restarted = AppState::new(store.clone());
+    assert!(
+        restarted
+            .sessions
+            .iter()
+            .all(|meta| meta.settled_at.is_some())
+    );
+    state.update(cx, |state, cx| state.select_session("child", cx));
+    cx.run_until_parked();
+    state.read(|state| assert!(state.find_meta("child").unwrap().settled_at.is_some()));
+    state.dispatch_command(
+        cx,
+        2,
+        Command::ArchiveSession {
+            session_id: "parent".into(),
+        },
+    );
+    state.dispatch_command(
+        cx,
+        3,
+        Command::UnarchiveSession {
+            session_id: "parent".into(),
+        },
+    );
+    cx.run_until_parked();
+    state.read(|state| {
+        assert!(
+            state
+                .sessions
+                .iter()
+                .all(|meta| meta.settled_at.is_some() && meta.archived_at.is_none())
+        )
+    });
+    state.dispatch_command(
+        cx,
+        4,
+        Command::MakeSessionActive {
+            session_id: "parent".into(),
+        },
+    );
+    cx.run_until_parked();
+    assert!(
+        store
+            .load_index()
+            .iter()
+            .all(|meta| meta.settled_at.is_none())
+    );
+}
+
+#[test]
+fn settling_rejects_busy_descendants_and_accepted_input_reactivates_ancestors() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-settled-input");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (commands, _receiver) = smol::channel::unbounded();
+    state.update(cx, |state, _| {
+        let mut child = live_session(ProviderKind::Codex, commands);
+        child.meta.id = "child".into();
+        child.meta.parent_session_id = Some("parent".into());
+        child.meta.settled_at = Some(1);
+        let mut parent = SessionMeta::new(ProviderKind::Codex, test_store.root().clone(), None);
+        parent.id = "parent".into();
+        parent.settled_at = Some(1);
+        let mut sibling = parent.clone();
+        sibling.id = "sibling".into();
+        sibling.parent_session_id = Some("parent".into());
+        state.sessions.extend([parent, sibling, child.meta.clone()]);
+        state.install_selected(child);
+    });
+    state.dispatch_command(
+        cx,
+        1,
+        Command::ScheduleTurn {
+            session_id: "child".into(),
+            text: "later".into(),
+            attachment_paths: Vec::new(),
+            fire_at_unix_secs: now_secs() + 3600,
+        },
+    );
+    state.read(|state| {
+        assert!(state.find_meta("child").unwrap().settled_at.is_none());
+        assert!(state.find_meta("parent").unwrap().settled_at.is_none());
+        assert!(state.find_meta("sibling").unwrap().settled_at.is_some());
+    });
+    // Each state would hide reachable child work if the parent were allowed to settle.
+    for busy in ["queued", "turn", "background", "input", "approval"] {
+        state.update(cx, |state, _| {
+            let child = state.resident_mut("child").unwrap();
+            child.queue.clear();
+            child.turn_in_flight = busy == "turn";
+            child.background_task_count = usize::from(busy == "background");
+            child.timeline.pending_user_input =
+                (busy == "input").then(|| ("input".into(), Vec::new()));
+            child.timeline.pending_approvals.clear();
+            if busy == "queued" {
+                child.push_queued("queued".into(), Vec::new());
+            }
+            if busy == "approval" {
+                child
+                    .timeline
+                    .pending_approvals
+                    .push(agent::ApprovalRequest {
+                        id: "approval".into(),
+                        turn_id: None,
+                        kind: agent::ApprovalKind::ExecCommand {
+                            command: "pwd".into(),
+                            cwd: None,
+                            reason: None,
+                        },
+                        options: Vec::new(),
+                    });
+            }
+            assert_eq!(
+                state
+                    .validate_command_target(&Command::SettleSession {
+                        session_id: "parent".into()
+                    })
+                    .unwrap_err()
+                    .code,
+                "thread_busy"
+            );
+        });
+        state.dispatch_command(
+            cx,
+            2,
+            Command::SettleSession {
+                session_id: "parent".into(),
+            },
+        );
+        state.read(|state| assert!(state.find_meta("parent").unwrap().settled_at.is_none()));
+    }
+    state.update(cx, |state, _| {
+        let child = state.resident_mut("child").unwrap();
+        child.timeline.pending_approvals.clear();
+        child.timeline.pending_user_input = None;
+        child.turn_in_flight = false;
+        child.background_task_count = 0;
+    });
+    state.dispatch_command(
+        cx,
+        3,
+        Command::SettleSession {
+            session_id: "parent".into(),
+        },
+    );
+    state.dispatch_command(
+        cx,
+        4,
+        Command::SendTurn {
+            session_id: "child".into(),
+            text: "continue".into(),
+            attachment_paths: Vec::new(),
+        },
+    );
+    state.read(|state| {
+        assert!(state.find_meta("parent").unwrap().settled_at.is_none());
+        assert!(state.find_meta("child").unwrap().settled_at.is_none());
+        assert!(state.find_meta("sibling").unwrap().settled_at.is_some());
+    });
+    cx.run_until_parked();
 }

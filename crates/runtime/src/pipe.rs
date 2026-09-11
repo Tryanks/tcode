@@ -439,6 +439,8 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.toggle_project_collapsed(&project_id, cx)
         }
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
+        Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
+        Command::MakeSessionActive { session_id } => app.make_session_active(&session_id, cx),
         Command::ArchiveSession { session_id } => app.archive_session(&session_id, cx),
         Command::UnarchiveSession { session_id } => app.unarchive_session(&session_id, cx),
         Command::AutoArchiveSweep { project_id } => {

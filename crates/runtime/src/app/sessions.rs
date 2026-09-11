@@ -592,6 +592,75 @@ impl AppState {
         (Some(marker.reopen_settings), session_id)
     }
 
+    pub(super) fn settle_family_busy(&self, session_id: &str) -> bool {
+        descendant_session_ids(&self.sessions, session_id)
+            .iter()
+            .any(|id| {
+                self.resident(id).is_some_and(|session| {
+                    session.has_work()
+                        || session.timeline.turn_running
+                        || !session.timeline.pending_approvals.is_empty()
+                        || session.timeline.pending_user_input.is_some()
+                })
+            })
+    }
+
+    /// Settle a whole descendant group without shutting down its resources.
+    pub fn settle_session(&mut self, session_id: &str, cx: &mut HostCx) {
+        if self.settle_family_busy(session_id) {
+            return;
+        }
+        let timestamp = now_secs();
+        for id in descendant_session_ids(&self.sessions, session_id) {
+            if let Some(mut meta) = self.find_meta(&id)
+                && meta.settled_at.is_none()
+            {
+                meta.settled_at = Some(timestamp);
+                self.persist_settled_meta(meta, cx);
+            }
+        }
+    }
+
+    /// Restore the matching settle cascade, then expose all of its ancestors.
+    pub fn make_session_active(&mut self, session_id: &str, cx: &mut HostCx) {
+        if let Some(timestamp) = self.find_meta(session_id).and_then(|meta| meta.settled_at) {
+            for id in descendant_session_ids(&self.sessions, session_id) {
+                if let Some(mut meta) = self.find_meta(&id)
+                    && meta.settled_at == Some(timestamp)
+                {
+                    meta.settled_at = None;
+                    self.persist_settled_meta(meta, cx);
+                }
+            }
+        }
+        self.reactivate_session(session_id, cx);
+    }
+
+    /// Accepted input exposes this thread and its ancestors, leaving siblings settled.
+    pub(super) fn reactivate_session(&mut self, session_id: &str, cx: &mut HostCx) {
+        let mut next = Some(session_id.to_string());
+        let mut visited = HashSet::new();
+        while let Some(id) = next.take() {
+            if !visited.insert(id.clone()) {
+                break;
+            }
+            let Some(mut meta) = self.find_meta(&id) else {
+                break;
+            };
+            next = meta.parent_session_id.clone();
+            if meta.settled_at.take().is_some() {
+                self.persist_settled_meta(meta, cx);
+            }
+        }
+    }
+
+    fn persist_settled_meta(&mut self, meta: SessionMeta, cx: &mut HostCx) {
+        if let Some(session) = self.resident_mut(&meta.id) {
+            session.meta.settled_at = meta.settled_at;
+        }
+        self.persist_meta(&meta, cx);
+    }
+
     /// Archive a thread (reversible; it vanishes from the sidebar). Blocked while
     /// its turn is running (returns without changing anything so the caller's
     /// tooltip stands). The active thread is closed back to the empty state.

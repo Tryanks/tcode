@@ -92,10 +92,18 @@ impl AppState {
         let Some(session_id) = command.session_id() else {
             return Ok(());
         };
+        if matches!(command, Command::SettleSession { .. }) && self.settle_family_busy(session_id) {
+            return Err(error(
+                "thread_busy",
+                "Wait for this thread and its children to finish before settling.",
+            ));
+        }
         // Index mutations operate on stored sessions, without requiring a live provider.
         if matches!(
             command,
-            Command::ArchiveSession { .. }
+            Command::SettleSession { .. }
+                | Command::MakeSessionActive { .. }
+                | Command::ArchiveSession { .. }
                 | Command::UnarchiveSession { .. }
                 | Command::RenameSession { .. }
                 | Command::DeleteSession { .. }

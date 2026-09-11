@@ -13,3 +13,5 @@
 
 # Generated browser bundle.
 /crates/web/dist/
+
+/tmp/

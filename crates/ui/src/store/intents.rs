@@ -185,6 +185,12 @@ impl WorkspaceStore {
 }
 
 impl WorkspaceStore {
+    pub fn settle_session(&mut self, session_id: String) {
+        self.dispatch(Command::SettleSession { session_id });
+    }
+    pub fn make_session_active(&mut self, session_id: String) {
+        self.dispatch(Command::MakeSessionActive { session_id });
+    }
     pub fn archive_session(&mut self, session_id: String) {
         self.dispatch(Command::ArchiveSession { session_id });
     }

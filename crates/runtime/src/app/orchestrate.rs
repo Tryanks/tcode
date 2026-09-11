@@ -407,6 +407,7 @@ impl AppState {
         child.draft = false;
         child.push_queued(brief, Vec::new());
         self.residents.parked.insert(id.clone(), child);
+        self.reactivate_session(&id, cx);
         self.ensure_session_started(&id, cx);
         Ok(id)
     }
@@ -633,6 +634,7 @@ impl AppState {
                     if archived {
                         self.unarchive_session(&thread_id, cx);
                     }
+                    self.reactivate_session(&thread_id, cx);
                     // A live turn accepts the message right away — same routing as
                     // parent callbacks. Queueing a mid-turn correction until the
                     // turn ends would deliver it after the work it was meant to
@@ -1080,7 +1082,11 @@ impl AppState {
                 );
                 state.callback_last_turn.insert(child_id.clone(), turn);
                 state.deliver_orchestrate_callback_to_parent(&parent_id, text, cx);
-                if auto_archive {
+                if auto_archive
+                    && state
+                        .find_meta(&child_id)
+                        .is_some_and(|meta| meta.settled_at.is_none())
+                {
                     state.archive_session_ids(&[child_id], now_secs(), cx);
                 }
             });
@@ -1172,6 +1178,7 @@ impl AppState {
         text: String,
         cx: &mut HostCx,
     ) {
+        self.reactivate_session(parent_id, cx);
         let can_steer = self
             .resident(parent_id)
             .is_some_and(|parent| parent.turn_in_flight && parent.can_steer());
