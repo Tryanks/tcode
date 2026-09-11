@@ -611,6 +611,13 @@ platform pays that inset.
   a current-state snapshot, not a replay: among activities that arrived while
   the thread was away, only the newest detail opens, and its 500ms visibility
   window starts when the thread becomes visible.
+  Manually toggling a detail overrides its automatic expansion: a collapsed
+  detail stays closed through subsequent updates, while a manually expanded
+  detail stays open when newer activities arrive. These choices are scoped to
+  each activity and session and remembered while the chat view is open, including
+  when switching threads. New activities still follow the automatic rules.
+  The **Live command panel** setting controls automatic command-output expansion
+  only; file-edit diffs and manual toggles are independent of that setting.
   Assistant prose settles the run, folding every
   activity in it under one summary row. A completed section's toggle summarizes
   only its real, nonzero events

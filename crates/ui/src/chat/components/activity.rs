@@ -140,6 +140,7 @@ pub(crate) fn activity_row(
             crate::tr!("chat.activity_details"),
             cx,
         )
+        .debug_selector(|| "activity-row".into())
         .aria_expanded(expanded)
         .rounded(crate::material::radius_chip())
         .cursor_pointer()
@@ -256,6 +257,7 @@ fn activity_detail(
         _ => div().into_any_element(),
     };
     crate::material::rail_detail(detail, cx)
+        .debug_selector(|| "activity-detail".into())
         .text_size(px(11.5))
         .into_any_element()
 }
