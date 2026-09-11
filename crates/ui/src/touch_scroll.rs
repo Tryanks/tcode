@@ -1,4 +1,6 @@
-//! Element capture for native touch scrolling. GPUI still owns recognition and inertia.
+//! Shared viewport registration for wheel easing and native touch capture.
+//! GPUI still owns touch recognition and inertia.
+mod wheel;
 use std::{collections::HashMap, panic::Location};
 
 use gpui::{
@@ -63,6 +65,7 @@ struct Entry {
     id: GlobalElementId,
     parent: Option<GlobalElementId>,
     bounds: Bounds<Pixels>,
+    line_height: Pixels,
     handle: Handle,
     hitbox: Option<HitboxId>,
 }
@@ -105,6 +108,7 @@ struct Registry {
     pending: Option<Capture>,
     active: Option<Capture>,
     momentum: Option<Capture>,
+    wheel: wheel::Wheel,
 }
 
 impl Registry {
@@ -192,6 +196,7 @@ fn discard_occluded(window: &Window, cx: &mut App) {
 }
 
 fn install(window: &mut Window) {
+    wheel::install(window);
     if !cfg!(any(target_os = "android", target_os = "ios", test)) {
         return;
     }
@@ -363,6 +368,7 @@ impl<E: Element> Element for Registered<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         if self.root {
+            wheel::will_prepaint(window, cx);
             let registry = registry(window, cx);
             registry.entries.clear();
             registry.frame = registry.frame.wrapping_add(1);
@@ -377,6 +383,7 @@ impl<E: Element> Element for Registered<E> {
                 id: id.clone(),
                 parent: registry.parents.last().cloned(),
                 bounds,
+                line_height: window.line_height(),
                 handle: handle.clone(),
                 hitbox: None,
             });
@@ -392,6 +399,9 @@ impl<E: Element> Element for Registered<E> {
             let registry = registry(window, cx);
             registry.entries[entry_index].hitbox = Some(hitbox.id);
             registry.parents.pop();
+        }
+        if self.root {
+            wheel::did_prepaint(window, cx);
         }
         result
     }
@@ -430,6 +440,7 @@ mod tests {
             id: id(name),
             parent: parent.map(id),
             bounds: Bounds::new(point(px(0.), px(y)), size(px(100.), px(height))),
+            line_height: px(20.),
             handle: Handle::Scroll(ScrollHandle::new()),
             hitbox: None,
         }
@@ -657,6 +668,17 @@ mod tests {
                     cx,
                 );
             }
+        });
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(50.)),
+            delta: ScrollDelta::Lines(point(0., -3.)),
+            ..Default::default()
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(150));
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            let _ = window.draw(cx);
         });
         assert_eq!(
             view.read_with(cx, |view, _| view.0.offset()),
