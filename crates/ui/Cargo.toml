@@ -131,7 +131,7 @@ optional = true
 [target.'cfg(target_os = "windows")'.dependencies]
 tempfile = { version = "3", optional = true }
 # Pinned to the version lb-wry resolves, so both drive the same WebView2 objects.
-webview2-com = { version = "0.38.2", optional = true }
+webview2-com = { version = "0.39.1", optional = true }
 windows-core = { version = "0.61", optional = true }
 
 [dev-dependencies]
