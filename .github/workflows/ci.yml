@@ -285,7 +285,7 @@ jobs:
 
       - name: Set up Android SDK
         if: needs.plan.outputs.android == 'true'
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android NDK and cargo-ndk
         if: needs.plan.outputs.android == 'true'
