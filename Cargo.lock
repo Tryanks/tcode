@@ -8897,7 +8897,7 @@ dependencies = [
  "futures-lite",
  "futures-rustls",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "if-addrs 0.13.4",
  "libc",
  "log",
