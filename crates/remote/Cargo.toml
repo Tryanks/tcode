@@ -25,7 +25,7 @@ async-tungstenite = { version = "0.30", default-features = false, features = ["h
 base64 = { version = "0.23", optional = true }
 futures-lite = "2"
 futures-util = { version = "0.3", features = ["sink", "io"] }
-getrandom = { version = "0.3", optional = true }
+getrandom = { version = "0.4", optional = true }
 if-addrs = { version = "0.13", optional = true }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
