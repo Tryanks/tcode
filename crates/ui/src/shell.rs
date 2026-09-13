@@ -3220,6 +3220,7 @@ mod tests {
                 id: format!("project-{index}"),
                 name: format!("Project {index}"),
                 root: root.join(format!("project-{index}")),
+                icon_path: None,
                 created_at: index as u64,
             })
             .collect();
