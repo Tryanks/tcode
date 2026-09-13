@@ -495,7 +495,7 @@ mod tests {
         draw(cx);
         let path = cx.debug_bounds("icon-path").unwrap();
         cx.simulate_click(path.center(), gpui::Modifiers::default());
-        cx.simulate_keystrokes("ctrl-a");
+        cx.dispatch_action(crate::widgets::input::SelectAll);
         cx.simulate_input(folder.to_str().unwrap());
         cx.simulate_keystrokes("enter");
         draw(cx);
