@@ -176,30 +176,28 @@ impl AppState {
             Command::RunGitAction { .. } if self.git_busy.contains(session_id) => {
                 return Err(error("git_busy", "A Git operation is already running."));
             }
-            Command::RespondApproval { request_id, .. } => {
+            Command::RespondApproval { request_id, .. }
                 if !self
                     .approval_requests(session_id)
                     .iter()
-                    .any(|request| &request.id == request_id)
-                {
-                    return Err(error(
-                        "unknown_approval",
-                        "This approval is no longer pending.",
-                    ));
-                }
+                    .any(|request| &request.id == request_id) =>
+            {
+                return Err(error(
+                    "unknown_approval",
+                    "This approval is no longer pending.",
+                ));
             }
-            Command::RespondUserInput { request_id, .. } => {
-                if !active
+            Command::RespondUserInput { request_id, .. }
+                if active
                     .timeline
                     .pending_user_input
                     .as_ref()
-                    .is_some_and(|request| &request.0 == request_id)
-                {
-                    return Err(error(
-                        "unknown_user_input",
-                        "This question is no longer pending.",
-                    ));
-                }
+                    .is_none_or(|request| &request.0 != request_id) =>
+            {
+                return Err(error(
+                    "unknown_user_input",
+                    "This question is no longer pending.",
+                ));
             }
             Command::SteerQueued { id, .. } | Command::DropQueued { id, .. }
                 if !active.queue.iter().any(|message| message.id == *id)
