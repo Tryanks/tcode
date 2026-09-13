@@ -3134,6 +3134,15 @@ impl SessionsSidebar {
         let state = &cached.state;
         let working = cached.working;
         let project_name = cached.project_name.clone();
+        let project = if project_name.is_some() {
+            self.store
+                .read(cx)
+                .projects()
+                .into_iter()
+                .find(|project| Some(&project.id) == meta.project_id.as_ref())
+        } else {
+            None
+        };
         let session_id = state.session_id.clone();
         let status = compact_status_line(state, working, cx);
         let click_id = session_id.clone();
@@ -3174,7 +3183,7 @@ impl SessionsSidebar {
                 this.window_state
                     .update(cx, |state, cx| state.open_thread(cx));
             }))
-            .child(compact_status_glyph(state, working, cx))
+            .child(compact_status_glyph(state, working, project.as_ref(), cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -3283,8 +3292,13 @@ impl SessionsSidebar {
 }
 
 /// The 20×20 status slot at the head of a compact row. The slot is
-/// always taken so titles line up whether or not a thread has a status.
-fn compact_status_glyph(state: &ThreadRowState, working: bool, cx: &App) -> gpui::AnyElement {
+/// always taken so titles line up. Idle ungrouped rows show their project artwork.
+fn compact_status_glyph(
+    state: &ThreadRowState,
+    working: bool,
+    project: Option<&tcode_core::project::Project>,
+    cx: &App,
+) -> gpui::AnyElement {
     let slot = div().flex_none().size(px(20.)).flex().items_center();
     if state.waiting_for_approval {
         return slot
@@ -3326,7 +3340,12 @@ fn compact_status_glyph(state: &ThreadRowState, working: bool, cx: &App) -> gpui
             .child(div().size(px(8.)).rounded_full().bg(cx.theme().primary))
             .into_any_element();
     }
-    slot.into_any_element()
+    slot.justify_center()
+        .text_color(cx.theme().muted_foreground)
+        .when_some(project, |slot, project| {
+            slot.child(crate::project_icon::artwork(project, 20.))
+        })
+        .into_any_element()
 }
 
 /// Status label and color, or `None` for an idle thread that shows only its time.

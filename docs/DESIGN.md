@@ -606,6 +606,10 @@ wide and compact group headers, wide flat-row metadata, the start hub, and
 project actions in the command palette. Missing or invalid artwork falls back
 to the folder glyph without changing row geometry.
 
+Compact ungrouped rows show a 20px project icon in the leading slot beside the
+title. Approval, input, working, and unread indicators take precedence in that
+slot. The project name stays in the metadata line without a second icon.
+
 **Change project icon** in a wide project context menu, or **Change icon for
 ‹project›** in the command palette at either width, opens the same in-app picker.
 It browses folders on the attached host, identifies that machine, and shows only
@@ -623,7 +627,7 @@ managed image after persisting the new project state.
 
 The 128px image remains the preview/source. Project glyphs use separately cached
 Lanczos3 rasters at their displayed physical pixel size: a 16px glyph uses 16px
-at 1×, 32px at 2×; compact 14px and metadata 12px glyphs follow the same rule.
+at 1×, 32px at 2×; compact 14px/20px and metadata 12px glyphs follow the same rule.
 Both the initial 128px thumbnail and the small rasters use Lanczos3 with
 premultiplied alpha to avoid dark fringes around transparent edges, preserving
 aspect ratio. Moving between display scales selects the
