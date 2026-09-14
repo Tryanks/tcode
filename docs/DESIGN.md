@@ -197,7 +197,9 @@ Ctrl+1 through Ctrl+9 open the corresponding thread in the current thread-list
 order. Ctrl+Tab opens the next thread and Ctrl+Shift+Tab opens the previous one,
 wrapping at either end. Navigation follows the current layout, sort, project
 filter and expanded groups, including rows outside the scroll viewport but
-excluding folded-away threads. A number beyond the list length does nothing;
+excluding folded-away threads. Rendering and shortcuts use the same included
+thread rows; group headings and disclosure controls do not consume shortcut
+positions. A number beyond the list length does nothing;
 with no listed thread selected, next starts at the first and previous at the
 last. These use Control on every platform. While the model picker is open,
 number shortcuts remain with the picker.
