@@ -39,7 +39,7 @@ uuid = { version = "1", features = ["v4", "serde"], optional = true }
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-mdns-sd = "0.20"
+mdns-sd = "0.21"
 webpki-roots = "1"
 url = "2"
 
