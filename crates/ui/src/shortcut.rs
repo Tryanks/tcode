@@ -13,7 +13,7 @@ pub(crate) enum NavigateThread {
 pub(crate) fn init(cx: &mut App) {
     cx.on_action(crate::shell::navigate_thread);
     for number in 1..=9 {
-        let key = format!("ctrl-{number}");
+        let key = format!("secondary-{number}");
         cx.bind_keys([
             KeyBinding::new(&key, NavigateThread::Index(number - 1), None),
             KeyBinding::new(&key, NoAction, Some("ModelPicker || ModelPicker > Input")),

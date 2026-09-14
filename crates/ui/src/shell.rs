@@ -3693,10 +3693,15 @@ mod tests {
         resize(cx, 1200.);
         draw(cx);
 
+        let [first_key, second_key, out_of_range_key] = if cfg!(target_os = "macos") {
+            ["cmd-1", "cmd-2", "cmd-9"]
+        } else {
+            ["ctrl-1", "ctrl-2", "ctrl-9"]
+        };
         let picker = cx.debug_bounds("model-picker").expect("model picker");
         cx.simulate_click(picker.center(), gpui::Modifiers::default());
         draw(cx);
-        cx.simulate_keystrokes("ctrl-2");
+        cx.simulate_keystrokes(second_key);
         draw(cx);
         assert_eq!(
             store
@@ -3709,12 +3714,12 @@ mod tests {
         draw(cx);
 
         for (keys, expected) in [
-            ("ctrl-2", "second"),
+            (second_key, "second"),
             ("ctrl-tab", "third"),
             ("ctrl-tab", "first"),
             ("ctrl-shift-tab", "third"),
-            ("ctrl-9", "third"),
-            ("ctrl-1", "first"),
+            (out_of_range_key, "third"),
+            (first_key, "first"),
         ] {
             cx.simulate_keystrokes(keys);
             await_restore_update(&shell, cx, |store| !store.chat_loading());
@@ -3733,7 +3738,7 @@ mod tests {
         );
         cx.update(|window, cx| window.blur(cx));
         draw(cx);
-        cx.simulate_keystrokes("ctrl-2");
+        cx.simulate_keystrokes(second_key);
         assert_eq!(
             store
                 .read_with(cx, |store, _| store.active_session_id())
@@ -3743,7 +3748,7 @@ mod tests {
         );
         shell.update(cx, |shell, cx| shell.go(Destination::Settings, cx));
         draw(cx);
-        cx.simulate_keystrokes("ctrl-1");
+        cx.simulate_keystrokes(first_key);
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.destination(cx)),
             Destination::Thread
