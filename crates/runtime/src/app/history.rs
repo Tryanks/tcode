@@ -75,6 +75,7 @@ impl AppState {
         };
         let records = self.history_records(session_id);
         let total = records.len();
+        eprintln!("TRACE host SNAP after={:?} total={} cached={} resident={}", subscription.after, total, self.event_records.contains_key(session_id), self.resident(session_id).is_some());
         let total_turns = self.resident(session_id).map_or_else(
             || Timeline::fold_events(records.iter().cloned()).turns.len(),
             |session| session.timeline.turns.len(),

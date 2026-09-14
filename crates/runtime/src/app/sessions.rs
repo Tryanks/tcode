@@ -1432,6 +1432,7 @@ impl AppState {
                         "timeline load for {session_id} remained racy after {attempt} attempts; applying the last fold"
                     );
                 }
+                eprintln!("TRACE host LOAD attempt={attempt} watermark={watermark} gen={} turns={} entries={}", state.store_append_generation, timeline.turns.len(), timeline.entries.len());
                 if let Some(session) = state.resident_mut(&session_id) {
                     session.timeline = timeline;
                     if let Some(git_branch) = git_branch {
