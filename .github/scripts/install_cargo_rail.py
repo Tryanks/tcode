@@ -11,6 +11,8 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -33,6 +35,21 @@ ARCHIVES = {
 }
 
 
+def download(url: str, destination: Path) -> None:
+    """GitHub's release CDN intermittently answers 5xx; one bad response
+    should not fail a whole CI job."""
+    for attempt in range(1, 5):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as output:
+                shutil.copyfileobj(response, output)
+            return
+        except (urllib.error.URLError, TimeoutError) as error:
+            if attempt == 4:
+                raise
+            print(f"download attempt {attempt} failed: {error}; retrying", file=sys.stderr)
+            time.sleep(5 * attempt)
+
+
 def main() -> int:
     target = ARCHIVES.get((platform.system(), platform.machine()))
     if target is None:
@@ -43,8 +60,7 @@ def main() -> int:
     install_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=install_root) as temporary:
         archive = Path(temporary) / archive_name
-        with urllib.request.urlopen(f"{RELEASE}/{archive_name}") as response, archive.open("wb") as output:
-            shutil.copyfileobj(response, output)
+        download(f"{RELEASE}/{archive_name}", archive)
         actual = hashlib.sha256(archive.read_bytes()).hexdigest()
         if actual != expected:
             print(f"Cargo-Rail checksum mismatch: expected {expected}, got {actual}", file=sys.stderr)
