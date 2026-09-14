@@ -383,9 +383,6 @@ pub struct AppState {
     /// Monotonic token so a stale background status refresh (from a session the
     /// user has since switched away from) is ignored.
     git_status_generation: HashMap<String, u64>,
-    /// Monotonic watermark for JSONL appends. Timeline loads retry when this
-    /// changes while their background read is in flight.
-    store_append_generation: u64,
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
     subscriptions: HashSet<Topic>,
@@ -510,7 +507,6 @@ impl AppState {
             git_busy: HashSet::new(),
             next_operation_id: 1,
             git_status_generation: HashMap::new(),
-            store_append_generation: 0,
             timeline_load_generations: HashMap::new(),
             subscriptions: HashSet::new(),
             event_records: HashMap::new(),

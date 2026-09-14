@@ -5595,7 +5595,7 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
 }
 
 #[test]
-fn timeline_load_retries_when_append_watermark_moves() {
+fn timeline_load_keeps_records_appended_during_the_fold() {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-timeline-watermark-test");
     let store = (*test_store).clone();

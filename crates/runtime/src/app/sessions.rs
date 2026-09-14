@@ -1356,25 +1356,6 @@ impl AppState {
             *generation += 1;
             *generation
         };
-        self.spawn_timeline_load_attempt(
-            session_id,
-            target,
-            generation,
-            self.store_append_generation,
-            1,
-            cx,
-        );
-    }
-
-    pub(super) fn spawn_timeline_load_attempt(
-        &mut self,
-        session_id: String,
-        target: TimelineLoadTarget,
-        generation: u64,
-        watermark: u64,
-        attempt: u8,
-        cx: &mut HostCx,
-    ) {
         let intended = match target {
             TimelineLoadTarget::Active { .. } => self.resident(&session_id),
             TimelineLoadTarget::Background => self.residents.parked.get(&session_id),
@@ -1382,13 +1363,17 @@ impl AppState {
         let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
             return;
         };
+        // Once a session has appended in this process, its in-memory records
+        // are the whole log; the JSONL can still be behind the store writer.
+        let cached = self.event_records.get(&session_id).cloned();
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let read_id = session_id.clone();
-            let (timeline, git_branch) = {
-                let stored = store.read_events(&read_id);
-                let mut timeline = Timeline::fold_events(stored.iter().cloned());
+            let (timeline, folded, git_branch) = {
+                let stored = cached.unwrap_or_else(|| store.read_events(&read_id));
+                let folded = stored.len();
+                let mut timeline = Timeline::fold_events(stored);
                 let (mark_idle, load_branch) = match target {
                     TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
                     TimelineLoadTarget::Background => (true, false),
@@ -1397,14 +1382,11 @@ impl AppState {
                     timeline.mark_idle();
                 }
                 let git_branch = load_branch.then(|| read_git_branch(&cwd));
-                (timeline, git_branch)
+                (timeline, folded, git_branch)
             };
-            host_cx.enqueue(move |state, cx| {
-                let generation_matches = state
-                    .timeline_load_generations
-                    .get(&session_id)
-                    .copied()
-                    == Some(generation);
+            host_cx.enqueue(move |state, _cx| {
+                let generation_matches =
+                    state.timeline_load_generations.get(&session_id).copied() == Some(generation);
                 let target_matches = match target {
                     TimelineLoadTarget::Active { .. } => {
                         state.residents.live.contains_key(&session_id)
@@ -1416,21 +1398,12 @@ impl AppState {
                 if !generation_matches || !target_matches {
                     return;
                 }
-                if state.store_append_generation != watermark && attempt < 4 {
-                    state.spawn_timeline_load_attempt(
-                        session_id,
-                        target,
-                        generation,
-                        state.store_append_generation,
-                        attempt + 1,
-                        cx,
-                    );
-                    return;
-                }
-                if state.store_append_generation != watermark {
-                    log::warn!(
-                        "timeline load for {session_id} remained racy after {attempt} attempts; applying the last fold"
-                    );
+                let mut timeline = timeline;
+                // Records appended while the fold ran continue the same log.
+                if let Some(records) = state.event_records.get(&session_id) {
+                    for record in records.iter().skip(folded) {
+                        timeline.apply_at(record.ts, &record.event);
+                    }
                 }
                 if let Some(session) = state.resident_mut(&session_id) {
                     session.timeline = timeline;
