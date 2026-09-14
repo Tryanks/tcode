@@ -3914,18 +3914,24 @@ mod tests {
                 timeline.turns.len(),
             )
         });
-        // Wait for the replica to catch up to the live timeline's shape before
-        // comparing contents; turn count alone flips at TurnStarted, while later
-        // events may still be queued.
+        // Both timelines can have the same entry and turn counts before the
+        // new events arrive. Wait for the final event before comparing contents.
         wait_until(
             cx,
             &workspace,
             "incremental session timeline replica",
             |cx| {
                 workspace.read_with(cx, |store, _| {
-                    store.session_replica.as_ref().is_some_and(|(_, timeline)| {
-                        timeline.turns.len() == live.1 && timeline.entries.len() == live.0.len()
-                    })
+                    store
+                        .session_records
+                        .get(&session_id)
+                        .and_then(|records| records.last())
+                        .is_some_and(|record| {
+                            matches!(
+                                &record.event,
+                                AgentEvent::TurnCompleted { turn_id, .. } if turn_id == "turn-2"
+                            )
+                        })
                 })
             },
         );
