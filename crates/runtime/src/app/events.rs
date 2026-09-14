@@ -481,7 +481,6 @@ impl AppState {
     }
 
     fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
-        self.store_append_generation += 1;
         self.event_records
             .entry(session_id.to_string())
             .or_insert_with(|| self.store.read_events(session_id))
