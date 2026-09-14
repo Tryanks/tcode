@@ -126,9 +126,9 @@ impl SelectionDrag {
         left_pressed: bool,
     ) -> SelectionDragAction {
         if !left_pressed
-            || !self
+            || self
                 .mouse_down
-                .is_some_and(|(mouse_id, _)| mouse_id == terminal_id)
+                .is_none_or(|(mouse_id, _)| mouse_id != terminal_id)
         {
             return SelectionDragAction::None;
         }
