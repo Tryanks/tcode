@@ -959,10 +959,10 @@ impl WorkspaceStore {
                     );
                 }
             }
-            (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error)) => {
-                if self.selected_session_id.as_ref() == Some(session_id) {
-                    self.history_error = Some(history::history_error_message(error.clone()));
-                }
+            (Topic::SessionEvents { session_id }, ServerEvent::SessionHistoryError(error))
+                if self.selected_session_id.as_ref() == Some(session_id) =>
+            {
+                self.history_error = Some(history::history_error_message(error.clone()));
             }
             (
                 Topic::SessionEvents { session_id },
