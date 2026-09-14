@@ -482,7 +482,11 @@ impl AppState {
 
     fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
         self.store_append_generation += 1;
-        eprintln!("TRACE host REC resident={} cached={:?}", self.resident(session_id).is_some(), self.event_records.get(session_id).map(|r| r.len()));
+        eprintln!(
+            "TRACE host REC resident={} cached={:?}",
+            self.resident(session_id).is_some(),
+            self.event_records.get(session_id).map(|r| r.len())
+        );
         self.event_records
             .entry(session_id.to_string())
             .or_insert_with(|| self.store.read_events(session_id))

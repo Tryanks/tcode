@@ -289,7 +289,11 @@ impl SessionStore {
     pub fn read_events(&self, id: &str) -> Vec<StoredEvent> {
         let path = self.events_path(id);
         let Ok(file) = File::open(&path) else {
-            eprintln!("TRACE read_events open failed for {} exists={}", path.display(), path.exists());
+            eprintln!(
+                "TRACE read_events open failed for {} exists={}",
+                path.display(),
+                path.exists()
+            );
             return Vec::new();
         };
         let mut events = Vec::new();

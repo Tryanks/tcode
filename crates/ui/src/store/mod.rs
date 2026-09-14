@@ -977,14 +977,26 @@ impl WorkspaceStore {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
-                eprintln!("TRACE store SNAP req={:?} from={} n={} total={} start={:?} held={} replica={}", envelope.request_id, from, records.len(), total, self.session_from.get(session_id), self.session_records.get(session_id).map_or(0, |r| r.len()), self.session_replica.is_some());
+                eprintln!(
+                    "TRACE store SNAP req={:?} from={} n={} total={} start={:?} held={} replica={}",
+                    envelope.request_id,
+                    from,
+                    records.len(),
+                    total,
+                    self.session_from.get(session_id),
+                    self.session_records.get(session_id).map_or(0, |r| r.len()),
+                    self.session_replica.is_some()
+                );
                 let held = self.session_records.entry(session_id.clone()).or_default();
                 let start = self.session_from.entry(session_id.clone()).or_insert(*from);
                 if *from == 0 {
                     held.clear();
                     *start = 0;
                 } else if *from != *start + held.len() as u64 {
-                    eprintln!("TRACE store MISMATCH from={from} start={start} held={}", held.len());
+                    eprintln!(
+                        "TRACE store MISMATCH from={from} start={start} held={}",
+                        held.len()
+                    );
                     held.clear();
                     self.session_from.remove(session_id);
                     self.session_replica = None;
@@ -1027,7 +1039,13 @@ impl WorkspaceStore {
                 if self.selected_session_id.as_ref() != Some(session_id) {
                     return;
                 }
-                eprintln!("TRACE store SE catching={} start={:?} held={} ev={:?}", self.session_catching_up, self.session_from.get(session_id), self.session_records.get(session_id).map_or(0, |r| r.len()), std::mem::discriminant(&record.event));
+                eprintln!(
+                    "TRACE store SE catching={} start={:?} held={} ev={:?}",
+                    self.session_catching_up,
+                    self.session_from.get(session_id),
+                    self.session_records.get(session_id).map_or(0, |r| r.len()),
+                    std::mem::discriminant(&record.event)
+                );
                 if self.session_catching_up || !self.session_from.contains_key(session_id) {
                     return;
                 }
