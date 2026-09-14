@@ -179,6 +179,23 @@ where
                     },
                     copy(socket.clone(), &mut writer, &activity),
                 )
+                .await?;
+                // Finish with FIN, not RST: dropping the socket while pipelined
+                // bytes sit unread resets the connection, and Windows discards
+                // the already-sent response on reset. Discard what the client
+                // sent until it closes.
+                writer.close().await?;
+                futures_lite::future::race(
+                    async {
+                        let mut sink = [0; 1024];
+                        while reader.read(&mut sink).await? != 0 {}
+                        Ok(())
+                    },
+                    async {
+                        smol::Timer::after(Duration::from_secs(1)).await;
+                        Ok(())
+                    },
+                )
                 .await
             }
         },

@@ -262,6 +262,8 @@ fn pipelined_request_and_chunk_trailers_never_reach_origin() {
         let mut socket = machine.socket();
         socket.write_all(format!("POST http://localhost:{port}/ HTTP/1.1\r\n{framing}\r\n{}\r\n{body}GET http://evil/ HTTP/1.1\r\n{}\r\n", machine.auth, machine.auth).as_bytes()).unwrap();
         assert!(head(&mut socket).starts_with("HTTP/1.1 200 OK"));
+        // A reset instead of an orderly close discards the response on Windows.
+        assert!(socket.read_to_end(&mut Vec::new()).is_ok());
         origin.join().unwrap();
     }
 }
