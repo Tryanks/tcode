@@ -142,6 +142,14 @@ pub(crate) fn finish_activity() {
     with_activity("gpuiFinish", "()V", Vec::new());
 }
 
+pub(crate) fn open_url(url: &str) {
+    with_activity(
+        "gpuiOpenUrl",
+        "(Ljava/lang/String;)V",
+        vec![OwnedArgument::Text(Some(url.to_owned()))],
+    );
+}
+
 pub(crate) fn read_clipboard() -> Option<String> {
     let app = APP.lock().clone()?;
     // SAFETY: Android owns this VM for the duration of the process.

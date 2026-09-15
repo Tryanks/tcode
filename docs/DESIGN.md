@@ -66,6 +66,9 @@ pages. Downloads, file uploads and new-window popups have no Android preview
 integration yet. Native child overlays can cover overlapping GPUI popovers;
 the command palette and navigation away hide the child explicitly.
 
+On Android, external HTTP(S) links open in the device's browser or associated
+app through the system URL handler.
+
 ## Design tokens
 
 The embedded [theme](../themes/tcode.json) owns colors and font choices;
