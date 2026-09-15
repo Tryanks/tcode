@@ -96,6 +96,13 @@ impl Theme {
         }
     }
 
+    /// The composer's fast-mode bolt when fast mode is on. Deliberately not a
+    /// theme token: one electric amber that reads on both light and dark
+    /// surfaces, so the state is recognisable regardless of the active theme.
+    pub(crate) fn fast_mode_accent(&self) -> Hsla {
+        gpui::rgb(0xF5A524).into()
+    }
+
     pub fn theme_name(&self) -> &SharedString {
         &self.theme_name
     }

@@ -331,7 +331,7 @@ pub fn segment(
 /// up to a 33pt glyph. The desktop keeps its dense control.
 pub fn toolbar_icon_button(
     id: impl Into<ElementId>,
-    icon: crate::icon::IconName,
+    icon: impl Into<crate::icon::Icon>,
     tooltip: impl Into<SharedString>,
     compact: bool,
 ) -> Button {

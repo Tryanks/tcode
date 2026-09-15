@@ -618,6 +618,8 @@ composer:
   off: "Off"
   trait_fast: "Fast"
   trait_normal: "Normal"
+  fast_mode: "Fast mode"
+  fast_mode_unsupported: "Current model cannot enable fast mode"
   option_default: " (default)"
   context_window_custom: "Custom"
   context_window_custom_placeholder: "e.g. 500k (100k–1M)"

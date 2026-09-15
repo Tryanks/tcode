@@ -612,6 +612,8 @@ composer:
   off: "关"
   trait_fast: "快速"
   trait_normal: "常规"
+  fast_mode: "快速模式"
+  fast_mode_unsupported: "当前模型无法启用快速模式"
   option_default: "（默认）"
   context_window_custom: "自定义"
   context_window_custom_placeholder: "例如 500k（100k–1M）"

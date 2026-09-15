@@ -15,7 +15,8 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
-use agent::{OptionDescriptor, ProviderKind};
+use agent::ProviderKind;
+use tcode_core::provider_models::FastMode;
 use tcode_core::settings::orchestrate_efforts;
 
 use crate::provider_card::provider_glyph;
@@ -240,10 +241,13 @@ impl OrchestrateSettingsPanel {
         self.update_profile(index, move |entry| entry.fast = fast, cx);
     }
 
-    /// Whether the provider catalog declares a fast mode for a model: Claude's
-    /// `fastMode` boolean or a Codex `serviceTier` selector offering `fast`.
+    /// Whether the provider catalog declares a [`FastMode`] for a model.
     fn child_fast_supported(&self, provider: ProviderKind, model: &str, cx: &App) -> bool {
-        model_fast_supported(&self.store.read(cx).provider_model_catalog(provider), model)
+        self.store
+            .read(cx)
+            .provider_model_catalog(provider)
+            .iter()
+            .any(|spec| spec.id == model && FastMode::of(spec).is_some())
     }
 
     fn add_child(&mut self, option: &ModelOption, decision: bool, cx: &mut Context<Self>) {
@@ -954,23 +958,6 @@ impl OrchestrateSettingsPanel {
     }
 }
 
-fn model_fast_supported(catalog: &[agent::ModelSpec], model: &str) -> bool {
-    catalog
-        .iter()
-        .find(|spec| spec.id == model)
-        .into_iter()
-        .flat_map(|spec| &spec.options)
-        .any(|option| match option {
-            OptionDescriptor::Boolean { id, .. } => id == "fastMode",
-            OptionDescriptor::Select { id, options, .. } => {
-                id == "serviceTier"
-                    && options.iter().any(|choice| {
-                        choice.value == "fast" || choice.label.eq_ignore_ascii_case("fast")
-                    })
-            }
-        })
-}
-
 /// The bundled description for this model and role, independent of endpoint.
 fn builtin_child_target(
     rows: &[OrchestrateChildModel],
@@ -1014,28 +1001,6 @@ impl Render for OrchestrateSettingsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent::SelectOption;
-
-    #[test]
-    fn codex_fast_support_accepts_the_model_list_priority_tier() {
-        let catalog = vec![agent::ModelSpec {
-            id: "gpt-6-astra".into(),
-            display_name: "GPT-6 Astra".into(),
-            is_default: true,
-            options: vec![OptionDescriptor::Select {
-                id: "serviceTier".into(),
-                label: "Service Tier".into(),
-                options: vec![SelectOption {
-                    value: "priority".into(),
-                    label: "Fast".into(),
-                    description: None,
-                }],
-                default_value: Some("default".into()),
-            }],
-        }];
-
-        assert!(model_fast_supported(&catalog, "gpt-6-astra"));
-    }
 
     #[test]
     fn bundled_astra_restore_target_is_role_aware() {

@@ -791,6 +791,21 @@ Build/Plan toggle and a trailing context ring. These controls keep 44pt touch
 targets; access and context open their details sheets. The model name may
 truncate when space is tight, while the effort value stays fully visible.
 The card and drawer fit at 360pt in English and Simplified Chinese.
+
+The traits popover (the effort chip's details) lists each model parameter as a
+section of selectable rows, except fast mode, which a lightning-bolt button
+pinned to the pane's top-right corner owns alone: filled amber
+(`Theme::fast_mode_accent`) when fast mode is on, a muted outline when off, and
+a dimmed, inert outline when the model declares no fast mode. Click toggles in
+place and the pane stays open; the chip label still reports Fast/Normal (Claude)
+or the service tier (Codex). On desktop, hovering the inert bolt explains
+that the current model cannot enable fast mode; compact clients show the same
+44pt button without a tooltip and tapping it does nothing. Whether a model has
+fast mode, and which option value switches it, is decided once by
+[`FastMode`](../crates/core/src/provider_models.rs) for the bolt and the
+Orchestrate Fast switch alike. Claude's Fast Mode rows are not listed; a Codex
+Service Tier section appears only when tiers other than Standard and Fast
+exist, and then without the Fast row.
 The context details distinguish the latest main-conversation request from
 processed traffic. Claude occupancy is the latest input plus cache-read and
 cache-creation tokens; generated output and repeated requests do not inflate it.
