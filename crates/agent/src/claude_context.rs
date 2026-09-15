@@ -28,15 +28,6 @@ pub fn parse_context_window_tokens(value: &Value) -> Option<u64> {
     (100_000..=1_000_000).contains(&tokens).then_some(tokens)
 }
 
-/// Return the model's native context-window size in tokens.
-pub fn native_context_window(model_id: &str) -> u64 {
-    match model_id.strip_suffix("[1m]").unwrap_or(model_id) {
-        "claude-fable-5" | "claude-fable-5-1" | "claude-opus-5" | "claude-sonnet-5"
-        | "claude-opus-4-7" | "claude-opus-4-8" => 1_000_000,
-        _ => 200_000,
-    }
-}
-
 /// Format a context-window token count for display.
 pub fn format_context_window(tokens: u64) -> String {
     if tokens == 1_000_000 {
@@ -46,11 +37,8 @@ pub fn format_context_window(tokens: u64) -> String {
     }
 }
 
-/// Resolve the selected context window, falling back to the model's native size.
+/// Resolve the selected context window, falling back to the model's default
+/// window in the current Claude model manifest.
 pub fn resolved_context_window(model_id: &str, selections: &[OptionSelection]) -> u64 {
-    selections
-        .iter()
-        .find(|selection| selection.id == "contextWindow")
-        .and_then(|selection| parse_context_window_tokens(&selection.value))
-        .unwrap_or_else(|| native_context_window(model_id))
+    crate::claude_manifest::current().resolved_context_window(model_id, selections)
 }

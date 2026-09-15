@@ -13,6 +13,7 @@ mod actor;
 #[cfg(feature = "process")]
 pub mod claude;
 mod claude_context;
+mod claude_manifest;
 #[cfg(not(feature = "process"))]
 pub mod claude {
     pub use crate::claude_context::*;
@@ -690,6 +691,17 @@ pub struct TurnOptions {
     pub interaction_mode: Option<InteractionMode>,
 }
 
+/// Where a static model catalog may refresh its data from. Claude's catalog is
+/// the t3code model manifest (see `claude_manifest`); the other providers
+/// discover their models from the CLI and ignore this.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogRefresh {
+    /// Directory holding the last good remote manifest (the tcode data dir).
+    pub cache_dir: Option<PathBuf>,
+    /// Whether a network fetch is allowed (the provider update-check setting).
+    pub network: bool,
+}
+
 /// List the provider's models (spawn, query, teardown). `launch_env` carries the
 /// provider's configured environment/home so the catalog reflects the same CLI
 /// (and account) a session would actually run against.
@@ -698,10 +710,11 @@ pub async fn list_models(
     provider: ProviderKind,
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    refresh: CatalogRefresh,
 ) -> Result<Vec<ModelSpec>, AgentError> {
     match provider {
         ProviderKind::Codex => codex::list_models(binary_path, launch_env).await,
-        ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env).await,
+        ProviderKind::ClaudeCode => claude::list_models(binary_path, launch_env, refresh).await,
         ProviderKind::Pi => pi::list_models(binary_path, launch_env).await,
         ProviderKind::OpenCode => opencode::list_models(binary_path, launch_env).await,
         // ACP agents advertise their models over the wire at session start
@@ -1930,4 +1943,20 @@ mod usage_compatibility_tests {
         assert_eq!(wire["type"], "context_compacted");
         assert_eq!(wire["pre_tokens"], 500);
     }
+}
+
+/// Parse a `MAJOR.MINOR.PATCH` triple from `--version` output such as
+/// `"2.1.206 (Claude Code)"` or a bare manifest version string.
+pub(crate) fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
+    let token = text.split_whitespace().find(|token| token.contains('.'))?;
+    let mut parts = token.trim_start_matches('v').split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts
+            .next()
+            .and_then(|part| part.split(['-', '+']).next())?
+            .parse()
+            .ok()?,
+    ))
 }

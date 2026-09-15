@@ -92,7 +92,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("--list-models") {
         let provider = parse_provider(args.get(1).map(String::as_str));
         let exit_code = smol::block_on(async move {
-            match list_models(provider, None, Default::default()).await {
+            match list_models(provider, None, Default::default(), Default::default()).await {
                 Ok(models) => {
                     println!("{}", serde_json::to_string_pretty(&models).unwrap());
                     0

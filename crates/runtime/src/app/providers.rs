@@ -124,6 +124,12 @@ impl AppState {
             let settings_store = self.settings_store.clone();
             self.providers.models_loading.insert(provider, true);
             let store = self.store.clone();
+            // Claude's manifest cache lives next to the persisted catalogs and
+            // phones home only under the same switch as CLI update checks.
+            let refresh = CatalogRefresh {
+                cache_dir: Some(store.root().clone()),
+                network: self.provider_update_checks_enabled(),
+            };
             let host_cx = cx.clone();
             HostCx::spawn_detached(cx, async move {
                 let profile_id = Settings::builtin_profile_id(provider).to_string();
@@ -133,7 +139,7 @@ impl AppState {
                         launch_env_for_profile(&settings, &profile_id, secrets)
                     })
                     .await;
-                let result = list_models(provider, binary, launch_env).await;
+                let result = list_models(provider, binary, launch_env, refresh).await;
                 host_cx.enqueue(move |state, _cx| {
                     state.providers.models_loading.insert(provider, false);
                     match result {

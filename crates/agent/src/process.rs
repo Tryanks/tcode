@@ -52,21 +52,7 @@ pub(crate) async fn probe_version(
         command.env(key, value);
     }
     let output = command.output().await.ok()?;
-    parse_semver(&String::from_utf8_lossy(&output.stdout))
-}
-
-pub(crate) fn parse_semver(text: &str) -> Option<(u32, u32, u32)> {
-    let token = text.split_whitespace().find(|token| token.contains('.'))?;
-    let mut parts = token.trim_start_matches('v').split('.');
-    Some((
-        parts.next()?.parse().ok()?,
-        parts.next()?.parse().ok()?,
-        parts
-            .next()
-            .and_then(|part| part.split(['-', '+']).next())?
-            .parse()
-            .ok()?,
-    ))
+    crate::parse_semver(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub(crate) enum ChildOutput {
