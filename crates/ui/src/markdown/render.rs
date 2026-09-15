@@ -120,6 +120,7 @@ struct RenderOptions {
     path: String,
     in_list: bool,
     ordered: bool,
+    list_start: u32,
     depth: usize,
     is_last: bool,
 }
@@ -130,6 +131,7 @@ impl Default for RenderOptions {
             path: "root".to_string(),
             in_list: false,
             ordered: false,
+            list_start: 1,
             depth: 0,
             is_last: true,
         }
@@ -427,7 +429,9 @@ fn render_block(
                 .into_any_element()
         }
         BlockNode::List {
-            children, ordered, ..
+            children,
+            ordered,
+            start,
         } => {
             let len = children.len();
             v_flex()
@@ -440,6 +444,7 @@ fn render_block(
                         ix,
                         RenderOptions {
                             ordered: *ordered,
+                            list_start: *start,
                             is_last: ix + 1 == len,
                             path: format!("{}-{ix}", options.path),
                             ..options.clone()
@@ -765,7 +770,12 @@ fn render_list_item(
                         .min_w_0()
                         .items_start()
                         .when(checked.is_none(), |this| {
-                            this.child(list_item_prefix(item_ix, options.ordered, options.depth))
+                            this.child(list_item_prefix(
+                                item_ix,
+                                options.ordered,
+                                options.list_start,
+                                options.depth,
+                            ))
                         })
                         .when_some(*checked, |this, checked| {
                             this.child(
