@@ -77,6 +77,12 @@ pub(super) fn present_runtime_event(event: &RuntimeEvent) -> PresentedRuntimeEve
                 RuntimeError::PersistSession { error } => {
                     crate::tr!("errors.persist_session", error = error).into_owned()
                 }
+                RuntimeError::TitleGenerationFailed => {
+                    crate::tr!("errors.title_generation_failed").into_owned()
+                }
+                RuntimeError::TitleGenerationEmpty => {
+                    crate::tr!("errors.title_generation_empty").into_owned()
+                }
                 RuntimeError::ProcessGone => crate::tr!("errors.process_gone").into_owned(),
                 RuntimeError::SteerUnsupported { agent } => {
                     crate::tr!("composer.steer_unsupported", agent = agent).into_owned()

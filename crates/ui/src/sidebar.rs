@@ -151,6 +151,7 @@ struct ThreadRowState {
     children_collapsed: bool,
     renaming: Option<Entity<InputState>>,
     menu_can_fork: bool,
+    title_generating: bool,
 }
 
 impl ThreadRowState {
@@ -486,6 +487,9 @@ fn toggle_parent_for_row_click(
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadRename(String);
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_thread, no_json)]
+struct ThreadRegenerateTitle(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_thread, no_json)]
 struct ThreadFork(String);
@@ -1049,6 +1053,17 @@ impl SessionsSidebar {
             _sub: sub,
         });
         cx.notify();
+    }
+
+    fn on_regenerate_title(
+        &mut self,
+        action: &ThreadRegenerateTitle,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.store.update(cx, |store, _| {
+            store.regenerate_session_title(action.0.clone());
+        });
     }
 
     fn on_fork(&mut self, action: &ThreadFork, window: &mut Window, cx: &mut Context<Self>) {
@@ -2069,6 +2084,7 @@ impl SessionsSidebar {
         sessions: &[SessionMeta],
         flags: &HashMap<String, ThreadFlags>,
         row_key: String,
+        cx: &App,
     ) -> ThreadRowState {
         let session_id = meta.id.clone();
         let own_flags = flags.get(&session_id).copied().unwrap_or_default();
@@ -2091,6 +2107,7 @@ impl SessionsSidebar {
             direct_children: render_state.direct_children,
             active_direct_children: render_state.active_direct_children,
             menu_can_fork: meta.provider.caps().supports_fork,
+            title_generating: self.store.read(cx).title_generating(&meta.id),
         }
     }
 
@@ -2167,7 +2184,7 @@ impl SessionsSidebar {
         emphasize_unread: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        if let Some(input) = &state.renaming {
+        let title = if let Some(input) = &state.renaming {
             div()
                 .flex_1()
                 .min_w_0()
@@ -2195,7 +2212,20 @@ impl SessionsSidebar {
                     },
                 )
                 .into_any_element()
-        }
+        };
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(6.))
+            .child(title)
+            .when(state.title_generating, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .child(Spinner::new().xsmall().color(cx.theme().muted_foreground)),
+                )
+            })
+            .into_any_element()
     }
 
     fn thread_status_badge(
@@ -2237,18 +2267,29 @@ impl SessionsSidebar {
 
     fn thread_context_menu(
         row: gpui::Stateful<gpui::Div>,
-        session_id: String,
+        state: &ThreadRowState,
         running: bool,
         settled: bool,
-        can_fork: bool,
-        is_worktree: bool,
         compact: bool,
     ) -> gpui::AnyElement {
+        let session_id = state.session_id.clone();
+        let can_fork = state.menu_can_fork;
+        let is_worktree = state.is_worktree;
+        let title_generating = state.title_generating;
         row.context_menu(move |menu, _window, _cx| {
             let id = session_id.clone();
             menu.menu(
                 crate::tr!("sidebar.ctx_rename").into_owned(),
                 Box::new(ThreadRename(id.clone())),
+            )
+            .menu_with_enable(
+                if title_generating {
+                    crate::tr!("sidebar.ctx_regenerating_title").into_owned()
+                } else {
+                    crate::tr!("sidebar.ctx_regenerate_title").into_owned()
+                },
+                Box::new(ThreadRegenerateTitle(id.clone())),
+                !title_generating,
             )
             .when(can_fork, |menu| {
                 menu.menu(
@@ -2321,7 +2362,7 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
-        let state = self.thread_row_state(meta, sessions, flags, format!("thread-{}", meta.id));
+        let state = self.thread_row_state(meta, sessions, flags, format!("thread-{}", meta.id), cx);
         let session_id = state.session_id.clone();
         let row_key = state.row_key.clone();
         let is_worktree = state.is_worktree;
@@ -2408,15 +2449,7 @@ impl SessionsSidebar {
             })
         };
 
-        Self::thread_context_menu(
-            row,
-            session_id,
-            working,
-            meta.settled_at.is_some(),
-            state.menu_can_fork,
-            is_worktree,
-            false,
-        )
+        Self::thread_context_menu(row, &state, working, meta.settled_at.is_some(), false)
     }
 
     fn render_flat_thread_right_slot(
@@ -2501,8 +2534,13 @@ impl SessionsSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let working = flags.get(&meta.id).is_some_and(|flags| flags.working);
-        let state =
-            self.thread_row_state(meta, sessions, flags, format!("flat-thread-{}", meta.id));
+        let state = self.thread_row_state(
+            meta,
+            sessions,
+            flags,
+            format!("flat-thread-{}", meta.id),
+            cx,
+        );
         let session_id = state.session_id.clone();
         let row_key = state.row_key.clone();
         let waiting_for_approval = state.waiting_for_approval;
@@ -2673,15 +2711,7 @@ impl SessionsSidebar {
             row.child(line_one).child(line_two)
         };
 
-        Self::thread_context_menu(
-            row,
-            session_id,
-            working,
-            meta.settled_at.is_some(),
-            state.menu_can_fork,
-            meta.worktree.is_some(),
-            false,
-        )
+        Self::thread_context_menu(row, &state, working, meta.settled_at.is_some(), false)
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2840,6 +2870,7 @@ impl SessionsSidebar {
                         &sessions,
                         &flags,
                         format!("compact-thread-{}", meta.id),
+                        cx,
                     );
                     let project_name = recent
                         .then(|| {
@@ -3104,6 +3135,7 @@ impl SessionsSidebar {
             .bg(crate::material::content_surface(cx))
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_regenerate_title))
             .on_action(cx.listener(Self::on_fork))
             .on_action(cx.listener(Self::on_merge_worktree))
             .on_action(cx.listener(Self::on_mark_unread))
@@ -3299,19 +3331,27 @@ impl SessionsSidebar {
                     .min_w_0()
                     .gap(px(2.))
                     .child(
-                        div()
+                        h_flex()
                             .w_full()
                             .min_w_0()
-                            .truncate()
-                            .text_size(px(16.))
-                            .line_height(px(21.))
-                            .when(!state.is_child, |title| title.font_medium())
-                            .when(state.show_unread, |title| title.font_semibold())
-                            .debug_selector({
-                                let id = session_id.clone();
-                                move || format!("compact-title-{id}")
-                            })
-                            .child(cached.title.clone()),
+                            .gap(px(6.))
+                            .child(
+                                truncated_sidebar_label()
+                                    .text_size(px(16.))
+                                    .line_height(px(21.))
+                                    .when(!state.is_child, |title| title.font_medium())
+                                    .when(state.show_unread, |title| title.font_semibold())
+                                    .debug_selector({
+                                        let id = session_id.clone();
+                                        move || format!("compact-title-{id}")
+                                    })
+                                    .child(cached.title.clone()),
+                            )
+                            .when(state.title_generating, |row| {
+                                row.child(div().flex_none().child(
+                                    Spinner::new().xsmall().color(cx.theme().muted_foreground),
+                                ))
+                            }),
                     )
                     .child(
                         h_flex()
@@ -3388,15 +3428,7 @@ impl SessionsSidebar {
                     .child(cached.children_count.clone()),
                 )
             });
-        Self::thread_context_menu(
-            row,
-            session_id,
-            working,
-            meta.settled_at.is_some(),
-            state.menu_can_fork,
-            meta.worktree.is_some(),
-            true,
-        )
+        Self::thread_context_menu(row, state, working, meta.settled_at.is_some(), true)
     }
 }
 
@@ -3686,6 +3718,7 @@ impl Render for SessionsSidebar {
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().sidebar_foreground)
             .on_action(cx.listener(Self::on_rename))
+            .on_action(cx.listener(Self::on_regenerate_title))
             .on_action(cx.listener(Self::on_fork))
             .on_action(cx.listener(Self::on_merge_worktree))
             .on_action(cx.listener(Self::on_mark_unread))
@@ -3846,6 +3879,7 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
+                title_generating: Default::default(),
                 sessions: vec![active, settled],
                 projects: vec![project],
                 activity: HashMap::new(),
@@ -4841,6 +4875,7 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
+                title_generating: Default::default(),
                 sessions,
                 projects: vec![project],
                 activity: HashMap::from([("running-child".into(), (true, false, false, false))]),

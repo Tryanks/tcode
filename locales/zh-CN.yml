@@ -174,6 +174,8 @@ sidebar:
   remove_project_action: "删除项目"
   reveal_project: "在访达中显示"
   ctx_rename: "重命名对话"
+  ctx_regenerate_title: "重新生成标题"
+  ctx_regenerating_title: "正在重新生成…"
   ctx_fork: "分叉对话"
   ctx_merge_worktree: "合并回主检出目录"
   fork_title_suffix: "（分叉）"
@@ -298,7 +300,7 @@ settings:
     description: "选择用于回退审查的提供方和模型。"
   title_generation:
     title: "对话命名模型"
-    description: "选择负责为新对话命名的提供方和模型。命名请求始终使用 low 推理强度。"
+    description: "选择用于生成和重新生成对话标题的提供方和模型。命名请求始终使用 low 推理强度。"
 model_picker:
   no_models: "此提供方暂无可用模型。"
 computer_use:
@@ -820,6 +822,8 @@ export:
   saved: "已保存 %{name}"
   downloaded: "已下载 %{name}"
 errors:
+  title_generation_failed: "无法重新生成对话标题，请重试。"
+  title_generation_empty: "请先发送一条消息，再重新生成对话标题。"
   terminal_start: "启动终端失败：%{error}"
   terminal_restart: "重新启动终端失败：%{error}"
   persist_project: "保存项目失败：%{error}"
