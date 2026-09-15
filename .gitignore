@@ -15,3 +15,6 @@
 /crates/web/dist/
 
 /tmp/
+
+# macOS Finder metadata.
+.DS_Store
