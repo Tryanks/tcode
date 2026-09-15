@@ -1733,6 +1733,12 @@ impl Actor {
         else {
             return;
         };
+        // Codex 0.154 also reports the root thread's own activity (`agentPath`
+        // "/root"); that is not a child and would otherwise become a capsule
+        // that never completes.
+        if thread_id == self.thread_id {
+            return;
+        }
         let kind = activity
             .get("kind")
             .and_then(Value::as_str)
@@ -3595,6 +3601,23 @@ mod tests {
                 let _ = actor.child.kill();
                 let _ = actor.child.wait();
             }
+        });
+    }
+
+    #[test]
+    fn root_thread_activity_is_not_a_subagent() {
+        smol::block_on(async {
+            let (mut actor, events) = test_actor();
+            let root = actor.thread_id.clone();
+            let activity = json!({"item": {
+                "type": "subAgentActivity", "id": "act-root",
+                "agentThreadId": root, "agentPath": "/root", "kind": "interacted"
+            }});
+            actor.handle_notification("item/started", &activity).await;
+            actor.handle_notification("item/completed", &activity).await;
+            assert!(events.try_recv().is_err(), "root activity must not emit a capsule");
+            assert!(actor.subagents.is_empty());
+            assert!(actor.subagent_parent_by_thread.is_empty());
         });
     }
 
