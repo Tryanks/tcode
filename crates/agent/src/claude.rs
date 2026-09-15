@@ -32,16 +32,16 @@ use smol::prelude::*;
 use smol::process::Stdio;
 
 pub use crate::claude_context::{
-    format_context_window, native_context_window, parse_context_window_tokens,
-    resolved_context_window,
+    format_context_window, parse_context_window_tokens, resolved_context_window,
 };
+use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, ClassifierCategory, DeltaKind, FileChange, FileChangeKind, InteractionMode,
-    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
-    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
+    Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange, FileChangeKind,
+    InteractionMode, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
+    ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
+    TokenUsage, TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// Denial returned to `ExitPlanMode` after the client captures the plan.
@@ -100,10 +100,9 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let native_rewind = version_ge(
-        claude_version(opts.binary_path.as_deref(), &opts.launch_env).await,
-        NATIVE_REWIND_MIN_VERSION,
-    );
+    let native_rewind = claude_version(opts.binary_path.as_deref(), &opts.launch_env)
+        .await
+        .is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
     // Absolute path: a bare name would be resolved against the session cwd we
     // set below, which breaks PATH lookup (see `resolve_binary`).
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
@@ -401,10 +400,11 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 
 /// Model-scoped launch flags resolved from the session's option selections.
 struct ClaudeLaunchOptions {
-    /// Model id with a `[1m]` suffix appended for the 1M context window.
+    /// Model id with the manifest's context-window suffix (e.g. `[1m]`) when
+    /// the selected window needs it.
     model_id: Option<String>,
-    /// Normalized `--effort` value (`None` when the selection is `ultrathink`,
-    /// which is a prompt-prefix mode).
+    /// `--effort` value after the manifest's `effortMap` (`None` when the
+    /// selection maps to no flag, e.g. `ultrathink`, a prompt-prefix mode).
     effort: Option<String>,
     /// `--settings` JSON string (fastMode / ultracode / alwaysThinkingEnabled).
     settings_json: Option<String>,
@@ -437,39 +437,42 @@ fn launch_settings_json(
 
 impl ClaudeLaunchOptions {
     fn resolve(model: Option<&str>, selections: &[OptionSelection]) -> Self {
-        let spec = model.and_then(model_spec);
+        Self::resolve_with(&crate::claude_manifest::current(), model, selections)
+    }
+
+    fn resolve_with(
+        catalog: &ClaudeCatalog,
+        model: Option<&str>,
+        selections: &[OptionSelection],
+    ) -> Self {
+        let entry = model.and_then(|model| catalog.model(model));
+        let spec = entry.map(|entry| &entry.spec);
         let raw_effort = selection_str(selections, "reasoningEffort");
-        let resolved_effort = resolve_claude_effort(spec.as_ref(), raw_effort.as_deref());
+        let resolved_effort = resolve_claude_effort(spec, raw_effort.as_deref());
         let ultrathink = resolved_effort.as_deref() == Some("ultrathink");
         let ultracode = resolved_effort.as_deref() == Some("ultracode");
-        let effort = normalize_claude_cli_effort(resolved_effort.as_deref(), model);
-
-        let window = resolved_context_window(model.unwrap_or_default(), selections);
-        let native_window = native_context_window(model.unwrap_or_default());
-        let effective_model_window = if native_window == 200_000 && window > native_window {
-            1_000_000
-        } else {
-            native_window
+        let effort = match (entry, resolved_effort.as_deref()) {
+            (Some(entry), Some(effort)) => entry.cli_effort(effort),
+            _ => None,
         };
-        let model_id = model.map(|m| {
-            let base = m.strip_suffix("[1m]").unwrap_or(m);
-            if native_window == 200_000 && window > native_window {
-                format!("{base}[1m]")
-            } else {
-                base.to_owned()
-            }
+
+        let window = catalog.resolved_context_window(model.unwrap_or_default(), selections);
+        let model_id = model.map(|model| {
+            let base = model.split('[').next().unwrap_or(model);
+            let suffix = entry.map_or("", |entry| entry.context_window_suffix(window));
+            format!("{base}{suffix}")
         });
-        let auto_compact_window = (window < effective_model_window).then_some(window);
+        // Anything below the model's largest window is enforced through
+        // `autoCompactWindow`: some bare slugs (e.g. Opus 5) already run at
+        // 1M, so a smaller selection must be told to compact early.
+        let largest = entry
+            .and_then(CatalogModel::largest_context_window)
+            .unwrap_or(window);
+        let auto_compact_window = (window < largest).then_some(window);
 
         // `--settings` object: only supported/true keys are emitted.
-        let fast_supported = spec
-            .as_ref()
-            .map(|s| has_boolean_option(s, "fastMode"))
-            .unwrap_or(false);
-        let thinking_supported = spec
-            .as_ref()
-            .map(|s| has_boolean_option(s, "thinking"))
-            .unwrap_or(false);
+        let fast_supported = spec.is_some_and(|spec| has_boolean_option(spec, "fastMode"));
+        let thinking_supported = spec.is_some_and(|spec| has_boolean_option(spec, "thinking"));
         let fast_mode = fast_supported && selection_bool(selections, "fastMode") == Some(true);
         let thinking = if thinking_supported {
             selection_bool(selections, "thinking")
@@ -3166,253 +3169,6 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
     default_value.clone()
 }
 
-/// Normalize special effort modes for the Claude CLI: `ultrathink` → no flag
-/// (prompt prefix); `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5.x /
-/// Opus 5 / Opus 4.8 / Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise
-/// passthrough.
-fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Option<String> {
-    let effort = effort?;
-    if effort == "ultrathink" {
-        return None;
-    }
-    if effort == "ultracode" {
-        return Some("xhigh".to_owned());
-    }
-    if effort == "xhigh"
-        && model != Some("claude-fable-5-1")
-        && model != Some("claude-fable-5")
-        && model != Some("claude-opus-5")
-        && model != Some("claude-opus-4-8")
-        && model != Some("claude-sonnet-5")
-    {
-        return Some("max".to_owned());
-    }
-    if effort == "max" && model == Some("claude-sonnet-4-6") {
-        return Some("high".to_owned());
-    }
-    Some(effort.to_owned())
-}
-
-fn effort_option(value: &str) -> SelectOption {
-    let label = match value {
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        "ultracode" => "Ultracode",
-        "ultrathink" => "Ultrathink",
-        other => other,
-    };
-    SelectOption {
-        value: value.to_owned(),
-        label: label.to_owned(),
-        description: None,
-    }
-}
-
-fn reasoning(values: &[&str], default: &str) -> OptionDescriptor {
-    OptionDescriptor::Select {
-        id: "reasoningEffort".to_owned(),
-        label: "Reasoning".to_owned(),
-        options: values.iter().map(|v| effort_option(v)).collect(),
-        default_value: Some(default.to_owned()),
-    }
-}
-
-fn context_window(default: &str) -> OptionDescriptor {
-    OptionDescriptor::Select {
-        id: "contextWindow".to_owned(),
-        label: "Context Window".to_owned(),
-        options: vec![
-            SelectOption {
-                value: "200k".to_owned(),
-                label: "200k".to_owned(),
-                description: None,
-            },
-            SelectOption {
-                value: "1m".to_owned(),
-                label: "1M".to_owned(),
-                description: None,
-            },
-        ],
-        default_value: Some(default.to_owned()),
-    }
-}
-
-fn boolean(id: &str, label: &str) -> OptionDescriptor {
-    OptionDescriptor::Boolean {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        default_value: false,
-    }
-}
-
-fn model(id: &str, display_name: &str, options: Vec<OptionDescriptor>) -> ModelSpec {
-    ModelSpec {
-        id: id.to_owned(),
-        display_name: display_name.to_owned(),
-        is_default: false,
-        options,
-    }
-}
-
-/// The full static Claude catalog, unfiltered by installed CLI version.
-fn built_in_models() -> Vec<ModelSpec> {
-    vec![
-        model(
-            "claude-fable-5-1",
-            "Claude Fable 5.1",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-fable-5",
-            "Claude Fable 5",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-5",
-            "Claude Opus 5",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                boolean("fastMode", "Fast Mode"),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-4-8",
-            "Claude Opus 4.8",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                boolean("fastMode", "Fast Mode"),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-4-7",
-            "Claude Opus 4.7",
-            vec![
-                reasoning(
-                    &["low", "medium", "high", "xhigh", "max", "ultrathink"],
-                    "xhigh",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-4-6",
-            "Claude Opus 4.6",
-            vec![
-                reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                context_window("200k"),
-            ],
-        ),
-        model(
-            "claude-opus-4-5",
-            "Claude Opus 4.5",
-            vec![reasoning(&["low", "medium", "high", "max"], "high")],
-        ),
-        model(
-            "claude-sonnet-5",
-            "Claude Sonnet 5",
-            vec![
-                reasoning(
-                    &["low", "medium", "high", "xhigh", "max", "ultrathink"],
-                    "high",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-sonnet-4-6",
-            "Claude Sonnet 4.6",
-            vec![
-                reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                context_window("200k"),
-            ],
-        ),
-        model(
-            "claude-haiku-4-5",
-            "Claude Haiku 4.5",
-            vec![boolean("thinking", "Thinking")],
-        ),
-    ]
-}
-
-/// Capabilities for one model id (from the unfiltered catalog).
-fn model_spec(id: &str) -> Option<ModelSpec> {
-    let id = id.trim();
-    built_in_models().into_iter().find(|m| m.id == id)
-}
-
-/// Whether a version-gated model is available at the installed Claude version.
-fn model_available(id: &str, version: Option<(u32, u32, u32)>) -> bool {
-    match id {
-        "claude-fable-5-1" => version_ge(version, (2, 1, 257)),
-        "claude-opus-5" => version_ge(version, (2, 1, 219)),
-        "claude-fable-5" => version_ge(version, (2, 1, 169)),
-        "claude-opus-4-8" => version_ge(version, (2, 1, 154)),
-        "claude-opus-4-7" => version_ge(version, (2, 1, 111)),
-        _ => true,
-    }
-}
-
-fn version_ge(version: Option<(u32, u32, u32)>, min: (u32, u32, u32)) -> bool {
-    version.is_some_and(|v| v >= min)
-}
-
-/// Parse a `MAJOR.MINOR.PATCH` triple from `claude --version` output
-/// (e.g. `"2.1.206 (Claude Code)"`).
 /// Run `claude --version` and parse the semver triple; `None` on any failure.
 async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
     // Resolve through the PATH search (PATHEXT-aware: on Windows the CLI only
@@ -3423,16 +3179,19 @@ async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option
     crate::process::probe_version(&bin, launch_env, ProviderKind::ClaudeCode).await
 }
 
-/// List Claude's models: the static catalog, gated by the installed CLI version.
+/// List Claude's models: the manifest catalog (refreshed per `refresh`),
+/// gated by the installed CLI version.
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    refresh: CatalogRefresh,
 ) -> Result<Vec<ModelSpec>, AgentError> {
+    crate::process::unblock(move || {
+        crate::claude_manifest::refresh(refresh.cache_dir.as_deref(), refresh.network)
+    })
+    .await;
     let version = claude_version(binary_path.as_deref(), &launch_env).await;
-    Ok(built_in_models()
-        .into_iter()
-        .filter(|m| model_available(&m.id, version))
-        .collect())
+    Ok(crate::claude_manifest::current().models_for_version(version))
 }
 
 #[cfg(test)]
@@ -3736,113 +3495,109 @@ mod tests {
         ));
     }
 
+    fn select(id: &str, value: Value) -> OptionSelection {
+        OptionSelection {
+            id: id.into(),
+            value,
+        }
+    }
+
+    fn settings(launch: &ClaudeLaunchOptions) -> Value {
+        launch
+            .settings_json
+            .as_deref()
+            .map(|settings| serde_json::from_str(settings).unwrap())
+            .unwrap_or(Value::Null)
+    }
+
     #[test]
-    fn effort_compat_transforms() {
-        // ultrathink → no flag (prompt-prefix mode)
+    fn effort_map_drives_the_effort_flag() {
+        let catalog = crate::claude_manifest::test_catalog();
+        let resolve = |model: &str, effort: &str| {
+            ClaudeLaunchOptions::resolve_with(
+                &catalog,
+                Some(model),
+                &[select("reasoningEffort", json!(effort))],
+            )
+        };
+        // Mapped to another value: ultracode → xhigh, plus the ultracode setting.
+        let launch = resolve("test-wide", "ultracode");
+        assert_eq!(launch.effort.as_deref(), Some("xhigh"));
+        assert_eq!(settings(&launch)["ultracode"], true);
+        assert!(!launch.ultrathink);
+        // Mapped to null: no --effort flag, prompt-prefix mode.
+        let launch = resolve("test-wide", "ultrathink");
+        assert_eq!(launch.effort, None);
+        assert!(launch.ultrathink);
+        assert!(launch.settings_json.is_none());
+        // Per-profile downgrade (max → high) and passthrough.
         assert_eq!(
-            normalize_claude_cli_effort(Some("ultrathink"), Some("claude-opus-4-8")),
-            None
-        );
-        // ultracode → xhigh
-        assert_eq!(
-            normalize_claude_cli_effort(Some("ultracode"), Some("claude-opus-4-8")).as_deref(),
-            Some("xhigh")
-        );
-        // xhigh → max EXCEPT on fable-5 / opus-4-8 / sonnet-5
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-opus-4-7")).as_deref(),
-            Some("max")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5-1")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-opus-4-8")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-sonnet-5")).as_deref(),
-            Some("xhigh")
-        );
-        // sonnet-4-6 max → high
-        assert_eq!(
-            normalize_claude_cli_effort(Some("max"), Some("claude-sonnet-4-6")).as_deref(),
+            resolve("test-narrow", "max").effort.as_deref(),
             Some("high")
         );
-        // passthrough
+        assert_eq!(resolve("test-wide", "max").effort.as_deref(), Some("max"));
         assert_eq!(
-            normalize_claude_cli_effort(Some("low"), Some("claude-opus-4-6")).as_deref(),
-            Some("low")
+            resolve("test-fixed", "xhigh").effort.as_deref(),
+            Some("max")
         );
+        // Unknown model: no descriptor to resolve against, so no flag.
+        assert_eq!(resolve("test-unknown", "high").effort, None);
     }
 
     #[test]
     fn resolve_effort_uses_listed_value_or_default() {
-        let fable = model_spec("claude-fable-5");
-        // Listed value wins.
+        let catalog = crate::claude_manifest::test_catalog();
+        let wide = catalog.model("test-wide").map(|entry| &entry.spec);
         assert_eq!(
-            resolve_claude_effort(fable.as_ref(), Some("max")).as_deref(),
+            resolve_claude_effort(wide, Some("max")).as_deref(),
             Some("max")
         );
-        // Unknown value falls back to the descriptor default (high).
         assert_eq!(
-            resolve_claude_effort(fable.as_ref(), Some("bogus")).as_deref(),
-            Some("high")
+            resolve_claude_effort(wide, Some("bogus")).as_deref(),
+            Some("medium")
         );
-        // No selection → default.
-        assert_eq!(
-            resolve_claude_effort(fable.as_ref(), None).as_deref(),
-            Some("high")
-        );
-        // Haiku has no reasoning selector.
-        let haiku = model_spec("claude-haiku-4-5");
-        assert_eq!(resolve_claude_effort(haiku.as_ref(), Some("low")), None);
+        assert_eq!(resolve_claude_effort(wide, None).as_deref(), Some("medium"));
+        // A profile without a reasoning selector has no effort at all.
+        let plain = catalog.model("test-plain").map(|entry| &entry.spec);
+        assert_eq!(resolve_claude_effort(plain, Some("low")), None);
     }
 
     #[test]
-    fn version_gating_filters_new_models() {
+    fn version_gating_follows_manifest_bounds() {
+        let catalog = crate::claude_manifest::test_catalog();
         let ids = |version: Option<(u32, u32, u32)>| -> Vec<String> {
-            built_in_models()
+            catalog
+                .models_for_version(version)
                 .into_iter()
-                .filter(|m| model_available(&m.id, version))
-                .map(|m| m.id)
+                .map(|model| model.id)
                 .collect()
         };
-        // Current version exposes everything.
-        assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
-        assert!(ids(Some((2, 1, 206))).contains(&"claude-fable-5".to_string()));
-        // Below every gate: opus-5 / fable-5 / opus-4-8 / opus-4-7 hidden, rest visible.
-        let old = ids(Some((2, 1, 100)));
-        assert!(!old.contains(&"claude-opus-5".to_string()));
-        assert!(!old.contains(&"claude-fable-5".to_string()));
-        assert!(!old.contains(&"claude-opus-4-8".to_string()));
-        assert!(!old.contains(&"claude-opus-4-7".to_string()));
-        assert!(old.contains(&"claude-opus-4-6".to_string()));
-        assert!(old.contains(&"claude-haiku-4-5".to_string()));
-        // Exact boundary is inclusive.
-        assert!(ids(Some((2, 1, 257))).contains(&"claude-fable-5-1".to_string()));
-        assert!(!ids(Some((2, 1, 256))).contains(&"claude-fable-5-1".to_string()));
-        assert!(ids(Some((2, 1, 154))).contains(&"claude-opus-4-8".to_string()));
-        assert!(!ids(Some((2, 1, 153))).contains(&"claude-opus-4-8".to_string()));
-        assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
-        assert!(!ids(Some((2, 1, 218))).contains(&"claude-opus-5".to_string()));
-        // Unknown version hides gated models.
-        assert!(!ids(None).contains(&"claude-fable-5".to_string()));
+        // Ungated models are always listed, even without a known version.
+        assert_eq!(ids(None), ["test-narrow", "test-plain"]);
+        // minVersion is inclusive; maxVersionExclusive is not.
+        assert_eq!(
+            ids(Some((2, 1, 256))),
+            ["test-fixed", "test-narrow", "test-plain"]
+        );
+        assert_eq!(
+            ids(Some((2, 1, 257))),
+            ["test-wide", "test-fixed", "test-narrow", "test-plain"]
+        );
+        assert_eq!(ids(Some((2, 1, 110))), ["test-narrow", "test-plain"]);
+        assert_eq!(
+            ids(Some((3, 0, 0))),
+            ["test-wide", "test-narrow", "test-plain"]
+        );
     }
 
     #[test]
     fn parse_semver_from_version_output() {
         assert_eq!(
-            crate::process::parse_semver("2.1.206 (Claude Code)"),
+            crate::parse_semver("2.1.206 (Claude Code)"),
             Some((2, 1, 206))
         );
-        assert_eq!(crate::process::parse_semver("2.1.169"), Some((2, 1, 169)));
-        assert_eq!(crate::process::parse_semver("nonsense"), None);
+        assert_eq!(crate::parse_semver("2.1.169"), Some((2, 1, 169)));
+        assert_eq!(crate::parse_semver("nonsense"), None);
     }
 
     #[test]
@@ -3861,8 +3616,6 @@ mod tests {
         assert_eq!(parse_context_window_tokens(&json!("garbage")), None);
         assert_eq!(parse_context_window_tokens(&json!(-200_000)), None);
         assert_eq!(parse_context_window_tokens(&json!(null)), None);
-        assert_eq!(native_context_window("claude-opus-5[1m]"), 1_000_000);
-        assert_eq!(native_context_window("claude-sonnet-4-6[1m]"), 200_000);
         assert_eq!(format_context_window(200_000), "200k");
         assert_eq!(format_context_window(750_000), "750k");
         assert_eq!(format_context_window(1_000_000), "1M");
@@ -3870,108 +3623,88 @@ mod tests {
 
     #[test]
     fn context_window_launch_semantics() {
-        let resolve = |model, value: Option<Value>| {
-            let selections = value
-                .map(|value| {
-                    vec![OptionSelection {
-                        id: "contextWindow".into(),
-                        value,
-                    }]
-                })
-                .unwrap_or_default();
-            ClaudeLaunchOptions::resolve(Some(model), &selections)
+        let catalog = crate::claude_manifest::test_catalog();
+        let resolve = |model: &str, value: Option<Value>| {
+            let selections: Vec<_> = value
+                .map(|value| select("contextWindow", value))
+                .into_iter()
+                .collect();
+            ClaudeLaunchOptions::resolve_with(&catalog, Some(model), &selections)
         };
-        let auto_compact = |launch: &ClaudeLaunchOptions| {
-            launch.settings_json.as_deref().map(|settings| {
-                serde_json::from_str::<Value>(settings).unwrap()["autoCompactWindow"].clone()
-            })
-        };
+        let auto_compact =
+            |launch: &ClaudeLaunchOptions| settings(launch)["autoCompactWindow"].clone();
 
-        let launch = resolve("claude-opus-5", Some(json!("200k")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
-        assert_eq!(auto_compact(&launch), Some(json!(200_000)));
-
-        let launch = resolve("claude-opus-5", Some(json!("1m")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
+        // Default window of a 1M-default profile: the manifest suffix is sent.
+        let launch = resolve("test-wide", None);
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide[1m]"));
         assert!(launch.settings_json.is_none());
+        assert_eq!(catalog.resolved_context_window("test-wide", &[]), 1_000_000);
+        // A suffixed id resolves to the same model.
+        assert_eq!(
+            catalog.resolved_context_window("test-wide[1m]", &[]),
+            1_000_000
+        );
 
-        let launch = resolve("claude-opus-5", Some(json!(500_000)));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
-        assert_eq!(auto_compact(&launch), Some(json!(500_000)));
+        // Below the largest window: bare slug plus early compaction.
+        let launch = resolve("test-wide", Some(json!("200k")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
+        assert_eq!(auto_compact(&launch), json!(200_000));
+        let launch = resolve("test-wide", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide[1m]"));
+        assert_eq!(auto_compact(&launch), json!(500_000));
 
-        let launch = resolve("claude-sonnet-4-6", Some(json!("1m")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6[1m]"));
-        assert!(launch.settings_json.is_none());
-
-        let launch = resolve("claude-sonnet-4-6", Some(json!(500_000)));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6[1m]"));
-        assert_eq!(auto_compact(&launch), Some(json!(500_000)));
-
+        // 200k-default profile: only the 1M expansion carries the suffix.
         for value in [Some(json!("200k")), None] {
-            let launch = resolve("claude-sonnet-4-6", value);
-            assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6"));
-            assert!(launch.settings_json.is_none());
+            let launch = resolve("test-narrow", value);
+            assert_eq!(launch.model_id.as_deref(), Some("test-narrow"));
+            assert_eq!(auto_compact(&launch), json!(200_000));
         }
+        let launch = resolve("test-narrow", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-narrow[1m]"));
+        assert!(launch.settings_json.is_none());
+        let launch = resolve("test-narrow", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-narrow[1m]"));
+        assert_eq!(auto_compact(&launch), json!(500_000));
 
-        let launch = resolve("claude-fable-5", Some(json!("1m")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5"));
+        // Fixed window: no selector, no suffix, custom values still compact early.
+        assert_eq!(
+            catalog.resolved_context_window("test-fixed", &[]),
+            1_000_000
+        );
+        let launch = resolve("test-fixed", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-fixed"));
+        assert!(launch.settings_json.is_none());
+        let launch = resolve("test-fixed", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-fixed"));
+        assert_eq!(auto_compact(&launch), json!(500_000));
+
+        // No context data at all falls back to 200k and never emits settings.
+        assert_eq!(catalog.resolved_context_window("test-plain", &[]), 200_000);
+        assert_eq!(
+            catalog.resolved_context_window("test-unknown", &[]),
+            200_000
+        );
+        let launch = resolve("test-plain", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-plain"));
         assert!(launch.settings_json.is_none());
     }
 
     #[test]
-    fn launch_options_resolve_effort_context_and_settings() {
-        // Ultracode → effort xhigh + settings.ultracode.
-        let launch = ClaudeLaunchOptions::resolve(
-            Some("claude-opus-4-8"),
-            &[
-                OptionSelection {
-                    id: "reasoningEffort".into(),
-                    value: json!("ultracode"),
-                },
-                OptionSelection {
-                    id: "fastMode".into(),
-                    value: json!(true),
-                },
-            ],
-        );
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-4-8"));
-        assert_eq!(launch.effort.as_deref(), Some("xhigh"));
-        assert!(!launch.ultrathink);
-        let settings: Value =
-            serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
-        assert_eq!(settings["ultracode"], true);
-        assert_eq!(settings["fastMode"], true);
+    fn boolean_options_reach_settings_only_when_supported() {
+        let catalog = crate::claude_manifest::test_catalog();
+        let both = [
+            select("fastMode", json!(true)),
+            select("thinking", json!(true)),
+        ];
+        let launch = ClaudeLaunchOptions::resolve_with(&catalog, Some("test-fixed"), &both);
+        let fixed = settings(&launch);
+        assert_eq!(fixed["fastMode"], true);
+        assert!(fixed.get("alwaysThinkingEnabled").is_none());
 
-        // ultrathink → no --effort, prompt-prefix flag set.
-        let launch = ClaudeLaunchOptions::resolve(
-            Some("claude-fable-5"),
-            &[
-                OptionSelection {
-                    id: "reasoningEffort".into(),
-                    value: json!("ultrathink"),
-                },
-                OptionSelection {
-                    id: "contextWindow".into(),
-                    value: json!("1m"),
-                },
-            ],
-        );
-        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5"));
-        assert_eq!(launch.effort, None);
-        assert!(launch.ultrathink);
-        assert!(launch.settings_json.is_none());
-
-        // Haiku thinking → settings.alwaysThinkingEnabled.
-        let launch = ClaudeLaunchOptions::resolve(
-            Some("claude-haiku-4-5"),
-            &[OptionSelection {
-                id: "thinking".into(),
-                value: json!(true),
-            }],
-        );
-        let settings: Value =
-            serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
-        assert_eq!(settings["alwaysThinkingEnabled"], true);
+        let launch = ClaudeLaunchOptions::resolve_with(&catalog, Some("test-plain"), &both);
+        let plain = settings(&launch);
+        assert_eq!(plain["alwaysThinkingEnabled"], true);
+        assert!(plain.get("fastMode").is_none());
     }
 
     #[test]
