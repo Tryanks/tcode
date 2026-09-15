@@ -282,7 +282,7 @@ settings:
     description: "智能体工作时自动展开最新命令的输出。"
   provider_updates:
     title: "提供方更新检查"
-    description: "启动时检查 Tcode 和提供方 CLI 的新版本。"
+    description: "启动时检查 Tcode 和提供方 CLI 的新版本，并从 t3code 刷新 Claude Code 模型列表。"
   inactive_frame_throttle:
     title: "后台帧率限制"
     description: "窗口失焦时将刷新率降至约 2 FPS 以节省能耗。重启后生效。"
