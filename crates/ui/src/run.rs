@@ -127,6 +127,7 @@ pub fn run_shell(
         .expect("failed to register bundled application fonts");
     theme::init_with_json(&options.theme_json, cx);
     crate::markdown::init(cx);
+    crate::shortcut::init(cx);
     // Global ⌘K / Ctrl-K opens/closes the command palette (handled by
     // AppShell). `secondary` is gpui's platform modifier: command on macOS,
     // control on Windows/Linux — where a literal `cmd-` binding would mean the
