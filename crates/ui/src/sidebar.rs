@@ -2228,25 +2228,34 @@ impl SessionsSidebar {
             .into_any_element()
     }
 
+    /// Status text and colour shared by every thread row shape.
+    fn thread_status_label(
+        state: &ThreadRowState,
+        working: bool,
+        cx: &Context<Self>,
+    ) -> Option<(gpui::Hsla, std::borrow::Cow<'static, str>)> {
+        if state.waiting_for_approval {
+            Some((cx.theme().warning, crate::tr!("sidebar.waiting_approval")))
+        } else if state.waiting_for_input {
+            Some((cx.theme().warning, crate::tr!("sidebar.waiting_input")))
+        } else if working && state.background {
+            Some((
+                cx.theme().muted_foreground,
+                crate::tr!("sidebar.background_tasks"),
+            ))
+        } else if working {
+            Some((cx.theme().primary, crate::tr!("sidebar.working")))
+        } else {
+            None
+        }
+    }
+
     fn thread_status_badge(
         state: &ThreadRowState,
         working: bool,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let (color, label) = if state.waiting_for_approval {
-            (cx.theme().warning, crate::tr!("sidebar.waiting_approval"))
-        } else if state.waiting_for_input {
-            (cx.theme().warning, crate::tr!("sidebar.waiting_input"))
-        } else if working && state.background {
-            (
-                cx.theme().muted_foreground,
-                crate::tr!("sidebar.background_tasks"),
-            )
-        } else if working {
-            (cx.theme().primary, crate::tr!("sidebar.working"))
-        } else {
-            return None;
-        };
+        let (color, label) = Self::thread_status_label(state, working, cx)?;
         Some(
             h_flex()
                 .flex_none()
@@ -2543,8 +2552,6 @@ impl SessionsSidebar {
         );
         let session_id = state.session_id.clone();
         let row_key = state.row_key.clone();
-        let waiting_for_approval = state.waiting_for_approval;
-        let waiting_for_input = state.waiting_for_input;
         let waiting = state.waiting();
         let is_child = state.is_child;
         let show_unread = state.show_unread;
@@ -2552,6 +2559,8 @@ impl SessionsSidebar {
         let active_direct_children = state.active_direct_children;
         let has_direct_children = state.has_direct_children();
         let children_collapsed = state.children_collapsed;
+        let renaming = state.renaming.is_some();
+        let status = Self::thread_status_label(&state, working, cx);
 
         let row = self
             .thread_clickable_row(
@@ -2590,6 +2599,14 @@ impl SessionsSidebar {
                             .text_color(cx.theme().muted_foreground)
                             .child("↳"),
                     )
+                    .when(state.is_worktree && !renaming, |line| {
+                        line.child(
+                            Icon::empty()
+                                .path("icons/git-branch.svg")
+                                .xsmall()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    })
                     .child(title_or_input)
                     .when(has_direct_children, |line| {
                         line.child(collapse_chevron(children_collapsed, cx)).child(
@@ -2601,7 +2618,7 @@ impl SessionsSidebar {
                             ),
                         )
                     })
-                    .when(!working, |line| {
+                    .when(!working && !renaming, |line| {
                         line.child(
                             self.render_flat_thread_right_slot(meta, &row_key, waiting, true, cx),
                         )
@@ -2609,40 +2626,29 @@ impl SessionsSidebar {
             )
         } else {
             let title_or_input = self.thread_title_or_input(meta, &state, true, cx);
+            // Unread wins over the status colour; renaming hides the dot so the
+            // input keeps the row's leading width (same as render_thread).
+            let dot = (!renaming)
+                .then(|| {
+                    show_unread
+                        .then(|| cx.theme().primary)
+                        .or(status.as_ref().map(|(color, _)| *color))
+                })
+                .flatten();
             let line_one = h_flex()
                 .w_full()
                 .min_w_0()
                 .items_center()
                 .gap_2()
-                .when(show_unread, |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(cx.theme().primary),
-                    )
-                })
-                .when(!show_unread && waiting, |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(cx.theme().warning),
-                    )
-                })
-                .when(!show_unread && !waiting && working, |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(cx.theme().primary),
-                    )
+                .when_some(dot, |line, color| {
+                    line.child(div().flex_none().size(px(6.)).rounded_full().bg(color))
                 })
                 .child(title_or_input)
-                .child(self.render_flat_thread_right_slot(meta, &row_key, waiting, !working, cx));
+                .when(!renaming, |line| {
+                    line.child(
+                        self.render_flat_thread_right_slot(meta, &row_key, waiting, !working, cx),
+                    )
+                });
 
             let has_project = project_name.is_some();
             let line_two = h_flex()
@@ -2652,29 +2658,8 @@ impl SessionsSidebar {
                 .gap_1()
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
-                .when(waiting_for_approval, |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .text_color(cx.theme().warning)
-                            .child(crate::tr!("sidebar.waiting_approval")),
-                    )
-                })
-                .when(waiting_for_input && !waiting_for_approval, |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .text_color(cx.theme().warning)
-                            .child(crate::tr!("sidebar.waiting_input")),
-                    )
-                })
-                .when(working && !waiting, |line| {
-                    line.child(
-                        div()
-                            .flex_none()
-                            .text_color(cx.theme().primary)
-                            .child(crate::tr!("sidebar.working")),
-                    )
+                .when_some(status, |line, (color, label)| {
+                    line.child(div().flex_none().text_color(color).child(label))
                 })
                 .when((waiting || working) && has_project, |line| {
                     line.child(div().flex_none().child("·"))

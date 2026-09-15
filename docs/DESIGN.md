@@ -180,6 +180,13 @@ so startup never exposes a default white/black window or decorative backdrop.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
+- Thread rows come in three shapes: grouped (one line), flat root (two lines)
+  and flat child (one line, indented). Status text and colour for all three
+  come from one place, `thread_status_label` (approval → input → background →
+  working). Deliberate layout differences: the flat root row keeps its
+  timestamp while working because it has a second line; the other shapes drop
+  the timestamp/archive slot while working. Renaming hides dots, worktree glyph
+  and the timestamp slot in every shape.
 
 ## Connection baseline
 
