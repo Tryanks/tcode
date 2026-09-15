@@ -28,6 +28,8 @@ pub(crate) enum BlockNode {
     List {
         children: Vec<BlockNode>,
         ordered: bool,
+        /// First item number of an ordered list (CommonMark `start`).
+        start: u32,
     },
     ListItem {
         children: Vec<BlockNode>,
