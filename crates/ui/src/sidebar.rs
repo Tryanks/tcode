@@ -4006,6 +4006,7 @@ mod tests {
         send(
             Topic::Index,
             ServerEvent::IndexSnapshot(IndexSnapshot {
+                title_generating: Default::default(),
                 sessions,
                 projects: store.read_with(cx, |store, _| store.projects()),
                 activity: HashMap::new(),
