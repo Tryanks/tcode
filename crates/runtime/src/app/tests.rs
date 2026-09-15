@@ -1130,9 +1130,10 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
             .events
             .try_send(AgentEvent::SessionClosed { reason: None })
             .unwrap();
-        cx.run_until_parked();
+        // Completion arrives after the scratch-cwd cleanup on the thread pool;
+        // wait on the pending flag rather than a fixed idle window.
+        cx.run_until(|state| !state.index_snapshot().title_generating.contains(&id));
         state.read(|state| {
-            assert!(!state.index_snapshot().title_generating.contains(&id));
             let title = state
                 .sessions
                 .iter()

@@ -131,6 +131,29 @@ impl TestAppContext {
         panic!("test host failed to park within five seconds");
     }
 
+    /// Park repeatedly until `done` observes the state a background chain
+    /// must reach. `run_until_parked` only watches the mailbox, so a chain
+    /// that hops through `unblock` (thread-pool filesystem work) between the
+    /// last event and its completion can look idle longer than the window.
+    pub(super) fn run_until(&mut self, mut done: impl FnMut(&TestClientState) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.run_until_parked();
+            let state = self
+                .state
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .expect("test state must outlive its context");
+            if done(&state.borrow()) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test host condition not reached within five seconds"
+            );
+        }
+    }
+
     /// Drain and decode every NDJSON line emitted by the host so tests assert
     /// on the same serialized traffic consumed by production clients.
     pub(super) fn drain_outgoing(&mut self) -> Vec<HostMessage> {
