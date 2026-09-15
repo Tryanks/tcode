@@ -52,6 +52,10 @@ callbacks to this backend. Rust calls activity methods on Android's Java UI
 thread; incoming callbacks are queued for the native activity/GPUI thread.
 Keep the method signatures at these two ends synchronized.
 
+URL opening uses an Android `ACTION_VIEW` intent on the Java UI thread, handing
+HTTP(S) links to the browser or associated app. If no app can handle the URL,
+the host logs the failure without crashing.
+
 Editable fields publish Android's text, selection and composing region after
 each completed IME batch. GPUI applies the changed UTF-16 range and sends its
 state back after app edits, cursor moves and draft clears. Revision and edit
@@ -159,7 +163,7 @@ host address reachable from the device.
 - Android supports a single GPUI window; desktop window management operations
   are intentionally no-ops.
 - Generic GPUI file dialogs, system credential storage, notifications,
-  accessibility bridging, and URL intents are not implemented in this backend;
+  and accessibility bridging are not implemented in this backend;
   applications must provide any required services in their host.
 - The text clipboard is bridged to Android `ClipboardManager`. Non-text GPUI
   clipboard data is retained only in-process.
