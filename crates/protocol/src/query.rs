@@ -32,6 +32,15 @@ pub enum Query {
         base: Option<String>,
         ignore_whitespace: bool,
     },
+    BrowseIconImages {
+        directory: PathBuf,
+    },
+    ReadIconImage {
+        path: PathBuf,
+    },
+    ReadProjectIcon {
+        project_id: String,
+    },
     ReadFileBytes {
         path: PathBuf,
     },
@@ -94,6 +103,11 @@ pub enum QueryResponse {
         truncated: bool,
     },
     ActiveWorkspace(Vec<PathEntry>),
+    IconImages {
+        directory: PathBuf,
+        parent: Option<PathBuf>,
+        entries: Vec<PathEntry>,
+    },
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
     GitDiff(GitDiffResult),

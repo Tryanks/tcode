@@ -226,23 +226,45 @@ impl SessionStore {
         self.persist_index(&file)
     }
 
-    /// Insert or replace a project (by id), then persist.
+    /// Insert or replace a project, then remove its previous managed icon.
     pub fn upsert_project(&self, project: &Project) -> std::io::Result<()> {
         let mut file = self.read_file();
+        let mut previous = None;
         if let Some(existing) = file.projects.iter_mut().find(|p| p.id == project.id) {
+            if existing.icon_path != project.icon_path {
+                previous = existing.icon_path.clone();
+            }
             *existing = project.clone();
         } else {
             file.projects.push(project.clone());
         }
-        self.persist_index(&file)
+        self.persist_index(&file)?;
+        self.remove_project_icon(previous);
+        Ok(())
     }
 
-    /// Remove a project from the index. Its sessions are removed separately so
-    /// their event logs receive the same cleanup as an ordinary thread delete.
+    /// Remove a project and its managed icon. Sessions are removed separately.
     pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
+        let icon = file
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.icon_path.clone());
         file.projects.retain(|project| project.id != id);
-        self.persist_index(&file)
+        self.persist_index(&file)?;
+        self.remove_project_icon(icon);
+        Ok(())
+    }
+
+    fn remove_project_icon(&self, path: Option<PathBuf>) {
+        if let Some(path) = path
+            && path.parent() == Some(self.root.join("project-icons").as_path())
+            && let Err(error) = fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("could not remove project icon {}: {error}", path.display());
+        }
     }
 
     /// Persist a whole index file atomically (also flushes migration on startup).

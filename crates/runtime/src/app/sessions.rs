@@ -114,6 +114,35 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
+    /// Save a normalized user override, or return to the project config.
+    pub fn set_project_icon(
+        &mut self,
+        project_id: &str,
+        png: Option<Vec<u8>>,
+        cx: &mut HostCx,
+    ) -> std::io::Result<()> {
+        let project = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .ok_or_else(|| std::io::Error::other("unknown project"))?;
+        let path = if let Some(png) = png {
+            let path = self
+                .store
+                .root()
+                .join("project-icons")
+                .join(format!("{}.png", uuid::Uuid::new_v4()));
+            tcode_services::project_icons::save_override(&path, &png)?;
+            Some(path)
+        } else {
+            None
+        };
+        project.icon_path = path;
+        let project = project.clone();
+        self.enqueue_store_write(StoreWrite::UpsertProject(project), cx);
+        Ok(())
+    }
+
     /// Create a project rooted at `root`, or return the existing id when one
     /// already covers it.
     ///

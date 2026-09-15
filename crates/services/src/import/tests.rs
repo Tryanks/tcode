@@ -254,6 +254,7 @@ fn import_is_idempotent_and_replays_into_timeline() {
         id: "project-1".into(),
         name: "Project".into(),
         root: cwd,
+        icon_path: None,
         created_at: 1,
     };
     store.upsert_project(&project).unwrap();

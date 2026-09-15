@@ -33,6 +33,7 @@ pub mod palette;
 mod pasteboard;
 mod plan_panel;
 mod preview_panel;
+mod project_icon;
 pub(crate) mod provider_card;
 mod provider_dialog;
 mod provider_model_picker;

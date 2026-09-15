@@ -424,6 +424,11 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             app.remove_review_comment(&session_id, index, cx)
         }
         Command::CycleProjectSort => app.cycle_project_sort(cx),
+        Command::SetProjectIcon { project_id, png } => {
+            if let Err(error) = app.set_project_icon(&project_id, png, cx) {
+                return CommandOutcome::Immediate(Err(io_protocol_error(error)));
+            }
+        }
         Command::CreateProject { root } => match app.create_project(root, cx) {
             Ok(project_id) => response = CommandResponse::ProjectId(Some(project_id)),
             Err(error) => return CommandOutcome::Immediate(Err(error)),
@@ -636,6 +641,30 @@ fn dispatch_query(
                 tcode_services::git::load_git_diff(&cwd, scope, base.as_deref(), ignore_whitespace)
             });
             cx.spawn_background(async move { Ok(QueryResponse::GitDiff(task.await)) })
+        }
+        Query::BrowseIconImages { directory } => {
+            let task = cx.unblock(move || tcode_services::project_icons::browse(&directory));
+            cx.spawn_background(async move { task.await.map_err(io_protocol_error) })
+        }
+        Query::ReadIconImage { path } => {
+            let task = cx.unblock(move || tcode_services::project_icons::thumbnail(&path));
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::FileBytes)
+                    .map_err(io_protocol_error)
+            })
+        }
+        Query::ReadProjectIcon { project_id } => {
+            let project = app.projects.iter().find(|p| p.id == project_id).cloned();
+            let task = cx.unblock(move || {
+                let project = project.ok_or_else(|| std::io::Error::other("unknown project"))?;
+                tcode_services::project_icons::read_project_icon(&project)
+            });
+            cx.spawn_background(async move {
+                task.await
+                    .map(QueryResponse::FileBytes)
+                    .map_err(io_protocol_error)
+            })
         }
         Query::ReadFileBytes { path } => {
             let task = cx.unblock(move || std::fs::read(&path));
@@ -1145,6 +1174,115 @@ mod tests {
         walk(root, &mut out);
         out.sort();
         out
+    }
+
+    #[test]
+    fn project_icons_replicate_persist_and_reset_to_t3_config() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-project-icons-{}", uuid::Uuid::new_v4()));
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let logo = project_root.join("logo.png");
+        std::fs::write(&logo, include_bytes!("../../../assets/icons/app/tcode.png")).unwrap();
+        std::fs::write(
+            project_root.join("t3.json"),
+            r#"{"iconPath":"logo.png","scripts":[]}"#,
+        )
+        .unwrap();
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        // An older project record must still load with automatic artwork.
+        std::fs::write(
+            root.join("sessions.json"),
+            serde_json::json!({
+                "projects": [{"id":"p", "name":"Project", "root": project_root, "created_at":1}],
+                "sessions": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
+        let link = host.link();
+        link.subscribe(Subscription {
+            after: None,
+            topic: Topic::Index,
+        })
+        .unwrap();
+        let events = link.events();
+        next_event(&events, |event| {
+            matches!(event.event, ServerEvent::IndexSnapshot(_))
+        });
+        let QueryResponse::FileBytes(png) = smol::block_on(link.query(Query::ReadProjectIcon {
+            project_id: "p".into(),
+        }))
+        .unwrap() else {
+            panic!()
+        };
+        assert!(
+            link.command_blocking(Command::SetProjectIcon {
+                project_id: "p".into(),
+                png: Some(b"broken".to_vec())
+            })
+            .is_err()
+        );
+        link.command_blocking(Command::SetProjectIcon {
+            project_id: "p".into(),
+            png: Some(png.clone()),
+        })
+        .unwrap();
+        let event = next_event(
+            &events,
+            |event| matches!(&event.event, ServerEvent::IndexSnapshot(snapshot) if snapshot.projects[0].icon_path.is_some()),
+        );
+        let ServerEvent::IndexSnapshot(snapshot) = event.event else {
+            panic!()
+        };
+        let first = snapshot.projects[0].icon_path.clone().unwrap();
+        assert!(first.starts_with(root.join("project-icons")));
+        host.shutdown_blocking().unwrap();
+        assert_eq!(
+            store.read_file().projects[0].icon_path.as_ref(),
+            Some(&first)
+        );
+        // Removing the source must not break the saved custom copy.
+        std::fs::remove_file(&logo).unwrap();
+        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
+        let link = host.link();
+        assert!(matches!(
+            smol::block_on(link.query(Query::ReadProjectIcon {
+                project_id: "p".into()
+            }))
+            .unwrap(),
+            QueryResponse::FileBytes(_)
+        ));
+        link.command_blocking(Command::SetProjectIcon {
+            project_id: "p".into(),
+            png: Some(png),
+        })
+        .unwrap();
+        host.shutdown_blocking().unwrap();
+        let second = store.read_file().projects[0].icon_path.clone().unwrap();
+        assert_ne!(first, second);
+        assert!(!first.exists());
+        std::fs::write(&logo, include_bytes!("../../../assets/icons/app/tcode.png")).unwrap();
+        let host = spawn_host(store.clone(), HostServices::default()).unwrap();
+        let link = host.link();
+        link.command_blocking(Command::SetProjectIcon {
+            project_id: "p".into(),
+            png: None,
+        })
+        .unwrap();
+        assert!(matches!(
+            smol::block_on(link.query(Query::ReadProjectIcon {
+                project_id: "p".into()
+            }))
+            .unwrap(),
+            QueryResponse::FileBytes(_)
+        ));
+        host.shutdown_blocking().unwrap();
+        assert!(store.read_file().projects[0].icon_path.is_none());
+        assert!(!second.exists());
+        assert!(logo.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

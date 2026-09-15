@@ -37,7 +37,7 @@ use crate::conversation_ui::{ConversationUiState, DiffFocus};
 
 mod history;
 pub(crate) use history::HISTORY_WINDOW_SCREENS;
-mod images;
+pub(crate) mod images;
 mod intents;
 pub(crate) use images::host_image;
 mod snapshots;
@@ -282,6 +282,8 @@ impl WorkspaceStore {
         cx.set_global(images::HostImages {
             link: Some(host.clone()),
             namespace: image_namespace,
+            #[cfg(test)]
+            blocking_queries: seed_blocking,
         });
         let client_preferences = client_host
             .as_ref()
@@ -778,6 +780,8 @@ impl WorkspaceStore {
             cx.set_global(images::HostImages {
                 link: None,
                 namespace: self.image_namespace,
+                #[cfg(test)]
+                blocking_queries: false,
             });
         }
     }
@@ -859,6 +863,7 @@ impl WorkspaceStore {
                     .sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
             }
             (Topic::Index, ServerEvent::IndexUpsertProject(project)) => {
+                images::invalidate_project_icon(project, cx);
                 match self
                     .index_replica
                     .1
@@ -898,6 +903,16 @@ impl WorkspaceStore {
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_hydrated = true;
                 self.baseline_topics.insert(Topic::Index);
+                for project in &snapshot.projects {
+                    if self
+                        .index_replica
+                        .1
+                        .iter()
+                        .any(|old| old.id == project.id && old.icon_path != project.icon_path)
+                    {
+                        images::invalidate_project_icon(project, cx);
+                    }
+                }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
                 self.title_generating = snapshot.title_generating.clone();
                 // Client state for a conversation the index no longer lists has
@@ -2492,6 +2507,48 @@ impl WorkspaceStore {
         Some(read(&workspace))
     }
 
+    pub(crate) fn browse_icon_images(
+        &self,
+        directory: PathBuf,
+        cx: &mut App,
+    ) -> Task<Result<QueryResponse, ProtocolError>> {
+        let host = self.host.clone();
+        #[cfg(test)]
+        {
+            let result =
+                futures_lite::future::block_on(host.query(Query::BrowseIconImages { directory }));
+            cx.spawn(async move |_| result)
+        }
+        #[cfg(not(test))]
+        cx.spawn(async move |_| host.query(Query::BrowseIconImages { directory }).await)
+    }
+
+    pub(crate) fn set_project_icon(
+        &self,
+        project_id: String,
+        path: Option<PathBuf>,
+        cx: &mut App,
+    ) -> Task<Result<tcode_protocol::CommandResponse, ProtocolError>> {
+        let host = self.host.clone();
+        cx.spawn(async move |_| {
+            let png = if let Some(path) = path {
+                match host.query(Query::ReadIconImage { path }).await? {
+                    QueryResponse::FileBytes(bytes) => Some(bytes),
+                    _ => {
+                        return Err(ProtocolError {
+                            code: "invalid_image_response".into(),
+                            message: "Unexpected image response".into(),
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            host.command(tcode_protocol::Command::SetProjectIcon { project_id, png })
+                .await
+        })
+    }
+
     pub fn list_active_workspace(&self, cx: &mut App) -> Task<Vec<PathEntry>> {
         let session_id = self.active_session_id().unwrap_or_default();
         let host = self.host.clone();
@@ -3447,6 +3504,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             root: root.to_path_buf(),
+            icon_path: None,
             created_at: 0,
         }
     }

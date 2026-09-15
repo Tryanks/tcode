@@ -7,15 +7,29 @@ use tcode_protocol::{Query, QueryResponse};
 pub(super) struct HostImages {
     pub link: Option<HostLink>,
     pub namespace: u64,
+    /// Real host fixtures pump on an OS thread; do not give that thread a
+    /// deterministic GPUI scheduler waker. Scripted image fixtures stay async.
+    #[cfg(test)]
+    pub blocking_queries: bool,
 }
 impl Global for HostImages {}
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ImageRequest {
+    File(PathBuf),
+    Thumbnail(PathBuf),
+    Project {
+        id: String,
+        override_path: Option<PathBuf>,
+    },
+}
+
 struct HostImage;
 impl Asset for HostImage {
-    type Source = (u64, PathBuf);
+    type Source = (u64, ImageRequest);
     type Output = Result<Arc<Image>, ImageCacheError>;
     fn load(
-        (namespace, path): Self::Source,
+        (namespace, request): Self::Source,
         cx: &mut App,
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
         let images = cx.global::<HostImages>();
@@ -24,9 +38,24 @@ impl Asset for HostImage {
             .clone()
             .filter(|_| images.namespace == namespace)
             .ok_or_else(|| std::io::Error::other("image belongs to a detached host"));
+        #[cfg(test)]
+        let blocking_queries = images.blocking_queries;
         async move {
+            let query = match request {
+                ImageRequest::File(path) => Query::ReadFileBytes { path },
+                ImageRequest::Thumbnail(path) => Query::ReadIconImage { path },
+                ImageRequest::Project { id, .. } => Query::ReadProjectIcon { project_id: id },
+            };
             let host = host?;
-            let bytes = match host.query(Query::ReadFileBytes { path }).await {
+            #[cfg(test)]
+            let result = if blocking_queries {
+                futures_lite::future::block_on(host.query(query))
+            } else {
+                host.query(query).await
+            };
+            #[cfg(not(test))]
+            let result = host.query(query).await;
+            let bytes = match result {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
                 result => {
                     return Err(std::io::Error::other(format!(
@@ -43,14 +72,107 @@ impl Asset for HostImage {
     }
 }
 
-pub(crate) fn host_image(path: PathBuf) -> ImageSource {
+/// A separate cache entry for each physical display size keeps the GPU from
+/// minifying the 128px preview with a four-sample bilinear lookup.
+struct IconRaster;
+impl Asset for IconRaster {
+    type Source = (Arc<Image>, u32);
+    type Output = Result<Arc<Image>, ImageCacheError>;
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "async fn would capture the borrowed, non-Send App; Asset requires a Send + 'static future"
+    )]
+    fn load(
+        (image, pixels): Self::Source,
+        _: &mut App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        async move { rasterize_icon(&image, pixels) }
+    }
+}
+
+fn rasterize_icon(image: &Image, pixels: u32) -> Result<Arc<Image>, ImageCacheError> {
+    let mut rgba = image::load_from_memory(&image.bytes)?.into_rgba32f();
+    // Filter premultiplied colors so transparent pixels cannot leave dark fringes.
+    for pixel in rgba.pixels_mut() {
+        let alpha = pixel[3];
+        for channel in &mut pixel.0[..3] {
+            *channel *= alpha;
+        }
+    }
+    let mut resized = image::DynamicImage::ImageRgba32F(rgba)
+        .resize(pixels, pixels, image::imageops::FilterType::Lanczos3)
+        .into_rgba32f();
+    for pixel in resized.pixels_mut() {
+        let alpha = pixel[3];
+        for channel in &mut pixel.0[..3] {
+            *channel = if alpha > 0. { *channel / alpha } else { 0. };
+        }
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba32F(resized)
+        .to_rgba8()
+        .write_to(&mut png, image::ImageFormat::Png)?;
+    Ok(Arc::new(Image::from_bytes(
+        gpui::ImageFormat::Png,
+        png.into_inner(),
+    )))
+}
+
+fn source(request: ImageRequest, logical_size: Option<f32>) -> ImageSource {
     ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
         let namespace = cx.try_global::<HostImages>()?.namespace;
-        match window.use_asset::<HostImage>(&(namespace, path.clone()), cx)? {
-            Ok(image) => image.use_render_image(window, cx).map(Ok),
+        match window.use_asset::<HostImage>(&(namespace, request.clone()), cx)? {
+            Ok(image) => {
+                let image = if let Some(size) = logical_size {
+                    let pixels = (size * window.scale_factor()).round().max(1.) as u32;
+                    match window.use_asset::<IconRaster>(&(image, pixels), cx)? {
+                        Ok(image) => image,
+                        Err(error) => return Some(Err(error)),
+                    }
+                } else {
+                    image
+                };
+                image.use_render_image(window, cx).map(Ok)
+            }
             Err(error) => Some(Err(error)),
         }
     })
+}
+
+pub(crate) fn host_image(path: PathBuf) -> ImageSource {
+    source(ImageRequest::File(path), None)
+}
+
+pub(crate) fn icon_thumbnail(path: PathBuf) -> ImageSource {
+    source(ImageRequest::Thumbnail(path), None)
+}
+
+pub(crate) fn project_icon(
+    project: &tcode_core::project::Project,
+    logical_size: f32,
+) -> ImageSource {
+    source(
+        ImageRequest::Project {
+            id: project.id.clone(),
+            override_path: project.icon_path.clone(),
+        },
+        Some(logical_size),
+    )
+}
+
+/// A reset can return to a previously cached default after the project config changes.
+pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx: &mut App) {
+    if let Some(images) = cx.try_global::<HostImages>() {
+        let key = (
+            images.namespace,
+            ImageRequest::Project {
+                id: project.id.clone(),
+                override_path: project.icon_path.clone(),
+            },
+        );
+        cx.remove_asset::<HostImage>(&key);
+    }
 }
 
 #[cfg(test)]
@@ -63,6 +185,36 @@ mod tests {
         Keystroke, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, px,
     };
     use tcode_protocol::{ClientPayload, HostMessage, decode_client_line, encode_line};
+
+    #[test]
+    fn small_icon_rasters_preserve_aspect_and_transparent_edge_color() {
+        // Opaque red beside transparent black exposes dark fringes if the
+        // downsampling averages straight-alpha colors.
+        let pixels = image::RgbaImage::from_fn(128, 64, |x, _| {
+            if x < 61 {
+                image::Rgba([255, 0, 0, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let source = Image::from_bytes(gpui::ImageFormat::Png, png.into_inner());
+        for size in [14, 16, 32] {
+            let raster = rasterize_icon(&source, size).unwrap();
+            let resized = image::load_from_memory(&raster.bytes).unwrap().into_rgba8();
+            assert_eq!(resized.dimensions(), (size, size / 2));
+            let edge: Vec<_> = resized
+                .pixels()
+                .filter(|p| p[3] > 0 && p[3] < 255)
+                .collect();
+            assert!(!edge.is_empty(), "the edge should be antialiased");
+            assert!(
+                edge.iter().all(|p| p[0] >= 254 && p[1] == 0 && p[2] == 0),
+                "transparent black must not darken the red edge"
+            );
+        }
+    }
 
     struct ImageMessage {
         markdown: Entity<MarkdownState>,
@@ -90,6 +242,7 @@ mod tests {
             cx.set_global(HostImages {
                 link: Some(link.clone()),
                 namespace: 1,
+                blocking_queries: false,
             });
         });
         let executor = cx.background_executor.clone();
