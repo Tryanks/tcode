@@ -314,6 +314,9 @@ pub struct IndexSnapshot {
     /// Working, approval, user-input and background-only flags for sidebar rows.
     #[serde(default)]
     pub activity: HashMap<String, (bool, bool, bool, bool)>,
+    /// Background title requests, including threads with no live provider.
+    #[serde(default)]
+    pub title_generating: HashSet<String>,
     pub sessions: Vec<SessionMeta>,
     pub projects: Vec<Project>,
 }
@@ -415,6 +418,8 @@ pub enum RuntimeError {
     PersistEvent { error: String },
     WorktreeAdd { error: String },
     PersistSession { error: String },
+    TitleGenerationFailed,
+    TitleGenerationEmpty,
     ProcessGone,
     SteerUnsupported { agent: String },
     DirtyTree,

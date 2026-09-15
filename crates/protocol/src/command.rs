@@ -239,6 +239,9 @@ pub enum Command {
         session_id: String,
         title: String,
     },
+    RegenerateSessionTitle {
+        session_id: String,
+    },
     ForkThread {
         id: String,
     },
@@ -416,6 +419,7 @@ impl Command {
             | Self::ArchiveSession { session_id, .. }
             | Self::UnarchiveSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
+            | Self::RegenerateSessionTitle { session_id }
             | Self::DeleteSession { session_id, .. }
             | Self::MergeWorktree { session_id, .. }
             | Self::MarkSessionUnread { session_id, .. }

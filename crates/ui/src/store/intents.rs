@@ -207,6 +207,10 @@ impl WorkspaceStore {
     pub fn rename_session(&mut self, session_id: String, title: String) {
         self.dispatch(Command::RenameSession { session_id, title });
     }
+
+    pub fn regenerate_session_title(&mut self, session_id: String) {
+        self.dispatch(Command::RegenerateSessionTitle { session_id });
+    }
     pub fn fork_thread(&mut self, id: String, cx: &mut Context<Self>) {
         self.create_and_select(Command::ForkThread { id }, cx);
     }

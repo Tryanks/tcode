@@ -597,6 +597,14 @@ in both states.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. Inline rename
    commits on Enter and cancels on blur or any click outside the input.
+   The thread context menu offers **Regenerate title / 重新生成标题** next to
+   Rename in both layouts. It uses the original request and recent conversation
+   to name the subject and desired outcome. While a title request is pending on
+   the host, the action reads **Regenerating… / 正在重新生成…** and is disabled
+   on every connected client. A small spinner appears beside the existing title
+   at both widths. Regeneration preserves the thread's activity timestamp and
+   list position; a manual rename wins over a late result. Failure preserves the
+   title and shows an error.
    On hover, time swaps to the archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
