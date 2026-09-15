@@ -3615,7 +3615,10 @@ mod tests {
             }});
             actor.handle_notification("item/started", &activity).await;
             actor.handle_notification("item/completed", &activity).await;
-            assert!(events.try_recv().is_err(), "root activity must not emit a capsule");
+            assert!(
+                events.try_recv().is_err(),
+                "root activity must not emit a capsule"
+            );
             assert!(actor.subagents.is_empty());
             assert!(actor.subagent_parent_by_thread.is_empty());
         });
