@@ -231,6 +231,7 @@ impl Composer {
             );
 
         crate::material::overlay_popover(("model-picker-popover", self.model_picker_token))
+            .track_focus(&self.model_search.read(cx).focus_handle(cx))
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
@@ -729,6 +730,7 @@ fn render_model_pane(
     let popover_key = popover.clone();
 
     let pane = h_flex()
+        .key_context("ModelPicker")
         .when(!composer.read(cx).compact, |pane| pane.w(px(360.)))
         .when(composer.read(cx).compact, |pane| pane.w_full())
         .h(px(360.))
