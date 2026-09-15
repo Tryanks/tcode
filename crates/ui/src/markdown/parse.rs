@@ -93,6 +93,7 @@ fn block_node(
             BlockNode::List {
                 children: block_children(arena, node_ref, source, Some(spread)),
                 ordered: list.is_ordered(),
+                start: list.start(),
             }
         }
         KindData::ListItem(item) => BlockNode::ListItem {
@@ -559,6 +560,16 @@ mod tests {
                 .iter()
                 .all(|item| matches!(item, BlockNode::ListItem { spread: true, .. }))
         );
+    }
+
+    #[test]
+    fn keeps_ordered_list_start() {
+        let children = root_children("1. one\n\ntext\n\n2. two\n3. three");
+        let BlockNode::List { ordered, start, .. } = &children[2] else {
+            panic!()
+        };
+        assert!(ordered);
+        assert_eq!(*start, 2);
     }
 
     #[test]
