@@ -140,14 +140,21 @@ fn map_model(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        let mut levels = vec!["off", "minimal", "low", "medium", "high", "xhigh"];
-        if model
-            .pointer("/thinkingLevelMap/max")
-            .and_then(Value::as_str)
-            .is_some()
-        {
-            levels.push("max");
-        }
+        // Pi uses provider defaults for missing keys; null disables a level.
+        // Extended levels require an explicit mapping (getSupportedThinkingLevels).
+        let levels: Vec<_> = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .filter(|level| {
+                let mapped = model
+                    .get("thinkingLevelMap")
+                    .and_then(|map| map.get(*level));
+                if matches!(*level, "xhigh" | "max") {
+                    mapped.is_some_and(Value::is_string)
+                } else {
+                    !mapped.is_some_and(Value::is_null)
+                }
+            })
+            .collect();
         let default_value = thinking_level
             .filter(|level| levels.contains(level))
             .map(str::to_owned);
@@ -1783,7 +1790,8 @@ mod tests {
         let model = json!({
             "id": "gpt-test",
             "provider": "openai",
-            "reasoning": true
+            "reasoning": true,
+            "thinkingLevelMap": {"xhigh": "xhigh"}
         });
         let mapped = map_model(&model, None, Some("xhigh")).unwrap();
         assert!(matches!(
@@ -1802,6 +1810,70 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn map_model_filters_unsupported_thinking_levels() {
+        // Pi's thinkingLevelMap contract: omitted keys use provider defaults,
+        // null disables a level, and xhigh/max require explicit support.
+        for (mapping, expected) in [
+            (json!(null), vec!["off", "minimal", "low", "medium", "high"]),
+            (
+                json!({"low": "low"}),
+                vec!["off", "minimal", "low", "medium", "high"],
+            ),
+            (
+                json!({"minimal": null, "medium": null, "xhigh": null, "max": "max"}),
+                vec!["off", "low", "high", "max"],
+            ),
+            (
+                json!({"off": null, "xhigh": "xhigh", "max": null}),
+                vec!["minimal", "low", "medium", "high", "xhigh"],
+            ),
+        ] {
+            let mut model = json!({
+                "id": "test-model",
+                "provider": "test-provider",
+                "reasoning": true
+            });
+            if !mapping.is_null() {
+                model["thinkingLevelMap"] = mapping;
+            }
+            let mapped = map_model(&model, None, Some("medium")).unwrap();
+            let [
+                OptionDescriptor::Select {
+                    options,
+                    default_value,
+                    ..
+                },
+            ] = mapped.options.as_slice()
+            else {
+                panic!("reasoning model must expose its supported thinking levels");
+            };
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.value.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{model}"
+            );
+            assert_eq!(
+                default_value.as_deref(),
+                expected.contains(&"medium").then_some("medium")
+            );
+        }
+    }
+
+    #[test]
+    fn map_model_hides_thinking_options_for_non_reasoning_models() {
+        let model = json!({
+            "id": "test-model",
+            "provider": "test-provider",
+            "reasoning": false,
+            "thinkingLevelMap": {"xhigh": "xhigh", "max": "max"}
+        });
+        assert!(map_model(&model, None, None).unwrap().options.is_empty());
     }
 
     #[test]

@@ -824,6 +824,10 @@ The compact drawer's Build/Plan control toggles in place; its access control
 opens the approval-mode picker. Narrow desktop composers retain their overflow
 popover, where Build/Plan toggles and closes the popover and access is a summary.
 
+Pi's reasoning-effort picker uses the selected model's supported levels from the
+[Pi adapter](../crates/agent/src/pi.rs). Unsupported levels are hidden in both
+wide and compact layouts.
+
 Model picker popover: left rail = favorites star + provider
 glyphs; search input; rows = model name (✓ current) + provider subtitle,
 ⌘1…⌘9 (macOS) / Ctrl+1…Ctrl+9 (Windows/Linux) chips, favorite star; footer note
