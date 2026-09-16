@@ -214,10 +214,11 @@ pub trait ClientHost: 'static {
         Box::pin(async { Vec::new() })
     }
 
-    /// Refresh a saved LAN origin after an unreachable reconnect cycle.
-    /// Browser adapters leave their page origin fixed.
-    fn refresh_origin(&self, _host_id: &str) -> HostFuture<'_, Option<String>> {
-        Box::pin(async { None })
+    /// LAN origins where the machine `host_id` currently advertises itself,
+    /// for the transport to verify and race after an unreachable reconnect
+    /// cycle. Browser adapters have a fixed page origin and report none.
+    fn discover_origins(&self, _host_id: &str) -> HostFuture<'_, Vec<String>> {
+        Box::pin(async { Vec::new() })
     }
 
     fn supports_qr(&self) -> bool {

@@ -332,6 +332,7 @@ fn paired_preview(machine: &Machine) -> tcode_remote::preview::PreviewRoutes {
         host_id: "fixture".into(),
         name: "fixture".into(),
         origin: format!("http://{}", machine.server.as_ref().unwrap().local_addr()),
+        candidates: Vec::new(),
         token: decoded.strip_prefix("tcode:").unwrap().into(),
         last_connected_unix: None,
     })
@@ -578,6 +579,7 @@ fn native_bridge_preserves_reverse_half_close_auth_and_attachment_lifetime() {
             origin: format!("http://{}", server.local_addr()),
             host_id: String::new(),
             name: String::new(),
+            candidates: Vec::new(),
             token: String::new(),
             last_connected_unix: None,
         };

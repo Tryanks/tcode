@@ -199,8 +199,8 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
         &device("B"),
     )
     .unwrap();
-    let client_a = connect(host_a, device("A"));
-    let client_b = connect(host_b, device("B"));
+    let client_a = connect(host_a, device("A"), None);
+    let client_b = connect(host_b, device("B"), None);
     wait_state(&client_a, ConnectionState::Syncing);
     wait_state(&client_b, ConnectionState::Syncing);
     let subscribe = |id| {
@@ -280,14 +280,114 @@ fn wrong_token_gets_rejected_and_closed() {
             panic!("expected text rejection");
         };
         let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["type"], "hello_rejected");
-        assert_eq!(reply["reason"], "token");
+        // The identity lets a client tell its own machine's refusal from a
+        // stranger that now answers at a stale address.
+        assert_eq!(
+            reply,
+            json!({"type": "hello_rejected", "reason": "token", "host_id": server.new_pairing_code().host_id})
+        );
         assert!(matches!(
             websocket.next().await,
             None | Some(Ok(Message::Close(_)))
         ));
     });
     server.shutdown();
+}
+
+#[test]
+fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_promoted() {
+    let machine = TestDir::new();
+    let stranger = TestDir::new();
+    let (mux, _) = fake_host();
+    let server = serve(mux, config(machine.0.clone(), 0)).unwrap();
+    let (mux, _) = fake_host();
+    let other = serve(mux, config(stranger.0.clone(), 0)).unwrap();
+    let origin = format!("http://{}", server.local_addr());
+    let stale = format!("http://{}", other.local_addr());
+    let code = server.new_pairing_code();
+    let paired = pair(&origin, &code.code, &device("phone")).unwrap();
+
+    // hello_ok names the machine and every address it listens on, so the
+    // client can remember where else to look.
+    let port = server.local_addr().port();
+    smol::block_on(async {
+        let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
+            .await
+            .unwrap();
+        let (mut websocket, _) =
+            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
+                .await
+                .unwrap();
+        websocket
+            .send(Message::Text(
+                json!({"type": "hello", "protocol_version": 4, "token": paired.token, "device_name": "phone"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let Some(Ok(Message::Text(reply))) = websocket.next().await else {
+            panic!("expected hello_ok");
+        };
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(
+            reply,
+            json!({
+                "type": "hello_ok",
+                "host_id": code.host_id,
+                "host_name": "Test Host",
+                "protocol_version": 4,
+                "addrs": code.addrs,
+                "port": port
+            })
+        );
+    });
+
+    // The phone's record points at an address another machine now owns; the
+    // real machine is only a saved candidate.
+    let client_data = TestDir::new();
+    let mut moved = paired.clone();
+    moved.origin = stale.clone();
+    moved.candidates = vec![origin.clone()];
+    moved.last_connected_unix = Some(7);
+    tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&moved)).unwrap();
+    let client = connect(moved, device("phone"), Some(client_data.0.clone()));
+    let refused = smol::block_on(futures_lite::future::race(
+        async {
+            let mut refused = false;
+            loop {
+                match client.state.recv().await.unwrap() {
+                    ConnectionState::Reconnecting {
+                        reason: Some(ConnectionFailure::Unreachable),
+                        ..
+                    } => refused = true,
+                    ConnectionState::Syncing => return refused,
+                    ConnectionState::Offline { reason } => {
+                        panic!("a stranger's rejection ended the pairing: {reason:?}")
+                    }
+                    _ => {}
+                }
+            }
+        },
+        async {
+            smol::Timer::after(Duration::from_secs(8)).await;
+            panic!("candidate was never raced");
+        },
+    ));
+    assert!(
+        refused,
+        "the stranger's token rejection must be a plain miss"
+    );
+    let saved = tcode_remote::client::load_hosts(&client_data.0)
+        .unwrap()
+        .remove(0);
+    assert_eq!(saved.origin, origin);
+    assert_eq!(saved.candidates[0], stale);
+    assert_eq!(saved.token, paired.token);
+    assert_eq!(saved.last_connected_unix, Some(7));
+    client.to_host.close();
+    server.shutdown();
+    other.shutdown();
 }
 
 #[test]
@@ -447,7 +547,7 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
         })
     });
     let start = Instant::now();
-    let client = connect(host, device("deadline"));
+    let client = connect(host, device("deadline"), None);
     saw_tcp.recv_blocking().unwrap();
     smol::block_on(async {
         futures_lite::future::race(
@@ -511,10 +611,11 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
         host_id: paired["host_id"].as_str().unwrap().into(),
         name: "Test Host".into(),
         origin: origin.clone(),
+        candidates: Vec::new(),
         token: paired["token"].as_str().unwrap().into(),
         last_connected_unix: None,
     };
-    let client = connect(host, device("Browser"));
+    let client = connect(host, device("Browser"), None);
     wait_state(&client, ConnectionState::Syncing);
     let phone = pair(&origin, &server.new_pairing_code().code, &device("phone")).unwrap();
     let hosting = |action| {
@@ -553,7 +654,7 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
         platform: Some("Android 15".into()),
     };
     let phone_again = pair(&origin, &server.new_pairing_code().code, &xiaomi).unwrap();
-    let stale = connect(phone, device("phone"));
+    let stale = connect(phone, device("phone"), None);
     wait_state(
         &stale,
         ConnectionState::Offline {
@@ -580,6 +681,7 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
             platform: Some("Android 16".into()),
             ..xiaomi
         },
+        None,
     );
     wait_state(&upgraded, ConnectionState::Syncing);
     let state = hosting(tcode_protocol::HostingAction::State);
@@ -593,7 +695,7 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
     assert_eq!(refreshed["platform"], "Android 16");
     upgraded.to_host.close();
     hosting(tcode_protocol::HostingAction::RevokeDevice(phone_id));
-    let revoked = connect(phone_again, device("phone"));
+    let revoked = connect(phone_again, device("phone"), None);
     wait_state(
         &revoked,
         ConnectionState::Offline {

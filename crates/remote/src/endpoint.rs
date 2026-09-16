@@ -212,6 +212,7 @@ mod tests {
                 token: response["token"].as_str().unwrap().into(),
                 host_id: response["host_id"].as_str().unwrap().into(),
                 name: "entry fixture".into(),
+                candidates: Vec::new(),
                 last_connected_unix: None,
             };
             let url = url::Url::parse(&origin).unwrap();
@@ -221,7 +222,9 @@ mod tests {
                 platform: None,
             };
             let ws = endpoint
-                .establish(|stream| crate::client::open_websocket(stream, &url, &paired, &device))
+                .establish(|stream| {
+                    crate::client::open_websocket(stream, &url, &paired, &device, true)
+                })
                 .await
                 .unwrap();
             drop(ws);
@@ -264,7 +267,7 @@ mod tests {
             assert!(matches!(
                 endpoint
                     .establish(|stream| crate::client::open_websocket(
-                        stream, &url, &paired, &device
+                        stream, &url, &paired, &device, true
                     ))
                     .await,
                 Err(tcode_client::ConnectionFailure::AuthenticationRejected)

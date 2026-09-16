@@ -592,7 +592,7 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
         expires: Instant::now() + PAIRING_LIFETIME,
         failures: 0,
     });
-    let addrs = local_addrs();
+    let addrs = crate::discovery::local_addrs();
     let browser_ip = if shared.local_addr.ip().is_unspecified() {
         addrs
             .iter()
@@ -622,25 +622,6 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
         port: shared.local_addr.port(),
         addrs,
     }
-}
-
-fn local_addrs() -> Vec<String> {
-    let mut result: Vec<_> = if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|interface| interface.ip())
-        .filter(|address| {
-            !address.is_loopback()
-                && match address {
-                    std::net::IpAddr::V4(v4) => !v4.is_link_local(),
-                    std::net::IpAddr::V6(v6) => !v6.is_unicast_link_local(),
-                }
-        })
-        .map(|address| address.to_string())
-        .collect();
-    result.sort();
-    result.dedup();
-    result
 }
 
 async fn json_response<S, T>(stream: &mut S, status: &str, value: &T) -> io::Result<()>
@@ -739,6 +720,7 @@ where
         let rejected = serde_json::json!({
             "type": "hello_rejected",
             "reason": "protocol",
+            "host_id": shared.auth.lock().unwrap().host_id,
             "expected": tcode_protocol::PROTOCOL_VERSION,
             "received": hello.protocol_version
         });
@@ -761,9 +743,12 @@ where
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
     let Some(hello) = hello else {
+        // The identity lets a client tell "my machine revoked me" from "a
+        // different machine now answers at this address".
         let rejected = serde_json::json!({
             "type": "hello_rejected",
-            "reason": "token"
+            "reason": "token",
+            "host_id": shared.auth.lock().unwrap().host_id
         });
         let _ = websocket
             .send(Message::Text(rejected.to_string().into()))
@@ -785,13 +770,17 @@ where
     {
         log::warn!("could not record the connecting device's details: {error}");
     }
+    // `addrs` and `port` let the client remember every address this machine
+    // can be reached at, so it can find the machine again after a move.
     let hello_ok = {
         let auth = shared.auth.lock().unwrap();
         serde_json::json!({
             "type": "hello_ok",
             "host_id": auth.host_id,
             "host_name": auth.host_name,
-            "protocol_version": version
+            "protocol_version": version,
+            "addrs": crate::discovery::local_addrs(),
+            "port": shared.local_addr.port()
         })
     };
     websocket

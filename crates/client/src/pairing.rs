@@ -45,15 +45,57 @@ pub fn lan_origin(addr: &str, port: u16) -> String {
     }
 }
 
+/// Alternate origins remembered per machine, beyond the one that last worked.
+pub const MAX_CANDIDATE_ORIGINS: usize = 16;
+
+/// A pairing is bound to the machine identity (`host_id`), never to an
+/// address. `origin` is the last origin that completed hello; `candidates`
+/// are other origins worth trying when it stops answering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "SavedHost")]
 pub struct PairedHost {
     pub host_id: String,
     pub name: String,
     pub origin: String,
+    /// Ordered, deduplicated and bounded: origins that completed hello most
+    /// recently first, then address hints reported by the machine or found on
+    /// the LAN. Never contains `origin`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<String>,
     pub token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_unix: Option<u64>,
+}
+
+impl PairedHost {
+    /// Record that `origin` just completed hello. The previous origin becomes
+    /// the first candidate. Returns whether the record changed.
+    pub fn promote_origin(&mut self, origin: &str) -> bool {
+        if self.origin == origin {
+            return false;
+        }
+        let previous = std::mem::replace(&mut self.origin, origin.to_owned());
+        self.candidates.retain(|candidate| candidate != origin);
+        self.candidates.insert(0, previous);
+        self.candidates.truncate(MAX_CANDIDATE_ORIGINS);
+        true
+    }
+
+    /// Append address hints that are not yet known. Origins that completed
+    /// hello keep their place ahead of hints. Returns whether any were new.
+    pub fn add_candidates<'a>(&mut self, origins: impl IntoIterator<Item = &'a str>) -> bool {
+        let mut added = false;
+        for origin in origins {
+            if self.candidates.len() >= MAX_CANDIDATE_ORIGINS {
+                break;
+            }
+            if origin != self.origin && !self.candidates.iter().any(|known| known == origin) {
+                self.candidates.push(origin.to_owned());
+                added = true;
+            }
+        }
+        added
+    }
 }
 
 /// Record a host in the saved list. A host is identified by `host_id`, so
@@ -70,6 +112,8 @@ struct SavedHost {
     name: String,
     origin: Option<String>,
     #[serde(default)]
+    candidates: Vec<String>,
+    #[serde(default)]
     addrs: Vec<String>,
     port: Option<u16>,
     token: String,
@@ -85,13 +129,31 @@ impl TryFrom<SavedHost> for PairedHost {
                 saved.port.ok_or("missing port")?,
             ))?,
         };
-        Ok(Self {
+        let mut host = Self {
             host_id: saved.host_id,
             name: saved.name,
             origin,
+            candidates: Vec::new(),
             token: saved.token,
             last_connected_unix: saved.last_connected_unix,
-        })
+        };
+        // Older records listed every LAN address; the ones after the first are
+        // the same hints a current host reports in hello.
+        let legacy = saved.port.map_or(Vec::new(), |port| {
+            saved
+                .addrs
+                .iter()
+                .map(|addr| lan_origin(addr, port))
+                .collect()
+        });
+        let known: Vec<String> = saved
+            .candidates
+            .iter()
+            .chain(&legacy)
+            .filter_map(|candidate| parse_origin(candidate).ok())
+            .collect();
+        host.add_candidates(known.iter().map(String::as_str));
+        Ok(host)
     }
 }
 
@@ -169,22 +231,76 @@ mod tests {
         }
     }
     #[test]
-    fn legacy_saved_hosts_migrate_without_retaining_pins() {
+    fn older_hosts_json_records_load_and_keep_their_extra_addresses_as_candidates() {
+        // Written by clients before origins existed: addresses plus port, and a
+        // certificate pin that is no longer used.
         let host: PairedHost = serde_json::from_str(r#"{"host_id":"h","name":"n","addrs":["fd00::1","192.168.1.2"],"port":47420,"token":"t","fingerprint":"old-pin","last_connected_unix":42}"#).unwrap();
         assert_eq!(host.origin, "http://[fd00::1]:47420");
+        assert_eq!(host.candidates, vec!["http://192.168.1.2:47420"]);
         assert_eq!(
-            serde_json::to_value(host).unwrap(),
-            serde_json::json!({"host_id":"h","name":"n","origin":"http://[fd00::1]:47420","token":"t","last_connected_unix":42})
+            serde_json::to_value(&host).unwrap(),
+            serde_json::json!({"host_id":"h","name":"n","origin":"http://[fd00::1]:47420","candidates":["http://192.168.1.2:47420"],"token":"t","last_connected_unix":42})
         );
-    }
-    #[test]
-    fn legacy_record_without_last_connection_time_is_readable() {
+        // Written by clients that saved one origin and no candidates.
+        let host: PairedHost = serde_json::from_str(
+            r#"{"host_id":"h","name":"n","origin":"http://192.168.1.10:47420","token":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(host.origin, "http://192.168.1.10:47420");
+        assert!(host.candidates.is_empty());
+        assert_eq!(host.last_connected_unix, None);
+        assert_eq!(
+            serde_json::to_value(&host).unwrap(),
+            serde_json::json!({"host_id":"h","name":"n","origin":"http://192.168.1.10:47420","token":"t"})
+        );
         let host: PairedHost = serde_json::from_str(
             r#"{"host_id":"h","name":"n","addrs":["192.168.1.10"],"port":47420,"token":"t"}"#,
         )
         .unwrap();
         assert_eq!(host.origin, "http://192.168.1.10:47420");
-        assert_eq!(host.last_connected_unix, None);
+        assert!(host.candidates.is_empty());
+        // A candidate equal to the origin or malformed is dropped on load.
+        let host: PairedHost = serde_json::from_str(
+            r#"{"host_id":"h","name":"n","origin":"http://192.168.1.10:47420","candidates":["http://192.168.1.10:47420","not an origin","http://10.0.0.5:47420"],"token":"t"}"#,
+        )
+        .unwrap();
+        assert_eq!(host.candidates, vec!["http://10.0.0.5:47420"]);
+    }
+
+    #[test]
+    fn promoted_origins_lead_the_candidates_and_hints_stay_bounded() {
+        let mut host = PairedHost {
+            host_id: "h".into(),
+            name: "n".into(),
+            origin: "http://192.168.1.10:47420".into(),
+            candidates: vec!["http://10.0.0.5:47420".into()],
+            token: "t".into(),
+            last_connected_unix: None,
+        };
+        assert!(!host.promote_origin("http://192.168.1.10:47420"));
+        assert!(host.promote_origin("http://10.0.0.5:47420"));
+        assert_eq!(host.origin, "http://10.0.0.5:47420");
+        assert_eq!(host.candidates, vec!["http://192.168.1.10:47420"]);
+        assert!(host.add_candidates(["http://10.0.0.5:47420", "http://172.20.10.1:47420"]));
+        assert!(!host.add_candidates(["http://172.20.10.1:47420"]));
+        assert_eq!(
+            host.candidates,
+            vec!["http://192.168.1.10:47420", "http://172.20.10.1:47420"]
+        );
+        let many: Vec<String> = (0..40)
+            .map(|n| format!("http://10.1.0.{n}:47420"))
+            .collect();
+        host.add_candidates(many.iter().map(String::as_str));
+        assert_eq!(host.candidates.len(), MAX_CANDIDATE_ORIGINS);
+        assert_eq!(host.candidates[0], "http://192.168.1.10:47420");
+        assert!(host.promote_origin("http://10.1.0.13:47420"));
+        assert_eq!(host.candidates.len(), MAX_CANDIDATE_ORIGINS);
+        assert_eq!(host.candidates[0], "http://10.0.0.5:47420");
+        assert!(
+            !host
+                .candidates
+                .contains(&"http://10.1.0.13:47420".to_owned())
+        );
     }
 
     #[test]
@@ -193,6 +309,7 @@ mod tests {
             host_id: id.into(),
             name: id.to_uppercase(),
             origin: "http://192.168.1.2:47420".into(),
+            candidates: Vec::new(),
             token: token.into(),
             last_connected_unix: None,
         };

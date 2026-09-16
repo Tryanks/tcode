@@ -211,6 +211,7 @@ async fn pair(code: &str, device: &DeviceIdentity) -> Result<PairedHost, String>
             name: field("host_name")?,
             token: field("token")?,
             origin,
+            candidates: Vec::new(),
             last_connected_unix: None,
         })
     }

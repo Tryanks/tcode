@@ -97,7 +97,7 @@ fn races_stalled_address_and_applies_first_host_message() {
             .unwrap();
     host.origin = format!("http://localhost:{}", server.local_addr().port());
     let start = Instant::now();
-    let client = connect(host, device("race"));
+    let client = connect(host, device("race"), None);
     wait(&client, Duration::from_secs(2), |s| {
         *s == ConnectionState::Syncing
     });
@@ -128,7 +128,7 @@ fn rejected_token_is_terminal_without_retry() {
     )
     .unwrap();
     host.token = "invalid".into();
-    let client = connect(host, device("reject"));
+    let client = connect(host, device("reject"), None);
     wait(&client, Duration::from_secs(2), |s| {
         *s == ConnectionState::Offline {
             reason: ConnectionFailure::AuthenticationRejected,
@@ -187,7 +187,7 @@ fn stopped_host_times_out() {
         &device("stop"),
     )
     .unwrap();
-    let client = connect(host, device("stop"));
+    let client = connect(host, device("stop"), None);
     ping(&client);
     wait(&client, Duration::from_secs(2), |s| {
         *s == ConnectionState::Connected
