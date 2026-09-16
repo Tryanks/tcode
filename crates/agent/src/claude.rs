@@ -32,16 +32,16 @@ use smol::prelude::*;
 use smol::process::Stdio;
 
 pub use crate::claude_context::{
-    format_context_window, native_context_window, parse_context_window_tokens,
-    resolved_context_window,
+    format_context_window, parse_context_window_tokens, resolved_context_window,
 };
+use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
     AgentError, AgentEvent, ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRequest,
-    Attachment, ClassifierCategory, DeltaKind, FileChange, FileChangeKind, InteractionMode,
-    ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor, OptionSelection, PlanStep,
-    PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind, ResumeCursor, RewindMode,
-    SelectOption, SessionCommand, SessionHandle, SessionOptions, ThreadItem, TokenUsage,
-    TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
+    Attachment, CatalogRefresh, ClassifierCategory, DeltaKind, FileChange, FileChangeKind,
+    InteractionMode, ItemContent, ItemStatus, LaunchEnv, ModelSpec, OptionDescriptor,
+    OptionSelection, PlanStep, PlanStepStatus, ProviderCommand, ProviderCommandKind, ProviderKind,
+    ResumeCursor, RewindMode, SessionCommand, SessionHandle, SessionOptions, ThreadItem,
+    TokenUsage, TurnStatus, UserInputOption, UserInputQuestion, selection_bool, selection_str,
 };
 
 /// Denial returned to `ExitPlanMode` after the client captures the plan.
@@ -100,10 +100,9 @@ fn effective_permission_mode(internal: &str, extra_args: &[String]) -> String {
 
 /// Start (or resume) a Claude Code session.
 pub async fn start(opts: SessionOptions) -> Result<SessionHandle, AgentError> {
-    let native_rewind = version_ge(
-        claude_version(opts.binary_path.as_deref(), &opts.launch_env).await,
-        NATIVE_REWIND_MIN_VERSION,
-    );
+    let native_rewind = claude_version(opts.binary_path.as_deref(), &opts.launch_env)
+        .await
+        .is_some_and(|version| version >= NATIVE_REWIND_MIN_VERSION);
     // Absolute path: a bare name would be resolved against the session cwd we
     // set below, which breaks PATH lookup (see `resolve_binary`).
     let binary = crate::resolve_binary(opts.binary_path.as_deref(), "claude")?;
@@ -401,10 +400,11 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 
 /// Model-scoped launch flags resolved from the session's option selections.
 struct ClaudeLaunchOptions {
-    /// Model id with a `[1m]` suffix appended for the 1M context window.
+    /// Model id with the manifest's context-window suffix (e.g. `[1m]`) when
+    /// the selected window needs it.
     model_id: Option<String>,
-    /// Normalized `--effort` value (`None` when the selection is `ultrathink`,
-    /// which is a prompt-prefix mode).
+    /// `--effort` value after the manifest's `effortMap` (`None` when the
+    /// selection maps to no flag, e.g. `ultrathink`, a prompt-prefix mode).
     effort: Option<String>,
     /// `--settings` JSON string (fastMode / ultracode / alwaysThinkingEnabled).
     settings_json: Option<String>,
@@ -437,39 +437,42 @@ fn launch_settings_json(
 
 impl ClaudeLaunchOptions {
     fn resolve(model: Option<&str>, selections: &[OptionSelection]) -> Self {
-        let spec = model.and_then(model_spec);
+        Self::resolve_with(&crate::claude_manifest::current(), model, selections)
+    }
+
+    fn resolve_with(
+        catalog: &ClaudeCatalog,
+        model: Option<&str>,
+        selections: &[OptionSelection],
+    ) -> Self {
+        let entry = model.and_then(|model| catalog.model(model));
+        let spec = entry.map(|entry| &entry.spec);
         let raw_effort = selection_str(selections, "reasoningEffort");
-        let resolved_effort = resolve_claude_effort(spec.as_ref(), raw_effort.as_deref());
+        let resolved_effort = resolve_claude_effort(spec, raw_effort.as_deref());
         let ultrathink = resolved_effort.as_deref() == Some("ultrathink");
         let ultracode = resolved_effort.as_deref() == Some("ultracode");
-        let effort = normalize_claude_cli_effort(resolved_effort.as_deref(), model);
-
-        let window = resolved_context_window(model.unwrap_or_default(), selections);
-        let native_window = native_context_window(model.unwrap_or_default());
-        let effective_model_window = if native_window == 200_000 && window > native_window {
-            1_000_000
-        } else {
-            native_window
+        let effort = match (entry, resolved_effort.as_deref()) {
+            (Some(entry), Some(effort)) => entry.cli_effort(effort),
+            _ => None,
         };
-        let model_id = model.map(|m| {
-            let base = m.strip_suffix("[1m]").unwrap_or(m);
-            if native_window == 200_000 && window > native_window {
-                format!("{base}[1m]")
-            } else {
-                base.to_owned()
-            }
+
+        let window = catalog.resolved_context_window(model.unwrap_or_default(), selections);
+        let model_id = model.map(|model| {
+            let base = model.split('[').next().unwrap_or(model);
+            let suffix = entry.map_or("", |entry| entry.context_window_suffix(window));
+            format!("{base}{suffix}")
         });
-        let auto_compact_window = (window < effective_model_window).then_some(window);
+        // Anything below the model's largest window is enforced through
+        // `autoCompactWindow`: some bare slugs (e.g. Opus 5) already run at
+        // 1M, so a smaller selection must be told to compact early.
+        let largest = entry
+            .and_then(CatalogModel::largest_context_window)
+            .unwrap_or(window);
+        let auto_compact_window = (window < largest).then_some(window);
 
         // `--settings` object: only supported/true keys are emitted.
-        let fast_supported = spec
-            .as_ref()
-            .map(|s| has_boolean_option(s, "fastMode"))
-            .unwrap_or(false);
-        let thinking_supported = spec
-            .as_ref()
-            .map(|s| has_boolean_option(s, "thinking"))
-            .unwrap_or(false);
+        let fast_supported = spec.is_some_and(|spec| has_boolean_option(spec, "fastMode"));
+        let thinking_supported = spec.is_some_and(|spec| has_boolean_option(spec, "thinking"));
         let fast_mode = fast_supported && selection_bool(selections, "fastMode") == Some(true);
         let thinking = if thinking_supported {
             selection_bool(selections, "thinking")
@@ -538,7 +541,7 @@ async fn actor_loop(
     );
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
-    let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentModelNotice>();
+    let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
 
     // Set when the child died on its own (stdout EOF): only then do its exit
     // status and stderr tail belong in the close reason.
@@ -558,8 +561,10 @@ async fn actor_loop(
             Sel::Tail(notice) => {
                 // The sender side is owned by this loop, so it can't close.
                 let Some(notice) = notice else { continue };
-                for ev in mapper.note_subagent_model(&notice.parent_id, notice.model, notice.effort)
-                {
+                if notice.stopped {
+                    tailers.remove(&notice.parent_id);
+                }
+                for ev in mapper.on_tail_notice(notice) {
                     if event_tx.send(ev).await.is_err() {
                         let _ = child.kill();
                         return;
@@ -602,7 +607,6 @@ async fn actor_loop(
                     mapper.take_tail_requests(),
                     &mut tailers,
                     claude_dir.as_deref(),
-                    &event_tx,
                     &tail_tx,
                 )
                 .await;
@@ -622,6 +626,11 @@ async fn actor_loop(
     let _ = stdin.close().await;
     for control in tailers.into_values() {
         let _ = control.send(TailControl::Stop).await;
+    }
+    // Tail acknowledgements no longer reach this loop; release the held
+    // terminal snapshots so the parent rows settle before the close.
+    for ev in mapper.take_pending_subagent_terminals() {
+        let _ = event_tx.send(ev).await;
     }
     let _ = child.kill();
     let _ = child.status().await;
@@ -649,18 +658,22 @@ async fn actor_loop(
 enum Sel {
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
-    Tail(Option<SubagentModelNotice>),
+    Tail(Option<SubagentTailNotice>),
 }
 
-/// Model/effort observed in a tailed subagent transcript, handed back to the
-/// actor so the parent Subagent item is updated with its live status.
-pub(crate) struct SubagentModelNotice {
+/// One read of a tailed subagent transcript, handed back to the actor so the
+/// mapper stays the single writer of the canonical stream: it dedupes the
+/// child items against the stdout feed and, on `stopped`, releases the
+/// Subagent item's terminal snapshot after them.
+pub(crate) struct SubagentTailNotice {
     pub(crate) parent_id: String,
-    pub(crate) model: Option<String>,
-    pub(crate) effort: Option<String>,
+    pub(crate) events: Vec<AgentEvent>,
+    pub(crate) model: Option<(Option<String>, Option<String>)>,
+    /// Final batch: the tail acknowledged Stop (or lost its actor).
+    pub(crate) stopped: bool,
 }
 
-enum TailControl {
+pub(crate) enum TailControl {
     PreferPath(PathBuf),
     Stop,
 }
@@ -669,8 +682,7 @@ async fn process_tail_requests(
     requests: Vec<TailRequest>,
     tailers: &mut HashMap<String, smol::channel::Sender<TailControl>>,
     claude_dir: Option<&Path>,
-    event_tx: &smol::channel::Sender<AgentEvent>,
-    tail_tx: &smol::channel::Sender<SubagentModelNotice>,
+    tail_tx: &smol::channel::Sender<SubagentTailNotice>,
 ) {
     for request in requests {
         match request {
@@ -685,10 +697,9 @@ async fn process_tail_requests(
                 let (control_tx, control_rx) = smol::channel::unbounded();
                 tailers.insert(parent_id.clone(), control_tx);
                 let claude_dir = claude_dir.map(Path::to_path_buf);
-                let events = event_tx.clone();
                 let notices = tail_tx.clone();
                 smol::spawn(run_subagent_tail(
-                    parent_id, task_id, session_id, claude_dir, control_rx, events, notices,
+                    parent_id, task_id, session_id, claude_dir, control_rx, notices,
                 ))
                 .detach();
             }
@@ -706,70 +717,83 @@ async fn process_tail_requests(
     }
 }
 
-async fn run_subagent_tail(
+/// Poll a subagent's transcript until Stop; the final read is flushed in the
+/// notice that carries `stopped`, so the actor sees every child item before
+/// it releases the Subagent item's terminal snapshot.
+pub(crate) async fn run_subagent_tail(
     parent_id: String,
     task_id: String,
     session_id: String,
     claude_dir: Option<PathBuf>,
     controls: smol::channel::Receiver<TailControl>,
-    events: smol::channel::Sender<AgentEvent>,
-    notices: smol::channel::Sender<SubagentModelNotice>,
+    notices: smol::channel::Sender<SubagentTailNotice>,
 ) {
-    let mut path = None;
-    let mut reader = None;
+    let mut reader: Option<crate::subagent_tail::TailReader> = None;
     let mut stopping = false;
+    let mut woken = None;
     loop {
-        while let Ok(control) = controls.try_recv() {
+        for control in woken
+            .take()
+            .into_iter()
+            .chain(std::iter::from_fn(|| controls.try_recv().ok()))
+        {
             match control {
-                TailControl::PreferPath(preferred) => {
-                    if path.as_ref() != Some(&preferred) {
-                        path = Some(preferred.clone());
-                        reader = Some(crate::subagent_tail::TailReader::new(
-                            preferred,
-                            parent_id.clone(),
-                        ));
-                    }
+                // The notification's output file duplicates a transcript that
+                // discovery already tails; switching would replay it from byte 0.
+                TailControl::PreferPath(preferred) if reader.is_none() => {
+                    reader = Some(crate::subagent_tail::TailReader::new(
+                        preferred,
+                        parent_id.clone(),
+                    ));
                 }
+                TailControl::PreferPath(_) => {}
                 TailControl::Stop => stopping = true,
             }
         }
-        if path.is_none()
+        if reader.is_none()
             && let Some(root) = &claude_dir
             && let Some(found) =
                 crate::subagent_tail::find_transcript(root, &session_id, &task_id, &parent_id)
         {
-            path = Some(found.clone());
             reader = Some(crate::subagent_tail::TailReader::new(
                 found,
                 parent_id.clone(),
             ));
         }
+        let mut notice = SubagentTailNotice {
+            parent_id: parent_id.clone(),
+            events: Vec::new(),
+            model: None,
+            stopped: stopping,
+        };
         if let Some(reader) = &mut reader {
             match reader.read_appended() {
                 Ok(mapped) => {
-                    for event in mapped {
-                        if events.send(event).await.is_err() {
-                            return;
-                        }
-                    }
-                    if let Some((model, effort)) = reader.take_model() {
-                        let _ = notices
-                            .send(SubagentModelNotice {
-                                parent_id: parent_id.clone(),
-                                model,
-                                effort,
-                            })
-                            .await;
-                    }
+                    notice.events = mapped;
+                    notice.model = reader.take_model();
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => log::debug!("claude subagent tail read failed: {err}"),
             }
         }
+        if (stopping || !notice.events.is_empty() || notice.model.is_some())
+            && notices.send(notice).await.is_err()
+        {
+            return;
+        }
         if stopping {
             return;
         }
-        smol::Timer::after(std::time::Duration::from_millis(400)).await;
+        // Wake on the next control so a Stop flushes immediately instead of
+        // after a poll interval; a closed channel means the actor is gone.
+        woken = smol::future::or(
+            async { Some(controls.recv().await.unwrap_or(TailControl::Stop)) },
+            async {
+                smol::Timer::after(std::time::Duration::from_millis(400)).await;
+                None
+            },
+        )
+        .await;
     }
 }
 
@@ -1158,6 +1182,14 @@ pub(crate) struct Mapper {
     task_tools: HashMap<String, String>,
     child_mappers: HashMap<String, crate::subagent_tail::TranscriptMapper>,
     tail_requests: Vec<TailRequest>,
+    /// Subagents whose transcript tail has not yet acknowledged its Stop. A
+    /// terminal Subagent snapshot is held in `pending_subagent_terminals` until
+    /// then, so the mirror's turn closes after the tail's final child items.
+    tailed: HashSet<String>,
+    pending_subagent_terminals: HashMap<String, AgentEvent>,
+    /// Child items already completed by either feed (stdout `parent_tool_use_id`
+    /// lines or the transcript tail); a stale start must not reopen them.
+    finished_child_items: HashSet<String>,
     pending_approvals: HashMap<String, PendingApproval>,
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
@@ -1255,6 +1287,9 @@ impl Mapper {
             task_tools: HashMap::new(),
             child_mappers: HashMap::new(),
             tail_requests: Vec::new(),
+            tailed: HashSet::new(),
+            pending_subagent_terminals: HashMap::new(),
+            finished_child_items: HashSet::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
             approval_mode,
@@ -1506,12 +1541,12 @@ impl Mapper {
                 Some((model, effort)) => self.note_subagent_model(parent_id, model, effort),
                 None => Vec::new(),
             };
-            events.extend(
-                self.child_mappers
-                    .entry(parent_id.to_owned())
-                    .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
-                    .map_value(&msg),
-            );
+            let child = self
+                .child_mappers
+                .entry(parent_id.to_owned())
+                .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
+                .map_value(&msg);
+            events.extend(self.dedupe_child_events(child));
             return events;
         }
         match msg.get("type").and_then(Value::as_str) {
@@ -1687,6 +1722,7 @@ impl Mapper {
             self.task_tools
                 .insert(task_id.to_owned(), tool_use_id.to_owned());
             if msg.get("task_type").and_then(Value::as_str) != Some("local_bash") {
+                self.tailed.insert(tool_use_id.to_owned());
                 self.tail_requests.push(TailRequest::Start {
                     parent_id: tool_use_id.to_owned(),
                     task_id: task_id.to_owned(),
@@ -1845,7 +1881,7 @@ impl Mapper {
             *saved_summary = summary;
         }
         *saved_status = status;
-        vec![AgentEvent::ItemUpdated(ThreadItem {
+        let event = AgentEvent::ItemUpdated(ThreadItem {
             id: tool_use_id.to_owned(),
             parent_item_id: None,
             content: ItemContent::Subagent {
@@ -1856,7 +1892,62 @@ impl Mapper {
                 model: model.clone(),
                 effort: effort.clone(),
             },
-        })]
+        });
+        if status == ItemStatus::InProgress {
+            vec![event]
+        } else {
+            self.gate_subagent_terminal(tool_use_id, event)
+        }
+    }
+
+    /// Hold a terminal Subagent snapshot while its transcript tail is still
+    /// flushing; the tail's Stop acknowledgement releases the latest one.
+    fn gate_subagent_terminal(&mut self, tool_use_id: &str, event: AgentEvent) -> Vec<AgentEvent> {
+        if self.tailed.contains(tool_use_id) {
+            self.pending_subagent_terminals
+                .insert(tool_use_id.to_owned(), event);
+            Vec::new()
+        } else {
+            vec![event]
+        }
+    }
+
+    fn dedupe_child_events(&mut self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+        let finished = &mut self.finished_child_items;
+        events.retain(|event| match event {
+            AgentEvent::ItemStarted(item) => !finished.contains(&item.id),
+            AgentEvent::ItemCompleted(item) => {
+                finished.insert(item.id.clone());
+                true
+            }
+            _ => true,
+        });
+        events
+    }
+
+    /// Fold one batch from a subagent transcript tail: its child items, the
+    /// model it observed, and — once it has stopped — the terminal Subagent
+    /// snapshot that was waiting on its final flush.
+    pub(crate) fn on_tail_notice(&mut self, notice: SubagentTailNotice) -> Vec<AgentEvent> {
+        let mut events = match notice.model {
+            Some((model, effort)) => self.note_subagent_model(&notice.parent_id, model, effort),
+            None => Vec::new(),
+        };
+        events.extend(self.dedupe_child_events(notice.events));
+        if notice.stopped {
+            self.tailed.remove(&notice.parent_id);
+            events.extend(self.pending_subagent_terminals.remove(&notice.parent_id));
+        }
+        events
+    }
+
+    /// Terminal snapshots whose tail acknowledgement will never arrive
+    /// (session teardown).
+    fn take_pending_subagent_terminals(&mut self) -> Vec<AgentEvent> {
+        self.tailed.clear();
+        std::mem::take(&mut self.pending_subagent_terminals)
+            .into_values()
+            .collect()
     }
 
     /// Record the model/effort a child transcript reports for its spawn item
@@ -2317,6 +2408,18 @@ impl Mapper {
                 Some(i) => i,
                 None => continue,
             };
+            // A background Agent's tool_result only acknowledges the launch;
+            // the subagent keeps running until its task_notification.
+            if matches!(item, ToolItem::Subagent { .. })
+                && msg
+                    .pointer("/tool_use_result/status")
+                    .and_then(Value::as_str)
+                    == Some("async_launched")
+            {
+                self.tool_items.insert(tool_use_id.clone(), item);
+                out.extend(self.update_subagent(&tool_use_id, ItemStatus::InProgress, None));
+                continue;
+            }
             let is_error = block
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -2406,11 +2509,17 @@ impl Mapper {
             } else {
                 AgentEvent::ItemCompleted
             };
-            out.push(event(ThreadItem {
-                id: tool_use_id,
+            let is_subagent = matches!(content, ItemContent::Subagent { .. });
+            let event = event(ThreadItem {
+                id: tool_use_id.clone(),
                 parent_item_id: None,
                 content,
-            }));
+            });
+            if is_subagent {
+                out.extend(self.gate_subagent_terminal(&tool_use_id, event));
+            } else {
+                out.push(event);
+            }
         }
         out
     }
@@ -3166,253 +3275,6 @@ fn resolve_claude_effort(spec: Option<&ModelSpec>, raw: Option<&str>) -> Option<
     default_value.clone()
 }
 
-/// Normalize special effort modes for the Claude CLI: `ultrathink` → no flag
-/// (prompt prefix); `ultracode` → `xhigh`; `xhigh` → `max` except Fable 5.x /
-/// Opus 5 / Opus 4.8 / Sonnet 5; Sonnet 4.6 `max` → `high`; otherwise
-/// passthrough.
-fn normalize_claude_cli_effort(effort: Option<&str>, model: Option<&str>) -> Option<String> {
-    let effort = effort?;
-    if effort == "ultrathink" {
-        return None;
-    }
-    if effort == "ultracode" {
-        return Some("xhigh".to_owned());
-    }
-    if effort == "xhigh"
-        && model != Some("claude-fable-5-1")
-        && model != Some("claude-fable-5")
-        && model != Some("claude-opus-5")
-        && model != Some("claude-opus-4-8")
-        && model != Some("claude-sonnet-5")
-    {
-        return Some("max".to_owned());
-    }
-    if effort == "max" && model == Some("claude-sonnet-4-6") {
-        return Some("high".to_owned());
-    }
-    Some(effort.to_owned())
-}
-
-fn effort_option(value: &str) -> SelectOption {
-    let label = match value {
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        "ultracode" => "Ultracode",
-        "ultrathink" => "Ultrathink",
-        other => other,
-    };
-    SelectOption {
-        value: value.to_owned(),
-        label: label.to_owned(),
-        description: None,
-    }
-}
-
-fn reasoning(values: &[&str], default: &str) -> OptionDescriptor {
-    OptionDescriptor::Select {
-        id: "reasoningEffort".to_owned(),
-        label: "Reasoning".to_owned(),
-        options: values.iter().map(|v| effort_option(v)).collect(),
-        default_value: Some(default.to_owned()),
-    }
-}
-
-fn context_window(default: &str) -> OptionDescriptor {
-    OptionDescriptor::Select {
-        id: "contextWindow".to_owned(),
-        label: "Context Window".to_owned(),
-        options: vec![
-            SelectOption {
-                value: "200k".to_owned(),
-                label: "200k".to_owned(),
-                description: None,
-            },
-            SelectOption {
-                value: "1m".to_owned(),
-                label: "1M".to_owned(),
-                description: None,
-            },
-        ],
-        default_value: Some(default.to_owned()),
-    }
-}
-
-fn boolean(id: &str, label: &str) -> OptionDescriptor {
-    OptionDescriptor::Boolean {
-        id: id.to_owned(),
-        label: label.to_owned(),
-        default_value: false,
-    }
-}
-
-fn model(id: &str, display_name: &str, options: Vec<OptionDescriptor>) -> ModelSpec {
-    ModelSpec {
-        id: id.to_owned(),
-        display_name: display_name.to_owned(),
-        is_default: false,
-        options,
-    }
-}
-
-/// The full static Claude catalog, unfiltered by installed CLI version.
-fn built_in_models() -> Vec<ModelSpec> {
-    vec![
-        model(
-            "claude-fable-5-1",
-            "Claude Fable 5.1",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-fable-5",
-            "Claude Fable 5",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-5",
-            "Claude Opus 5",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                boolean("fastMode", "Fast Mode"),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-4-8",
-            "Claude Opus 4.8",
-            vec![
-                reasoning(
-                    &[
-                        "low",
-                        "medium",
-                        "high",
-                        "xhigh",
-                        "max",
-                        "ultracode",
-                        "ultrathink",
-                    ],
-                    "high",
-                ),
-                boolean("fastMode", "Fast Mode"),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-4-7",
-            "Claude Opus 4.7",
-            vec![
-                reasoning(
-                    &["low", "medium", "high", "xhigh", "max", "ultrathink"],
-                    "xhigh",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-opus-4-6",
-            "Claude Opus 4.6",
-            vec![
-                reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                context_window("200k"),
-            ],
-        ),
-        model(
-            "claude-opus-4-5",
-            "Claude Opus 4.5",
-            vec![reasoning(&["low", "medium", "high", "max"], "high")],
-        ),
-        model(
-            "claude-sonnet-5",
-            "Claude Sonnet 5",
-            vec![
-                reasoning(
-                    &["low", "medium", "high", "xhigh", "max", "ultrathink"],
-                    "high",
-                ),
-                context_window("1m"),
-            ],
-        ),
-        model(
-            "claude-sonnet-4-6",
-            "Claude Sonnet 4.6",
-            vec![
-                reasoning(&["low", "medium", "high", "max", "ultrathink"], "high"),
-                context_window("200k"),
-            ],
-        ),
-        model(
-            "claude-haiku-4-5",
-            "Claude Haiku 4.5",
-            vec![boolean("thinking", "Thinking")],
-        ),
-    ]
-}
-
-/// Capabilities for one model id (from the unfiltered catalog).
-fn model_spec(id: &str) -> Option<ModelSpec> {
-    let id = id.trim();
-    built_in_models().into_iter().find(|m| m.id == id)
-}
-
-/// Whether a version-gated model is available at the installed Claude version.
-fn model_available(id: &str, version: Option<(u32, u32, u32)>) -> bool {
-    match id {
-        "claude-fable-5-1" => version_ge(version, (2, 1, 257)),
-        "claude-opus-5" => version_ge(version, (2, 1, 219)),
-        "claude-fable-5" => version_ge(version, (2, 1, 169)),
-        "claude-opus-4-8" => version_ge(version, (2, 1, 154)),
-        "claude-opus-4-7" => version_ge(version, (2, 1, 111)),
-        _ => true,
-    }
-}
-
-fn version_ge(version: Option<(u32, u32, u32)>, min: (u32, u32, u32)) -> bool {
-    version.is_some_and(|v| v >= min)
-}
-
-/// Parse a `MAJOR.MINOR.PATCH` triple from `claude --version` output
-/// (e.g. `"2.1.206 (Claude Code)"`).
 /// Run `claude --version` and parse the semver triple; `None` on any failure.
 async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option<(u32, u32, u32)> {
     // Resolve through the PATH search (PATHEXT-aware: on Windows the CLI only
@@ -3423,16 +3285,19 @@ async fn claude_version(binary: Option<&Path>, launch_env: &LaunchEnv) -> Option
     crate::process::probe_version(&bin, launch_env, ProviderKind::ClaudeCode).await
 }
 
-/// List Claude's models: the static catalog, gated by the installed CLI version.
+/// List Claude's models: the manifest catalog (refreshed per `refresh`),
+/// gated by the installed CLI version.
 pub async fn list_models(
     binary_path: Option<PathBuf>,
     launch_env: LaunchEnv,
+    refresh: CatalogRefresh,
 ) -> Result<Vec<ModelSpec>, AgentError> {
+    crate::process::unblock(move || {
+        crate::claude_manifest::refresh(refresh.cache_dir.as_deref(), refresh.network)
+    })
+    .await;
     let version = claude_version(binary_path.as_deref(), &launch_env).await;
-    Ok(built_in_models()
-        .into_iter()
-        .filter(|m| model_available(&m.id, version))
-        .collect())
+    Ok(crate::claude_manifest::current().models_for_version(version))
 }
 
 #[cfg(test)]
@@ -3736,113 +3601,109 @@ mod tests {
         ));
     }
 
+    fn select(id: &str, value: Value) -> OptionSelection {
+        OptionSelection {
+            id: id.into(),
+            value,
+        }
+    }
+
+    fn settings(launch: &ClaudeLaunchOptions) -> Value {
+        launch
+            .settings_json
+            .as_deref()
+            .map(|settings| serde_json::from_str(settings).unwrap())
+            .unwrap_or(Value::Null)
+    }
+
     #[test]
-    fn effort_compat_transforms() {
-        // ultrathink → no flag (prompt-prefix mode)
+    fn effort_map_drives_the_effort_flag() {
+        let catalog = crate::claude_manifest::test_catalog();
+        let resolve = |model: &str, effort: &str| {
+            ClaudeLaunchOptions::resolve_with(
+                &catalog,
+                Some(model),
+                &[select("reasoningEffort", json!(effort))],
+            )
+        };
+        // Mapped to another value: ultracode → xhigh, plus the ultracode setting.
+        let launch = resolve("test-wide", "ultracode");
+        assert_eq!(launch.effort.as_deref(), Some("xhigh"));
+        assert_eq!(settings(&launch)["ultracode"], true);
+        assert!(!launch.ultrathink);
+        // Mapped to null: no --effort flag, prompt-prefix mode.
+        let launch = resolve("test-wide", "ultrathink");
+        assert_eq!(launch.effort, None);
+        assert!(launch.ultrathink);
+        assert!(launch.settings_json.is_none());
+        // Per-profile downgrade (max → high) and passthrough.
         assert_eq!(
-            normalize_claude_cli_effort(Some("ultrathink"), Some("claude-opus-4-8")),
-            None
-        );
-        // ultracode → xhigh
-        assert_eq!(
-            normalize_claude_cli_effort(Some("ultracode"), Some("claude-opus-4-8")).as_deref(),
-            Some("xhigh")
-        );
-        // xhigh → max EXCEPT on fable-5 / opus-4-8 / sonnet-5
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-opus-4-7")).as_deref(),
-            Some("max")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5-1")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-fable-5")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-opus-4-8")).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            normalize_claude_cli_effort(Some("xhigh"), Some("claude-sonnet-5")).as_deref(),
-            Some("xhigh")
-        );
-        // sonnet-4-6 max → high
-        assert_eq!(
-            normalize_claude_cli_effort(Some("max"), Some("claude-sonnet-4-6")).as_deref(),
+            resolve("test-narrow", "max").effort.as_deref(),
             Some("high")
         );
-        // passthrough
+        assert_eq!(resolve("test-wide", "max").effort.as_deref(), Some("max"));
         assert_eq!(
-            normalize_claude_cli_effort(Some("low"), Some("claude-opus-4-6")).as_deref(),
-            Some("low")
+            resolve("test-fixed", "xhigh").effort.as_deref(),
+            Some("max")
         );
+        // Unknown model: no descriptor to resolve against, so no flag.
+        assert_eq!(resolve("test-unknown", "high").effort, None);
     }
 
     #[test]
     fn resolve_effort_uses_listed_value_or_default() {
-        let fable = model_spec("claude-fable-5");
-        // Listed value wins.
+        let catalog = crate::claude_manifest::test_catalog();
+        let wide = catalog.model("test-wide").map(|entry| &entry.spec);
         assert_eq!(
-            resolve_claude_effort(fable.as_ref(), Some("max")).as_deref(),
+            resolve_claude_effort(wide, Some("max")).as_deref(),
             Some("max")
         );
-        // Unknown value falls back to the descriptor default (high).
         assert_eq!(
-            resolve_claude_effort(fable.as_ref(), Some("bogus")).as_deref(),
-            Some("high")
+            resolve_claude_effort(wide, Some("bogus")).as_deref(),
+            Some("medium")
         );
-        // No selection → default.
-        assert_eq!(
-            resolve_claude_effort(fable.as_ref(), None).as_deref(),
-            Some("high")
-        );
-        // Haiku has no reasoning selector.
-        let haiku = model_spec("claude-haiku-4-5");
-        assert_eq!(resolve_claude_effort(haiku.as_ref(), Some("low")), None);
+        assert_eq!(resolve_claude_effort(wide, None).as_deref(), Some("medium"));
+        // A profile without a reasoning selector has no effort at all.
+        let plain = catalog.model("test-plain").map(|entry| &entry.spec);
+        assert_eq!(resolve_claude_effort(plain, Some("low")), None);
     }
 
     #[test]
-    fn version_gating_filters_new_models() {
+    fn version_gating_follows_manifest_bounds() {
+        let catalog = crate::claude_manifest::test_catalog();
         let ids = |version: Option<(u32, u32, u32)>| -> Vec<String> {
-            built_in_models()
+            catalog
+                .models_for_version(version)
                 .into_iter()
-                .filter(|m| model_available(&m.id, version))
-                .map(|m| m.id)
+                .map(|model| model.id)
                 .collect()
         };
-        // Current version exposes everything.
-        assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
-        assert!(ids(Some((2, 1, 206))).contains(&"claude-fable-5".to_string()));
-        // Below every gate: opus-5 / fable-5 / opus-4-8 / opus-4-7 hidden, rest visible.
-        let old = ids(Some((2, 1, 100)));
-        assert!(!old.contains(&"claude-opus-5".to_string()));
-        assert!(!old.contains(&"claude-fable-5".to_string()));
-        assert!(!old.contains(&"claude-opus-4-8".to_string()));
-        assert!(!old.contains(&"claude-opus-4-7".to_string()));
-        assert!(old.contains(&"claude-opus-4-6".to_string()));
-        assert!(old.contains(&"claude-haiku-4-5".to_string()));
-        // Exact boundary is inclusive.
-        assert!(ids(Some((2, 1, 257))).contains(&"claude-fable-5-1".to_string()));
-        assert!(!ids(Some((2, 1, 256))).contains(&"claude-fable-5-1".to_string()));
-        assert!(ids(Some((2, 1, 154))).contains(&"claude-opus-4-8".to_string()));
-        assert!(!ids(Some((2, 1, 153))).contains(&"claude-opus-4-8".to_string()));
-        assert!(ids(Some((2, 1, 219))).contains(&"claude-opus-5".to_string()));
-        assert!(!ids(Some((2, 1, 218))).contains(&"claude-opus-5".to_string()));
-        // Unknown version hides gated models.
-        assert!(!ids(None).contains(&"claude-fable-5".to_string()));
+        // Ungated models are always listed, even without a known version.
+        assert_eq!(ids(None), ["test-narrow", "test-plain"]);
+        // minVersion is inclusive; maxVersionExclusive is not.
+        assert_eq!(
+            ids(Some((2, 1, 256))),
+            ["test-fixed", "test-narrow", "test-plain"]
+        );
+        assert_eq!(
+            ids(Some((2, 1, 257))),
+            ["test-wide", "test-fixed", "test-narrow", "test-plain"]
+        );
+        assert_eq!(ids(Some((2, 1, 110))), ["test-narrow", "test-plain"]);
+        assert_eq!(
+            ids(Some((3, 0, 0))),
+            ["test-wide", "test-narrow", "test-plain"]
+        );
     }
 
     #[test]
     fn parse_semver_from_version_output() {
         assert_eq!(
-            crate::process::parse_semver("2.1.206 (Claude Code)"),
+            crate::parse_semver("2.1.206 (Claude Code)"),
             Some((2, 1, 206))
         );
-        assert_eq!(crate::process::parse_semver("2.1.169"), Some((2, 1, 169)));
-        assert_eq!(crate::process::parse_semver("nonsense"), None);
+        assert_eq!(crate::parse_semver("2.1.169"), Some((2, 1, 169)));
+        assert_eq!(crate::parse_semver("nonsense"), None);
     }
 
     #[test]
@@ -3861,8 +3722,6 @@ mod tests {
         assert_eq!(parse_context_window_tokens(&json!("garbage")), None);
         assert_eq!(parse_context_window_tokens(&json!(-200_000)), None);
         assert_eq!(parse_context_window_tokens(&json!(null)), None);
-        assert_eq!(native_context_window("claude-opus-5[1m]"), 1_000_000);
-        assert_eq!(native_context_window("claude-sonnet-4-6[1m]"), 200_000);
         assert_eq!(format_context_window(200_000), "200k");
         assert_eq!(format_context_window(750_000), "750k");
         assert_eq!(format_context_window(1_000_000), "1M");
@@ -3870,108 +3729,88 @@ mod tests {
 
     #[test]
     fn context_window_launch_semantics() {
-        let resolve = |model, value: Option<Value>| {
-            let selections = value
-                .map(|value| {
-                    vec![OptionSelection {
-                        id: "contextWindow".into(),
-                        value,
-                    }]
-                })
-                .unwrap_or_default();
-            ClaudeLaunchOptions::resolve(Some(model), &selections)
+        let catalog = crate::claude_manifest::test_catalog();
+        let resolve = |model: &str, value: Option<Value>| {
+            let selections: Vec<_> = value
+                .map(|value| select("contextWindow", value))
+                .into_iter()
+                .collect();
+            ClaudeLaunchOptions::resolve_with(&catalog, Some(model), &selections)
         };
-        let auto_compact = |launch: &ClaudeLaunchOptions| {
-            launch.settings_json.as_deref().map(|settings| {
-                serde_json::from_str::<Value>(settings).unwrap()["autoCompactWindow"].clone()
-            })
-        };
+        let auto_compact =
+            |launch: &ClaudeLaunchOptions| settings(launch)["autoCompactWindow"].clone();
 
-        let launch = resolve("claude-opus-5", Some(json!("200k")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
-        assert_eq!(auto_compact(&launch), Some(json!(200_000)));
-
-        let launch = resolve("claude-opus-5", Some(json!("1m")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
+        // Default window of a 1M-default profile: the manifest suffix is sent.
+        let launch = resolve("test-wide", None);
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide[1m]"));
         assert!(launch.settings_json.is_none());
+        assert_eq!(catalog.resolved_context_window("test-wide", &[]), 1_000_000);
+        // A suffixed id resolves to the same model.
+        assert_eq!(
+            catalog.resolved_context_window("test-wide[1m]", &[]),
+            1_000_000
+        );
 
-        let launch = resolve("claude-opus-5", Some(json!(500_000)));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-5"));
-        assert_eq!(auto_compact(&launch), Some(json!(500_000)));
+        // Below the largest window: bare slug plus early compaction.
+        let launch = resolve("test-wide", Some(json!("200k")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
+        assert_eq!(auto_compact(&launch), json!(200_000));
+        let launch = resolve("test-wide", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide[1m]"));
+        assert_eq!(auto_compact(&launch), json!(500_000));
 
-        let launch = resolve("claude-sonnet-4-6", Some(json!("1m")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6[1m]"));
-        assert!(launch.settings_json.is_none());
-
-        let launch = resolve("claude-sonnet-4-6", Some(json!(500_000)));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6[1m]"));
-        assert_eq!(auto_compact(&launch), Some(json!(500_000)));
-
+        // 200k-default profile: only the 1M expansion carries the suffix.
         for value in [Some(json!("200k")), None] {
-            let launch = resolve("claude-sonnet-4-6", value);
-            assert_eq!(launch.model_id.as_deref(), Some("claude-sonnet-4-6"));
-            assert!(launch.settings_json.is_none());
+            let launch = resolve("test-narrow", value);
+            assert_eq!(launch.model_id.as_deref(), Some("test-narrow"));
+            assert_eq!(auto_compact(&launch), json!(200_000));
         }
+        let launch = resolve("test-narrow", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-narrow[1m]"));
+        assert!(launch.settings_json.is_none());
+        let launch = resolve("test-narrow", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-narrow[1m]"));
+        assert_eq!(auto_compact(&launch), json!(500_000));
 
-        let launch = resolve("claude-fable-5", Some(json!("1m")));
-        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5"));
+        // Fixed window: no selector, no suffix, custom values still compact early.
+        assert_eq!(
+            catalog.resolved_context_window("test-fixed", &[]),
+            1_000_000
+        );
+        let launch = resolve("test-fixed", Some(json!("1m")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-fixed"));
+        assert!(launch.settings_json.is_none());
+        let launch = resolve("test-fixed", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-fixed"));
+        assert_eq!(auto_compact(&launch), json!(500_000));
+
+        // No context data at all falls back to 200k and never emits settings.
+        assert_eq!(catalog.resolved_context_window("test-plain", &[]), 200_000);
+        assert_eq!(
+            catalog.resolved_context_window("test-unknown", &[]),
+            200_000
+        );
+        let launch = resolve("test-plain", Some(json!(500_000)));
+        assert_eq!(launch.model_id.as_deref(), Some("test-plain"));
         assert!(launch.settings_json.is_none());
     }
 
     #[test]
-    fn launch_options_resolve_effort_context_and_settings() {
-        // Ultracode → effort xhigh + settings.ultracode.
-        let launch = ClaudeLaunchOptions::resolve(
-            Some("claude-opus-4-8"),
-            &[
-                OptionSelection {
-                    id: "reasoningEffort".into(),
-                    value: json!("ultracode"),
-                },
-                OptionSelection {
-                    id: "fastMode".into(),
-                    value: json!(true),
-                },
-            ],
-        );
-        assert_eq!(launch.model_id.as_deref(), Some("claude-opus-4-8"));
-        assert_eq!(launch.effort.as_deref(), Some("xhigh"));
-        assert!(!launch.ultrathink);
-        let settings: Value =
-            serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
-        assert_eq!(settings["ultracode"], true);
-        assert_eq!(settings["fastMode"], true);
+    fn boolean_options_reach_settings_only_when_supported() {
+        let catalog = crate::claude_manifest::test_catalog();
+        let both = [
+            select("fastMode", json!(true)),
+            select("thinking", json!(true)),
+        ];
+        let launch = ClaudeLaunchOptions::resolve_with(&catalog, Some("test-fixed"), &both);
+        let fixed = settings(&launch);
+        assert_eq!(fixed["fastMode"], true);
+        assert!(fixed.get("alwaysThinkingEnabled").is_none());
 
-        // ultrathink → no --effort, prompt-prefix flag set.
-        let launch = ClaudeLaunchOptions::resolve(
-            Some("claude-fable-5"),
-            &[
-                OptionSelection {
-                    id: "reasoningEffort".into(),
-                    value: json!("ultrathink"),
-                },
-                OptionSelection {
-                    id: "contextWindow".into(),
-                    value: json!("1m"),
-                },
-            ],
-        );
-        assert_eq!(launch.model_id.as_deref(), Some("claude-fable-5"));
-        assert_eq!(launch.effort, None);
-        assert!(launch.ultrathink);
-        assert!(launch.settings_json.is_none());
-
-        // Haiku thinking → settings.alwaysThinkingEnabled.
-        let launch = ClaudeLaunchOptions::resolve(
-            Some("claude-haiku-4-5"),
-            &[OptionSelection {
-                id: "thinking".into(),
-                value: json!(true),
-            }],
-        );
-        let settings: Value =
-            serde_json::from_str(launch.settings_json.as_deref().unwrap()).unwrap();
-        assert_eq!(settings["alwaysThinkingEnabled"], true);
+        let launch = ClaudeLaunchOptions::resolve_with(&catalog, Some("test-plain"), &both);
+        let plain = settings(&launch);
+        assert_eq!(plain["alwaysThinkingEnabled"], true);
+        assert!(plain.get("fastMode").is_none());
     }
 
     #[test]
@@ -5351,6 +5190,20 @@ mod tests {
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
+        // task_started opened a transcript tail; every terminal snapshot
+        // (task_updated, task_notification, tool_result) waits for its ack.
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
+            | AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
+                if *status != ItemStatus::InProgress
+        )));
+        events.extend(mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: "toolu_spawn_1".into(),
+            events: Vec::new(),
+            model: None,
+            stopped: true,
+        }));
 
         let spawn_events: Vec<_> = events
             .iter()
@@ -5365,7 +5218,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(spawn_events.len(), 6);
+        assert_eq!(spawn_events.len(), 4);
+        assert!(matches!(events.last(), Some(AgentEvent::ItemCompleted(_))));
         assert!(matches!(
             &spawn_events[0].content,
             ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None, model: None, effort: None }
@@ -5426,6 +5280,179 @@ mod tests {
             }
             _ => true,
         }));
+    }
+
+    /// Background subagent: the launch acknowledgement and the parent's result
+    /// leave the Subagent item in progress; the terminal snapshot is emitted
+    /// only after the transcript tail's final flush, and the tail's copy of a
+    /// child the stdout feed already completed cannot reopen it.
+    #[test]
+    fn background_subagent_terminal_waits_for_tail_flush_and_dedupes_feeds() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_background_trace.jsonl");
+        let mut mapper = Mapper::new();
+        let mut events = Vec::new();
+        for line in trace.lines() {
+            events.extend(feed(&mut mapper, line));
+        }
+        let spawn_status = |event: &AgentEvent| match event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item)
+                if item.id == "toolu_spawn_bg" =>
+            {
+                match &item.content {
+                    ItemContent::Subagent { status, .. } => Some(*status),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        assert!(
+            events
+                .iter()
+                .filter_map(spawn_status)
+                .all(|status| status == ItemStatus::InProgress),
+            "launch acknowledgement and task_notification must not settle the item yet"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })
+                if id == "toolu_spawn_bg:toolu_child_grep"
+        )));
+        assert!(matches!(
+            mapper.take_tail_requests().as_slice(),
+            [
+                TailRequest::Start { parent_id: start, .. },
+                TailRequest::PreferPath { parent_id: prefer, .. },
+                TailRequest::Stop { parent_id: stop },
+            ] if start == "toolu_spawn_bg" && prefer == "toolu_spawn_bg" && stop == "toolu_spawn_bg"
+        ));
+
+        // The tail maps the same transcript records a second time, plus one
+        // record the stdout feed never carried.
+        let mut tail = crate::subagent_tail::TranscriptMapper::new("toolu_spawn_bg");
+        let mut tail_events = Vec::new();
+        for line in trace
+            .lines()
+            .filter(|line| line.contains("parent_tool_use_id"))
+        {
+            tail_events.extend(tail.map_value(&serde_json::from_str(line).unwrap()));
+        }
+        tail_events.extend(tail.map_value(&json!({
+            "type": "assistant", "message": { "id": "msg-child-2", "content": [{ "type": "text", "text": "done" }] }
+        })));
+        let flushed = mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: "toolu_spawn_bg".into(),
+            events: tail_events,
+            model: None,
+            stopped: true,
+        });
+        assert!(
+            flushed
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::ItemStarted(_))),
+            "a completed child must not be restarted by the tail's copy"
+        );
+        assert!(matches!(
+            flushed.last(),
+            Some(AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. }))
+                if id == "toolu_spawn_bg" && summary == "Routing audited" && model == "claude-sonnet-5" && effort == "high"
+        ));
+        assert!(matches!(
+            &flushed[flushed.len() - 2],
+            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text }, .. })
+                if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
+        ));
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// The tail keeps the transcript discovery found; the notification's
+    /// `output_file` only seeds a reader when discovery found nothing.
+    #[test]
+    fn subagent_tail_prefer_path_does_not_replay_a_discovered_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-subagent-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let subagents = root.join("projects/session-tail/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let transcript = "{\"type\":\"user\",\"message\":{\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n";
+        std::fs::write(
+            subagents.join("agent-x.meta.json"),
+            r#"{"toolUseId":"toolu_tail"}"#,
+        )
+        .unwrap();
+        std::fs::write(subagents.join("agent-x.jsonl"), transcript).unwrap();
+        let output_file = root.join("task.output");
+        std::fs::write(&output_file, transcript).unwrap();
+
+        let run = |claude_dir: Option<PathBuf>| {
+            let (control_tx, control_rx) = smol::channel::unbounded();
+            let (notice_tx, notice_rx) = smol::channel::unbounded();
+            smol::spawn(run_subagent_tail(
+                "toolu_tail".into(),
+                "task-tail".into(),
+                "session-tail".into(),
+                claude_dir,
+                control_rx,
+                notice_tx,
+            ))
+            .detach();
+            (control_tx, notice_rx)
+        };
+        smol::block_on(async {
+            let (control, notices) = run(Some(root.clone()));
+            let first = notices.recv().await.unwrap();
+            assert_eq!(first.events.len(), 2);
+            assert!(!first.stopped);
+            control
+                .send(TailControl::PreferPath(output_file.clone()))
+                .await
+                .unwrap();
+            control.send(TailControl::Stop).await.unwrap();
+            let mut after = Vec::new();
+            loop {
+                let notice = notices.recv().await.unwrap();
+                after.extend(notice.events);
+                if notice.stopped {
+                    break;
+                }
+            }
+            assert!(
+                after.is_empty(),
+                "preferred path must not be re-read: {after:?}"
+            );
+
+            let (control, notices) = run(None);
+            control
+                .send(TailControl::PreferPath(output_file.clone()))
+                .await
+                .unwrap();
+            control.send(TailControl::Stop).await.unwrap();
+            let mut fallback = Vec::new();
+            loop {
+                let notice = notices.recv().await.unwrap();
+                fallback.extend(notice.events);
+                if notice.stopped {
+                    break;
+                }
+            }
+            assert_eq!(
+                fallback.len(),
+                2,
+                "undiscovered tail reads the notified file"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -97,6 +97,7 @@ fn emit_replacement(topic: Topic, event: ServerEvent, cx: &mut HostCx) {
 impl AppState {
     pub fn index_snapshot(&self) -> IndexSnapshot {
         IndexSnapshot {
+            title_generating: self.title_generating.clone(),
             activity: self
                 .residents
                 .ids()

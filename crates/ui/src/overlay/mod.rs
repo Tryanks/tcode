@@ -176,7 +176,7 @@ impl Render for OverlayHost {
                     cx.stop_propagation();
                 }
             })
-            .bg(cx.theme().background)
+            .bg(crate::material::canvas(cx))
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
             .child(self.view.clone())

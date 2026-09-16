@@ -675,8 +675,8 @@ impl OrchestrateSettings {
 }
 
 /// Provider and model used for the isolated, background request that names a
-/// newly-started thread. Reasoning effort is intentionally fixed to `low` by
-/// the runtime: title generation is a small, latency-sensitive task.
+/// thread, initially or on request. Reasoning effort is intentionally fixed to
+/// `low` by the runtime: title generation is a small, latency-sensitive task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitleGenerationSettings {
     #[serde(default = "default_title_provider")]

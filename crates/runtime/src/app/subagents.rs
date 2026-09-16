@@ -27,14 +27,16 @@ impl AppState {
                 );
                 return true;
             };
-            // Late transcript items still need a turn for the chat view, but
-            // a finished child has no future lifecycle event to close it.
-            let finished = self.native_subagent_turns.get(&mirror_id) == Some(&false);
-            self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
-            self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
-            if finished {
-                self.sync_mirror_turn(&mirror_id, false, parent_item_id, TurnStatus::Completed, cx);
+            // A child item before any Subagent status means the subagent is
+            // evidently running: open its turn. One arriving after the terminal
+            // status is folded into that closed turn rather than opening a
+            // zero-length one — the provider orders the terminal update after
+            // the transcript's final flush, so this is only a stray straggler
+            // and it still belongs to the work it came from.
+            if !self.native_subagent_turns.contains_key(&mirror_id) {
+                self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             }
+            self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
             return true;
         }
 
@@ -81,7 +83,8 @@ impl AppState {
     /// Mirrors never receive provider Turn events, but the chat view derives
     /// its working indicator, live timer, and live work-log expansion from
     /// timeline turn state — so synthesize the boundaries from the parent
-    /// Subagent item's lifecycle.
+    /// Subagent item's lifecycle: `native_subagent_turns` holds `true` while
+    /// it is in progress and `false` once it reached a terminal status.
     fn sync_mirror_turn(
         &mut self,
         mirror_id: &str,
@@ -185,28 +188,30 @@ impl AppState {
         Some(id)
     }
 
-    pub(super) fn clear_native_subagent_work(&mut self, parent_session_id: &str, cx: &mut HostCx) {
-        let mirror_ids: Vec<_> = self
+    /// The parent process is gone, so no Subagent status will ever close the
+    /// mirrors it was still running.
+    pub(super) fn interrupt_native_subagent_work(
+        &mut self,
+        parent_session_id: &str,
+        cx: &mut HostCx,
+    ) {
+        let running: Vec<_> = self
             .sessions
             .iter()
             .filter(|meta| {
                 meta.parent_session_id.as_deref() == Some(parent_session_id)
-                    && meta.native_subagent.is_some()
+                    && self.native_subagent_turns.get(&meta.id) == Some(&true)
             })
-            .map(|meta| (meta.id.clone(), meta.native_subagent.clone().unwrap()))
+            .filter_map(|meta| Some((meta.id.clone(), meta.native_subagent.clone()?)))
             .collect();
-        for (mirror_id, subagent_item_id) in mirror_ids {
-            let was_running = self.native_subagent_turns.get(&mirror_id) == Some(&true);
+        for (mirror_id, subagent_item_id) in running {
             self.sync_mirror_turn(
                 &mirror_id,
                 false,
                 &subagent_item_id,
-                TurnStatus::Completed,
+                TurnStatus::Interrupted,
                 cx,
             );
-            if !was_running {
-                continue;
-            }
             let meta = self.meta_mut(&mirror_id).map(|meta| {
                 meta.updated_at = now_secs();
                 meta.clone()

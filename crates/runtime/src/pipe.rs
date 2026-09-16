@@ -20,7 +20,7 @@ use crate::host::{HostCx, HostEvent, HostFn};
 pub struct HostServices {
     /// Run provider catalog, version, and status probes during host startup.
     pub background_startup_probes: bool,
-    /// Generate AI-authored titles after the first completed turn.
+    /// Generate AI-authored titles for new threads and explicit regeneration.
     pub ai_title_generation: bool,
     /// URL/tokens and the broker receiver stay host-side. Requests reach
     /// subscribed WebViews through the preview reverse-RPC topic.
@@ -452,6 +452,9 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
             response = CommandResponse::ArchivedCount(app.auto_archive_sweep(&project_id, cx));
         }
         Command::RenameSession { session_id, title } => app.rename_session(&session_id, &title, cx),
+        Command::RegenerateSessionTitle { session_id } => {
+            app.regenerate_session_title(&session_id, cx)
+        }
         Command::ForkThread { id } => {
             response = CommandResponse::SessionId(app.fork_thread(&id, cx));
         }
@@ -1326,6 +1329,7 @@ mod tests {
             ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot { activity: _,
                 ref sessions,
                 ref projects,
+                ..
             }) if sessions.is_empty() && projects.is_empty()
         ));
 

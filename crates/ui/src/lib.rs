@@ -23,6 +23,8 @@ pub mod icon;
 mod local_permissions;
 pub mod markdown;
 // Shared material helpers are also used by the phone shell.
+#[cfg(target_os = "macos")]
+mod macos_backdrop;
 pub mod material;
 mod orchestrate_settings;
 pub mod overlay;

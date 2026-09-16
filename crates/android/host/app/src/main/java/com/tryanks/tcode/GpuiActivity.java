@@ -2,6 +2,7 @@ package com.tryanks.tcode;
 
 import android.app.NativeActivity;
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
@@ -11,6 +12,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.Editable;
@@ -18,6 +20,7 @@ import android.text.InputType;
 import android.text.Selection;
 import android.text.SpannableStringBuilder;
 import android.text.method.TextKeyListener;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -249,6 +252,14 @@ public final class GpuiActivity extends NativeActivity {
     }
 
     public void gpuiFinish() { finish(); }
+
+    public void gpuiOpenUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (ActivityNotFoundException error) {
+            Log.w("Tcode", "No application can open this URL", error);
+        }
+    }
 
     public String gpuiDataDir() {
         return getFilesDir().getAbsolutePath();

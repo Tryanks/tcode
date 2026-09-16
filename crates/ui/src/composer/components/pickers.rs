@@ -231,6 +231,7 @@ impl Composer {
             );
 
         crate::material::overlay_popover(("model-picker-popover", self.model_picker_token))
+            .track_focus(&self.model_search.read(cx).focus_handle(cx))
             .anchor(Anchor::BottomLeft)
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
@@ -729,6 +730,7 @@ fn render_model_pane(
     let popover_key = popover.clone();
 
     let pane = h_flex()
+        .key_context("ModelPicker")
         .when(!composer.read(cx).compact, |pane| pane.w(px(360.)))
         .when(composer.read(cx).compact, |pane| pane.w_full())
         .h(px(360.))
@@ -1226,7 +1228,16 @@ fn render_traits_pane(
 
     let mut pane = v_flex().w_full().p_1().gap_0p5();
 
+    // The bolt in the corner owns fast mode: the Claude `fastMode` rows are
+    // dropped and a Codex service-tier list keeps only its non-fast tiers
+    // (hidden entirely when Standard is all that is left).
+    let fast = FastMode::of(spec);
     for descriptor in &spec.options {
+        let fast_owned = fast.as_ref().is_some_and(|fast| {
+            let (OptionDescriptor::Select { id, .. } | OptionDescriptor::Boolean { id, .. }) =
+                descriptor;
+            *id == fast.option_id
+        });
         match descriptor {
             OptionDescriptor::Select {
                 id,
@@ -1234,6 +1245,19 @@ fn render_traits_pane(
                 options,
                 default_value,
             } => {
+                let options: Vec<agent::SelectOption> = if fast_owned {
+                    options
+                        .iter()
+                        .filter(|choice| !FastMode::is_fast_tier(choice))
+                        .cloned()
+                        .collect()
+                } else {
+                    options.clone()
+                };
+                if fast_owned && options.len() < 2 {
+                    continue;
+                }
+                let options = &options;
                 let is_reasoning = id == "reasoningEffort";
                 let is_context_window = id == "contextWindow";
                 pane = pane.child(section_header(label, cx));
@@ -1371,6 +1395,9 @@ fn render_traits_pane(
                 label,
                 default_value,
             } => {
+                if fast_owned {
+                    continue;
+                }
                 pane = pane.child(section_header(label, cx));
                 let on = option_selection_bool(selections, id).unwrap_or(*default_value);
                 for (index, (value, text)) in [
@@ -1432,12 +1459,96 @@ fn render_traits_pane(
         );
     }
     div()
-        .id("traits-options-scroll")
+        .relative()
         .w_full()
         .when(!compact, |pane| pane.w(px(280.)))
-        .max_h(px(360.))
-        .touch_overflow_y_scroll()
-        .child(pane)
+        .child(
+            div()
+                .id("traits-options-scroll")
+                .w_full()
+                .max_h(px(360.))
+                .touch_overflow_y_scroll()
+                .child(pane),
+        )
+        .child(render_fast_mode_bolt(
+            fast.as_ref(),
+            selections,
+            compact,
+            store_entity,
+            cx,
+        ))
+        .into_any_element()
+}
+
+/// The fast-mode bolt pinned to the traits pane's top-right corner: filled
+/// amber when on, an outline when off, dimmed and inert when the model has no
+/// fast mode. Toggling keeps the pane open so the new state is visible. The
+/// wrapper occludes the list scrolling beneath it so hovering or clicking the
+/// bolt never reaches an option row under it.
+fn render_fast_mode_bolt(
+    fast: Option<&FastMode>,
+    selections: &[agent::OptionSelection],
+    compact: bool,
+    store_entity: &Entity<WorkspaceStore>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let on = fast.map(|fast| fast.enabled(selections));
+    let (path, color) = match on {
+        Some(true) => ("icons/zap-filled.svg", theme.fast_mode_accent()),
+        _ => ("icons/zap.svg", theme.muted_foreground),
+    };
+    let icon = Icon::empty().path(path).text_color(color);
+    let wrapper = div().absolute().top_1().right_1().occlude();
+    let Some(fast) = fast else {
+        // Inert: no hover affordance, just the desktop tooltip explaining why.
+        let tooltip = crate::tr!("composer.fast_mode_unsupported");
+        return wrapper
+            .child(
+                div()
+                    .id("traits-fast-mode")
+                    .size(px(if compact {
+                        crate::material::TOUCH_TARGET
+                    } else {
+                        24.
+                    }))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(0.5)
+                    .cursor_default()
+                    .when(!compact, |el| {
+                        el.tooltip(move |window, cx| {
+                            crate::widgets::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                    })
+                    .child(if compact {
+                        icon.size(px(20.))
+                    } else {
+                        icon.small()
+                    }),
+            )
+            .into_any_element();
+    };
+    let fast = fast.clone();
+    let store = store_entity.clone();
+    wrapper
+        .child(
+            crate::material::toolbar_icon_button(
+                "traits-fast-mode",
+                icon,
+                crate::tr!("composer.fast_mode"),
+                compact,
+            )
+            .debug_selector(|| "traits-fast-mode".into())
+            .on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let value = fast.value(on != Some(true));
+                store.update(cx, |store, _cx| {
+                    store.set_active_option(fast.option_id.clone(), Some(value));
+                });
+            }),
+        )
         .into_any_element()
 }
 

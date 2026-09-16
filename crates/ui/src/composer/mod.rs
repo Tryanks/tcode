@@ -52,6 +52,7 @@ use crate::shortcut::format_secondary_shortcut;
 use crate::store::{TopicKind, WorkspaceStore, observe_store_topics};
 use crate::workspace_walk::filter_entries;
 use tcode_core::attachments::{mime_from_path, validate_attachment};
+use tcode_core::provider_models::FastMode;
 use tcode_core::ui::WorkspaceMode;
 use tcode_protocol::PathEntry;
 

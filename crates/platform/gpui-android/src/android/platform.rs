@@ -445,7 +445,7 @@ impl Platform for AndroidPlatform {
     }
 
     fn open_url(&self, url: &str) {
-        log::warn!("opening URLs is not yet supported on Android: {url}");
+        host::open_url(url);
     }
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {

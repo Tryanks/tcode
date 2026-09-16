@@ -174,6 +174,8 @@ sidebar:
   remove_project_action: "Remove project"
   reveal_project: "Reveal in Finder"
   ctx_rename: "Rename thread"
+  ctx_regenerate_title: "Regenerate title"
+  ctx_regenerating_title: "Regenerating…"
   ctx_fork: "Fork"
   ctx_merge_worktree: "Merge back"
   fork_title_suffix: "(fork)"
@@ -280,7 +282,7 @@ settings:
     description: "Automatically expand the latest command output while the agent is working."
   provider_updates:
     title: "Provider update checks"
-    description: "Check for newer Tcode and provider CLI versions on launch."
+    description: "Check for newer Tcode and provider CLI versions on launch, and refresh the Claude Code model list from t3code."
   inactive_frame_throttle:
     title: "Background frame throttle"
     description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
@@ -298,7 +300,7 @@ settings:
     description: "Choose the provider and model used for fallback reviews."
   title_generation:
     title: "Thread title model"
-    description: "Choose the provider and model used to name new threads. Title requests always use low reasoning effort."
+    description: "Choose the provider and model used to generate and regenerate thread titles. Title requests always use low reasoning effort."
 model_picker:
   no_models: "No models available for this provider."
 computer_use:
@@ -616,6 +618,8 @@ composer:
   off: "Off"
   trait_fast: "Fast"
   trait_normal: "Normal"
+  fast_mode: "Fast mode"
+  fast_mode_unsupported: "Current model cannot enable fast mode"
   option_default: " (default)"
   context_window_custom: "Custom"
   context_window_custom_placeholder: "e.g. 500k (100k–1M)"
@@ -826,6 +830,8 @@ export:
   saved: "Saved %{name}"
   downloaded: "Downloaded %{name}"
 errors:
+  title_generation_failed: "Could not regenerate the thread title. Try again."
+  title_generation_empty: "Send a message before regenerating the thread title."
   terminal_start: "Failed to start terminal: %{error}"
   terminal_restart: "Failed to restart terminal: %{error}"
   persist_project: "Failed to persist project: %{error}"

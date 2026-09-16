@@ -129,6 +129,7 @@ pub struct WorkspaceStore {
     import_statuses: HashMap<String, Option<ExternalImportStatus>>,
     connection_state: ConnectionState,
     index_replica: (Vec<SessionMeta>, Vec<Project>),
+    title_generating: HashSet<String>,
     settings_replica: Settings,
     /// Whether `settings_replica` is the host's settings or still the local
     /// defaults it was constructed with. Views that copy a setting into an
@@ -305,6 +306,7 @@ impl WorkspaceStore {
                 ConnectionState::Connected
             },
             index_replica: (Vec::new(), Vec::new()),
+            title_generating: HashSet::new(),
             settings_replica: Settings::default(),
             settings_hydrated: false,
             baseline_topics: HashSet::new(),
@@ -912,6 +914,7 @@ impl WorkspaceStore {
                     }
                 }
                 self.index_replica = (snapshot.sessions.clone(), snapshot.projects.clone());
+                self.title_generating = snapshot.title_generating.clone();
                 // Client state for a conversation the index no longer lists has
                 // nothing left to return to: a deleted project takes its draft's
                 // state, a deleted thread its own. Archived threads stay listed,
@@ -1548,6 +1551,10 @@ impl WorkspaceStore {
 
     pub fn settings(&self) -> Settings {
         effective_client_settings(&self.settings_replica, &self.client_preferences)
+    }
+
+    pub fn title_generating(&self, session_id: &str) -> bool {
+        self.title_generating.contains(session_id)
     }
 
     /// Whether the Index baseline has arrived, including an empty Index.
@@ -2911,6 +2918,7 @@ mod tests {
                     request_id: None,
                     topic: Topic::Index,
                     event: ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        title_generating: Default::default(),
                         sessions: vec![],
                         projects: vec![],
                         activity: Default::default(),
@@ -3418,6 +3426,7 @@ mod tests {
                 (
                     Topic::Index,
                     ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                        title_generating: Default::default(),
                         sessions: store.index_replica.0.clone(),
                         projects: store.index_replica.1.clone(),
                         activity: Default::default(),

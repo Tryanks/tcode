@@ -66,6 +66,9 @@ pages. Downloads, file uploads and new-window popups have no Android preview
 integration yet. Native child overlays can cover overlapping GPUI popovers;
 the command palette and navigation away hide the child explicitly.
 
+On Android, external HTTP(S) links open in the device's browser or associated
+app through the system URL handler.
+
 ## Design tokens
 
 The embedded [theme](../themes/tcode.json) owns colors and font choices;
@@ -105,7 +108,7 @@ The material layers are:
 
 | Layer | Use | Treatment |
 | --- | --- | --- |
-| T0 | Sidebar and window edges | Translucent theme canvas over the native window material |
+| T0 | Sidebar and window edges | Native window material; the theme canvas tints it only where the material carries no tint of its own (Windows) |
 | T1 | Chat, right panel and Settings reading surfaces | Near-opaque warm paper in light mode, blue carbon in dark mode |
 | T2 | Inline fields, hover and selection | Theme-derived tints |
 | T3 | Composer, popovers, dialogs, menus and toasts | Opaque popover fill, hairline border and soft shadow |
@@ -125,13 +128,24 @@ from the command palette and sheets. They darken the page in both themes.
 
 ## Window material
 
-The persistent main window uses native backdrop material: macOS keeps its
-existing blurred vibrancy, while Windows deliberately uses GPUI's
-`WindowBackgroundAppearance::Blurred`, which the locked Windows backend maps to
-Acrylic Accent state 4. Mica was rejected because it did not provide the
-perceptible live background-through blur required in the exposed T0 sidebar and
-window-edge regions. Both native materials retain the embedded theme's
-translucent canvas so the system backdrop can show through.
+The persistent main window uses native backdrop material. macOS opens a
+`WindowBackgroundAppearance::Transparent` window and slides a stock
+`NSVisualEffectView` (`.sidebar` material, behind-window blending, following
+the window's active state) under the GPUI view
+([macos_backdrop.rs](../crates/ui/src/macos_backdrop.rs)). The material is
+left exactly as AppKit builds it, so it follows Reduce Transparency and the
+macOS 27 Liquid Glass slider, and it is pinned to the theme mode so a forced
+dark palette never sits on a light material. Because the system tint already
+carries the T0 tone, the theme canvas ([`material::canvas`](../crates/ui/src/material.rs))
+is fully transparent on macOS. GPUI's own `Blurred` path is not used on macOS:
+it strips the material's tint layers and depends on the `.selection` material
+for blur, which carries no backdrop layer on macOS 27.
+
+Windows deliberately uses GPUI's `WindowBackgroundAppearance::Blurred`, which
+the locked Windows backend maps to Acrylic Accent state 4. Mica was rejected
+because it did not provide the perceptible live background-through blur
+required in the exposed T0 sidebar and window-edge regions. Acrylic carries no
+tint of its own, so Windows keeps the embedded theme's translucent canvas over it.
 `TCODE_NO_VIBRANCY=1` keeps its macOS-only
 diagnostic behavior: an opaque window with a flattened canvas. Linux and other
 platforms remain opaque and flatten that canvas to its solid RGB base. In-app
@@ -177,6 +191,13 @@ so startup never exposes a default white/black window or decorative backdrop.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
+- Thread rows come in three shapes: grouped (one line), flat root (two lines)
+  and flat child (one line, indented). Status text and colour for all three
+  come from one place, `thread_status_label` (approval → input → background →
+  working). Deliberate layout differences: the flat root row keeps its
+  timestamp while working because it has a second line; the other shapes drop
+  the timestamp/archive slot while working. Renaming hides dots, worktree glyph
+  and the timestamp slot in every shape.
 
 ## Connection baseline
 
@@ -192,6 +213,18 @@ received their replayed baseline, then **Connected**. Loading state belongs to
 the attachment's store and survives layout changes.
 
 ## Opening a conversation
+
+Command+1 through Command+9 on macOS, or Ctrl+1 through Ctrl+9 elsewhere, open
+the corresponding thread in the current thread-list order. Ctrl+Tab opens the
+next thread and Ctrl+Shift+Tab opens the previous one,
+wrapping at either end. Navigation follows the current layout, sort, project
+filter and expanded groups, including rows outside the scroll viewport but
+excluding folded-away threads. Rendering and shortcuts use the same included
+thread rows; group headings and disclosure controls do not consume shortcut
+positions. A number beyond the list length does nothing;
+with no listed thread selected, next starts at the first and previous at the
+last. Tab navigation uses Control on every platform. While the model picker is
+open, number shortcuts remain with the picker.
 
 The first tap selects the sidebar row and pushes the compact Thread destination
 immediately. Until both status and timeline arrive, the chat shows a muted message
@@ -582,6 +615,14 @@ in both states.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. Inline rename
    commits on Enter and cancels on blur or any click outside the input.
+   The thread context menu offers **Regenerate title / 重新生成标题** next to
+   Rename in both layouts. It uses the original request and recent conversation
+   to name the subject and desired outcome. While a title request is pending on
+   the host, the action reads **Regenerating… / 正在重新生成…** and is disabled
+   on every connected client. A small spinner appears beside the existing title
+   at both widths. Regeneration preserves the thread's activity timestamp and
+   list position; a manual rename wins over a late result. Failure preserves the
+   title and shows an error.
    On hover, time swaps to the archive icon; active = persistent accent bg; a running
    session shows "● Working" (green, 11px) left of the title; >6 threads →
    "Show more" / "Show less" toggle row (the row remains available after
@@ -803,6 +844,21 @@ Build/Plan toggle and a trailing context ring. These controls keep 44pt touch
 targets; access and context open their details sheets. The model name may
 truncate when space is tight, while the effort value stays fully visible.
 The card and drawer fit at 360pt in English and Simplified Chinese.
+
+The traits popover (the effort chip's details) lists each model parameter as a
+section of selectable rows, except fast mode, which a lightning-bolt button
+pinned to the pane's top-right corner owns alone: filled amber
+(`Theme::fast_mode_accent`) when fast mode is on, a muted outline when off, and
+a dimmed, inert outline when the model declares no fast mode. Click toggles in
+place and the pane stays open; the chip label still reports Fast/Normal (Claude)
+or the service tier (Codex). On desktop, hovering the inert bolt explains
+that the current model cannot enable fast mode; compact clients show the same
+44pt button without a tooltip and tapping it does nothing. Whether a model has
+fast mode, and which option value switches it, is decided once by
+[`FastMode`](../crates/core/src/provider_models.rs) for the bolt and the
+Orchestrate Fast switch alike. Claude's Fast Mode rows are not listed; a Codex
+Service Tier section appears only when tiers other than Standard and Fast
+exist, and then without the Fast row.
 The context details distinguish the latest main-conversation request from
 processed traffic. Claude occupancy is the latest input plus cache-read and
 cache-creation tokens; generated output and repeated requests do not inflate it.
@@ -842,6 +898,10 @@ affordance, because a typed message there is an ordinary build turn.
 The compact drawer's Build/Plan control toggles in place; its access control
 opens the approval-mode picker. Narrow desktop composers retain their overflow
 popover, where Build/Plan toggles and closes the popover and access is a summary.
+
+Pi's reasoning-effort picker uses the selected model's supported levels from the
+[Pi adapter](../crates/agent/src/pi.rs). Unsupported levels are hidden in both
+wide and compact layouts.
 
 Model picker popover: left rail = favorites star + provider
 glyphs; search input; rows = model name (✓ current) + provider subtitle,
