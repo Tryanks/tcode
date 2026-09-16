@@ -39,6 +39,17 @@ fn rgba(r: u8, g: u8, b: u8, a: u8) -> Hsla {
     .into()
 }
 
+/// T0 canvas: the theme's translucent tint over the native window material.
+/// Transparent when the macOS system material already tints the backdrop
+/// (`macos_backdrop`), so the two tints do not stack.
+pub fn canvas(cx: &App) -> Hsla {
+    #[cfg(target_os = "macos")]
+    if crate::macos_backdrop::installed(cx) {
+        return gpui::transparent_black();
+    }
+    cx.theme().background
+}
+
 /// Flatten the canvas over fullscreen vibrancy, where its translucent color
 /// would otherwise composite against black.
 pub fn opaque_canvas(cx: &App) -> Hsla {

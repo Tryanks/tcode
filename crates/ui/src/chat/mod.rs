@@ -2609,7 +2609,7 @@ impl Render for ChatView {
         let root = v_flex().size_full().min_w_0().bg(if compact {
             crate::material::content_surface(cx)
         } else {
-            cx.theme().background
+            crate::material::canvas(cx)
         });
 
         if self.workspace_store.read(cx).chat_loading() {
