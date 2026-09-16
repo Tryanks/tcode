@@ -29,6 +29,10 @@ struct EventEnvelope {
 #[derive(Debug, Clone)]
 pub struct SessionStore {
     root: PathBuf,
+    /// Full event-log parses, shared by every clone of this store so tests can
+    /// prove a caller served history from memory.
+    #[cfg(any(test, feature = "test-support"))]
+    event_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SessionStore {
@@ -47,7 +51,18 @@ impl SessionStore {
 
     pub fn open_at(root: PathBuf) -> std::io::Result<Self> {
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            #[cfg(any(test, feature = "test-support"))]
+            event_reads: Default::default(),
+        })
+    }
+
+    /// How many times [`SessionStore::read_events`] parsed a log through this
+    /// store or any of its clones.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn event_reads(&self) -> usize {
+        self.event_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -309,6 +324,9 @@ impl SessionStore {
     /// (`{"ts":…,"event":…}`) or a legacy bare event (`{"type":…}`), so logs
     /// written before the envelope format still replay (with `ts == None`).
     pub fn read_events(&self, id: &str) -> Vec<StoredEvent> {
+        #[cfg(any(test, feature = "test-support"))]
+        self.event_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = self.events_path(id);
         let Ok(file) = File::open(&path) else {
             return Vec::new();

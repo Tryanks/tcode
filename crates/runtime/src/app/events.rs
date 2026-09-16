@@ -65,6 +65,7 @@ impl AppState {
                         }
                         if !has_queued {
                             self.residents.evict(session_id);
+                            self.release_stale_session_logs(cx);
                         }
                     }
                     // Otherwise: user-requested shutdowns remove the runtime before
@@ -485,7 +486,7 @@ impl AppState {
     fn record_event_at(&mut self, session_id: &str, ts: u64, event: &AgentEvent, cx: &mut HostCx) {
         self.event_records
             .entry(session_id.to_string())
-            .or_insert_with(|| self.store.read_events(session_id))
+            .or_insert_with(|| SessionLog::load(&self.store, session_id))
             .push(SessionEventRecord {
                 ts: Some(ts),
                 event: event.clone(),
@@ -510,6 +511,8 @@ impl AppState {
         );
         if let Some(session) = self.resident_mut(session_id) {
             session.timeline.apply_at(Some(ts), event);
+        } else {
+            self.release_stale_session_logs(cx);
         }
     }
 
@@ -588,8 +591,9 @@ impl AppState {
         let regenerate = first_message.is_none();
         // The cache includes accepted messages whose disk writes are still queued.
         let records = regenerate
-            .then(|| self.event_records.get(&session_id).cloned())
-            .flatten();
+            .then(|| self.event_records.get(&session_id))
+            .flatten()
+            .map(|log| log.records().to_vec());
         let store = self.store.clone();
         let settings = self.settings.clone();
         let settings_store = self.settings_store.clone();

@@ -58,49 +58,151 @@ fn bounded_range(
     })
 }
 
-/// Move a window start back to the record that opens its turn. The client
-/// folds only the records it holds, so a window that begins mid-turn renders a
-/// partial first turn whose entries shift as earlier pages arrive, while a
-/// window that begins where a turn begins opens its turns exactly where the
-/// full log does. Records that open no turn leave the start unchanged.
-fn turn_aligned_start(records: &[SessionEventRecord], start: usize) -> usize {
-    let mut timeline = Timeline::default();
-    let mut aligned = start;
-    let candidates = &records[..(start + 1).min(records.len())];
-    for (index, record) in candidates.iter().enumerate() {
-        let turns = timeline.turns.len();
-        timeline.apply_at(record.ts, &record.event);
-        if timeline.turns.len() > turns {
-            aligned = index;
-        }
+/// The complete event log of one session, held in memory while the session
+/// is resident so history windows cost the page rather than a re-parse of the
+/// JSONL, plus the fold that decides where each window may start.
+///
+/// Memory policy: [`AppState::event_records`] holds a log for every live or
+/// parked session (bounded by the resident LRU) and for nothing else. A log
+/// is loaded when a client opens the session or when the session first
+/// appends in this process, and is dropped once the session leaves residency
+/// and the store writer has flushed every append queued from it
+/// ([`AppState::release_stale_session_logs`]): until then the log, not the
+/// JSONL, is the whole conversation.
+#[derive(Clone)]
+pub(super) struct SessionLog {
+    records: Vec<SessionEventRecord>,
+    /// Indices of the records that opened a turn in `fold`, ascending.
+    turn_starts: Vec<usize>,
+    /// `Timeline::fold_events(records)`, extended by every push so an append
+    /// can tell whether it opens a turn, and cloned by timeline loads instead
+    /// of folding the records again.
+    fold: Timeline,
+    /// The length flushed by the release barrier in flight, if any.
+    release_barrier: Option<usize>,
+}
+
+impl SessionLog {
+    pub(super) fn load(store: &SessionStore, session_id: &str) -> Self {
+        Self::from_records(store.read_events(session_id))
     }
-    aligned
+
+    pub(super) fn from_records(records: impl IntoIterator<Item = SessionEventRecord>) -> Self {
+        let mut log = Self {
+            records: Vec::new(),
+            turn_starts: Vec::new(),
+            fold: Timeline::default(),
+            release_barrier: None,
+        };
+        for record in records {
+            log.push(record);
+        }
+        log
+    }
+
+    pub(super) fn push(&mut self, record: SessionEventRecord) {
+        let turns = self.fold.turns.len();
+        self.fold.apply_at(record.ts, &record.event);
+        if self.fold.turns.len() > turns {
+            self.turn_starts.push(self.records.len());
+        }
+        self.records.push(record);
+    }
+
+    pub(super) fn records(&self) -> &[SessionEventRecord] {
+        &self.records
+    }
+
+    /// The pure fold of every record, before any `mark_idle`.
+    pub(super) fn fold(&self) -> &Timeline {
+        &self.fold
+    }
+
+    /// Move a window start back to the record that opens its turn. The client
+    /// folds only the records it holds, so a window that begins mid-turn
+    /// renders a partial first turn whose entries shift as earlier pages
+    /// arrive, while a window that begins where a turn begins opens its turns
+    /// exactly where the full log does. Records that open no turn leave the
+    /// start unchanged.
+    fn turn_aligned_start(&self, start: usize) -> usize {
+        let opened_before = self.turn_starts.partition_point(|&index| index <= start);
+        opened_before
+            .checked_sub(1)
+            .map_or(start, |last| self.turn_starts[last])
+    }
 }
 
 impl AppState {
-    fn history_records(&self, session_id: &str) -> std::borrow::Cow<'_, [SessionEventRecord]> {
-        self.event_records.get(session_id).map_or_else(
-            || std::borrow::Cow::Owned(self.store.read_events(session_id)),
-            |records| std::borrow::Cow::Borrowed(records.as_slice()),
-        )
+    /// The session's log, cached for the resident session it belongs to. A
+    /// non-resident session is read cold and not retained, so paging it never
+    /// grows the cache.
+    fn history_log(&mut self, session_id: &str) -> std::borrow::Cow<'_, SessionLog> {
+        if !self.event_records.contains_key(session_id) {
+            let log = SessionLog::load(&self.store, session_id);
+            if self.resident(session_id).is_none() {
+                return std::borrow::Cow::Owned(log);
+            }
+            self.event_records.insert(session_id.to_string(), log);
+        }
+        std::borrow::Cow::Borrowed(&self.event_records[session_id])
+    }
+
+    /// Queue a store-writer barrier for every cached log whose session left
+    /// residency, and drop the log once the barrier echoes: a cold read after
+    /// that sees every append the log had accepted. Appends that race the
+    /// barrier re-arm it.
+    pub(super) fn release_stale_session_logs(&mut self, cx: &mut HostCx) {
+        let stale: Vec<(String, usize)> = self
+            .event_records
+            .iter()
+            .filter(|(id, log)| log.release_barrier.is_none() && self.resident(id).is_none())
+            .map(|(id, log)| (id.clone(), log.records.len()))
+            .collect();
+        for (session_id, flushed) in stale {
+            self.event_records
+                .get_mut(&session_id)
+                .expect("stale log collected above")
+                .release_barrier = Some(flushed);
+            let (completion, completed) = smol::channel::bounded(1);
+            self.enqueue_store_write(StoreWrite::Flush(completion), cx);
+            let host_cx = cx.clone();
+            HostCx::spawn_detached(cx, async move {
+                // A stopped writer has dropped its queue as well; nothing
+                // later can still land in the JSONL.
+                let _ = completed.recv().await;
+                host_cx.enqueue(move |state, cx| {
+                    let Some(log) = state.event_records.get_mut(&session_id) else {
+                        return;
+                    };
+                    log.release_barrier = None;
+                    let appended_since = log.records.len() != flushed;
+                    if state.resident(&session_id).is_some() {
+                        return;
+                    }
+                    if appended_since {
+                        state.release_stale_session_logs(cx);
+                    } else {
+                        state.event_records.remove(&session_id);
+                    }
+                });
+            });
+        }
     }
 
     pub(crate) fn session_events_snapshot(
-        &self,
+        &mut self,
         subscription: &tcode_protocol::Subscription,
     ) -> ServerEvent {
         let Topic::SessionEvents { session_id } = &subscription.topic else {
             unreachable!()
         };
-        let records = self.history_records(session_id);
+        let log = self.history_log(session_id);
+        let records = log.records();
         let total = records.len();
-        let total_turns = self.resident(session_id).map_or_else(
-            || Timeline::fold_events(records.iter().cloned()).turns.len(),
-            |session| session.timeline.turns.len(),
-        ) as u64;
+        let total_turns = log.fold().turns.len() as u64;
         let after = subscription.after.filter(|after| *after <= total as u64);
         let from = after.map_or_else(
-            || turn_aligned_start(&records, total.saturating_sub(400)),
+            || log.turn_aligned_start(total.saturating_sub(400)),
             |after| after as usize,
         );
         let empty = HostMessage::Event(EventEnvelope {
@@ -118,7 +220,7 @@ impl AppState {
             .expect("serializable snapshot")
             .len()
             + 1;
-        match bounded_range(&records, from..total, after.is_none(), overhead) {
+        match bounded_range(records, from..total, after.is_none(), overhead) {
             Ok(range) => ServerEvent::SessionSnapshot {
                 from: range.start as u64,
                 truncated: range.len() < total - from,
@@ -131,15 +233,16 @@ impl AppState {
     }
 
     pub(crate) fn session_history_page(
-        &self,
+        &mut self,
         session_id: &str,
         before: u64,
         limit: u32,
     ) -> Result<QueryResponse, tcode_protocol::ProtocolError> {
-        let records = self.history_records(session_id);
+        let log = self.history_log(session_id);
+        let records = log.records();
         let end = before.min(records.len() as u64) as usize;
         let count = (limit as usize).clamp(1, SESSION_HISTORY_RECORDS);
-        let requested = turn_aligned_start(&records, end.saturating_sub(count))..end;
+        let requested = log.turn_aligned_start(end.saturating_sub(count))..end;
         let empty = HostMessage::QueryResult {
             id: u64::MAX,
             result: Ok(QueryResponse::SessionHistoryPage {
@@ -149,7 +252,7 @@ impl AppState {
             }),
         };
         let overhead = serde_json::to_vec(&empty).expect("serializable page").len() + 1;
-        let range = bounded_range(&records, requested.clone(), true, overhead)?;
+        let range = bounded_range(records, requested.clone(), true, overhead)?;
         Ok(QueryResponse::SessionHistoryPage {
             from: range.start as u64,
             truncated: range.len() < requested.len(),

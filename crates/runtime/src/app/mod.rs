@@ -239,6 +239,7 @@ mod command_validation;
 mod events;
 mod git;
 mod history;
+use history::SessionLog;
 mod lifecycle;
 mod options;
 mod orchestrate;
@@ -388,7 +389,9 @@ pub struct AppState {
     /// Per-session token used to discard superseded timeline loads.
     timeline_load_generations: HashMap<String, u64>,
     subscriptions: HashSet<Topic>,
-    event_records: HashMap<String, Vec<SessionEventRecord>>,
+    /// Resident sessions' event logs; see [`SessionLog`] for what is cached
+    /// and when it is dropped.
+    event_records: HashMap<String, SessionLog>,
     /// Composer-draft review notes, keyed by session id (in-memory only).
     review_comment_drafts: HashMap<String, Vec<ReviewComment>>,
     /// A restart-continuity marker taken at launch (see `tcode_services::relaunch`).

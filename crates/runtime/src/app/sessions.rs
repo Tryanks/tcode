@@ -1401,17 +1401,33 @@ impl AppState {
         let Some(cwd) = intended.map(|session| session.meta.cwd.clone()) else {
             return;
         };
-        // Once a session has appended in this process, its in-memory records
-        // are the whole log; the JSONL can still be behind the store writer.
-        let cached = self.event_records.get(&session_id).cloned();
+        // A cached log is the whole conversation, including appends whose
+        // disk writes are still queued, so the timeline derives from it and
+        // never from a JSONL that can lag the store writer. A session opened
+        // for a client loads its log here, on the mailbox, because the
+        // snapshot that answers the subscription needs it in the same turn;
+        // a background session parses off the mailbox and caches on completion.
+        let cached = match target {
+            TimelineLoadTarget::Active { .. } => Some(
+                self.event_records
+                    .entry(session_id.clone())
+                    .or_insert_with(|| SessionLog::load(&self.store, &session_id)),
+            ),
+            TimelineLoadTarget::Background => self.event_records.get_mut(&session_id),
+        }
+        .map(|log| (log.records().len(), log.fold().clone()));
         let store = self.store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             let read_id = session_id.clone();
-            let (timeline, folded, git_branch) = {
-                let stored = cached.unwrap_or_else(|| store.read_events(&read_id));
-                let folded = stored.len();
-                let mut timeline = Timeline::fold_events(stored);
+            let (timeline, folded, loaded, git_branch) = {
+                let (mut timeline, folded, loaded) = match cached {
+                    Some((folded, fold)) => (fold, folded, None),
+                    None => {
+                        let log = SessionLog::load(&store, &read_id);
+                        (log.fold().clone(), log.records().len(), Some(log))
+                    }
+                };
                 let (mark_idle, load_branch) = match target {
                     TimelineLoadTarget::Active { mark_idle } => (mark_idle, true),
                     TimelineLoadTarget::Background => (true, false),
@@ -1420,7 +1436,7 @@ impl AppState {
                     timeline.mark_idle();
                 }
                 let git_branch = load_branch.then(|| read_git_branch(&cwd));
-                (timeline, folded, git_branch)
+                (timeline, folded, loaded, git_branch)
             };
             host_cx.enqueue(move |state, _cx| {
                 let generation_matches =
@@ -1436,10 +1452,18 @@ impl AppState {
                 if !generation_matches || !target_matches {
                     return;
                 }
+                // An append during the parse already loaded and extended its
+                // own copy; that one carries the newer records.
+                if let Some(loaded) = loaded {
+                    state
+                        .event_records
+                        .entry(session_id.clone())
+                        .or_insert(loaded);
+                }
                 let mut timeline = timeline;
                 // Records appended while the fold ran continue the same log.
-                if let Some(records) = state.event_records.get(&session_id) {
-                    for record in records.iter().skip(folded) {
+                if let Some(log) = state.event_records.get(&session_id) {
+                    for record in log.records().iter().skip(folded) {
                         timeline.apply_at(record.ts, &record.event);
                     }
                 }
@@ -1466,7 +1490,7 @@ impl AppState {
 
         // A parked session is re-adopted, not replayed cold: its process, pump
         // and queue come back as they were, and the timeline is rebuilt from the
-        // JSONL — which stayed current while parked, because `record_event`
+        // cached log — which stayed current while parked, because `record_event`
         // routes by session id.
         if let Some(mut parked) = self.residents.adopt(session_id) {
             log::info!(

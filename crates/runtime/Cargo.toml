@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-test-support = []
+test-support = ["tcode-services/test-support"]
 
 [dependencies]
 agent = { path = "../agent" }
@@ -26,4 +26,5 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 mcp-host = { path = "../mcp-host" }
+tcode-services = { path = "../services", features = ["test-support"] }
 tcode-remote = { path = "../remote", default-features = false, features = ["server", "client"] }

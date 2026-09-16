@@ -165,7 +165,7 @@ impl AppState {
 
     /// Build the serialized snapshot associated with one subscription.
     pub(crate) fn subscription_snapshot(
-        &self,
+        &mut self,
         subscription: &tcode_protocol::Subscription,
     ) -> Option<EventEnvelope> {
         let topic = &subscription.topic;
