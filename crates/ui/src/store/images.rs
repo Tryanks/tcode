@@ -7,6 +7,10 @@ use tcode_protocol::{Query, QueryResponse};
 pub(super) struct HostImages {
     pub link: Option<HostLink>,
     pub namespace: u64,
+    /// Existing live-host UI fixtures pump on an OS thread. Keep its wakeups
+    /// outside GPUI's deterministic scheduler; scripted fixtures stay async.
+    #[cfg(test)]
+    pub blocking_queries: bool,
 }
 impl Global for HostImages {}
 
@@ -35,6 +39,8 @@ impl Asset for HostImage {
             .clone()
             .filter(|_| images.namespace == namespace)
             .ok_or_else(|| std::io::Error::other("image belongs to a detached host"));
+        #[cfg(test)]
+        let blocking_queries = images.blocking_queries;
         async move {
             let query = match request {
                 ImageRequest::File(path) => Query::ReadFileBytes { path },
@@ -45,7 +51,15 @@ impl Asset for HostImage {
                 },
             };
             let host = host?;
-            let bytes = match host.query(query).await {
+            #[cfg(test)]
+            let result = if blocking_queries {
+                futures_lite::future::block_on(host.query(query))
+            } else {
+                host.query(query).await
+            };
+            #[cfg(not(test))]
+            let result = host.query(query).await;
+            let bytes = match result {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
                 result => {
                     return Err(std::io::Error::other(format!(
@@ -165,30 +179,31 @@ mod tests {
             (Some(true), Some([255, 0, 0, 255])),
             (Some(false), Some([0, 0, 255, 255])),
         ] {
-            if let Some(reconnect) = reconnect {
-                store.update(cx, |store, cx| {
-                    let event = if reconnect {
+            store.update(cx, |store, cx| {
+                let event = if reconnect == Some(false) {
+                    // Also delivered to clients that did not open the picker.
+                    ServerEvent::IndexUpsertProject(project.clone())
+                } else {
+                    if reconnect == Some(true) {
                         store.apply_connection_state(tcode_client::ConnectionState::Syncing);
-                        ServerEvent::IndexSnapshot(IndexSnapshot {
-                            sessions: vec![],
-                            projects: vec![project.clone()],
-                            activity: Default::default(),
-                            title_generating: Default::default(),
-                        })
-                    } else {
-                        // Also delivered to clients that did not open the picker.
-                        ServerEvent::IndexUpsertProject(project.clone())
-                    };
-                    store.apply_domain_event(
-                        &EventEnvelope {
-                            request_id: None,
-                            topic: Topic::Index,
-                            event,
-                        },
-                        cx,
-                    );
-                });
-            }
+                    }
+                    // Seed a baseline before caching the error, then replace it on reconnect.
+                    ServerEvent::IndexSnapshot(IndexSnapshot {
+                        sessions: vec![],
+                        projects: vec![project.clone()],
+                        activity: Default::default(),
+                        title_generating: Default::default(),
+                    })
+                };
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic: Topic::Index,
+                        event,
+                    },
+                    cx,
+                );
+            });
             for pixels in [16, 32] {
                 let (image, requested) = cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)));
                 assert!(
@@ -275,6 +290,7 @@ mod tests {
             cx.set_global(HostImages {
                 link: Some(link.clone()),
                 namespace: 1,
+                blocking_queries: false,
             });
         });
         let executor = cx.background_executor.clone();

@@ -282,6 +282,8 @@ impl WorkspaceStore {
         cx.set_global(images::HostImages {
             link: Some(host.clone()),
             namespace: image_namespace,
+            #[cfg(test)]
+            blocking_queries: seed_blocking,
         });
         let client_preferences = client_host
             .as_ref()
@@ -778,6 +780,8 @@ impl WorkspaceStore {
             cx.set_global(images::HostImages {
                 link: None,
                 namespace: self.image_namespace,
+                #[cfg(test)]
+                blocking_queries: false,
             });
         }
     }
