@@ -541,7 +541,7 @@ async fn actor_loop(
     );
     let claude_dir = config.claude_dir.clone();
     let mut tailers = HashMap::new();
-    let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentModelNotice>();
+    let (tail_tx, tail_rx) = smol::channel::unbounded::<SubagentTailNotice>();
 
     // Set when the child died on its own (stdout EOF): only then do its exit
     // status and stderr tail belong in the close reason.
@@ -561,8 +561,10 @@ async fn actor_loop(
             Sel::Tail(notice) => {
                 // The sender side is owned by this loop, so it can't close.
                 let Some(notice) = notice else { continue };
-                for ev in mapper.note_subagent_model(&notice.parent_id, notice.model, notice.effort)
-                {
+                if notice.stopped {
+                    tailers.remove(&notice.parent_id);
+                }
+                for ev in mapper.on_tail_notice(notice) {
                     if event_tx.send(ev).await.is_err() {
                         let _ = child.kill();
                         return;
@@ -605,7 +607,6 @@ async fn actor_loop(
                     mapper.take_tail_requests(),
                     &mut tailers,
                     claude_dir.as_deref(),
-                    &event_tx,
                     &tail_tx,
                 )
                 .await;
@@ -625,6 +626,11 @@ async fn actor_loop(
     let _ = stdin.close().await;
     for control in tailers.into_values() {
         let _ = control.send(TailControl::Stop).await;
+    }
+    // Tail acknowledgements no longer reach this loop; release the held
+    // terminal snapshots so the parent rows settle before the close.
+    for ev in mapper.take_pending_subagent_terminals() {
+        let _ = event_tx.send(ev).await;
     }
     let _ = child.kill();
     let _ = child.status().await;
@@ -652,18 +658,22 @@ async fn actor_loop(
 enum Sel {
     Cmd(Option<SessionCommand>),
     Line(Option<String>),
-    Tail(Option<SubagentModelNotice>),
+    Tail(Option<SubagentTailNotice>),
 }
 
-/// Model/effort observed in a tailed subagent transcript, handed back to the
-/// actor so the parent Subagent item is updated with its live status.
-pub(crate) struct SubagentModelNotice {
+/// One read of a tailed subagent transcript, handed back to the actor so the
+/// mapper stays the single writer of the canonical stream: it dedupes the
+/// child items against the stdout feed and, on `stopped`, releases the
+/// Subagent item's terminal snapshot after them.
+pub(crate) struct SubagentTailNotice {
     pub(crate) parent_id: String,
-    pub(crate) model: Option<String>,
-    pub(crate) effort: Option<String>,
+    pub(crate) events: Vec<AgentEvent>,
+    pub(crate) model: Option<(Option<String>, Option<String>)>,
+    /// Final batch: the tail acknowledged Stop (or lost its actor).
+    pub(crate) stopped: bool,
 }
 
-enum TailControl {
+pub(crate) enum TailControl {
     PreferPath(PathBuf),
     Stop,
 }
@@ -672,8 +682,7 @@ async fn process_tail_requests(
     requests: Vec<TailRequest>,
     tailers: &mut HashMap<String, smol::channel::Sender<TailControl>>,
     claude_dir: Option<&Path>,
-    event_tx: &smol::channel::Sender<AgentEvent>,
-    tail_tx: &smol::channel::Sender<SubagentModelNotice>,
+    tail_tx: &smol::channel::Sender<SubagentTailNotice>,
 ) {
     for request in requests {
         match request {
@@ -688,10 +697,9 @@ async fn process_tail_requests(
                 let (control_tx, control_rx) = smol::channel::unbounded();
                 tailers.insert(parent_id.clone(), control_tx);
                 let claude_dir = claude_dir.map(Path::to_path_buf);
-                let events = event_tx.clone();
                 let notices = tail_tx.clone();
                 smol::spawn(run_subagent_tail(
-                    parent_id, task_id, session_id, claude_dir, control_rx, events, notices,
+                    parent_id, task_id, session_id, claude_dir, control_rx, notices,
                 ))
                 .detach();
             }
@@ -709,70 +717,83 @@ async fn process_tail_requests(
     }
 }
 
-async fn run_subagent_tail(
+/// Poll a subagent's transcript until Stop; the final read is flushed in the
+/// notice that carries `stopped`, so the actor sees every child item before
+/// it releases the Subagent item's terminal snapshot.
+pub(crate) async fn run_subagent_tail(
     parent_id: String,
     task_id: String,
     session_id: String,
     claude_dir: Option<PathBuf>,
     controls: smol::channel::Receiver<TailControl>,
-    events: smol::channel::Sender<AgentEvent>,
-    notices: smol::channel::Sender<SubagentModelNotice>,
+    notices: smol::channel::Sender<SubagentTailNotice>,
 ) {
-    let mut path = None;
-    let mut reader = None;
+    let mut reader: Option<crate::subagent_tail::TailReader> = None;
     let mut stopping = false;
+    let mut woken = None;
     loop {
-        while let Ok(control) = controls.try_recv() {
+        for control in woken
+            .take()
+            .into_iter()
+            .chain(std::iter::from_fn(|| controls.try_recv().ok()))
+        {
             match control {
-                TailControl::PreferPath(preferred) => {
-                    if path.as_ref() != Some(&preferred) {
-                        path = Some(preferred.clone());
-                        reader = Some(crate::subagent_tail::TailReader::new(
-                            preferred,
-                            parent_id.clone(),
-                        ));
-                    }
+                // The notification's output file duplicates a transcript that
+                // discovery already tails; switching would replay it from byte 0.
+                TailControl::PreferPath(preferred) if reader.is_none() => {
+                    reader = Some(crate::subagent_tail::TailReader::new(
+                        preferred,
+                        parent_id.clone(),
+                    ));
                 }
+                TailControl::PreferPath(_) => {}
                 TailControl::Stop => stopping = true,
             }
         }
-        if path.is_none()
+        if reader.is_none()
             && let Some(root) = &claude_dir
             && let Some(found) =
                 crate::subagent_tail::find_transcript(root, &session_id, &task_id, &parent_id)
         {
-            path = Some(found.clone());
             reader = Some(crate::subagent_tail::TailReader::new(
                 found,
                 parent_id.clone(),
             ));
         }
+        let mut notice = SubagentTailNotice {
+            parent_id: parent_id.clone(),
+            events: Vec::new(),
+            model: None,
+            stopped: stopping,
+        };
         if let Some(reader) = &mut reader {
             match reader.read_appended() {
                 Ok(mapped) => {
-                    for event in mapped {
-                        if events.send(event).await.is_err() {
-                            return;
-                        }
-                    }
-                    if let Some((model, effort)) = reader.take_model() {
-                        let _ = notices
-                            .send(SubagentModelNotice {
-                                parent_id: parent_id.clone(),
-                                model,
-                                effort,
-                            })
-                            .await;
-                    }
+                    notice.events = mapped;
+                    notice.model = reader.take_model();
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
                 Err(err) => log::debug!("claude subagent tail read failed: {err}"),
             }
         }
+        if (stopping || !notice.events.is_empty() || notice.model.is_some())
+            && notices.send(notice).await.is_err()
+        {
+            return;
+        }
         if stopping {
             return;
         }
-        smol::Timer::after(std::time::Duration::from_millis(400)).await;
+        // Wake on the next control so a Stop flushes immediately instead of
+        // after a poll interval; a closed channel means the actor is gone.
+        woken = smol::future::or(
+            async { Some(controls.recv().await.unwrap_or(TailControl::Stop)) },
+            async {
+                smol::Timer::after(std::time::Duration::from_millis(400)).await;
+                None
+            },
+        )
+        .await;
     }
 }
 
@@ -1161,6 +1182,14 @@ pub(crate) struct Mapper {
     task_tools: HashMap<String, String>,
     child_mappers: HashMap<String, crate::subagent_tail::TranscriptMapper>,
     tail_requests: Vec<TailRequest>,
+    /// Subagents whose transcript tail has not yet acknowledged its Stop. A
+    /// terminal Subagent snapshot is held in `pending_subagent_terminals` until
+    /// then, so the mirror's turn closes after the tail's final child items.
+    tailed: HashSet<String>,
+    pending_subagent_terminals: HashMap<String, AgentEvent>,
+    /// Child items already completed by either feed (stdout `parent_tool_use_id`
+    /// lines or the transcript tail); a stale start must not reopen them.
+    finished_child_items: HashSet<String>,
     pending_approvals: HashMap<String, PendingApproval>,
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
@@ -1258,6 +1287,9 @@ impl Mapper {
             task_tools: HashMap::new(),
             child_mappers: HashMap::new(),
             tail_requests: Vec::new(),
+            tailed: HashSet::new(),
+            pending_subagent_terminals: HashMap::new(),
+            finished_child_items: HashSet::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
             approval_mode,
@@ -1509,12 +1541,12 @@ impl Mapper {
                 Some((model, effort)) => self.note_subagent_model(parent_id, model, effort),
                 None => Vec::new(),
             };
-            events.extend(
-                self.child_mappers
-                    .entry(parent_id.to_owned())
-                    .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
-                    .map_value(&msg),
-            );
+            let child = self
+                .child_mappers
+                .entry(parent_id.to_owned())
+                .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
+                .map_value(&msg);
+            events.extend(self.dedupe_child_events(child));
             return events;
         }
         match msg.get("type").and_then(Value::as_str) {
@@ -1690,6 +1722,7 @@ impl Mapper {
             self.task_tools
                 .insert(task_id.to_owned(), tool_use_id.to_owned());
             if msg.get("task_type").and_then(Value::as_str) != Some("local_bash") {
+                self.tailed.insert(tool_use_id.to_owned());
                 self.tail_requests.push(TailRequest::Start {
                     parent_id: tool_use_id.to_owned(),
                     task_id: task_id.to_owned(),
@@ -1848,7 +1881,7 @@ impl Mapper {
             *saved_summary = summary;
         }
         *saved_status = status;
-        vec![AgentEvent::ItemUpdated(ThreadItem {
+        let event = AgentEvent::ItemUpdated(ThreadItem {
             id: tool_use_id.to_owned(),
             parent_item_id: None,
             content: ItemContent::Subagent {
@@ -1859,7 +1892,62 @@ impl Mapper {
                 model: model.clone(),
                 effort: effort.clone(),
             },
-        })]
+        });
+        if status == ItemStatus::InProgress {
+            vec![event]
+        } else {
+            self.gate_subagent_terminal(tool_use_id, event)
+        }
+    }
+
+    /// Hold a terminal Subagent snapshot while its transcript tail is still
+    /// flushing; the tail's Stop acknowledgement releases the latest one.
+    fn gate_subagent_terminal(&mut self, tool_use_id: &str, event: AgentEvent) -> Vec<AgentEvent> {
+        if self.tailed.contains(tool_use_id) {
+            self.pending_subagent_terminals
+                .insert(tool_use_id.to_owned(), event);
+            Vec::new()
+        } else {
+            vec![event]
+        }
+    }
+
+    fn dedupe_child_events(&mut self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+        let finished = &mut self.finished_child_items;
+        events.retain(|event| match event {
+            AgentEvent::ItemStarted(item) => !finished.contains(&item.id),
+            AgentEvent::ItemCompleted(item) => {
+                finished.insert(item.id.clone());
+                true
+            }
+            _ => true,
+        });
+        events
+    }
+
+    /// Fold one batch from a subagent transcript tail: its child items, the
+    /// model it observed, and — once it has stopped — the terminal Subagent
+    /// snapshot that was waiting on its final flush.
+    pub(crate) fn on_tail_notice(&mut self, notice: SubagentTailNotice) -> Vec<AgentEvent> {
+        let mut events = match notice.model {
+            Some((model, effort)) => self.note_subagent_model(&notice.parent_id, model, effort),
+            None => Vec::new(),
+        };
+        events.extend(self.dedupe_child_events(notice.events));
+        if notice.stopped {
+            self.tailed.remove(&notice.parent_id);
+            events.extend(self.pending_subagent_terminals.remove(&notice.parent_id));
+        }
+        events
+    }
+
+    /// Terminal snapshots whose tail acknowledgement will never arrive
+    /// (session teardown).
+    fn take_pending_subagent_terminals(&mut self) -> Vec<AgentEvent> {
+        self.tailed.clear();
+        std::mem::take(&mut self.pending_subagent_terminals)
+            .into_values()
+            .collect()
     }
 
     /// Record the model/effort a child transcript reports for its spawn item
@@ -2320,6 +2408,18 @@ impl Mapper {
                 Some(i) => i,
                 None => continue,
             };
+            // A background Agent's tool_result only acknowledges the launch;
+            // the subagent keeps running until its task_notification.
+            if matches!(item, ToolItem::Subagent { .. })
+                && msg
+                    .pointer("/tool_use_result/status")
+                    .and_then(Value::as_str)
+                    == Some("async_launched")
+            {
+                self.tool_items.insert(tool_use_id.clone(), item);
+                out.extend(self.update_subagent(&tool_use_id, ItemStatus::InProgress, None));
+                continue;
+            }
             let is_error = block
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -2409,11 +2509,17 @@ impl Mapper {
             } else {
                 AgentEvent::ItemCompleted
             };
-            out.push(event(ThreadItem {
-                id: tool_use_id,
+            let is_subagent = matches!(content, ItemContent::Subagent { .. });
+            let event = event(ThreadItem {
+                id: tool_use_id.clone(),
                 parent_item_id: None,
                 content,
-            }));
+            });
+            if is_subagent {
+                out.extend(self.gate_subagent_terminal(&tool_use_id, event));
+            } else {
+                out.push(event);
+            }
         }
         out
     }
@@ -5084,6 +5190,20 @@ mod tests {
         for line in trace.lines() {
             events.extend(feed(&mut mapper, line));
         }
+        // task_started opened a transcript tail; every terminal snapshot
+        // (task_updated, task_notification, tool_result) waits for its ack.
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
+            | AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::Subagent { status, .. }, .. })
+                if *status != ItemStatus::InProgress
+        )));
+        events.extend(mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: "toolu_spawn_1".into(),
+            events: Vec::new(),
+            model: None,
+            stopped: true,
+        }));
 
         let spawn_events: Vec<_> = events
             .iter()
@@ -5098,7 +5218,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(spawn_events.len(), 6);
+        assert_eq!(spawn_events.len(), 4);
+        assert!(matches!(events.last(), Some(AgentEvent::ItemCompleted(_))));
         assert!(matches!(
             &spawn_events[0].content,
             ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, summary: None, model: None, effort: None }
@@ -5159,6 +5280,179 @@ mod tests {
             }
             _ => true,
         }));
+    }
+
+    /// Background subagent: the launch acknowledgement and the parent's result
+    /// leave the Subagent item in progress; the terminal snapshot is emitted
+    /// only after the transcript tail's final flush, and the tail's copy of a
+    /// child the stdout feed already completed cannot reopen it.
+    #[test]
+    fn background_subagent_terminal_waits_for_tail_flush_and_dedupes_feeds() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_background_trace.jsonl");
+        let mut mapper = Mapper::new();
+        let mut events = Vec::new();
+        for line in trace.lines() {
+            events.extend(feed(&mut mapper, line));
+        }
+        let spawn_status = |event: &AgentEvent| match event {
+            AgentEvent::ItemStarted(item)
+            | AgentEvent::ItemUpdated(item)
+            | AgentEvent::ItemCompleted(item)
+                if item.id == "toolu_spawn_bg" =>
+            {
+                match &item.content {
+                    ItemContent::Subagent { status, .. } => Some(*status),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        assert!(
+            events
+                .iter()
+                .filter_map(spawn_status)
+                .all(|status| status == ItemStatus::InProgress),
+            "launch acknowledgement and task_notification must not settle the item yet"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnCompleted { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::ToolCall { status: ItemStatus::Completed, .. }, .. })
+                if id == "toolu_spawn_bg:toolu_child_grep"
+        )));
+        assert!(matches!(
+            mapper.take_tail_requests().as_slice(),
+            [
+                TailRequest::Start { parent_id: start, .. },
+                TailRequest::PreferPath { parent_id: prefer, .. },
+                TailRequest::Stop { parent_id: stop },
+            ] if start == "toolu_spawn_bg" && prefer == "toolu_spawn_bg" && stop == "toolu_spawn_bg"
+        ));
+
+        // The tail maps the same transcript records a second time, plus one
+        // record the stdout feed never carried.
+        let mut tail = crate::subagent_tail::TranscriptMapper::new("toolu_spawn_bg");
+        let mut tail_events = Vec::new();
+        for line in trace
+            .lines()
+            .filter(|line| line.contains("parent_tool_use_id"))
+        {
+            tail_events.extend(tail.map_value(&serde_json::from_str(line).unwrap()));
+        }
+        tail_events.extend(tail.map_value(&json!({
+            "type": "assistant", "message": { "id": "msg-child-2", "content": [{ "type": "text", "text": "done" }] }
+        })));
+        let flushed = mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: "toolu_spawn_bg".into(),
+            events: tail_events,
+            model: None,
+            stopped: true,
+        });
+        assert!(
+            flushed
+                .iter()
+                .all(|event| !matches!(event, AgentEvent::ItemStarted(_))),
+            "a completed child must not be restarted by the tail's copy"
+        );
+        assert!(matches!(
+            flushed.last(),
+            Some(AgentEvent::ItemUpdated(ThreadItem { id, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. }))
+                if id == "toolu_spawn_bg" && summary == "Routing audited" && model == "claude-sonnet-5" && effort == "high"
+        ));
+        assert!(matches!(
+            &flushed[flushed.len() - 2],
+            AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::AssistantMessage { text }, .. })
+                if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
+        ));
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// The tail keeps the transcript discovery found; the notification's
+    /// `output_file` only seeds a reader when discovery found nothing.
+    #[test]
+    fn subagent_tail_prefer_path_does_not_replay_a_discovered_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-subagent-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let subagents = root.join("projects/session-tail/subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let transcript = "{\"type\":\"user\",\"message\":{\"content\":\"go\"}}\n{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n";
+        std::fs::write(
+            subagents.join("agent-x.meta.json"),
+            r#"{"toolUseId":"toolu_tail"}"#,
+        )
+        .unwrap();
+        std::fs::write(subagents.join("agent-x.jsonl"), transcript).unwrap();
+        let output_file = root.join("task.output");
+        std::fs::write(&output_file, transcript).unwrap();
+
+        let run = |claude_dir: Option<PathBuf>| {
+            let (control_tx, control_rx) = smol::channel::unbounded();
+            let (notice_tx, notice_rx) = smol::channel::unbounded();
+            smol::spawn(run_subagent_tail(
+                "toolu_tail".into(),
+                "task-tail".into(),
+                "session-tail".into(),
+                claude_dir,
+                control_rx,
+                notice_tx,
+            ))
+            .detach();
+            (control_tx, notice_rx)
+        };
+        smol::block_on(async {
+            let (control, notices) = run(Some(root.clone()));
+            let first = notices.recv().await.unwrap();
+            assert_eq!(first.events.len(), 2);
+            assert!(!first.stopped);
+            control
+                .send(TailControl::PreferPath(output_file.clone()))
+                .await
+                .unwrap();
+            control.send(TailControl::Stop).await.unwrap();
+            let mut after = Vec::new();
+            loop {
+                let notice = notices.recv().await.unwrap();
+                after.extend(notice.events);
+                if notice.stopped {
+                    break;
+                }
+            }
+            assert!(
+                after.is_empty(),
+                "preferred path must not be re-read: {after:?}"
+            );
+
+            let (control, notices) = run(None);
+            control
+                .send(TailControl::PreferPath(output_file.clone()))
+                .await
+                .unwrap();
+            control.send(TailControl::Stop).await.unwrap();
+            let mut fallback = Vec::new();
+            loop {
+                let notice = notices.recv().await.unwrap();
+                fallback.extend(notice.events);
+                if notice.stopped {
+                    break;
+                }
+            }
+            assert_eq!(
+                fallback.len(),
+                2,
+                "undiscovered tail reads the notified file"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

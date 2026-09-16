@@ -153,8 +153,20 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
     });
 }
 
+/// How the mirror's single turn ends: the Subagent item reaching a terminal
+/// status, or the parent process closing while it is still running. A parent
+/// `TurnCompleted` is never an ending — a background subagent outlives it.
+#[derive(Clone, Copy, PartialEq)]
+enum MirrorEnd {
+    SubagentCompleted,
+    /// Parent turn completes first (background subagent), then a child item
+    /// arrives, then the Subagent item completes.
+    ParentTurnThenSubagentCompleted,
+    SessionClosed,
+}
+
 // Exercise provider routing and disk replay, including residency changes between events.
-fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool, reload: bool) {
+fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, reload: bool) {
     let cx = &mut TestAppContext::default();
     let test_store = TestStore::new("tcode-native-mirror-turn-lifecycle");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
@@ -193,65 +205,81 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool
             }
             state.on_event("parent", native_mirror_child_item(i), cx);
         }
-        if parent_end {
-            state.on_event(
-                "parent",
-                AgentEvent::TurnCompleted {
-                    turn_id: "parent-turn".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-                cx,
-            );
-        } else {
-            state.on_event(
-                "parent",
-                native_mirror_parent_item(ItemStatus::Completed),
-                cx,
-            );
+        match end {
+            MirrorEnd::SubagentCompleted => {
+                state.on_event(
+                    "parent",
+                    native_mirror_parent_item(ItemStatus::Completed),
+                    cx,
+                );
+            }
+            MirrorEnd::ParentTurnThenSubagentCompleted => {
+                state.on_event(
+                    "parent",
+                    AgentEvent::TurnCompleted {
+                        turn_id: "parent-turn".into(),
+                        status: TurnStatus::Completed,
+                        usage: None,
+                    },
+                    cx,
+                );
+                assert_eq!(
+                    state.native_subagent_turns.get(&id),
+                    Some(&true),
+                    "background subagent keeps running after the parent turn"
+                );
+                assert!(evict || state.turn_running_for(&id));
+                state.on_event("parent", native_mirror_child_item(3), cx);
+                state.on_event(
+                    "parent",
+                    native_mirror_parent_item(ItemStatus::Completed),
+                    cx,
+                );
+            }
+            MirrorEnd::SessionClosed => {
+                state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
+            }
         }
         if late {
-            state.on_event("parent", native_mirror_child_item(3), cx);
+            state.on_event("parent", native_mirror_child_item(4), cx);
         }
         id
     });
     cx.run_until_parked();
+    let expected_items =
+        3 + usize::from(end == MirrorEnd::ParentTurnThenSubagentCompleted) + usize::from(late);
+    let expected_status = if end == MirrorEnd::SessionClosed {
+        TurnStatus::Interrupted
+    } else {
+        TurnStatus::Completed
+    };
     state.update(cx, |state, cx| {
         let events = state.store.read_events(&mirror_id);
-        let starts = events
-            .iter()
-            .filter(|e| matches!(e.event, AgentEvent::TurnStarted { .. }))
-            .count();
-        let completions = events
-            .iter()
-            .filter(|e| matches!(e.event, AgentEvent::TurnCompleted { .. }))
-            .count();
-        assert_eq!(
-            starts, completions,
-            "persisted mirror boundaries must balance"
-        );
-        assert_eq!(starts, if late { 2 } else { 1 });
         let mut open = false;
+        let mut boundaries = 0;
         let mut items = 0;
         for stored in &events {
             match &stored.event {
                 AgentEvent::TurnStarted { .. } => {
                     assert!(!open);
                     open = true;
+                    boundaries += 1;
                 }
-                AgentEvent::TurnCompleted { .. } => {
+                AgentEvent::TurnCompleted { status, .. } => {
                     assert!(open);
+                    assert_eq!(*status, expected_status);
                     open = false;
+                    boundaries += 1;
                 }
                 AgentEvent::ItemCompleted(_) => {
-                    assert!(open, "child must render inside a turn");
                     items += 1;
                 }
                 _ => {}
             }
         }
-        assert!(!open);
-        assert_eq!(items, if late { 4 } else { 3 });
+        assert!(!open, "persisted mirror boundaries must balance");
+        assert_eq!(boundaries, 2, "exactly one turn, never a zero-length one");
+        assert_eq!(items, expected_items);
         assert!(!state.turn_running_for(&mirror_id));
         if state.resident(&mirror_id).is_none() {
             let meta = state.find_meta(&mirror_id).unwrap().clone();
@@ -262,14 +290,10 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool
     state.update(cx, |state, _| {
         let mirror = state.resident(&mirror_id).unwrap();
         assert!(!mirror.timeline.turn_running);
-        assert_eq!(mirror.timeline.turns.len(), if late { 2 } else { 1 });
-        assert!(
-            mirror
-                .timeline
-                .turns
-                .iter()
-                .all(|turn| { !turn.running && turn.start_ts.is_some() && turn.end_ts.is_some() })
-        );
+        assert_eq!(mirror.timeline.turns.len(), 1);
+        let turn = &mirror.timeline.turns[0];
+        assert!(!turn.running && turn.start_ts.is_some() && turn.end_ts.is_some());
+        assert_eq!(turn.status, Some(expected_status));
         assert!(!mirror.turn_in_flight);
         assert!(!mirror.has_work());
         assert!(!state.session_status_snapshot(&mirror_id).unwrap().working);
@@ -283,7 +307,7 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, parent_end: bool
                     EntryContent::Item(ItemContent::AssistantMessage { .. })
                 ))
                 .count(),
-            if late { 4 } else { 3 }
+            expected_items
         );
     });
 }
@@ -320,29 +344,49 @@ fn native_mirror_child_item(i: usize) -> AgentEvent {
 
 #[test]
 fn native_mirror_turn_lifecycle_resident() {
-    assert_native_mirror_turn_lifecycle(false, false, false, false);
+    assert_native_mirror_turn_lifecycle(false, false, MirrorEnd::SubagentCompleted, false);
 }
 
 #[test]
 fn native_mirror_turn_lifecycle_evicted() {
-    assert_native_mirror_turn_lifecycle(true, false, false, false);
+    assert_native_mirror_turn_lifecycle(true, false, MirrorEnd::SubagentCompleted, false);
 }
 
 #[test]
 fn native_mirror_turn_lifecycle_async_reload() {
-    assert_native_mirror_turn_lifecycle(true, false, false, true);
+    assert_native_mirror_turn_lifecycle(true, false, MirrorEnd::SubagentCompleted, true);
 }
 
+/// A straggler after the terminal status joins the closed turn instead of
+/// opening a zero-length one.
 #[test]
 fn native_mirror_turn_lifecycle_late_item() {
-    assert_native_mirror_turn_lifecycle(false, true, false, false);
-    assert_native_mirror_turn_lifecycle(true, true, false, false);
+    assert_native_mirror_turn_lifecycle(false, true, MirrorEnd::SubagentCompleted, false);
+    assert_native_mirror_turn_lifecycle(true, true, MirrorEnd::SubagentCompleted, false);
+}
+
+/// Background subagent: the parent turn's result lands while the child still
+/// runs; the mirror keeps its single open turn until the Subagent item ends.
+#[test]
+fn native_mirror_turn_lifecycle_outlives_parent_turn() {
+    assert_native_mirror_turn_lifecycle(
+        false,
+        true,
+        MirrorEnd::ParentTurnThenSubagentCompleted,
+        false,
+    );
+    assert_native_mirror_turn_lifecycle(
+        true,
+        false,
+        MirrorEnd::ParentTurnThenSubagentCompleted,
+        false,
+    );
 }
 
 #[test]
-fn native_mirror_turn_lifecycle_parent_end() {
-    assert_native_mirror_turn_lifecycle(false, true, true, false);
-    assert_native_mirror_turn_lifecycle(true, true, true, false);
+fn native_mirror_turn_lifecycle_session_closed_interrupts() {
+    assert_native_mirror_turn_lifecycle(false, false, MirrorEnd::SessionClosed, false);
+    assert_native_mirror_turn_lifecycle(true, true, MirrorEnd::SessionClosed, false);
 }
 
 #[test]

@@ -43,7 +43,7 @@ impl AppState {
             AgentEvent::SessionClosed { reason } => {
                 self.pending_native_rewinds.remove(session_id);
                 self.clear_approvals(session_id);
-                self.clear_native_subagent_work(session_id, cx);
+                self.interrupt_native_subagent_work(session_id, cx);
                 self.close_orchestrator_children(session_id, cx);
                 let is_active = self.residents.live.contains_key(session_id);
                 if !is_active {
@@ -198,7 +198,6 @@ impl AppState {
                 }
             }
             AgentEvent::TurnCompleted { .. } => {
-                self.clear_native_subagent_work(session_id, cx);
                 if let Some(meta) = self.meta_mut(session_id) {
                     meta.updated_at = now_secs();
                     let meta = meta.clone();
