@@ -15,7 +15,7 @@ use tcode_client::host::ClientHost;
 use crate::overlay::OverlayHost;
 use crate::remote::{AttachmentTarget, ClientAttachment};
 use crate::shell::{AppShell, ShellSetup, TogglePalette};
-use crate::theme::{self, ActiveTheme as _};
+use crate::theme;
 use crate::window_seam::WindowSeam;
 use crate::window_state::WindowState;
 
@@ -159,6 +159,7 @@ pub fn run_shell(
         },
     ));
     let captured = mounted.clone();
+    #[cfg(target_os = "macos")]
     let window_background = options.window.window_background;
     let window = cx
         .open_window(options.window, move |window, cx| {
@@ -181,6 +182,7 @@ pub fn run_shell(
     // rather than GPUI's `Blurred` path; see `macos_backdrop`.
     #[cfg(target_os = "macos")]
     if window_background == gpui::WindowBackgroundAppearance::Transparent {
+        use crate::theme::ActiveTheme as _;
         let _ = window.update(cx, |_, window, cx| {
             crate::macos_backdrop::install(window, cx);
             theme::change_mode(cx.theme().mode, Some(window), cx);
