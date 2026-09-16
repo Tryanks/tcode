@@ -159,6 +159,13 @@ The relevant Settings pages are:
   the next explicit action becomes **Open System Settings** and deep-links the matching
   `x-apple.systempreferences` pane. Returning to Tcode also triggers a recheck.
 
+Remote clients show the host's Accessibility and Screen Recording grants in the
+same System permissions group. Opening the section, reconnecting, and **Recheck**
+query the host without prompting. Grants and any required restart must still be
+performed on that host. Disconnection or a failed query shows unknown status,
+not a cached success. Windows reports that separate grants are unnecessary;
+unsupported hosts are identified explicitly.
+
 The persisted computer-use block additionally accepts `allow_foreground_fallback` (default
 `false`) and `show_agent_cursor` (default `true`). Both use serde defaults, so settings files from
 before background delivery continue to load without migration.

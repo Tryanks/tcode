@@ -11,6 +11,8 @@ pub enum Query {
     Hosting {
         action: HostingAction,
     },
+    /// Read the agent host's system grants without requesting access.
+    ComputerUsePermissions,
     Ping,
     /// Records strictly before the absolute event cursor, oldest first.
     SessionHistoryPage {
@@ -98,6 +100,7 @@ pub const MAX_THREAD_EXPORT_BYTES: usize = 8 * 1024 * 1024;
 #[serde(tag = "type", content = "content", rename_all = "snake_case")]
 pub enum QueryResponse {
     Hosting(HostingState),
+    ComputerUsePermissions(tcode_core::permissions::ComputerUsePermissions),
     Pong,
     SessionHistoryPage {
         records: Vec<crate::SessionEventRecord>,
