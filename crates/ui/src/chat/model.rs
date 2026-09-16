@@ -739,6 +739,10 @@ pub(crate) struct TurnListItem {
     pub(crate) entry_range: Range<usize>,
     pub(crate) entry_count: usize,
     pub(crate) identity: u64,
+    /// Identity of the newest entry alone. A history page can only add
+    /// entries before a partially loaded turn, so this survives completion
+    /// while `identity` does not.
+    pub(crate) tail_identity: u64,
     pub(crate) content: u64,
 }
 
@@ -786,6 +790,19 @@ struct ProposedPlanIndex {
     markdown: String,
 }
 
+/// How the timeline being synced relates to the previously indexed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimelineContinuity {
+    /// The same session with its whole history loaded: turns only grow at
+    /// the end or change in place.
+    Complete,
+    /// The same session with earlier history still unloaded: a page can
+    /// complete or merge the first turn's entries without replacing its row.
+    PartialFirstTurn,
+    /// A different session: every row is new.
+    NewSession,
+}
+
 /// Stateful input snapshot for reusing indexed turns across store notifications.
 #[derive(Debug, Default)]
 pub(crate) struct TurnIndexCache {
@@ -805,8 +822,9 @@ impl TurnIndexCache {
         entries: &[Arc<TimelineEntry>],
         proposed_plan: Option<(usize, &str, &str)>,
         expanded: &HashSet<String>,
-        reset: bool,
+        continuity: TimelineContinuity,
     ) -> ListSync {
+        let reset = continuity == TimelineContinuity::NewSession;
         let item_count = turns
             .len()
             .max(entries.last().map_or(0, |entry| entry.turn + 1));
@@ -861,7 +879,7 @@ impl TurnIndexCache {
                 Vec::new()
             }
         };
-        let sync = list_sync_with(items, item_count, reset, |index| {
+        let sync = list_sync_with(items, item_count, continuity, |index| {
             if index < reindex_from {
                 &items[index]
             } else {
@@ -960,7 +978,11 @@ fn index_turns_from(
         .map(|(offset, entry_range)| {
             let index = first_turn + offset;
             let mut identity = DefaultHasher::new();
+            let mut tail_identity = DefaultHasher::new();
             let mut content = DefaultHasher::new();
+            if let Some(entry) = entries[entry_range.clone()].last() {
+                entry.id.hash(&mut tail_identity);
+            }
             for entry in &entries[entry_range.clone()] {
                 entry.id.hash(&mut identity);
                 std::mem::discriminant(&entry.content).hash(&mut content);
@@ -996,6 +1018,7 @@ fn index_turns_from(
                 entry_count: entry_range.len(),
                 entry_range,
                 identity: identity.finish(),
+                tail_identity: tail_identity.finish(),
                 content: content.finish(),
             }
         })
@@ -1146,41 +1169,45 @@ fn hash_entry_shape(content: &EntryContent, hash: &mut DefaultHasher) {
 pub(crate) fn list_sync(
     old: &[TurnListItem],
     new: &[TurnListItem],
-    session_changed: bool,
+    continuity: TimelineContinuity,
 ) -> ListSync {
-    list_sync_with(old, new.len(), session_changed, |index| &new[index])
+    list_sync_with(old, new.len(), continuity, |index| &new[index])
 }
 
 fn list_sync_with<'a>(
     old: &[TurnListItem],
     new_len: usize,
-    session_changed: bool,
+    continuity: TimelineContinuity,
     new_at: impl Fn(usize) -> &'a TurnListItem,
 ) -> ListSync {
+    let session_changed = continuity == TimelineContinuity::NewSession;
+    let partial_first_turn = continuity == TimelineContinuity::PartialFirstTurn;
     if !session_changed && !old.is_empty() && new_len > old.len() {
         let count = new_len - old.len();
-        // A page can complete the first partial turn; subsequent turns retain
-        // their identity and their measured heights after the prefix insertion.
-        let has_stable_entry = old.iter().enumerate().any(|(index, item)| {
-            item.entry_count > 0 && item.identity == new_at(index + count).identity
-        });
-        if has_stable_entry
-            && (0..old.len())
-                .all(|index| index == 0 || old[index].identity == new_at(index + count).identity)
-            && old
-                .last()
-                .is_some_and(|item| item.identity == new_at(new_len - 1).identity)
-        {
+        // Earlier history keeps the newest loaded turn, possibly completing
+        // it when it was the partial first turn. A window folded without its
+        // earlier context can also shift entries between other turns; those
+        // rows are remeasured, never reset, so the reading anchor survives
+        // every page.
+        let continues = |index: usize| {
+            let (old, new) = (&old[index], new_at(index + count));
+            old.entry_count > 0
+                && (old.identity == new.identity
+                    || old.tail_identity == new.tail_identity && new.entry_count >= old.entry_count)
+        };
+        if continues(old.len() - 1) {
             let remeasure = (0..old.len())
                 .filter_map(|index| {
-                    (old[index].content != new_at(index + count).content).then_some(index + count)
+                    let (old, new) = (&old[index], new_at(index + count));
+                    (old.identity != new.identity || old.content != new.content)
+                        .then_some(index + count)
                 })
                 .collect();
             return ListSync::Prepend { count, remeasure };
         }
     }
     let common = old.len().min(new_len);
-    let replaced = (0..common).any(|index| {
+    let replaced = (usize::from(partial_first_turn)..common).any(|index| {
         let old = &old[index];
         let new = new_at(index);
         new.entry_count < old.entry_count
@@ -1194,6 +1221,7 @@ fn list_sync_with<'a>(
     let mut remeasure = (0..common)
         .filter(|&index| {
             old[index].entry_count != new_at(index).entry_count
+                || old[index].identity != new_at(index).identity
                 || old[index].content != new_at(index).content
         })
         .collect::<Vec<_>>();
@@ -1250,11 +1278,106 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(
-            list_sync(&old, &new, false),
+            list_sync(&old, &new, TimelineContinuity::Complete),
             ListSync::Incremental {
                 append: Some(2..3),
                 remeasure: vec![1]
             }
+        );
+    }
+
+    /// The snapshot of a long conversation can hold a single partial turn.
+    /// The first page then completes it and adds earlier turns; nothing in
+    /// the old list keeps its identity, but the newest entry does.
+    #[test]
+    fn history_completing_the_only_partial_turn_prepends_instead_of_resetting() {
+        let index = |entries: &[Arc<TimelineEntry>], turns: usize| {
+            index_turns(
+                &vec![TurnMeta::default(); turns],
+                entries,
+                None,
+                &HashSet::new(),
+            )
+        };
+        let old = index(&[entry("tail", assistant("partial answer"))], 1);
+        let completed = [
+            at_turn(entry("earlier-user", user_item("earlier")), 0),
+            at_turn(entry("earlier-answer", assistant("done")), 0),
+            at_turn(entry("user", user_item("question")), 1),
+            at_turn(entry("tail", assistant("partial answer")), 1),
+        ];
+        assert_eq!(
+            list_sync(
+                &old,
+                &index(&completed, 2),
+                TimelineContinuity::PartialFirstTurn
+            ),
+            ListSync::Prepend {
+                count: 1,
+                remeasure: vec![1]
+            }
+        );
+
+        // Entries can also move between loaded turns once earlier context is
+        // folded in; those rows remeasure, but the reader is never reset.
+        let old = index(
+            &[
+                at_turn(entry("a", assistant("a")), 0),
+                at_turn(entry("b", assistant("b")), 1),
+                at_turn(entry("shifted", reasoning("moved")), 1),
+                at_turn(entry("c", assistant("c")), 2),
+            ],
+            3,
+        );
+        let refolded = [
+            at_turn(entry("z", user_item("z")), 0),
+            at_turn(entry("shifted", reasoning("moved")), 0),
+            at_turn(entry("a", assistant("a")), 1),
+            at_turn(entry("b", assistant("b")), 2),
+            at_turn(entry("c", assistant("c")), 3),
+        ];
+        assert_eq!(
+            list_sync(
+                &old,
+                &index(&refolded, 4),
+                TimelineContinuity::PartialFirstTurn
+            ),
+            ListSync::Prepend {
+                count: 1,
+                remeasure: vec![2]
+            }
+        );
+
+        // A page that stays inside the partial first turn can merge its
+        // streamed fragments (pi reuses one placeholder id per turn), so the
+        // row shrinks. That is a remeasure while history remains, and only a
+        // replacement once the whole turn is known.
+        let old = index(
+            &[
+                entry("pi-assistant-0:1", assistant("tail of the answer")),
+                command("call-1"),
+                at_turn(entry("user-1", user_item("next")), 1),
+            ],
+            2,
+        );
+        let merged = [
+            entry("pi-assistant-0:1", assistant("the whole answer")),
+            at_turn(entry("user-1", user_item("next")), 1),
+        ];
+        assert_eq!(
+            list_sync(
+                &old,
+                &index(&merged, 2),
+                TimelineContinuity::PartialFirstTurn
+            ),
+            ListSync::Incremental {
+                append: None,
+                remeasure: vec![0]
+            }
+        );
+        assert_eq!(
+            list_sync(&old, &index(&merged, 2), TimelineContinuity::Complete),
+            ListSync::Reset { count: 2 }
         );
     }
 
@@ -1440,7 +1563,7 @@ mod tests {
         let current_turn_append = index_turns(&turns, &entries, None, &expanded);
         assert_eq!(current_turn_append[0].entry_range, 0..3);
         assert_eq!(
-            list_sync(&initial, &current_turn_append, false),
+            list_sync(&initial, &current_turn_append, TimelineContinuity::Complete),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -1455,7 +1578,11 @@ mod tests {
         assert_eq!(new_turn[0].entry_range, 0..3);
         assert_eq!(new_turn[1].entry_range, 3..4);
         assert_eq!(
-            list_sync(&current_turn_append, &new_turn, false),
+            list_sync(
+                &current_turn_append,
+                &new_turn,
+                TimelineContinuity::Complete
+            ),
             ListSync::Incremental {
                 append: Some(1..2),
                 remeasure: vec![0],
@@ -1464,12 +1591,12 @@ mod tests {
 
         // Conversation truncation cannot leave ListState with stale item indices.
         assert_eq!(
-            list_sync(&new_turn, &initial, false),
+            list_sync(&new_turn, &initial, TimelineContinuity::Complete),
             ListSync::Reset { count: 1 }
         );
         // Even an equal-shaped replacement must reset when the session changes.
         assert_eq!(
-            list_sync(&initial, &initial, true),
+            list_sync(&initial, &initial, TimelineContinuity::NewSession),
             ListSync::Reset { count: 1 }
         );
     }
@@ -1482,23 +1609,51 @@ mod tests {
         let mut expanded = HashSet::new();
         let mut indexed = Vec::new();
 
-        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut indexed,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
         assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
 
         // (a) Append an entry to the last turn.
         entries.push(entry("assistant-0", assistant("working")));
-        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut indexed,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
         assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
 
         // (b) Append a new turn.
         turns.push(TurnMeta::default());
         entries.push(at_turn(entry("user-1", user_item("next")), 1));
-        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut indexed,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
         assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
 
         // (c) Replace the streaming tail Arc with updated content.
         entries[2] = at_turn(entry("user-1", user_item("next, updated")), 1);
-        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut indexed,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
         assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
 
         // (d) Toggle a disclosure expansion key.
@@ -1513,9 +1668,23 @@ mod tests {
             ),
             1,
         );
-        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut indexed,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
         expanded.insert("orchestrate-context-user-1".into());
-        cache.sync(&mut indexed, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut indexed,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
         assert_eq!(indexed, index_turns(&turns, &entries, None, &expanded));
 
         // (e) A session switch resets unrelated cached inputs.
@@ -1528,7 +1697,7 @@ mod tests {
             &switched_entries,
             None,
             &no_expanded,
-            true,
+            TimelineContinuity::NewSession,
         );
         assert_eq!(
             indexed,
@@ -1543,7 +1712,7 @@ mod tests {
             &empty_entries,
             None,
             &no_expanded,
-            false,
+            TimelineContinuity::Complete,
         );
         assert_eq!(
             indexed,
@@ -1560,10 +1729,24 @@ mod tests {
         let expanded = HashSet::new();
         let mut cache = TurnIndexCache::default();
         let mut incremental = Vec::new();
-        cache.sync(&mut incremental, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut incremental,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
 
         entries[199] = at_turn(entry("assistant-199", assistant("streamed")), 199);
-        cache.sync(&mut incremental, &turns, &entries, None, &expanded, false);
+        cache.sync(
+            &mut incremental,
+            &turns,
+            &entries,
+            None,
+            &expanded,
+            TimelineContinuity::Complete,
+        );
 
         assert_eq!(incremental, index_turns(&turns, &entries, None, &expanded));
         assert!(
@@ -1599,7 +1782,7 @@ mod tests {
         }
         let completed = index_turns(&turns, &completed_entries, None, &HashSet::new());
         assert_eq!(
-            list_sync(&running, &completed, false),
+            list_sync(&running, &completed, TimelineContinuity::Complete),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -1631,7 +1814,7 @@ mod tests {
         let completed = index_turns(&turns, &completed_entries, None, &HashSet::new());
 
         assert_eq!(
-            list_sync(&running, &completed, false),
+            list_sync(&running, &completed, TimelineContinuity::Complete),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -1791,7 +1974,7 @@ mod tests {
             &expanded,
         );
         assert_eq!(
-            list_sync(&before, &status_changed, false),
+            list_sync(&before, &status_changed, TimelineContinuity::Complete),
             ListSync::Incremental {
                 append: None,
                 remeasure: vec![0],
@@ -1800,7 +1983,7 @@ mod tests {
 
         let reordered = index_turns(&turns, &[assistant, accepted], None, &expanded);
         assert_eq!(
-            list_sync(&status_changed, &reordered, false),
+            list_sync(&status_changed, &reordered, TimelineContinuity::Complete),
             ListSync::Reset { count: 1 }
         );
     }

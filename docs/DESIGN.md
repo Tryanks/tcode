@@ -240,27 +240,35 @@ menu.
 
 ## Timeline history
 
-A newly opened conversation starts with up to the last 400 event records, within
-an 8 MiB envelope. On the first layout (including cold-start restore), and after
-every prepend, earlier history loads until the content above the viewport covers
-six viewport heights or history is exhausted. The same six-screen threshold
-triggers scroll-ahead loading. Only one page of at most 200 records loads at a
-time, with a 250ms yield between pages so layout can measure the new content.
+A newly opened conversation starts with the last 400 event records, extended
+back to the start of the turn the 400th record falls in, within an 8 MiB
+envelope. On the first layout (including cold-start restore), and after every
+prepend, earlier history loads until the content above the viewport covers six
+viewport heights or history is exhausted. The same six-screen threshold
+triggers scroll-ahead loading. Only one page loads at a time: at least 200
+records, extended back to the start of the turn they fall in, so a page begins
+mid-turn only when one turn exceeds the envelope. Streamed conversations hold
+hundreds of delta records per turn, so a page is typically one whole turn.
+There is a 250ms yield between pages so layout can measure the new content.
 Leaving the conversation cancels the sequence. A one-viewport placeholder before
 the first loaded turn reserves scrollable space for incoming history; while
 loading, its bottom 24pt row shows a small centered spinner. The reservation is
 excluded from the loaded-window measurement and moves back as pages arrive,
-preserving the visible turn and pixel offset. There is no load control,
-end-of-history message, or page-error feedback. Failed pages are logged and
-retried when the prefetch condition is met again, with at most one retry per
-five seconds.
+preserving the visible turn and pixel offset; a reader who scrolled into the
+reservation keeps that pixel position once the page is measured, one layout
+frame later. There is no load control, end-of-history message, or page-error
+feedback. Failed pages are logged and retried when the prefetch condition is
+met again, with at most one retry per five seconds.
 
 Prepending preserves the visible turn and its offset in pixels. Existing list
 measurements and markdown state remain resident; only new or changed turns need
-measurement. A page may complete a partially loaded turn. Live replay cursors
-remain absolute event positions, independent of how much earlier history is
-currently visible. Snapshots and pages fit within 8 MiB including their serialized
-envelope; a single record that cannot fit produces an explicit error.
+measurement. A page may complete a partially loaded first turn, and folding a
+page in can reshape turns that were folded without their earlier context; those
+rows are remeasured in place. A page never resets the list or moves the reader
+to the tail. Live replay cursors remain absolute event positions, independent
+of how much earlier history is currently visible. Snapshots and pages fit within
+8 MiB including their serialized envelope; a single record that cannot fit
+produces an explicit error.
 
 The jump-to-latest pill appears when more than one timeline viewport remains
 below the reading position. Its visibility follows the list's pixel geometry
