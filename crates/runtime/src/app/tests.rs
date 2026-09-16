@@ -7112,6 +7112,96 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
     });
 }
 
+/// Streaming providers write hundreds of delta records per turn. A window cut
+/// at a record count would start mid-turn, and the client's fold of that
+/// window would keep changing shape as earlier records arrive; both the
+/// initial snapshot and each page instead start where a turn starts, within
+/// the same byte envelope.
+#[test]
+fn history_snapshot_and_pages_start_at_turn_boundaries() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-turn-pages");
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    state.update(cx, |state, _| {
+        let mut records = Vec::new();
+        let mut turn_starts = Vec::new();
+        for turn in 0..5u64 {
+            turn_starts.push(records.len());
+            records.push(SessionEventRecord {
+                ts: Some(turn * 1000),
+                event: AgentEvent::ItemCompleted(ThreadItem {
+                    id: format!("user-{turn}"),
+                    parent_item_id: None,
+                    content: ItemContent::UserMessage {
+                        text: format!("question {turn}"),
+                        context_len: None,
+                        attachments: Vec::new(),
+                    },
+                }),
+            });
+            records.push(SessionEventRecord {
+                ts: Some(turn * 1000 + 1),
+                event: AgentEvent::TurnStarted {
+                    turn_id: format!("turn-{turn}"),
+                },
+            });
+            for delta in 0..300u64 {
+                records.push(SessionEventRecord {
+                    ts: Some(turn * 1000 + 2 + delta),
+                    event: AgentEvent::Delta {
+                        item_id: "pi-assistant-0:0".into(),
+                        kind: agent::DeltaKind::AssistantText,
+                        text: "word ".into(),
+                    },
+                });
+            }
+            records.push(SessionEventRecord {
+                ts: Some(turn * 1000 + 400),
+                event: AgentEvent::TurnCompleted {
+                    turn_id: format!("turn-{turn}"),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            });
+        }
+        assert_eq!(turn_starts, [0, 303, 606, 909, 1212]);
+        state
+            .event_records
+            .insert("streamed".into(), records.clone());
+
+        let snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "streamed".into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        let ServerEvent::SessionSnapshot { from, .. } = snapshot.event else {
+            panic!("snapshot")
+        };
+        assert_eq!(
+            from, 909,
+            "the 400th-from-last record falls inside turn 3, which loads whole"
+        );
+
+        let QueryResponse::SessionHistoryPage {
+            from: page_from,
+            records: page,
+            truncated,
+        } = state.session_history_page("streamed", from, 200).unwrap()
+        else {
+            panic!("page")
+        };
+        assert_eq!(
+            page_from, 606,
+            "a 200-record page grows back to its turn start"
+        );
+        assert_eq!(page, records[606..909]);
+        assert!(!truncated);
+    });
+}
+
 #[test]
 fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
     let cx = &mut TestAppContext::default();

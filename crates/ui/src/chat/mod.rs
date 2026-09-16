@@ -51,11 +51,12 @@ use crate::window_state::WindowState;
 use self::components::assistant::MdState;
 use self::components::command_panel::CommandPanelCache;
 use self::model::{
-    ListSync, Segment, TurnIndexCache, TurnListItem, TurnRenderArgs, activity_run_duration_ms,
-    displayed_error_text, divergent_served_model, format_elapsed_deciseconds, latest_message_ids,
-    live_activity_segment, live_edit_counts, live_edit_rows, partition_activity_run,
-    plain_text_as_markdown, segment_entries, start_hub_projects, timeline_overdraw, user_content,
-    user_visible_text, work_log_capsule_label, work_log_counts, work_log_outcome,
+    ListSync, Segment, TimelineContinuity, TurnIndexCache, TurnListItem, TurnRenderArgs,
+    activity_run_duration_ms, displayed_error_text, divergent_served_model,
+    format_elapsed_deciseconds, latest_message_ids, live_activity_segment, live_edit_counts,
+    live_edit_rows, partition_activity_run, plain_text_as_markdown, segment_entries,
+    start_hub_projects, timeline_overdraw, user_content, user_visible_text, work_log_capsule_label,
+    work_log_counts, work_log_outcome,
 };
 use self::residency::{
     MarkdownEntry, ResidencyInput, ResidencyScope, decide, tail_turn_window, viewport_turn_window,
@@ -340,6 +341,9 @@ pub struct ChatView {
     terminal_was_open: bool,
     list_state: ListState,
     history_placeholder_height: gpui::Pixels,
+    /// Anchor and distance to scroll back once a page has filled the
+    /// reservation the reader had scrolled into.
+    reservation_scroll_back: Option<(ListOffset, gpui::Pixels)>,
     turn_items: Vec<TurnListItem>,
     turn_index_cache: TurnIndexCache,
     md_states: HashMap<String, MdState>,
@@ -472,6 +476,7 @@ impl ChatView {
             terminal_was_open,
             list_state,
             history_placeholder_height: px(0.),
+            reservation_scroll_back: None,
             turn_items: Vec::new(),
             turn_index_cache: TurnIndexCache::default(),
             md_states: HashMap::new(),
@@ -511,6 +516,13 @@ impl ChatView {
         let awaiting_activity_snapshot = self
             .auto_activity_expansions
             .awaiting_session_snapshot(session_key.as_deref());
+        let continuity = if session_changed {
+            TimelineContinuity::NewSession
+        } else if self.workspace_store.read(cx).history_available() {
+            TimelineContinuity::PartialFirstTurn
+        } else {
+            TimelineContinuity::Complete
+        };
         let (running, list_sync, activity_snapshot_keys) = self
             .workspace_store
             .read(cx)
@@ -524,7 +536,7 @@ impl ChatView {
                         .as_ref()
                         .map(|plan| (plan.turn, plan.item_id.as_str(), plan.markdown.as_str())),
                     &self.expanded,
-                    session_changed,
+                    continuity,
                 );
                 let activity_snapshot_keys = awaiting_activity_snapshot
                     .then(|| auto_activity_snapshot_keys(&timeline.entries));
@@ -537,7 +549,7 @@ impl ChatView {
                     &[],
                     None,
                     &self.expanded,
-                    session_changed,
+                    continuity,
                 );
                 (false, list_sync, None)
             });
@@ -573,10 +585,21 @@ impl ChatView {
                     // from the former first turn without moving its content.
                     self.list_state.remeasure_items(count..count + 1);
                     if anchor.item_ix == 0 && !following {
-                        self.list_state.scroll_to(ListOffset {
+                        let into_reservation =
+                            self.history_placeholder_height - anchor.offset_in_item;
+                        let anchor = ListOffset {
                             item_ix: count,
-                            offset_in_item: anchor.offset_in_item - self.history_placeholder_height,
-                        });
+                            offset_in_item: (-into_reservation).max(px(0.)),
+                        };
+                        self.list_state.scroll_to(anchor);
+                        // A reader inside the reservation keeps that pixel
+                        // position, which now belongs to the page above. A
+                        // list anchor cannot precede its row (rows above it
+                        // stay unpainted), so the next frame walks back over
+                        // the page once layout has measured it.
+                        if into_reservation > px(0.) {
+                            self.reservation_scroll_back = Some((anchor, into_reservation));
+                        }
                     }
                 }
                 for index in remeasure {
@@ -2560,6 +2583,22 @@ impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
         self.sync_markdown_scroll_position(cx);
+        if let Some((expected, distance)) = self.reservation_scroll_back.take() {
+            let chat = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = chat.update(cx, |chat, cx| {
+                    let list = &chat.list_state;
+                    let anchor = list.logical_scroll_top();
+                    if anchor.item_ix == expected.item_ix
+                        && anchor.offset_in_item == expected.offset_in_item
+                        && !list.is_following_tail()
+                    {
+                        list.scroll_by(-distance);
+                        cx.notify();
+                    }
+                });
+            });
+        }
         // Measure after this frame's list layout, including the initial tail
         // frame and frames caused by prepends. No scroll event is required.
         let chat = cx.entity().downgrade();
@@ -4209,6 +4248,64 @@ mod tests {
         assert!(!list.is_following_tail());
     }
 
+    /// A long streamed conversation opens with one partial turn: the snapshot
+    /// holds only its last records. The first page completes that turn and
+    /// adds an earlier one; the reader's position must survive rather than
+    /// resetting to the tail.
+    #[gpui::test]
+    fn completing_the_only_partial_turn_keeps_the_reading_anchor(cx: &mut TestAppContext) {
+        use gpui::{FollowMode, ListOffset, px};
+        let mut full = synthetic_markdown_timeline(2);
+        // Tall enough that the reader can scroll into the loaded content.
+        let long_answer = "A paragraph of the answer.\n\n".repeat(80);
+        full.entries.pop();
+        full.entries
+            .push(at_turn(entry("assistant-1", assistant(&long_answer)), 1));
+        let mut tail = Timeline::default();
+        tail.turns = vec![TurnMeta::default()];
+        tail.entries = vec![entry("assistant-1", assistant(&long_answer))];
+        let (store, window_state, session_id) = seed_chat_with_history(cx, tail, true);
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store.clone(), window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(1024.), px(700.)));
+        for _ in 0..2 {
+            view.update(cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let (list, placeholder) = view.read_with(cx, |chat, _| {
+            (chat.list_state.clone(), chat.history_placeholder_height)
+        });
+        assert!(placeholder > px(0.), "earlier history is still unloaded");
+        list.set_follow_mode(FollowMode::Normal);
+        list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: placeholder + px(20.),
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        store.update(cx, |store, cx| {
+            store.set_session_replica_for_test(session_id, full, cx);
+            cx.notify();
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let anchor = list.logical_scroll_top();
+        assert_eq!(
+            (anchor.item_ix, anchor.offset_in_item),
+            (1, px(20.)),
+            "the completed turn keeps its reader at the same content offset"
+        );
+        assert!(
+            !list.is_following_tail(),
+            "the page must not reset the list to its tail"
+        );
+    }
+
     #[gpui::test]
     fn incoming_page_replaces_scrollable_reservation_without_moving_content(
         cx: &mut TestAppContext,
@@ -4252,11 +4349,21 @@ mod tests {
         );
         store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id, full, cx);
+            store.suppress_history_prefetch_for_test();
             cx.notify();
         });
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
+        // The first frame measures the page; the next one walks back into it.
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+                window.simulate_next_frame(cx);
+            });
+        }
+        let anchor = list.logical_scroll_top();
+        assert!(
+            anchor.item_ix < 20 && anchor.offset_in_item >= px(0.),
+            "the viewport top sits inside the measured page, not above its row: {anchor:?}"
+        );
         let after = list
             .bounds_for_item(20)
             .expect("previous first turn remains on screen")

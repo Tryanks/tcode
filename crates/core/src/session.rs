@@ -564,7 +564,7 @@ impl Timeline {
                 to_model,
             } => {
                 let turn = self.begin_user_turn(ts);
-                let id = self.synthetic_id("relay");
+                let id = self.synthetic_id("relay", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ProviderRelay {
@@ -608,7 +608,7 @@ impl Timeline {
                     == Some(agent::claude::strip_context_window_suffix(model));
                 if !same_model {
                     let from = self.last_served_model.clone();
-                    let id = self.synthetic_id("model");
+                    let id = self.synthetic_id("model", ts);
                     self.entries.push(Arc::new(TimelineEntry {
                         id,
                         content: EntryContent::ModelChanged {
@@ -815,7 +815,7 @@ impl Timeline {
             AgentEvent::Warning { message } => log::warn!("provider warning: {message}"),
             AgentEvent::ProviderStartFailed { error } => {
                 let turn = self.ensure_turn(ts);
-                let id = self.synthetic_id("error");
+                let id = self.synthetic_id("error", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ProviderStartError {
@@ -827,7 +827,7 @@ impl Timeline {
             }
             AgentEvent::Error { message, .. } => {
                 let turn = self.ensure_turn(ts);
-                let id = self.synthetic_id("error");
+                let id = self.synthetic_id("error", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::Error {
@@ -868,7 +868,7 @@ impl Timeline {
                 // must still show why the work stopped.
                 if let Some(reason) = reason {
                     let turn = self.ensure_turn(ts);
-                    let id = self.synthetic_id("error");
+                    let id = self.synthetic_id("error", ts);
                     self.entries.push(Arc::new(TimelineEntry {
                         id,
                         content: EntryContent::Error {
@@ -940,7 +940,7 @@ impl Timeline {
                     usage.output_tokens = None;
                 }
                 let turn = self.ensure_turn(ts);
-                let id = self.synthetic_id("compacted");
+                let id = self.synthetic_id("compacted", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ContextCompacted(compaction.clone()),
@@ -950,7 +950,7 @@ impl Timeline {
             }
             AgentEvent::ContextWindowChanged { window } => {
                 let turn = self.ensure_turn(ts);
-                let id = self.synthetic_id("context-window");
+                let id = self.synthetic_id("context-window", ts);
                 self.entries.push(Arc::new(TimelineEntry {
                     id,
                     content: EntryContent::ContextWindowChanged { window: *window },
@@ -1082,9 +1082,23 @@ impl Timeline {
         }
     }
 
-    fn synthetic_id(&mut self, prefix: &str) -> String {
-        self.next_synthetic_id += 1;
-        format!("{prefix}-{}", self.next_synthetic_id)
+    /// Ids for entries that have no provider item. The UI pages history in
+    /// from the tail, so an id must not depend on how many records precede it:
+    /// a timestamped record names itself, and only untimestamped legacy logs
+    /// fall back to the fold-relative counter.
+    fn synthetic_id(&mut self, prefix: &str, ts: Option<u64>) -> String {
+        let Some(ts) = ts else {
+            self.next_synthetic_id += 1;
+            return format!("{prefix}-{}", self.next_synthetic_id);
+        };
+        let base = format!("{prefix}-{ts}");
+        let mut id = base.clone();
+        let mut duplicate = 1;
+        while self.entries.iter().any(|entry| entry.id == id) {
+            id = format!("{base}-{duplicate}");
+            duplicate += 1;
+        }
+        id
     }
 
     fn refresh_partial_turn_changes(&mut self, turn: usize) {
@@ -1231,7 +1245,17 @@ impl Timeline {
     }
 
     fn apply_delta(&mut self, ts: Option<u64>, item_id: &str, kind: DeltaKind, text: &str) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == item_id) {
+        // A stream continues the item in the turn being streamed. Some
+        // providers reuse a placeholder id for every turn's stream, so an
+        // earlier turn's entry with the same id is a different item.
+        let current_turn = self.current_turn;
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .take_while(|e| Some(e.turn) == current_turn)
+            .find(|e| e.id == item_id)
+        {
             let entry = Arc::make_mut(entry);
             match (&mut entry.content, kind) {
                 (
@@ -3471,5 +3495,130 @@ mod tests {
                     && to == "served"
                     && reason.as_deref() == Some("capacity")
         ));
+    }
+
+    /// pi streams every turn's assistant message under the same placeholder
+    /// id and only names it at completion. A stream continues the open
+    /// turn's item; the earlier turn's entry is a different message, and a
+    /// suffix of the log (as history pages load) must fold its turns exactly
+    /// like the whole log does.
+    #[test]
+    fn streamed_deltas_continue_the_open_turn_not_an_earlier_turn_with_the_same_id() {
+        let turn = |n: u64| {
+            [
+                StoredEvent {
+                    ts: Some(n * 10),
+                    event: user_msg(&format!("user-{n}"), "go"),
+                },
+                StoredEvent {
+                    ts: Some(n * 10 + 1),
+                    event: AgentEvent::TurnStarted {
+                        turn_id: format!("turn-{n}"),
+                    },
+                },
+                StoredEvent {
+                    ts: Some(n * 10 + 2),
+                    event: assistant_delta("pi-assistant-0:0", &format!("text {n}")),
+                },
+                StoredEvent {
+                    ts: Some(n * 10 + 3),
+                    event: AgentEvent::TurnCompleted {
+                        turn_id: format!("turn-{n}"),
+                        status: TurnStatus::Completed,
+                        usage: None,
+                    },
+                },
+            ]
+        };
+        let log: Vec<StoredEvent> = [turn(1), turn(2), turn(3)].concat();
+        let full = Timeline::fold_events(log.iter().cloned());
+        assert_eq!(
+            full.entries
+                .iter()
+                .filter(|entry| entry.id == "pi-assistant-0:0")
+                .map(|entry| match &entry.content {
+                    EntryContent::Item(ItemContent::AssistantMessage { text }) =>
+                        (entry.turn, text.as_str()),
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>(),
+            [(0, "text 1"), (1, "text 2"), (2, "text 3")],
+            "each turn keeps its own streamed message"
+        );
+
+        let suffix = Timeline::fold_events(log[4..].iter().cloned());
+        let entries = |timeline: &Timeline, skip: usize| {
+            timeline.entries[skip..]
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.id.clone(),
+                        entry.turn - timeline.entries[skip].turn,
+                        format!("{:?}", entry.content),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            entries(&suffix, 0),
+            entries(&full, full.entries.len() - suffix.entries.len()),
+            "a page boundary at a turn start folds the same turns as the full log"
+        );
+    }
+
+    #[test]
+    fn synthetic_entry_ids_do_not_depend_on_how_much_earlier_history_is_folded() {
+        let error = |ts: u64| StoredEvent {
+            ts: Some(ts),
+            event: AgentEvent::Error {
+                message: format!("boom {ts}"),
+                fatal: false,
+            },
+        };
+        let log = [
+            StoredEvent {
+                ts: Some(1),
+                event: user_msg("user-1", "go"),
+            },
+            error(2),
+            StoredEvent {
+                ts: Some(3),
+                event: AgentEvent::TurnCompleted {
+                    turn_id: "turn-1".into(),
+                    status: TurnStatus::Failed,
+                    usage: None,
+                },
+            },
+            StoredEvent {
+                ts: Some(4),
+                event: user_msg("user-2", "again"),
+            },
+            error(5),
+            error(5),
+        ];
+        let full = Timeline::fold_events(log.iter().cloned());
+        let suffix = Timeline::fold_events(log[3..].iter().cloned());
+        let ids = |timeline: &Timeline| {
+            timeline
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.content, EntryContent::Error { .. }))
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&full), ["error-2", "error-5", "error-5-1"]);
+        assert_eq!(ids(&suffix), ["error-5", "error-5-1"]);
+
+        let legacy = Timeline::fold_events([
+            AgentEvent::Error {
+                message: "old".into(),
+                fatal: false,
+            },
+            AgentEvent::Error {
+                message: "older".into(),
+                fatal: false,
+            },
+        ]);
+        assert_eq!(ids(&legacy), ["error-1", "error-2"]);
     }
 }

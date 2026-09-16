@@ -17,6 +17,14 @@ impl WorkspaceStore {
         self.history_error.as_deref()
     }
 
+    /// Chat tests that run frame callbacks would otherwise request a page from
+    /// the seeded host, whose reply wakes the test scheduler from a thread it
+    /// does not control. A failed page holds prefetch until its retry cooldown.
+    #[cfg(test)]
+    pub(crate) fn suppress_history_prefetch_for_test(&mut self) {
+        self.history_error = Some("prefetch suppressed".into());
+    }
+
     pub(super) fn load_pending_chat_history(&mut self, cx: &mut Context<Self>) {
         if self.history_error.is_none()
             && self.pending_chat_turn.as_ref().is_some_and(|(id, turn)| {
