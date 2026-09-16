@@ -604,8 +604,8 @@ impl Timeline {
                 let same_model = self
                     .last_served_model
                     .as_deref()
-                    .map(agent::claude::strip_context_1m_suffix)
-                    == Some(agent::claude::strip_context_1m_suffix(model));
+                    .map(agent::claude::strip_context_window_suffix)
+                    == Some(agent::claude::strip_context_window_suffix(model));
                 if !same_model {
                     let from = self.last_served_model.clone();
                     let id = self.synthetic_id("model");
@@ -3419,9 +3419,9 @@ mod tests {
                 model: "claude-opus-5".into(),
                 reason: None,
             },
-            // Only the fixed `[1m]` suffix is ignored, not any bracket.
+            // Only the listed context suffixes are ignored, not any bracket.
             AgentEvent::ServedModel {
-                model: "claude-opus-5[fast]".into(),
+                model: "claude-opus-5[3m]".into(),
                 reason: None,
             },
         ]);
@@ -3435,7 +3435,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             changes,
-            vec![(Some("claude-opus-5".into()), "claude-opus-5[fast]".into())]
+            vec![(Some("claude-opus-5".into()), "claude-opus-5[3m]".into())]
         );
     }
 

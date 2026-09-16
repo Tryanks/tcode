@@ -32,8 +32,8 @@ use smol::prelude::*;
 use smol::process::Stdio;
 
 pub use crate::claude_context::{
-    CONTEXT_1M_SUFFIX, format_context_window, parse_context_window_tokens, resolved_context_window,
-    strip_context_1m_suffix,
+    CONTEXT_WINDOW_SUFFIXES, format_context_window, parse_context_window_tokens,
+    resolved_context_window, strip_context_window_suffix,
 };
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
@@ -3730,6 +3730,34 @@ mod tests {
         assert_eq!(format_context_window(200_000), "200k");
         assert_eq!(format_context_window(750_000), "750k");
         assert_eq!(format_context_window(1_000_000), "1M");
+    }
+
+    #[test]
+    fn strip_context_window_suffix_is_an_explicit_list() {
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[1m]"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[1M]"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[2m]"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5"),
+            "claude-opus-5"
+        );
+        // Unlisted brackets are left alone: no `[*]` wildcard.
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[3m]"),
+            "claude-opus-5[3m]"
+        );
+        assert_eq!(strip_context_window_suffix("opus[1m][2m]"), "opus[1m]");
+        assert_eq!(strip_context_window_suffix("[1m]"), "");
+        assert_eq!(CONTEXT_WINDOW_SUFFIXES, &["[1m]", "[2m]"]);
     }
 
     #[test]
