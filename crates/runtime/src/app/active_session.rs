@@ -186,6 +186,8 @@ pub struct ActiveSession {
     /// The entry remains in `queue` until acceptance; scheduled rows may precede it.
     pub(super) delivery_in_flight: Option<u64>,
     pub(super) turn_in_flight: bool,
+    /// Set once an interrupt reached the provider; cleared when the turn ends.
+    pub(super) interrupt_requested: bool,
     /// Provider-owned background tasks which outlive a completed model turn.
     /// Claude currently supplies this transient liveness signal.
     pub(super) background_task_count: usize,
@@ -242,6 +244,7 @@ impl ActiveSession {
             next_queue_id: 0,
             delivery_in_flight: None,
             turn_in_flight: false,
+            interrupt_requested: false,
             background_task_count: 0,
             idle_since: None,
             provider_commands,
@@ -327,6 +330,7 @@ impl ActiveSession {
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
         self.turn_in_flight = false;
+        self.interrupt_requested = false;
         self.background_task_count = 0;
         self.idle_since = None;
         self._pump = None;
@@ -337,6 +341,7 @@ impl ActiveSession {
         self.runtime = Runtime::Idle;
         self.delivery_in_flight = None;
         self.turn_in_flight = false;
+        self.interrupt_requested = false;
         self.background_task_count = 0;
         self._pump = None;
     }

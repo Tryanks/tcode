@@ -249,6 +249,9 @@ pub struct SessionStatus {
     pub terminal_height: f32,
     pub delivery_in_flight: Option<u64>,
     pub turn_running: bool,
+    /// An interrupt was accepted by the provider and its turn has not ended yet.
+    #[serde(default)]
+    pub stopping: bool,
     pub working: bool,
     pub pending_approval: bool,
     pub pending_user_input: bool,

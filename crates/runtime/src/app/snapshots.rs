@@ -282,6 +282,7 @@ impl AppState {
                 .unwrap_or(240.),
             delivery_in_flight: session.delivery_in_flight,
             turn_running: session.turn_in_flight,
+            stopping: session.interrupt_requested,
             working: session.has_work(),
             pending_approval,
             pending_user_input: session.timeline.pending_user_input.is_some(),

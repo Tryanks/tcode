@@ -717,6 +717,7 @@ impl Composer {
                 .into_any_element();
         }
         let stopping = turn_running && !has_text;
+        let stop_pending = self.workspace_store.read(cx).composer_state().stopping;
         let (label, id): (_, &'static str) = if stopping {
             (crate::tr!("composer.stop"), "stop-turn")
         } else if turn_running {
@@ -739,7 +740,9 @@ impl Composer {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .when(stopping && !interactive, |el| el.opacity(0.4))
+            .when(stopping && (!interactive || stop_pending), |el| {
+                el.opacity(0.4)
+            })
             .child(
                 div()
                     .size(px(40.))
@@ -858,7 +861,11 @@ impl Composer {
                     .items_center()
                     .justify_center()
                     .bg(rgb(STOP_TINT))
-                    .when(!self.interactive(cx), |el| el.opacity(0.4))
+                    .when(
+                        !self.interactive(cx)
+                            || self.workspace_store.read(cx).composer_state().stopping,
+                        |el| el.opacity(0.4),
+                    )
                     .cursor_pointer()
                     .hover(|s| s.opacity(0.9))
                     .child(div().size(px(11.)).rounded(px(2.)).bg(gpui::white()))
