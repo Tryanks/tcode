@@ -32,6 +32,17 @@ pub enum Query {
         base: Option<String>,
         ignore_whitespace: bool,
     },
+    BrowseIconImages {
+        directory: PathBuf,
+    },
+    ReadIconImage {
+        path: PathBuf,
+    },
+    ReadProjectIcon {
+        project_id: String,
+        /// Physical display size, from 1 through 128 pixels.
+        pixels: u32,
+    },
     ReadFileBytes {
         path: PathBuf,
     },
@@ -94,6 +105,11 @@ pub enum QueryResponse {
         truncated: bool,
     },
     ActiveWorkspace(Vec<PathEntry>),
+    IconImages {
+        directory: PathBuf,
+        parent: Option<PathBuf>,
+        entries: Vec<IconImageEntry>,
+    },
     ExternalHistory(Vec<RecentDir>),
     CommitMessage(String),
     GitDiff(GitDiffResult),
@@ -153,6 +169,15 @@ pub struct GitDiffResult {
     pub error: Option<String>,
     pub branches: Vec<String>,
     pub default_base: Option<String>,
+}
+
+/// A picker entry on the host. Clients return `path` unchanged: their path
+/// separator and drive semantics may differ from the host's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IconImageEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
 }
 
 /// One listable workspace entry (relative to the workspace root).

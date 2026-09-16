@@ -2419,11 +2419,7 @@ impl ChatView {
                             store.start_draft(project_id.clone(), cwd.clone(), cx);
                         });
                     }))
-                    .child(
-                        Icon::new(IconName::Folder)
-                            .size_4()
-                            .text_color(cx.theme().muted_foreground),
-                    )
+                    .child(crate::project_icon::artwork(&project, 16.))
                     .child(
                         div()
                             .flex_1()

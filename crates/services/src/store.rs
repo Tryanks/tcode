@@ -226,23 +226,45 @@ impl SessionStore {
         self.persist_index(&file)
     }
 
-    /// Insert or replace a project (by id), then persist.
+    /// Insert or replace a project, then remove its previous managed icon.
     pub fn upsert_project(&self, project: &Project) -> std::io::Result<()> {
         let mut file = self.read_file();
+        let mut previous = None;
         if let Some(existing) = file.projects.iter_mut().find(|p| p.id == project.id) {
+            if existing.icon_path != project.icon_path {
+                previous = existing.icon_path.clone();
+            }
             *existing = project.clone();
         } else {
             file.projects.push(project.clone());
         }
-        self.persist_index(&file)
+        self.persist_index(&file)?;
+        self.remove_project_icon(previous);
+        Ok(())
     }
 
-    /// Remove a project from the index. Its sessions are removed separately so
-    /// their event logs receive the same cleanup as an ordinary thread delete.
+    /// Remove a project and its managed icon. Sessions are removed separately.
     pub fn remove_project(&self, id: &str) -> std::io::Result<()> {
         let mut file = self.read_file();
+        let icon = file
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.icon_path.clone());
         file.projects.retain(|project| project.id != id);
-        self.persist_index(&file)
+        self.persist_index(&file)?;
+        self.remove_project_icon(icon);
+        Ok(())
+    }
+
+    fn remove_project_icon(&self, path: Option<PathBuf>) {
+        if let Some(path) = path
+            && path.parent() == Some(self.root.join("project-icons").as_path())
+            && let Err(error) = fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("could not remove project icon {}: {error}", path.display());
+        }
     }
 
     /// Persist a whole index file atomically (also flushes migration on startup).
@@ -373,6 +395,36 @@ mod tests {
         let mut p = std::env::temp_dir();
         p.push(format!("tcode-store-test-{}", uuid::Uuid::new_v4()));
         p
+    }
+
+    #[test]
+    fn removing_project_cleans_only_managed_icons_after_persisting() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-icon-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        fs::create_dir(root.join("project-icons")).unwrap();
+        let mut project = Project::from_root(root.join("project"));
+        for (path, managed) in [
+            (root.join("project-icons/icon.png"), true),
+            (root.join("original.png"), false),
+        ] {
+            fs::write(&path, b"stored image").unwrap();
+            project.icon_path = Some(path.clone());
+            store.upsert_project(&project).unwrap();
+            // A failed index replacement must retain the image still referenced on disk.
+            fs::create_dir(root.join("sessions.json.tmp")).unwrap();
+            assert!(store.remove_project(&project.id).is_err());
+            assert!(path.exists());
+            assert_eq!(
+                store.read_file().projects[0].icon_path.as_ref(),
+                Some(&path)
+            );
+            fs::remove_dir(root.join("sessions.json.tmp")).unwrap();
+            store.remove_project(&project.id).unwrap();
+            assert!(store.read_file().projects.is_empty());
+            assert_eq!(path.exists(), !managed);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

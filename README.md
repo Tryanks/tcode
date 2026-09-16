@@ -166,7 +166,8 @@ Make sure `claude` or `codex` is on your `PATH` — or install an ACP agent from
 the marketplace once Tcode is running.
 
 **3. Add a project and start a thread.** Point Tcode at a directory, type, send.
-No API keys, no config file.
+No API keys, no config file required. Optional [project configuration](docs/project-config.md)
+can provide a shared project icon.
 
 The interface is localized and follows your system language; you can override it
 in Settings. Everything Tcode stores — sessions, settings, installed ACP agents —

@@ -23,9 +23,9 @@ pub use event::{
 };
 pub use query::{
     ExternalThread, GitDiffResult, GitDiffScope, GitFileText, HostedDevice, HostingAction,
-    HostingState, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, PathEntry, Query,
-    QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, STORED_OUTPUT_COLS, STORED_OUTPUT_ROWS,
-    SessionSearchHit, SourceTool,
+    HostingState, IconImageEntry, MAX_SESSION_HISTORY_BYTES, MAX_THREAD_EXPORT_BYTES, PathEntry,
+    Query, QueryResponse, RecentDir, SESSION_HISTORY_RECORDS, STORED_OUTPUT_COLS,
+    STORED_OUTPUT_ROWS, SessionSearchHit, SourceTool,
 };
 pub use terminal::{TerminalDelta, TerminalFrame};
 pub use wire::{
