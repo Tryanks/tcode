@@ -615,9 +615,10 @@ in both states.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. With the
    **Provider colors** switch on (the default) every thread row, child rows
-   included, carries a subtle wash of its provider's color instead: built-in
-   providers use their brand color and each user profile or ACP agent takes a
-   stable palette slot (owner: `Settings::provider_color` in `crates/core`).
+   included, carries a subtle wash of its provider's color instead: the
+   provider card's accent when one is set, else the built-in brand color, else
+   a stable palette slot for each user profile or ACP agent (owner:
+   `Settings::provider_color` in `crates/core`).
    The wash is the same hue at three strengths — resting (~8%), hover (~16%)
    and selected (~26%) — so hover and selection never change geometry or hue.
    Compact rows take only the resting wash; the selected surface and the

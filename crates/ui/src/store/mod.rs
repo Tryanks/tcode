@@ -1968,15 +1968,10 @@ impl WorkspaceStore {
     }
 
     pub fn provider_profile_accent(&self, profile_id: &str) -> Option<u32> {
-        let raw = self
-            .settings_replica
+        self.settings_replica
             .resolved_profile(profile_id)?
             .settings
-            .accent_color?;
-        let hex = raw.trim().trim_start_matches('#');
-        (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
-            .then(|| u32::from_str_radix(hex, 16).ok())
-            .flatten()
+            .accent_rgb()
     }
 
     pub fn provider_update_command(&self, provider: agent::ProviderKind) -> Option<String> {

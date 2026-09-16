@@ -188,6 +188,15 @@ impl Default for ProviderSettings {
 }
 
 impl ProviderSettings {
+    /// The card's `accent_color` as `0xRRGGBB`, `None` when unset or not a
+    /// six-digit hex string.
+    pub fn accent_rgb(&self) -> Option<u32> {
+        let hex = self.accent_color.as_deref()?.trim().trim_start_matches('#');
+        (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(hex, 16).ok())
+            .flatten()
+    }
+
     /// A native provider's `Launch arguments` field, split on whitespace.
     pub fn extra_args(&self) -> Vec<String> {
         self.launch_args
@@ -1305,10 +1314,17 @@ impl Settings {
 
     /// The `0xRRGGBB` color for a provider color key (see
     /// [`SessionMeta::provider_color_key`](crate::project::SessionMeta::provider_color_key)).
-    /// Built-in profiles use their brand color; user profiles and ACP agents
-    /// take a palette slot that is distinct from every other configured custom
-    /// provider while the palette has room.
+    /// A card's own accent wins when set; otherwise built-in profiles use their
+    /// brand color and user profiles and ACP agents take a palette slot that is
+    /// distinct from every other configured custom provider while the palette
+    /// has room. ACP keys are not profile ids, so they never carry an accent.
     pub fn provider_color(&self, key: &str) -> u32 {
+        if let Some(accent) = self
+            .resolved_profile(key)
+            .and_then(|profile| profile.settings.accent_rgb())
+        {
+            return accent;
+        }
         if let Some(color) = Self::builtin_kind_from_id(key).and_then(builtin_provider_color) {
             return color;
         }
@@ -1458,6 +1474,36 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("gone")));
+    }
+
+    #[test]
+    fn card_accent_wins_over_brand_and_palette_when_valid() {
+        let mut settings = Settings::default();
+        settings.profiles.insert(
+            "work-claude".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    accent_color: Some("#2563eb".into()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        settings.profiles.insert(
+            "broken".into(),
+            ProviderProfile {
+                kind: ProviderKind::Codex,
+                settings: ProviderSettings {
+                    accent_color: Some("blue".into()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        settings.provider_mut(ProviderKind::Codex).accent_color = Some("00FF00".into());
+        assert_eq!(settings.provider_color("work-claude"), 0x2563EB);
+        assert_eq!(settings.provider_color("codex"), 0x00FF00);
+        assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("broken")));
+        assert_eq!(settings.provider_color("claude"), 0xD97757);
     }
 
     #[test]
