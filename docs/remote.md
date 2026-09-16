@@ -14,7 +14,7 @@ shorter introduction, see
 | Device | A desktop, phone, tablet or browser that opens a machine and sends actions to it. |
 | Browser password | Protects the web page served by `tcode-headless`. Set it on first open, or preset it with `TCODE_PASSWORD`. A successful login issues a device token. |
 | Adding a machine | Exchanging a single-use, six-digit connection code for a device token. A code expires after five minutes; five wrong attempts invalidate it. Generating a new code replaces the previous code. |
-| Connected device | One saved device record on the machine, with a name and a token that you can remove. |
+| Connected device | One saved device record on the machine, with a name, its operating system and a token that you can remove. A device keeps one record however often it is added again: re-adding it replaces the token instead of listing it twice. |
 
 Add the machine separately on each device. Project files, provider processes and
 terminal processes stay on the machine. Your devices receive the thread content
@@ -33,8 +33,11 @@ and other data they need to show and operate that work.
 4. Read the connection code, or scan the QR code from your
    phone. Use **New code** if the code expires or you need to add another
    device.
-5. Check **Connected devices** after adding a device. Use **Remove** to withdraw
-   its access. Keep the app and machine running while other devices use it.
+5. Check **Connected devices** after adding a device. Each row shows the
+   device's name and operating system (for example `Xiaomi 15 · Android 15`)
+   and when it was first connected; the name and system follow the device on
+   its next connection. Use **Remove** to withdraw its access. Keep the app and
+   machine running while other devices use it.
 
 The desktop keeps listening and letting nearby devices find this machine when
 its window connects to another machine. **Let other devices connect to this
@@ -429,12 +432,18 @@ with a trusted LAN or VPN. Removing a connected device revokes its proxy access.
 ### Device tokens and storage
 
 Adding a device issues a random bearer device token. The machine's `remote.json`
-stores device names, IDs and token hashes, not raw tokens. For headless browser
-login it also stores a randomly salted PBKDF2-HMAC-SHA256 password hash with
-600,000 iterations; it never stores the password itself. Native apps store raw
-tokens and origins in `hosts.json` in their own data directory.
+stores device names, operating systems, IDs and token hashes, not raw tokens.
+Each device also sends a persistent, self-generated device id when it is added
+and when it connects; a device presenting a known id replaces its own token
+rather than adding a record, so removing a row revokes that device entirely.
+Devices from older app versions that send no id get a new record each time they
+are added. For headless browser login it also stores a randomly salted
+PBKDF2-HMAC-SHA256 password hash with 600,000 iterations; it never stores the
+password itself. Native apps store raw tokens and origins in `hosts.json`, and
+their device id in `mobile.json`, in their own data directory.
 Phone records are in the app's private data directory; Android uses its
-`filesDir`. Browser records use `localStorage` as described above.
+`filesDir`. Browser records use `localStorage` as described above, with the
+device id under `tcode.device_id`.
 
 On Unix, Tcode writes `remote.json` and `hosts.json` with mode `0600`. These are filesystem permissions, not file
 encryption. Protect this device's data directory and browser profile: possession

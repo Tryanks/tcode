@@ -119,8 +119,7 @@ impl ClientAttachment {
 
     pub fn save_host(&self, host: PairedHost) {
         let mut hosts = self.hosts();
-        hosts.retain(|existing| existing.host_id != host.host_id);
-        hosts.push(host);
+        tcode_client::pairing::remember_host(&mut hosts, host);
         self.host.save_hosts(&hosts);
     }
 
@@ -831,6 +830,16 @@ impl RemotePanel {
     }
 }
 
+/// A connected device is listed by name, then its operating system when the
+/// device reported one — the same ` · ` separator used elsewhere.
+#[cfg(any(feature = "remote-hosting", target_family = "wasm"))]
+pub(crate) fn device_label(name: &str, platform: Option<&str>) -> String {
+    match platform {
+        Some(platform) => format!("{name} · {platform}"),
+        None => name.to_owned(),
+    }
+}
+
 /// The same recovery wording is used in the shell and the machine row.
 pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
     use tcode_client::ConnectionFailure::*;
@@ -855,6 +864,16 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    #[cfg(feature = "remote-hosting")]
+    #[test]
+    fn device_rows_name_the_platform_only_when_reported() {
+        assert_eq!(
+            device_label("Xiaomi 15", Some("Android 15")),
+            "Xiaomi 15 · Android 15"
+        );
+        assert_eq!(device_label("older phone", None), "older phone");
     }
 
     #[gpui::test]

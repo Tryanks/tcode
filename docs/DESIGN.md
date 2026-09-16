@@ -1179,7 +1179,10 @@ clients.
 
 **Settings → Other devices** is **Let other devices connect to this machine**
 and nothing else: the listener, **Let nearby devices find this machine**,
-connection codes and **Connected devices**. It needs a listener and a beacon,
+connection codes and **Connected devices**. A connected device row is titled
+`‹name› · ‹platform›` — the name alone when the device reported no operating
+system — over a **First connected …** caption, and a device that is added
+again keeps its single row. It needs a listener and a beacon,
 so the section only exists where the client can host — a phone or a browser has
 no such setting. Choosing which machine to talk to is a product surface, not a
 setting: it lives in **Machines**, reached from the sidebar's feature area at
@@ -1362,7 +1365,8 @@ A saved valid token skips login; rejected tokens return to the login form.
 In the browser, Settings → Other devices belongs to the attached machine. Its
 Allow other devices switch controls new native pairings, not web login. The
 current code, expiry and QR use the desktop hosting presentation, stacking on
-narrow screens. Paired devices and Remove remain visible when pairing is off.
+narrow screens. Paired devices, titled `‹name› · ‹platform›` as on the desktop,
+and Remove remain visible when pairing is off.
 The listener owns this state and returns it over the authenticated pipe. Native
 Add a machine continues to show an address and six-digit connection code.
 ## Pending writes on weak networks

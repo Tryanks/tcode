@@ -157,6 +157,11 @@ pub(crate) fn native_host(
         .call_string("gpuiDeviceModel")?
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "Android".into());
+    let platform = bridge
+        .object
+        .call_string("gpuiDevicePlatform")?
+        .filter(|platform| !platform.trim().is_empty())
+        .unwrap_or_else(|| "Android".into());
     let system_locale = bridge
         .object
         .call_string("gpuiSystemLocale")?
@@ -195,6 +200,7 @@ pub(crate) fn native_host(
     let multicast = bridge.object.clone();
     let camera = bridge.clone();
     let host = NativeClientHost::new(data_dir, device_name)
+        .with_platform(platform)
         .with_multicast_lock(move |acquire| {
             if multicast
                 .with_env(|env, activity| {

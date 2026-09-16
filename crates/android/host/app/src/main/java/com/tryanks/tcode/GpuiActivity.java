@@ -15,6 +15,7 @@ import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
@@ -265,8 +266,35 @@ public final class GpuiActivity extends NativeActivity {
         return getFilesDir().getAbsolutePath();
     }
 
+    /** The user-facing device name: the Settings name, else the marketing name, else make and model. */
     public String gpuiDeviceModel() {
-        return Build.MODEL == null || Build.MODEL.isEmpty() ? "Android" : Build.MODEL;
+        String name = Settings.Global.getString(getContentResolver(), "device_name");
+        if (name != null && !name.trim().isEmpty()) return name.trim();
+        name = marketName();
+        if (name != null && !name.trim().isEmpty()) return name.trim();
+        String manufacturer = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.trim();
+        String model = Build.MODEL == null ? "" : Build.MODEL.trim();
+        if (model.isEmpty()) return manufacturer.isEmpty() ? "Android" : manufacturer;
+        if (manufacturer.isEmpty() || model.toLowerCase(Locale.ROOT).startsWith(manufacturer.toLowerCase(Locale.ROOT))) {
+            return model;
+        }
+        return manufacturer + " " + model;
+    }
+
+    public String gpuiDevicePlatform() {
+        String release = Build.VERSION.RELEASE == null ? "" : Build.VERSION.RELEASE.trim();
+        return release.isEmpty() ? "Android" : "Android " + release;
+    }
+
+    /** {@code ro.product.marketname} is a vendor property with no public API. */
+    private static String marketName() {
+        try {
+            Class<?> properties = Class.forName("android.os.SystemProperties");
+            Object value = properties.getMethod("get", String.class).invoke(null, "ro.product.marketname");
+            return value instanceof String ? (String) value : null;
+        } catch (Exception | LinkageError error) {
+            return null;
+        }
     }
 
     /** Snapshot used by the Rust shell at startup; restart after changing the OS language. */

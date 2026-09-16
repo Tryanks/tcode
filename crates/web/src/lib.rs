@@ -168,8 +168,7 @@ async fn initial_target(
 
 fn save_host(host: &WebHost, paired: &PairedHost) {
     let mut hosts = host.load_hosts();
-    hosts.retain(|saved| saved.host_id != paired.host_id);
-    hosts.push(paired.clone());
+    tcode_client::pairing::remember_host(&mut hosts, paired.clone());
     host.save_hosts(&hosts);
 }
 

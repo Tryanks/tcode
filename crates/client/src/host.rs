@@ -34,6 +34,77 @@ pub struct DiscoveredHost {
     pub origin: String,
 }
 
+/// What a client says about itself when pairing and connecting. Serializes to
+/// the `device_id`, `device_name` and `platform` fields shared by `/pair`,
+/// `/auth/login` and the websocket hello; the host keeps one device record per
+/// `device_id` across repeated pairings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceIdentity {
+    #[serde(rename = "device_id")]
+    pub id: String,
+    #[serde(rename = "device_name")]
+    pub name: String,
+    /// Operating system name and version, such as `Android 15` or `macOS 26.0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+impl DeviceIdentity {
+    /// The `/pair` request body for `code`.
+    pub fn pair_body(&self, code: &str) -> String {
+        #[derive(Serialize)]
+        struct PairBody<'a> {
+            code: &'a str,
+            #[serde(flatten)]
+            device: &'a DeviceIdentity,
+        }
+        serde_json::to_string(&PairBody { code, device: self }).expect("string fields serialize")
+    }
+
+    /// The first websocket line: the version-3 hello as the baseline with
+    /// version 4 advertised, the device token, and this identity.
+    pub fn hello_line(&self, token: &str) -> String {
+        #[derive(Serialize)]
+        struct Hello<'a> {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            protocol_version: u32,
+            supported_versions: [u32; 2],
+            token: &'a str,
+            #[serde(flatten)]
+            device: &'a DeviceIdentity,
+        }
+        serde_json::to_string(&Hello {
+            kind: "hello",
+            protocol_version: 3,
+            supported_versions: [3, tcode_protocol::PROTOCOL_VERSION],
+            token,
+            device: self,
+        })
+        .expect("string fields serialize")
+    }
+}
+
+/// Hosts accept a device id of at most this many bytes; longer or
+/// control-bearing values are treated as absent.
+pub const MAX_DEVICE_ID_LEN: usize = 64;
+
+/// Whether a stored or received device id is one a host will accept.
+pub fn valid_device_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_DEVICE_ID_LEN && !id.chars().any(char::is_control)
+}
+
+/// The client's persistent device id: the stored value when it is usable,
+/// otherwise a freshly minted UUID that `store` persists for the next read.
+pub fn persistent_device_id(stored: Option<String>, store: impl FnOnce(&str)) -> String {
+    if let Some(id) = stored.filter(|id| valid_device_id(id)) {
+        return id;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    store(&id);
+    id
+}
+
 /// Preferences which belong to the client and are never sent to the host.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientPreferences {
@@ -96,6 +167,21 @@ pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
 pub trait ClientHost: 'static {
     /// Name this device presents to hosts while pairing and connecting.
     fn device_name(&self) -> String;
+
+    /// Stable, client-generated id (see [`persistent_device_id`]) so a host
+    /// keeps one record for this device however often it pairs again.
+    fn device_id(&self) -> String;
+
+    /// Operating system name and version shown next to the device name on hosts.
+    fn device_platform(&self) -> Option<String>;
+
+    fn device_identity(&self) -> DeviceIdentity {
+        DeviceIdentity {
+            id: self.device_id(),
+            name: self.device_name(),
+            platform: self.device_platform(),
+        }
+    }
 
     fn load_preferences(&self) -> ClientPreferences {
         ClientPreferences::default()
@@ -167,6 +253,61 @@ pub trait ClientHost: 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pair_and_hello_carry_the_device_fields_hosts_read() {
+        let device = DeviceIdentity {
+            id: "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b".into(),
+            name: "Xiaomi 15".into(),
+            platform: Some("Android 15".into()),
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&device.pair_body("123456")).unwrap(),
+            serde_json::json!({
+                "code": "123456",
+                "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
+                "device_name": "Xiaomi 15",
+                "platform": "Android 15",
+            })
+        );
+        let unknown_platform = DeviceIdentity {
+            platform: None,
+            ..device
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&unknown_platform.hello_line("token"))
+                .unwrap(),
+            serde_json::json!({
+                "type": "hello",
+                "protocol_version": 3,
+                "supported_versions": [3, 4],
+                "token": "token",
+                "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
+                "device_name": "Xiaomi 15",
+            })
+        );
+    }
+
+    #[test]
+    fn device_id_is_reused_when_valid_and_minted_and_stored_otherwise() {
+        let stored = std::cell::Cell::new(None);
+        let keep = "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b".to_owned();
+        assert_eq!(
+            persistent_device_id(Some(keep.clone()), |id| stored.set(Some(id.to_owned()))),
+            keep
+        );
+        assert_eq!(stored.take(), None, "a usable id must not be rewritten");
+        for damaged in [
+            None,
+            Some(String::new()),
+            Some("a\u{0}b".into()),
+            Some("x".repeat(65)),
+        ] {
+            let minted = persistent_device_id(damaged, |id| stored.set(Some(id.to_owned())));
+            assert!(valid_device_id(&minted));
+            assert_eq!(stored.take().as_deref(), Some(minted.as_str()));
+        }
+    }
 
     #[test]
     fn discovered_hosts_are_bounded_validated_and_deduplicated() {

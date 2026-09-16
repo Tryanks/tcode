@@ -279,4 +279,7 @@ pub struct HostedDevice {
     pub id: String,
     pub name: String,
     pub created_unix: u64,
+    /// Operating system name and version the device last reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
 }

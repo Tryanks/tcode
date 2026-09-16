@@ -16,6 +16,7 @@ pub use tcode_client::pairing::{
 pub use tcode_client::{ConnectionFailure, ConnectionState};
 
 use tcode_client::{
+    host::DeviceIdentity,
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     recovery::{Backoff, Wake},
 };
@@ -33,21 +34,20 @@ struct PairResponse {
     token: String,
 }
 
-pub fn pair(origin: &str, code: &str, device_name: &str) -> Result<PairedHost, String> {
-    smol::block_on(pair_async(origin, code, device_name))
+pub fn pair(origin: &str, code: &str, device: &DeviceIdentity) -> Result<PairedHost, String> {
+    smol::block_on(pair_async(origin, code, device))
 }
 
 pub(crate) async fn pair_async(
     origin: &str,
     code: &str,
-    device_name: &str,
+    device: &DeviceIdentity,
 ) -> Result<PairedHost, String> {
     let origin = tcode_client::pairing::parse_origin(origin)?;
-    if !is_pairing_code(code) || device_name.is_empty() || device_name.len() > 256 {
+    if !is_pairing_code(code) || device.name.is_empty() || device.name.len() > 256 {
         return Err("invalid pairing request".into());
     }
-    let body = serde_json::json!({ "code": code, "device_name": device_name }).to_string();
-    let bytes = http_request(&origin, "POST", "/pair", &body).await?;
+    let bytes = http_request(&origin, "POST", "/pair", &device.pair_body(code)).await?;
     let response: PairResponse =
         serde_json::from_slice(&bytes).map_err(|_| "invalid pairing response")?;
     Ok(PairedHost {
@@ -174,20 +174,14 @@ pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     fs::rename(temporary, data_dir.join("hosts.json"))
 }
 
-pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
+pub fn connect(host: PairedHost, device: DeviceIdentity) -> RemoteClient {
     let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     std::thread::Builder::new()
         .name("tcode-remote-client".into())
         .spawn(move || {
-            smol::block_on(connection_loop(
-                host,
-                device_name,
-                outgoing,
-                incoming,
-                state_tx,
-            ));
+            smol::block_on(connection_loop(host, device, outgoing, incoming, state_tx));
         })
         .expect("failed to spawn remote client thread");
     RemoteClient {
@@ -199,7 +193,7 @@ pub fn connect(host: PairedHost, device_name: String) -> RemoteClient {
 
 async fn connection_loop(
     mut host: PairedHost,
-    device_name: String,
+    device: DeviceIdentity,
     outgoing: OutgoingReceiver,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
@@ -219,7 +213,7 @@ async fn connection_loop(
         let mut stable_ms = 0;
         let mut interrupted = None;
         let opened = futures_lite::future::race(
-            async { Ok(establish_websocket(&host, &device_name).await) },
+            async { Ok(establish_websocket(&host, &device).await) },
             async { Err(outgoing.wake.recv().await) },
         )
         .await;
@@ -354,12 +348,12 @@ fn connection_failure(error: String) -> ConnectionFailure {
 
 async fn establish_websocket(
     host: &PairedHost,
-    device_name: &str,
+    device: &DeviceIdentity,
 ) -> Result<WebSocket, ConnectionFailure> {
     let url = url::Url::parse(&host.origin).map_err(|e| connection_failure(e.to_string()))?;
     let endpoint = crate::endpoint::Endpoint::new(&host.origin).map_err(connection_failure)?;
     endpoint
-        .establish(|stream| open_websocket(stream, &url, host, device_name))
+        .establish(|stream| open_websocket(stream, &url, host, device))
         .await
 }
 
@@ -403,7 +397,7 @@ pub(crate) async fn open_websocket(
     stream: crate::endpoint::Stream,
     origin: &url::Url,
     host: &PairedHost,
-    device_name: &str,
+    device: &DeviceIdentity,
 ) -> Result<WebSocket, ConnectionFailure> {
     let mut url = origin.clone();
     url.set_scheme(if origin.scheme() == "https" {
@@ -416,15 +410,8 @@ pub(crate) async fn open_websocket(
     let (mut websocket, _) = async_tungstenite::client_async(url.as_str(), stream)
         .await
         .map_err(|e| connection_failure(e.to_string()))?;
-    let hello = serde_json::json!({
-        "type": "hello",
-        "protocol_version": 3,
-        "supported_versions": [3, tcode_protocol::PROTOCOL_VERSION],
-        "token": host.token,
-        "device_name": device_name,
-    });
     websocket
-        .send(Message::Text(hello.to_string().into()))
+        .send(Message::Text(device.hello_line(&host.token).into()))
         .await
         .map_err(|error| connection_failure(error.to_string()))?;
     match websocket.next().await {
@@ -680,9 +667,13 @@ mod establishment_tests {
                 });
                 let started = Instant::now();
                 if cancel {
-                    let task = smol::spawn(async move {
-                        pair_async(&origin, "123456", "cancelled device").await
-                    });
+                    let device = DeviceIdentity {
+                        id: "cancelled".into(),
+                        name: "cancelled device".into(),
+                        platform: None,
+                    };
+                    let task =
+                        smol::spawn(async move { pair_async(&origin, "123456", &device).await });
                     request_received.recv().await.unwrap();
                     task.cancel().await;
                 } else {

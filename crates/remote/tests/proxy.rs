@@ -44,9 +44,17 @@ impl Machine {
                 .unwrap()
                 .to_owned()
         } else {
-            tcode_remote::client::pair(&origin, &server.new_pairing_code().code, "test device")
-                .unwrap()
-                .token
+            tcode_remote::client::pair(
+                &origin,
+                &server.new_pairing_code().code,
+                &tcode_client::host::DeviceIdentity {
+                    id: "test-device".into(),
+                    name: "test device".into(),
+                    platform: None,
+                },
+            )
+            .unwrap()
+            .token
         };
         Self {
             server: Some(server),

@@ -1,11 +1,20 @@
 //! Real host pipe and HTTP/WebSocket transport, including a stopped host process.
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use tcode_client::host::DeviceIdentity;
 use tcode_client::{ConnectionFailure, ConnectionState};
 use tcode_remote::client::{RemoteClient, connect, pair};
 use tcode_remote::{HostMux, RemoteConfig, serve};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::SessionStore;
+
+fn device(name: &str) -> DeviceIdentity {
+    DeviceIdentity {
+        id: format!("{name}-id"),
+        name: name.into(),
+        platform: None,
+    }
+}
 
 struct TestDir(PathBuf);
 impl TestDir {
@@ -78,7 +87,7 @@ fn races_stalled_address_and_applies_first_host_message() {
     let mut host = pair(
         &format!("http://127.0.0.1:{}", server.local_addr().port()),
         &code.code,
-        "race",
+        &device("race"),
     )
     .unwrap();
     // TCP connects, but the WebSocket upgrade cannot complete because this listener never accepts.
@@ -88,7 +97,7 @@ fn races_stalled_address_and_applies_first_host_message() {
             .unwrap();
     host.origin = format!("http://localhost:{}", server.local_addr().port());
     let start = Instant::now();
-    let client = connect(host, "race".into());
+    let client = connect(host, device("race"));
     wait(&client, Duration::from_secs(2), |s| {
         *s == ConnectionState::Syncing
     });
@@ -115,11 +124,11 @@ fn rejected_token_is_terminal_without_retry() {
     let mut host = pair(
         &format!("http://127.0.0.1:{}", server.local_addr().port()),
         &code.code,
-        "reject",
+        &device("reject"),
     )
     .unwrap();
     host.token = "invalid".into();
-    let client = connect(host, "reject".into());
+    let client = connect(host, device("reject"));
     wait(&client, Duration::from_secs(2), |s| {
         *s == ConnectionState::Offline {
             reason: ConnectionFailure::AuthenticationRejected,
@@ -175,10 +184,10 @@ fn stopped_host_times_out() {
     let host = pair(
         &format!("http://127.0.0.1:{}", code.port),
         &code.code,
-        "stop",
+        &device("stop"),
     )
     .unwrap();
-    let client = connect(host, "stop".into());
+    let client = connect(host, device("stop"));
     ping(&client);
     wait(&client, Duration::from_secs(2), |s| {
         *s == ConnectionState::Connected

@@ -141,6 +141,8 @@ pub(crate) struct ClaudeCodeProfile {
 struct ModelFile {
     slug: String,
     name: String,
+    #[serde(default)]
+    aliases: Vec<String>,
     profile: Option<String>,
     #[serde(default)]
     adapter: ModelAdapterFile,
@@ -165,6 +167,8 @@ type Version = (u32, u32, u32);
 #[derive(Debug, Clone)]
 pub(crate) struct CatalogModel {
     pub(crate) spec: ModelSpec,
+    /// Alternate ids (`opus`, `claude-opus-5.0`) that resolve to this slug.
+    aliases: Vec<String>,
     runtime: ClaudeCodeProfile,
     min_version: Option<Version>,
     max_version_exclusive: Option<Version>,
@@ -221,8 +225,16 @@ impl CatalogModel {
 
     /// Slug suffix that opens a window of at least `window` tokens: the
     /// smallest listed context window option that fits, e.g. `[1m]` for both
-    /// the `1m` option and a custom 500k window on a 200k model.
+    /// the `1m` option and a custom 500k window on a 200k model. Windows the
+    /// bare slug already covers (at or below the model's default) need no
+    /// suffix, so a 1M-default model launches as its plain id.
     pub(crate) fn context_window_suffix(&self, window: u64) -> &str {
+        if self
+            .default_context_window()
+            .is_some_and(|default| window <= default)
+        {
+            return "";
+        }
         let Some(suffixes) = self.runtime.model_suffixes.get("contextWindow") else {
             return "";
         };
@@ -355,6 +367,11 @@ impl ClaudeCatalog {
                 .iter()
                 .filter_map(|option| descriptor(option).transpose())
                 .collect::<Result<Vec<_>, _>>()?;
+            let aliases = model
+                .aliases
+                .iter()
+                .map(|alias| non_empty(alias, "model alias"))
+                .collect::<Result<Vec<_>, _>>()?;
             models.push(CatalogModel {
                 spec: ModelSpec {
                     is_default: catalog.defaults.chat.as_deref() == Some(slug.as_str()),
@@ -362,6 +379,7 @@ impl ClaudeCatalog {
                     id: slug,
                     options,
                 },
+                aliases,
                 runtime,
                 min_version,
                 max_version_exclusive,
@@ -378,10 +396,21 @@ impl ClaudeCatalog {
         })
     }
 
-    /// Look up a model by slug; a context suffix such as `[1m]` is ignored.
+    /// Look up a model by slug, else by alias (case-insensitively, as
+    /// upstream does); a context suffix such as `[1m]` is ignored.
     pub(crate) fn model(&self, id: &str) -> Option<&CatalogModel> {
         let id = id.trim().split('[').next().unwrap_or_default();
-        self.models.iter().find(|model| model.spec.id == id)
+        self.models
+            .iter()
+            .find(|model| model.spec.id == id)
+            .or_else(|| {
+                self.models.iter().find(|model| {
+                    model
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(id))
+                })
+            })
     }
 
     /// Models the installed CLI version can run, in manifest order.
@@ -657,7 +686,7 @@ pub(crate) const TEST_MANIFEST: &str = r#"{
         }
       },
       "models": [
-        { "slug": "test-wide", "name": "Test Wide", "status": "current", "badge": "new", "profile": "wide",
+        { "slug": "test-wide", "name": "Test Wide", "aliases": ["wide", "test-wide.0"], "status": "current", "badge": "new", "profile": "wide",
           "adapter": { "claudeCode": { "minVersion": "2.1.257" } } },
         { "slug": "test-fixed", "name": "Test Fixed", "status": "legacy", "profile": "fixed",
           "adapter": { "claudeCode": { "minVersion": "2.1.111", "maxVersionExclusive": "3.0.0" } } },
@@ -782,6 +811,13 @@ mod tests {
         assert!(catalog.model(" test-plain ").is_some());
         assert!(catalog.model("test-narrow[1m]").is_some());
         assert!(catalog.model("test-missing").is_none());
+        // Aliases resolve case-insensitively to the canonical slug.
+        assert_eq!(catalog.model("WIDE").unwrap().spec.id, "test-wide");
+        assert_eq!(
+            catalog.model("test-wide.0[1m]").unwrap().spec.id,
+            "test-wide"
+        );
+        assert!(catalog.model("wid").is_none());
     }
 
     #[test]

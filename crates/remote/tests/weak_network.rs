@@ -183,13 +183,13 @@ fn relay_disconnect_fails_read_and_recreation_replays_write_without_execution_tw
     )
     .unwrap();
     let relay = Relay::new(server.local_addr());
+    let adapter = NativeClientHost::new(root.join("client"), "test-device");
     let paired = client::pair(
         &format!("http://{}", relay.addr),
         &server.new_pairing_code().code,
-        "test-device",
+        &adapter.device_identity(),
     )
     .unwrap();
-    let adapter = NativeClientHost::new(root.join("client"), "test-device");
     let first = link(&paired, &adapter);
     relay.paused.store(true, Ordering::SeqCst);
     let read_link = first.clone();

@@ -56,6 +56,14 @@ pub struct PairedHost {
     pub last_connected_unix: Option<u64>,
 }
 
+/// Record a host in the saved list. A host is identified by `host_id`, so
+/// pairing again or stamping a reconnection replaces its record instead of
+/// adding a second row; the newest record moves to the end.
+pub fn remember_host(hosts: &mut Vec<PairedHost>, host: PairedHost) {
+    hosts.retain(|existing| existing.host_id != host.host_id);
+    hosts.push(host);
+}
+
 #[derive(Deserialize)]
 struct SavedHost {
     host_id: String,
@@ -177,6 +185,23 @@ mod tests {
         .unwrap();
         assert_eq!(host.origin, "http://192.168.1.10:47420");
         assert_eq!(host.last_connected_unix, None);
+    }
+
+    #[test]
+    fn pairing_again_replaces_the_saved_host_instead_of_duplicating_it() {
+        let host = |id: &str, token: &str| PairedHost {
+            host_id: id.into(),
+            name: id.to_uppercase(),
+            origin: "http://192.168.1.2:47420".into(),
+            token: token.into(),
+            last_connected_unix: None,
+        };
+        let mut hosts = vec![host("desk", "first"), host("laptop", "laptop")];
+        remember_host(&mut hosts, host("desk", "second"));
+        assert_eq!(
+            hosts,
+            vec![host("laptop", "laptop"), host("desk", "second")]
+        );
     }
 
     #[test]
