@@ -8,7 +8,7 @@ use std::{
 use agent::{ApprovalMode, InteractionMode, OptionSelection, ProviderKind, ResumeCursor};
 use serde::{Deserialize, Serialize};
 
-use crate::settings::ProjectSort;
+use crate::settings::{ProjectSort, Settings, acp_color_key, provider_key};
 
 /// A project groups sessions (threads) that share a working-directory root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +140,26 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// The key [`Settings::provider_color`] resolves this thread's color from:
+    /// a user profile id, an ACP agent (`acp:<id>`), or the built-in
+    /// [`provider_key`]. A user profile is its own provider to the user even
+    /// when it drives a built-in protocol, so it never inherits the brand color.
+    pub fn provider_color_key(&self) -> String {
+        if let Some(profile_id) = self
+            .profile_id
+            .as_deref()
+            .filter(|id| !Settings::is_builtin_profile_id(id))
+        {
+            return profile_id.to_string();
+        }
+        if self.provider == ProviderKind::Acp
+            && let Some(agent_id) = self.acp_agent_id.as_deref()
+        {
+            return acp_color_key(agent_id);
+        }
+        provider_key(self.provider).to_string()
+    }
+
     #[cfg(feature = "process")]
     pub fn new(provider: ProviderKind, cwd: PathBuf, model: Option<String>) -> Self {
         let now = now_secs();
@@ -502,6 +522,22 @@ mod tests {
         meta.id = id.to_string();
         meta.parent_session_id = parent.map(str::to_string);
         meta
+    }
+
+    #[test]
+    fn provider_color_key_prefers_user_profile_then_acp_agent_then_builtin() {
+        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
+        assert_eq!(meta.provider_color_key(), "claude");
+        // The built-in profile spelled out explicitly is still the built-in.
+        meta.profile_id = Some("claude".into());
+        assert_eq!(meta.provider_color_key(), "claude");
+        // A third-party endpoint is a different provider to the user.
+        meta.profile_id = Some("work-claude".into());
+        assert_eq!(meta.provider_color_key(), "work-claude");
+
+        let mut acp = SessionMeta::new(ProviderKind::Acp, PathBuf::from("/x"), None);
+        acp.acp_agent_id = Some("gemini".into());
+        assert_eq!(acp.provider_color_key(), "acp:gemini");
     }
 
     fn candidates(

@@ -7,6 +7,7 @@ use agent::{ModelSpec, OptionDescriptor, ProviderKind};
 use serde::{Deserialize, Serialize};
 
 use crate::acp::InstalledAcpAgent;
+pub use crate::provider_colors::{PROVIDER_COLOR_PALETTE, builtin_provider_color};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +63,12 @@ pub fn provider_key(provider: ProviderKind) -> &'static str {
         // ever holds the shared fallbacks (it is never written by the ACP card).
         ProviderKind::Acp => "acp",
     }
+}
+
+/// The provider color key of an ACP agent: agents share `ProviderKind::Acp`,
+/// so the registry id is what tells them apart.
+pub fn acp_color_key(agent_id: &str) -> String {
+    format!("acp:{agent_id}")
 }
 
 /// The provider's short display name used for card titles and picker labels.
@@ -181,6 +188,15 @@ impl Default for ProviderSettings {
 }
 
 impl ProviderSettings {
+    /// The card's `accent_color` as `0xRRGGBB`, `None` when unset or not a
+    /// six-digit hex string.
+    pub fn accent_rgb(&self) -> Option<u32> {
+        let hex = self.accent_color.as_deref()?.trim().trim_start_matches('#');
+        (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(hex, 16).ok())
+            .flatten()
+    }
+
     /// A native provider's `Launch arguments` field, split on whitespace.
     pub fn extra_args(&self) -> Vec<String> {
         self.launch_args
@@ -820,6 +836,7 @@ pub enum SettingsPatch {
     SkipDeleteConfirmation(bool),
     AutoOpenTaskPanel(bool),
     LiveCommandPanelDisabled(bool),
+    SidebarProviderMarks(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     AbortOnModelFallback(bool),
@@ -918,6 +935,10 @@ pub struct Settings {
     /// legacy settings keep the feature enabled.
     #[serde(default)]
     pub live_command_panel_disabled: bool,
+    /// Whether sidebar thread rows show their provider's mark. Off by
+    /// default and absent in legacy files.
+    #[serde(default)]
+    pub sidebar_provider_marks: bool,
     /// Whether the on-launch provider version check is DISABLED. Stored inverted
     /// so it remains enabled for legacy settings files that lack the field.
     #[serde(default)]
@@ -1039,6 +1060,7 @@ impl Default for Settings {
             skip_delete_confirmation: false,
             auto_open_task_panel: false,
             live_command_panel_disabled: false,
+            sidebar_provider_marks: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             abort_on_model_fallback: true,
@@ -1081,6 +1103,9 @@ impl Settings {
             SettingsPatch::AutoOpenTaskPanel(value) => self.auto_open_task_panel = value,
             SettingsPatch::LiveCommandPanelDisabled(value) => {
                 self.live_command_panel_disabled = value;
+            }
+            SettingsPatch::SidebarProviderMarks(value) => {
+                self.sidebar_provider_marks = value;
             }
             SettingsPatch::ProviderUpdateChecksDisabled(value) => {
                 self.provider_update_checks_disabled = value;
@@ -1287,6 +1312,33 @@ impl Settings {
         }
     }
 
+    /// The `0xRRGGBB` color for a provider color key (see
+    /// [`SessionMeta::provider_color_key`](crate::project::SessionMeta::provider_color_key)).
+    /// A card's own accent wins when set; otherwise built-in profiles use their
+    /// brand color and user profiles and ACP agents take a palette slot that is
+    /// distinct from every other configured custom provider while the palette
+    /// has room. ACP keys are not profile ids, so they never carry an accent.
+    pub fn provider_color(&self, key: &str) -> u32 {
+        if let Some(accent) = self
+            .resolved_profile(key)
+            .and_then(|profile| profile.settings.accent_rgb())
+        {
+            return accent;
+        }
+        if let Some(color) = Self::builtin_kind_from_id(key).and_then(builtin_provider_color) {
+            return color;
+        }
+        let acp_keys: Vec<String> = self.acp_agents.keys().map(|id| acp_color_key(id)).collect();
+        let mut known: Vec<&str> = self
+            .profiles
+            .keys()
+            .map(String::as_str)
+            .chain(acp_keys.iter().map(String::as_str))
+            .collect();
+        known.sort_unstable();
+        crate::provider_colors::palette_color(key, &known)
+    }
+
     /// One installed ACP agent, by registry id.
     pub fn acp_agent(&self, id: &str) -> Option<&InstalledAcpAgent> {
         self.acp_agents.get(id)
@@ -1348,6 +1400,110 @@ mod tests {
             back.auto_archive_notice_shown,
             settings.auto_archive_notice_shown
         );
+    }
+
+    #[test]
+    fn sidebar_provider_marks_default_off_and_patch_on() {
+        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
+        assert!(!legacy.sidebar_provider_marks);
+        let mut settings = Settings::default();
+        settings.apply(SettingsPatch::SidebarProviderMarks(true));
+        assert!(settings.sidebar_provider_marks);
+    }
+
+    #[test]
+    fn provider_color_maps_builtins_to_brand_and_custom_providers_to_distinct_palette_slots() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.provider_color("claude"), 0xD97757);
+        assert_eq!(settings.provider_color("codex"), 0x8B5CF6);
+        assert_eq!(settings.provider_color("pi"), 0x4D9ABF);
+        assert_eq!(settings.provider_color("opencode"), 0x22A06B);
+
+        for id in ["work-claude", "proxy-codex", "lab"] {
+            settings.profiles.insert(
+                id.into(),
+                ProviderProfile {
+                    kind: ProviderKind::ClaudeCode,
+                    settings: ProviderSettings::default(),
+                },
+            );
+        }
+        for id in ["gemini", "goose"] {
+            settings.acp_agents.insert(
+                id.into(),
+                InstalledAcpAgent {
+                    id: id.into(),
+                    name: id.into(),
+                    version: String::new(),
+                    icon: None,
+                    launch: agent::AcpLaunch::Npx {
+                        package: id.into(),
+                        args: Vec::new(),
+                        env: Vec::new(),
+                    },
+                    enabled: true,
+                    env: Vec::new(),
+                    launch_args: None,
+                },
+            );
+        }
+        let keys = [
+            "work-claude",
+            "proxy-codex",
+            "lab",
+            "acp:gemini",
+            "acp:goose",
+        ];
+        let colors: Vec<u32> = keys.iter().map(|k| settings.provider_color(k)).collect();
+        let mut distinct = colors.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), keys.len(), "{colors:06X?}");
+        for color in &colors {
+            assert!(PROVIDER_COLOR_PALETTE.contains(color));
+            assert!(
+                ![0xD97757, 0x8B5CF6, 0x4D9ABF, 0x22A06B].contains(color),
+                "custom providers never take a brand color"
+            );
+        }
+        // Deterministic across calls, and a deleted profile still has a color.
+        assert_eq!(
+            colors,
+            keys.iter()
+                .map(|k| settings.provider_color(k))
+                .collect::<Vec<_>>()
+        );
+        assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("gone")));
+    }
+
+    #[test]
+    fn card_accent_wins_over_brand_and_palette_when_valid() {
+        let mut settings = Settings::default();
+        settings.profiles.insert(
+            "work-claude".into(),
+            ProviderProfile {
+                kind: ProviderKind::ClaudeCode,
+                settings: ProviderSettings {
+                    accent_color: Some("#2563eb".into()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        settings.profiles.insert(
+            "broken".into(),
+            ProviderProfile {
+                kind: ProviderKind::Codex,
+                settings: ProviderSettings {
+                    accent_color: Some("blue".into()),
+                    ..ProviderSettings::default()
+                },
+            },
+        );
+        settings.provider_mut(ProviderKind::Codex).accent_color = Some("00FF00".into());
+        assert_eq!(settings.provider_color("work-claude"), 0x2563EB);
+        assert_eq!(settings.provider_color("codex"), 0x00FF00);
+        assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("broken")));
+        assert_eq!(settings.provider_color("claude"), 0xD97757);
     }
 
     #[test]

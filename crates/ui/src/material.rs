@@ -24,6 +24,8 @@ pub(crate) const CHAT_CONTENT_MIN_PADDING: f32 = 24.;
 /// The compact layout's page inset: content is held this far clear of both
 /// window edges. Cards inside that content inset a further [`CARD_INSET`].
 pub(crate) const COMPACT_PAGE_INSET: f32 = 16.;
+/// The touch-target height of a [`list_row`].
+pub(crate) const LIST_ROW_MIN_HEIGHT: f32 = 56.;
 /// Padding inside a card, chip or notice that already sits within a page inset.
 pub(crate) const CARD_INSET: f32 = 12.;
 /// The smallest square a finger can reliably hit.
@@ -171,7 +173,7 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
 pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stateful<Div> {
     accessible_clickable(gpui_base::h_flex(), id, Role::Button, label, cx)
         .w_full()
-        .min_h(px(56.))
+        .min_h(px(LIST_ROW_MIN_HEIGHT))
         .px(px(COMPACT_PAGE_INSET))
         .py(px(8.))
         .gap_3()
