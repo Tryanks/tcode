@@ -280,8 +280,12 @@ fn wrong_token_gets_rejected_and_closed() {
             panic!("expected text rejection");
         };
         let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["type"], "hello_rejected");
-        assert_eq!(reply["reason"], "token");
+        // The identity lets a client tell its own machine's refusal from a
+        // stranger that now answers at a stale address.
+        assert_eq!(
+            reply,
+            json!({"type": "hello_rejected", "reason": "token", "host_id": server.new_pairing_code().host_id})
+        );
         assert!(matches!(
             websocket.next().await,
             None | Some(Ok(Message::Close(_)))

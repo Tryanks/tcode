@@ -1,17 +1,61 @@
-//! DNS-SD discovery is an address hint, never authorization to connect.
+//! Address hints for reaching a machine: DNS-SD, this device's own
+//! interfaces and the gateways they imply. A hint is never authorization to
+//! connect; the transport verifies the machine identity at hello.
 use mdns_sd::ServiceDaemon;
 #[cfg(any(feature = "server", test))]
 use mdns_sd::ServiceInfo;
 #[cfg(feature = "client")]
 use mdns_sd::{ScopedIp, ServiceEvent};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "client")]
 use std::net::IpAddr;
 use std::time::Duration;
 #[cfg(feature = "client")]
 use std::time::Instant;
 
 pub const SERVICE_TYPE: &str = "_tcode._tcp.local.";
+
+/// One address of this device with its IPv4 prefix length, when known.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LocalNetwork {
+    pub ip: IpAddr,
+    pub prefix: Option<u8>,
+}
+
+/// This device's usable addresses: no loopback, no link-local, sorted and
+/// deduplicated so two snapshots compare as sets.
+pub fn local_networks() -> Vec<LocalNetwork> {
+    let mut networks: Vec<_> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| !interface.is_loopback())
+        .filter_map(|interface| match interface.addr {
+            if_addrs::IfAddr::V4(addr) if !addr.ip.is_link_local() => Some(LocalNetwork {
+                ip: addr.ip.into(),
+                prefix: Some(addr.prefixlen),
+            }),
+            if_addrs::IfAddr::V6(addr) if !addr.ip.is_unicast_link_local() => Some(LocalNetwork {
+                ip: addr.ip.into(),
+                prefix: None,
+            }),
+            _ => None,
+        })
+        .collect();
+    networks.sort();
+    networks.dedup();
+    networks
+}
+
+/// Addresses other devices can reach this machine at, as strings for pairing
+/// codes and hello.
+pub fn local_addrs() -> Vec<String> {
+    let mut addrs: Vec<_> = local_networks()
+        .into_iter()
+        .map(|network| network.ip.to_string())
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
 
 #[cfg(feature = "client")]
 #[derive(Debug, Clone, PartialEq, Eq)]
