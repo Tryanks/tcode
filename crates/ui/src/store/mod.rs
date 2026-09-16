@@ -3948,6 +3948,22 @@ mod tests {
             })
         });
 
+        // The replica above is fed by the SessionEvents baseline, which the host
+        // reads from the store independently of its own resident timeline. That
+        // timeline is hydrated by a detached load; on slow disks (Windows CI) it
+        // can still be empty here, so live events would land on nothing and the
+        // snapshot below would miss turn-1.
+        wait_until(cx, &workspace, "host resident timeline hydration", |_| {
+            let target_id = session_id.clone();
+            update_host!(&host, move |state, _| {
+                state
+                    .residents
+                    .live
+                    .get(&target_id)
+                    .is_some_and(|session| session.timeline.turns.len() == 1)
+            })
+        });
+
         let live_events = [
             AgentEvent::ItemCompleted(ThreadItem {
                 id: "user-2".into(),
