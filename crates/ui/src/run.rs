@@ -159,6 +159,8 @@ pub fn run_shell(
         },
     ));
     let captured = mounted.clone();
+    #[cfg(target_os = "macos")]
+    let window_background = options.window.window_background;
     let window = cx
         .open_window(options.window, move |window, cx| {
             window.set_window_title(&title);
@@ -176,6 +178,16 @@ pub fn run_shell(
             cx.new(|cx| OverlayHost::new(shell, window, cx))
         })
         .expect("failed to open the tcode window");
+    // A transparent macOS window gets its blur from a stock semantic material
+    // rather than GPUI's `Blurred` path; see `macos_backdrop`.
+    #[cfg(target_os = "macos")]
+    if window_background == gpui::WindowBackgroundAppearance::Transparent {
+        use crate::theme::ActiveTheme as _;
+        let _ = window.update(cx, |_, window, cx| {
+            crate::macos_backdrop::install(window, cx);
+            theme::change_mode(cx.theme().mode, Some(window), cx);
+        });
+    }
     let shell = mounted
         .borrow_mut()
         .take()

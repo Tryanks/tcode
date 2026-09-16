@@ -32,15 +32,12 @@ native-preview = [
     "dep:gpui-android",
     "dep:gpui-wry",
     "dep:wry",
-    "dep:raw-window-handle",
     "dep:preview-mcp",
     "dep:async-lock",
     "dep:objc2-core-foundation",
     "dep:objc2-image-io",
     "dep:objc2-web-kit",
     "dep:block2",
-    "dep:objc2",
-    "dep:objc2-app-kit",
     "dep:objc2-foundation",
     "dep:webview2-com",
     "dep:windows-core",
@@ -51,7 +48,7 @@ voice = ["dep:tcode-voice"]
 # macOS TCC permission status, grant and relaunch for a *local* attachment.
 local-permissions = ["dep:computer-use-mcp"]
 # Reading an image off the macOS AppKit pasteboard.
-pasteboard-image = ["dep:objc2-app-kit", "dep:objc2-foundation"]
+pasteboard-image = ["dep:objc2-foundation"]
 
 [dependencies]
 url = "2"
@@ -98,7 +95,7 @@ reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 gpui-wry = { version = "0.6.0", optional = true }
 wry = { version = "0.53.3", package = "lb-wry", features = ["mac-proxy"], optional = true }
-raw-window-handle = { version = "0.6", features = ["std"], optional = true }
+raw-window-handle = { version = "0.6", features = ["std"] }
 # Only the Windows WebContext needs it, but Cargo has no per-feature target
 # narrower than this.
 async-lock = { version = "3", optional = true }
@@ -107,8 +104,8 @@ async-lock = { version = "3", optional = true }
 tcode-voice = { path = "../voice", optional = true }
 computer-use-mcp = { path = "../computer-use-mcp", optional = true }
 block2 = { version = "0.6.2", optional = true }
-objc2 = { version = "0.6.4", optional = true }
-objc2-app-kit = { version = "0.3.2", features = ["NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "objc2-core-graphics"], optional = true }
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSAppearance", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPasteboard", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "objc2-core-graphics"] }
 objc2-foundation = { version = "0.3.2", features = ["NSDictionary", "NSError", "NSString", "NSURLError", "NSURLRequest", "block2"], optional = true }
 
 # The macOS WKWebView snapshot backend, and the navigation delegate the

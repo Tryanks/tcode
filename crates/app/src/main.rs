@@ -36,8 +36,12 @@ fn translucent_canvas_enabled() -> bool {
 }
 
 fn main_window_background() -> WindowBackgroundAppearance {
-    if cfg!(target_os = "windows") || vibrancy_enabled() {
+    if cfg!(target_os = "windows") {
         WindowBackgroundAppearance::Blurred
+    } else if vibrancy_enabled() {
+        // `run_shell` slides a stock `NSVisualEffectView` under a transparent
+        // window; GPUI's `Blurred` material stopped blurring on macOS 27.
+        WindowBackgroundAppearance::Transparent
     } else {
         WindowBackgroundAppearance::Opaque
     }
@@ -467,7 +471,7 @@ fn main() {
                 window_decorations: cfg!(target_os = "windows")
                     .then_some(WindowDecorations::Client),
                 // Persistent windows use the platform's system material:
-                // macOS blur, Windows Acrylic, or an opaque fallback.
+                // macOS sidebar vibrancy, Windows Acrylic, or an opaque fallback.
                 window_background: main_window_background(),
                 // Throttle background redraws (spinners, streaming output) to
                 // ~2 FPS while the window is inactive; gpui lifts the cap the
