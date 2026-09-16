@@ -836,7 +836,7 @@ pub enum SettingsPatch {
     SkipDeleteConfirmation(bool),
     AutoOpenTaskPanel(bool),
     LiveCommandPanelDisabled(bool),
-    ProviderColorsDisabled(bool),
+    SidebarProviderMarks(bool),
     ProviderUpdateChecksDisabled(bool),
     InactiveFrameThrottleDisabled(bool),
     AbortOnModelFallback(bool),
@@ -935,10 +935,10 @@ pub struct Settings {
     /// legacy settings keep the feature enabled.
     #[serde(default)]
     pub live_command_panel_disabled: bool,
-    /// Whether the sidebar's per-provider thread tint is DISABLED. Stored
-    /// inverted so absent legacy settings keep the colors on.
+    /// Whether sidebar thread rows show their provider's mark. Off by
+    /// default and absent in legacy files.
     #[serde(default)]
-    pub provider_colors_disabled: bool,
+    pub sidebar_provider_marks: bool,
     /// Whether the on-launch provider version check is DISABLED. Stored inverted
     /// so it remains enabled for legacy settings files that lack the field.
     #[serde(default)]
@@ -1060,7 +1060,7 @@ impl Default for Settings {
             skip_delete_confirmation: false,
             auto_open_task_panel: false,
             live_command_panel_disabled: false,
-            provider_colors_disabled: false,
+            sidebar_provider_marks: false,
             provider_update_checks_disabled: false,
             inactive_frame_throttle_disabled: false,
             abort_on_model_fallback: true,
@@ -1104,8 +1104,8 @@ impl Settings {
             SettingsPatch::LiveCommandPanelDisabled(value) => {
                 self.live_command_panel_disabled = value;
             }
-            SettingsPatch::ProviderColorsDisabled(value) => {
-                self.provider_colors_disabled = value;
+            SettingsPatch::SidebarProviderMarks(value) => {
+                self.sidebar_provider_marks = value;
             }
             SettingsPatch::ProviderUpdateChecksDisabled(value) => {
                 self.provider_update_checks_disabled = value;
@@ -1403,12 +1403,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_colors_default_on_and_patch_off() {
+    fn sidebar_provider_marks_default_off_and_patch_on() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(!legacy.provider_colors_disabled);
+        assert!(!legacy.sidebar_provider_marks);
         let mut settings = Settings::default();
-        settings.apply(SettingsPatch::ProviderColorsDisabled(true));
-        assert!(settings.provider_colors_disabled);
+        settings.apply(SettingsPatch::SidebarProviderMarks(true));
+        assert!(settings.sidebar_provider_marks);
     }
 
     #[test]

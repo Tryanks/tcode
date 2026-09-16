@@ -71,8 +71,8 @@ impl WorkspaceStore {
     pub fn set_live_command_panel_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::LiveCommandPanelDisabled(value));
     }
-    pub fn set_provider_colors_disabled(&mut self, value: bool) {
-        self.patch_settings(SettingsPatch::ProviderColorsDisabled(value));
+    pub fn set_sidebar_provider_marks(&mut self, value: bool) {
+        self.patch_settings(SettingsPatch::SidebarProviderMarks(value));
     }
     pub fn set_provider_update_checks_disabled(&mut self, value: bool) {
         self.patch_settings(SettingsPatch::ProviderUpdateChecksDisabled(value));

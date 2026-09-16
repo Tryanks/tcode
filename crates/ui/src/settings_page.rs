@@ -1220,26 +1220,25 @@ impl SettingsPage {
         let language_overridden = store.client_language_override().is_some();
         let theme_overridden = store.client_theme_override().is_some();
         let device_name_overridden = store.client_device_name_override().is_some();
-        let provider_colors_reset = self.reset_action(
-            "reset-provider-colors",
-            settings.provider_colors_disabled,
+        let provider_marks_reset = self.reset_action(
+            "reset-sidebar-provider-marks",
+            settings.sidebar_provider_marks,
             cx,
             |this, _, cx| {
-                this.dispatch_settings(|store| store.set_provider_colors_disabled(false), cx)
+                this.dispatch_settings(|store| store.set_sidebar_provider_marks(false), cx)
             },
         );
         let appearance = vec![
             self.language_row(settings.language.as_deref(), language_overridden, cx),
             self.theme_row(settings.theme_mode, theme_overridden, cx),
             self.toggle_row(
-                "provider-colors",
-                crate::tr!("settings.provider_colors.title"),
-                crate::tr!("settings.provider_colors.description"),
-                // Stored inverted: checked = enabled.
-                !settings.provider_colors_disabled,
-                provider_colors_reset,
+                "sidebar-provider-marks",
+                crate::tr!("settings.sidebar_provider_marks.title"),
+                crate::tr!("settings.sidebar_provider_marks.description"),
+                settings.sidebar_provider_marks,
+                provider_marks_reset,
                 cx,
-                |store, checked| store.set_provider_colors_disabled(!checked),
+                WorkspaceStore::set_sidebar_provider_marks,
             ),
             self.device_name_row(device_name_overridden, cx),
         ];

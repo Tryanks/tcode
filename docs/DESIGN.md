@@ -614,7 +614,7 @@ in both states.
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. With the
-   **Provider colors** switch on (the default) every thread row, child and
+   **Provider marks** switch on (off by default) every thread row, child and
    compact rows included, carries a decorative provider mark painted under
    its content: the provider's glyph (the ACP box for agents) in a square box
    that fits the row height minus an 8px inset, vertically centred and
@@ -1068,8 +1068,8 @@ label at both widths, since a switch never squeezes the text.
 
 Both the compact list and wide rail divide Settings into two captioned groups,
 in this order: **This device** contains General (appearance — theme, the
-**Provider colors** switch for the sidebar's provider marks — language and
-device name) plus Other devices wherever the build can host connections; **‹machine
+off-by-default **Provider marks** switch for the sidebar's provider marks —
+language and device name) plus Other devices wherever the build can host connections; **‹machine
 name› settings** contains Providers, Usage, Orchestrate, Computer Use, Browser
 and Archived Threads. The attached host's display name supplies ‹machine name›;
 a local attachment uses the machine name shown by the hosting panel, and a

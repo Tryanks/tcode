@@ -2141,7 +2141,7 @@ impl SessionsSidebar {
     /// The decorative provider mark painted under a thread row's content:
     /// `meta`'s protocol glyph in its provider color, fitted to the row height
     /// minus [`PROVIDER_MARK_INSET`], vertically centred and right-aligned
-    /// inside the row's `right_padding`. `None` while Provider colors is off.
+    /// inside the row's `right_padding`. `None` while Provider marks is off.
     /// It has no handlers, so the row's own hover, click and menu are unaffected.
     fn provider_mark(
         &self,
@@ -4556,11 +4556,32 @@ mod tests {
             }
         };
 
+        let set_marks = |cx: &mut VisualTestContext, enabled: bool| {
+            store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while store.read_with(cx, |store, _| store.settings().sidebar_provider_marks) != enabled
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "setting never replicated"
+                );
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        // Off by default: rows render without a mark.
+        wait_for_rows(cx);
+        for (_, mark_selector) in selectors {
+            assert!(cx.debug_bounds(mark_selector).is_none());
+        }
+
+        set_marks(cx, true);
         let rows = wait_for_rows(cx);
         for ((_, mark_selector), row) in selectors.iter().zip(&rows) {
             let mark = cx
                 .debug_bounds(mark_selector)
-                .expect("each row carries its provider mark");
+                .expect("each row carries its provider mark once enabled");
             assert!(
                 mark.top() >= row.top()
                     && mark.bottom() <= row.bottom()
@@ -4588,21 +4609,12 @@ mod tests {
             "the active row keeps the neutral selected surface"
         );
 
-        store.update(cx, |store, _| store.set_provider_colors_disabled(true));
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !store.read_with(cx, |store, _| store.settings().provider_colors_disabled) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "setting never replicated"
-            );
-            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        set_marks(cx, false);
         let rows = wait_for_rows(cx);
         for (_, mark_selector) in selectors {
             assert!(
                 cx.debug_bounds(mark_selector).is_none(),
-                "with colors off no mark is drawn"
+                "with marks off again no mark is drawn"
             );
         }
         assert!(painted_active(cx, rows[0]));
