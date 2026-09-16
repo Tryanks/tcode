@@ -58,6 +58,25 @@ fn bounded_range(
     })
 }
 
+/// Move a window start back to the record that opens its turn. The client
+/// folds only the records it holds, so a window that begins mid-turn renders a
+/// partial first turn whose entries shift as earlier pages arrive, while a
+/// window that begins where a turn begins opens its turns exactly where the
+/// full log does. Records that open no turn leave the start unchanged.
+fn turn_aligned_start(records: &[SessionEventRecord], start: usize) -> usize {
+    let mut timeline = Timeline::default();
+    let mut aligned = start;
+    let candidates = &records[..(start + 1).min(records.len())];
+    for (index, record) in candidates.iter().enumerate() {
+        let turns = timeline.turns.len();
+        timeline.apply_at(record.ts, &record.event);
+        if timeline.turns.len() > turns {
+            aligned = index;
+        }
+    }
+    aligned
+}
+
 impl AppState {
     fn history_records(&self, session_id: &str) -> std::borrow::Cow<'_, [SessionEventRecord]> {
         self.event_records.get(session_id).map_or_else(
@@ -80,7 +99,10 @@ impl AppState {
             |session| session.timeline.turns.len(),
         ) as u64;
         let after = subscription.after.filter(|after| *after <= total as u64);
-        let from = after.map_or_else(|| total.saturating_sub(400), |after| after as usize);
+        let from = after.map_or_else(
+            || turn_aligned_start(&records, total.saturating_sub(400)),
+            |after| after as usize,
+        );
         let empty = HostMessage::Event(EventEnvelope {
             request_id: Some(u64::MAX),
             topic: subscription.topic.clone(),
@@ -117,7 +139,7 @@ impl AppState {
         let records = self.history_records(session_id);
         let end = before.min(records.len() as u64) as usize;
         let count = (limit as usize).clamp(1, SESSION_HISTORY_RECORDS);
-        let requested = end.saturating_sub(count)..end;
+        let requested = turn_aligned_start(&records, end.saturating_sub(count))..end;
         let empty = HostMessage::QueryResult {
             id: u64::MAX,
             result: Ok(QueryResponse::SessionHistoryPage {
