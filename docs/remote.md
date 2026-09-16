@@ -534,7 +534,9 @@ reported as unreachable.
   access isolation.
 - A device's terminal scrollback is the machine's retained ring, capped at
   **1000 rows**. Older output is gone from the machine too, so no device can
-  scroll further back than that.
+  scroll further back than that. During a large output burst the visible screen
+  keeps updating, while scrollback catches up after scrolling has stopped for
+  100 ms. This avoids repeatedly sending the whole retained ring between PTY reads.
 - The terminal renders text. In-grid images (sixel, iTerm2, kitty graphics) are
   not supported on any device, including the machine's own desktop window.
 - Android has an embedded WebView preview with history, JavaScript automation,

@@ -21,6 +21,10 @@ pub(crate) const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// whole ring on every frame.
 const HISTORY_STREAM_BUDGET: usize = 256;
 
+/// PTY reads can have short gaps during a flood, especially under CPU load.
+/// Wait for scrolling to stop before republishing deferred scrollback.
+const HISTORY_QUIET_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Rebuild the frame rather than growing the interned style table past this.
 /// Cell style ids are `u16`, so an unbounded table would eventually alias.
 const STYLE_TABLE_LIMIT: usize = 4096;
@@ -39,9 +43,9 @@ pub(crate) struct TerminalProjection {
     pub(crate) frame: TerminalFrame,
     /// Lines that had scrolled off when `frame` was last advanced.
     scrolled: u64,
-    /// A burst exceeded [`HISTORY_STREAM_BUDGET`]; the next calm delta
-    /// republishes the whole retained scrollback.
-    history_backlog: bool,
+    /// A burst exceeded [`HISTORY_STREAM_BUDGET`]. Republish the retained
+    /// scrollback after this deadline, postponed by each new scrolled row.
+    history_deadline: Option<Instant>,
     /// A projection is already scheduled; further wakeups coalesce into it.
     pub(crate) scheduled: bool,
     pub(crate) last_projected: Instant,
@@ -55,7 +59,7 @@ impl TerminalProjection {
         Self {
             frame: TerminalFrame::default(),
             scrolled: 0,
-            history_backlog: false,
+            history_deadline: None,
             scheduled: false,
             // Far enough in the past that the first wakeup projects immediately.
             last_projected: Instant::now() - FRAME_INTERVAL,
@@ -88,7 +92,7 @@ impl TerminalProjection {
             exit_code: snapshot.exit_code,
         };
         self.scrolled = snapshot.lines_evicted + snapshot.history_size as u64;
-        self.history_backlog = false;
+        self.history_deadline = None;
         self.last_cwd = Instant::now();
         self.frame.clone()
     }
@@ -108,7 +112,10 @@ impl TerminalProjection {
             && !self.frame.history.is_empty();
         let republish = swapped
             || reflowed
-            || (self.history_backlog && pending <= HISTORY_STREAM_BUDGET as u64);
+            || (pending == 0
+                && self
+                    .history_deadline
+                    .is_some_and(|deadline| self.last_projected >= deadline));
         let (since, budget) = if republish {
             (0, HISTORY_LIMIT)
         } else {
@@ -142,7 +149,7 @@ impl TerminalProjection {
         let scrolled = snapshot.lines_evicted + snapshot.history_size as u64;
         let appended = scrolled.saturating_sub(self.scrolled) as usize;
         let history = if republish {
-            self.history_backlog = false;
+            self.history_deadline = None;
             // ponytail: the whole ring goes back on the wire. Diffing reflowed
             // scrollback would need row identity the emulator does not expose;
             // revisit if a width drag over a full ring is measurably heavy.
@@ -151,7 +158,7 @@ impl TerminalProjection {
             ))
         } else if appended == 0 {
             None
-        } else if appended <= snapshot.history_rows.len() {
+        } else if self.history_deadline.is_none() && appended <= snapshot.history_rows.len() {
             let start = snapshot.history_rows.len() - appended;
             Some(TerminalHistoryUpdate::Appended(
                 (start..snapshot.history_rows.len())
@@ -159,7 +166,7 @@ impl TerminalProjection {
                     .collect(),
             ))
         } else {
-            self.history_backlog = true;
+            self.history_deadline = Some(self.last_projected + HISTORY_QUIET_INTERVAL);
             None
         };
         self.scrolled = scrolled;
@@ -229,7 +236,7 @@ impl TerminalProjection {
     /// projection, because the terminal may now be idle and produce no further
     /// wakeup of its own.
     pub(crate) fn owes_history(&self) -> bool {
-        self.history_backlog
+        self.history_deadline.is_some()
     }
 }
 

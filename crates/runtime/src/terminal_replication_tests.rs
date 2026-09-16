@@ -1,5 +1,5 @@
 //! The replicated terminal grid, exercised through the production pipe and the
-//! fan-out mux rather than against `AppState` directly.
+//! fan-out mux, plus controlled projection timing for the burst wire budget.
 //!
 //! Every assertion here compares a client's reconstructed model with the host
 //! emulator's own grid, which is the whole point of the projection: a
@@ -286,11 +286,15 @@ impl Session {
         }
     }
 
-    /// Replace the user's login shell with plain sh and silence its prompt, so
-    /// nothing prints asynchronously behind the assertions. Sentinels are
-    /// octal-escaped so the shell's echo of the typed line never matches.
+    /// Replace the user's login shell with plain sh and silence its prompt.
+    /// An explicit title also prevents foreground-process polling from changing
+    /// metadata between replica comparisons. Sentinels are octal-escaped so
+    /// the shell's echo of the typed line never matches.
     fn plain_shell(&self) {
-        self.send("exec /bin/sh\rPS1=; printf '\\122\\105\\101\\104\\131\\n'\r");
+        self.send(concat!(
+            "exec /bin/sh\rPS1=; printf '\\033]2;replication-test\\007",
+            "\\122\\105\\101\\104\\131\\n'\r",
+        ));
         self.wait_for("READY");
     }
 
@@ -578,13 +582,11 @@ fn deltas_carry_only_changed_rows_and_stop_when_the_grid_is_quiet() {
     session.shutdown();
 }
 
-/// A megabytes-per-second flood must cost the wire a fraction of the raw
-/// stream. Coalescing bounds the delta rate, row-level diffing keeps a scrolling
-/// screen cheap, and scrollback that outruns its budget is republished once when
-/// the burst settles rather than streamed row by row.
+/// A real PTY flood must eventually publish the complete retained history,
+/// including a final scheduled flush after the shell has stopped producing output.
 #[cfg(unix)]
 #[test]
-fn a_two_megabyte_burst_costs_far_less_than_its_bytes() {
+fn a_two_megabyte_pty_burst_catches_up_after_output_stops() {
     let session = terminal_session();
     let mut replica = Replica::attach(&session.link, session.events.clone(), session.terminal_id);
     session.plain_shell();
@@ -593,28 +595,90 @@ fn a_two_megabyte_burst_costs_far_less_than_its_bytes() {
 
     session.send("yes | head -c 2000000; printf '\\131\\105\\123\\104\\117\\116\\105\\n'\r");
     session.wait_for("YESDONE");
-    let (mut deltas, mut bytes) = (0usize, 0usize);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        while let Ok(envelope) = replica.events.try_recv() {
-            let ServerEvent::TerminalDelta { delta, .. } = &envelope.event else {
-                continue;
-            };
-            deltas += 1;
-            bytes += tcode_protocol::encode_line(&envelope.event).unwrap().len();
-            replica.frame.apply(delta);
-        }
-        if difference(&replica.frame, &host_frame(&session.terminal)).is_none() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the replica never caught up");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    replica.settle(&session.terminal);
     assert_eq!(replica.frame.history.len(), HISTORY_LIMIT);
-    assert!(
-        bytes < 500_000,
-        "{bytes} B over {deltas} deltas for 2 MB of output"
-    );
 
+    session.shutdown();
+}
+
+/// Short gaps between PTY reads must not repeatedly ship the retained ring.
+/// The projection cadence is controlled here so CPU speed cannot change the budget.
+#[cfg(unix)]
+#[test]
+fn bursty_scrollback_waits_for_a_stable_gap_before_republishing() {
+    use crate::terminal::{TerminalProjection, TerminalUpdate};
+
+    let session = terminal_session();
+    session.plain_shell();
+    session.resize(100, 30);
+    let mut projection = TerminalProjection::new();
+    let mut replica = projection.reset(&session.terminal);
+    let start = Instant::now();
+    let chunk = b"y\r\n".repeat(10_000);
+    let mut bytes = 0;
+    let mut last_output = start;
+    for tick in 0..128 {
+        let now = start + Duration::from_millis(tick * 16);
+        if tick % 2 == 0 {
+            session.terminal.grid().feed(&chunk);
+            last_output = now;
+        }
+        projection.last_projected = now;
+        match projection.update(&session.terminal) {
+            Some(TerminalUpdate::Delta(delta)) => {
+                assert!(
+                    delta.history.is_none(),
+                    "a one-frame gap republished scrollback"
+                );
+                bytes += tcode_protocol::encode_line(&ServerEvent::TerminalDelta {
+                    terminal_id: session.terminal_id,
+                    delta: Box::new(delta.clone()),
+                })
+                .unwrap()
+                .len();
+                replica.apply(&delta);
+            }
+            Some(TerminalUpdate::Frame(_)) => panic!("the burst replaced the whole frame"),
+            None => {}
+        }
+    }
+    // Even a small tail must stay deferred: appending it would leave a hole
+    // where the earlier burst belongs, and must restart the quiet interval.
+    session.terminal.grid().feed(b"tail\r\n");
+    last_output += Duration::from_millis(32);
+    projection.last_projected = last_output;
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+        panic!("the tail must update the visible screen");
+    };
+    assert!(delta.history.is_none());
+    bytes += tcode_protocol::encode_line(&ServerEvent::TerminalDelta {
+        terminal_id: session.terminal_id,
+        delta: Box::new(delta.clone()),
+    })
+    .unwrap()
+    .len();
+    replica.apply(&delta);
+    projection.last_projected = last_output + Duration::from_millis(99);
+    assert!(projection.update(&session.terminal).is_none());
+    projection.last_projected = last_output + Duration::from_millis(100);
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+        panic!("a stable gap must flush the retained history");
+    };
+    assert!(
+        matches!(&delta.history, Some(tcode_protocol::terminal::TerminalHistoryUpdate::Replaced(rows)) if rows.len() == HISTORY_LIMIT)
+    );
+    bytes += tcode_protocol::encode_line(&ServerEvent::TerminalDelta {
+        terminal_id: session.terminal_id,
+        delta: Box::new(delta.clone()),
+    })
+    .unwrap()
+    .len();
+    replica.apply(&delta);
+    assert!(!projection.owes_history());
+    assert!(difference(&replica, &host_frame(&session.terminal)).is_none());
+    assert!(
+        bytes < chunk.len() * 64 / 4,
+        "{bytes} bytes for a 1.92 MB burst"
+    );
     session.shutdown();
 }
