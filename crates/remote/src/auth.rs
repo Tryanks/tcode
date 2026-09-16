@@ -40,6 +40,21 @@ pub(crate) struct Device {
     pub name: String,
     pub token_sha256_hex: String,
     pub created_unix: u64,
+    /// The client's own persistent id; pairing again with it rotates this
+    /// record's token instead of adding a second one. Absent for records made
+    /// by clients that predate device ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Operating system name and version as last reported by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+/// What a client reports about itself while pairing, logging in or saying hello.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceDetails {
+    pub name: String,
+    pub platform: Option<String>,
 }
 
 impl AuthStore {
@@ -138,18 +153,56 @@ impl AuthStore {
         false
     }
 
-    pub fn issue_token(&mut self, device_name: String) -> io::Result<String> {
+    /// Issue a fresh token. A client that presents the `client_id` of an
+    /// existing record keeps that record — its id and first-connection time —
+    /// with the token rotated and its details refreshed, so the previous token
+    /// stops validating; any other client gets a new record.
+    pub fn issue_token(
+        &mut self,
+        client_id: Option<String>,
+        details: DeviceDetails,
+    ) -> io::Result<String> {
         let mut bytes = [0_u8; 32];
         getrandom::fill(&mut bytes).map_err(io::Error::other)?;
         let token = URL_SAFE_NO_PAD.encode(bytes);
-        self.devices.push(Device {
-            id: Uuid::new_v4(),
-            name: device_name,
-            token_sha256_hex: hex_hash(token.as_bytes()),
-            created_unix: unix_now(),
+        let token_sha256_hex = hex_hash(token.as_bytes());
+        let existing = client_id.as_ref().and_then(|client_id| {
+            self.devices
+                .iter_mut()
+                .find(|device| device.client_id.as_ref() == Some(client_id))
         });
+        match existing {
+            Some(device) => {
+                device.token_sha256_hex = token_sha256_hex;
+                device.name = details.name;
+                device.platform = details.platform;
+            }
+            None => self.devices.push(Device {
+                id: Uuid::new_v4(),
+                name: details.name,
+                token_sha256_hex,
+                created_unix: unix_now(),
+                client_id,
+                platform: details.platform,
+            }),
+        }
         self.save()?;
         Ok(token)
+    }
+
+    /// Reflect what a connected device now calls itself, so a rename or an OS
+    /// upgrade shows on the host without pairing again. Writes only on change.
+    pub fn refresh_device(&mut self, token: &str, details: DeviceDetails) -> io::Result<()> {
+        let Some(index) = self.device_for_token(token) else {
+            return Ok(());
+        };
+        let device = &mut self.devices[index];
+        if device.name == details.name && device.platform == details.platform {
+            return Ok(());
+        }
+        device.name = details.name;
+        device.platform = details.platform;
+        self.save()
     }
 
     /// Drop a paired device by id. Returns whether anything was removed.
@@ -164,11 +217,15 @@ impl AuthStore {
     }
 
     pub fn token_is_valid(&self, token: &str) -> bool {
+        self.device_for_token(token).is_some()
+    }
+
+    fn device_for_token(&self, token: &str) -> Option<usize> {
         if token.len() != 43 {
-            return false;
+            return None;
         }
         let candidate = Sha256::digest(token.as_bytes());
-        self.devices.iter().any(|device| {
+        self.devices.iter().position(|device| {
             let Some(expected) = decode_hex(&device.token_sha256_hex) else {
                 return false;
             };
@@ -240,11 +297,111 @@ fn enabled_by_default() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn phone(name: &str) -> DeviceDetails {
+        DeviceDetails {
+            name: name.into(),
+            platform: Some("Android 15".into()),
+        }
+    }
+
+    #[test]
+    fn pairing_again_with_the_same_client_id_rotates_one_record() {
+        let root = std::env::temp_dir().join(format!("tcode-repair-{}", Uuid::new_v4()));
+        let mut auth = AuthStore::open(&root, "host").unwrap();
+        let first = auth
+            .issue_token(Some("phone-id".into()), phone("24129PN74C"))
+            .unwrap();
+        let record = auth.devices[0].clone();
+        auth.devices[0].created_unix -= 60;
+        auth.save().unwrap();
+        let second = auth
+            .issue_token(
+                Some("phone-id".into()),
+                DeviceDetails {
+                    name: "Xiaomi 15".into(),
+                    platform: Some("Android 16".into()),
+                },
+            )
+            .unwrap();
+        let legacy = auth.issue_token(None, phone("older app")).unwrap();
+        let auth = AuthStore::open(&root, "host").unwrap();
+        assert!(!auth.token_is_valid(&first));
+        assert!(auth.token_is_valid(&second));
+        assert!(auth.token_is_valid(&legacy));
+        assert_eq!(auth.devices.len(), 2);
+        assert_eq!(auth.devices[0].id, record.id);
+        assert_eq!(auth.devices[0].created_unix, record.created_unix - 60);
+        assert_eq!(auth.devices[0].name, "Xiaomi 15");
+        assert_eq!(auth.devices[0].platform.as_deref(), Some("Android 16"));
+        assert_eq!(auth.devices[1].client_id, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hello_refreshes_details_by_token_and_saves_only_on_change() {
+        let root = std::env::temp_dir().join(format!("tcode-refresh-{}", Uuid::new_v4()));
+        let mut auth = AuthStore::open(&root, "host").unwrap();
+        let token = auth
+            .issue_token(Some("phone-id".into()), phone("Phone"))
+            .unwrap();
+        // Removing the file makes any write observable.
+        fs::remove_file(root.join("remote.json")).unwrap();
+        auth.refresh_device(&token, phone("Phone")).unwrap();
+        auth.refresh_device("not-a-token", phone("Intruder"))
+            .unwrap();
+        assert!(!root.join("remote.json").exists());
+        auth.refresh_device(
+            &token,
+            DeviceDetails {
+                name: "Phone".into(),
+                platform: Some("Android 16".into()),
+            },
+        )
+        .unwrap();
+        let reopened = AuthStore::open(&root, "host").unwrap();
+        assert_eq!(reopened.devices[0].name, "Phone");
+        assert_eq!(reopened.devices[0].platform.as_deref(), Some("Android 16"));
+        assert_eq!(reopened.devices[0].client_id.as_deref(), Some("phone-id"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_json_without_client_ids_or_platforms_still_loads() {
+        let root = std::env::temp_dir().join(format!("tcode-legacy-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("remote.json"),
+            br#"{
+              "host_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
+              "host_name": "host",
+              "devices": [{
+                "id": "9a7c1e2d-5b6f-4a3c-8d9e-0f1a2b3c4d5e",
+                "name": "old phone",
+                "token_sha256_hex": "00",
+                "created_unix": 1700000000
+              }],
+              "password": null,
+              "pairing_enabled": true
+            }"#,
+        )
+        .unwrap();
+        let mut auth = AuthStore::open(&root, "host").unwrap();
+        assert_eq!(auth.devices[0].name, "old phone");
+        assert_eq!(auth.devices[0].client_id, None);
+        assert_eq!(auth.devices[0].platform, None);
+        // A client id never matches a record that has none.
+        auth.issue_token(Some("new-id".into()), phone("new phone"))
+            .unwrap();
+        assert_eq!(auth.devices.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn password_hash_persists_and_password_changes_keep_or_revoke_tokens() {
         let root = std::env::temp_dir().join(format!("tcode-password-{}", Uuid::new_v4()));
         let mut auth = AuthStore::open(&root, "host").unwrap();
-        let token = auth.issue_token("existing phone".into()).unwrap();
+        let token = auth.issue_token(None, phone("existing phone")).unwrap();
         assert!(!auth.verify_password("password"));
         assert!(auth.set_password("short", false).is_err());
         auth.set_password("test password", false).unwrap();

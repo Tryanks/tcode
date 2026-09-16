@@ -32,7 +32,8 @@ use smol::prelude::*;
 use smol::process::Stdio;
 
 pub use crate::claude_context::{
-    format_context_window, parse_context_window_tokens, resolved_context_window,
+    CONTEXT_WINDOW_SUFFIXES, format_context_window, parse_context_window_tokens,
+    resolved_context_window, strip_context_window_suffix,
 };
 use crate::claude_manifest::{CatalogModel, ClaudeCatalog};
 use crate::{
@@ -400,8 +401,8 @@ fn mcp_args(registrations: &[crate::McpRegistration]) -> Vec<String> {
 
 /// Model-scoped launch flags resolved from the session's option selections.
 struct ClaudeLaunchOptions {
-    /// Model id with the manifest's context-window suffix (e.g. `[1m]`) when
-    /// the selected window needs it.
+    /// Model id with the manifest's context-window suffix (e.g. `[1m]`) only
+    /// when the selected window exceeds what the bare slug already opens.
     model_id: Option<String>,
     /// `--effort` value after the manifest's `effortMap` (`None` when the
     /// selection maps to no flag, e.g. `ultrathink`, a prompt-prefix mode).
@@ -457,8 +458,12 @@ impl ClaudeLaunchOptions {
         };
 
         let window = catalog.resolved_context_window(model.unwrap_or_default(), selections);
+        // Aliases (`opus`, `claude-opus-5.0`) launch as their canonical slug.
         let model_id = model.map(|model| {
-            let base = model.split('[').next().unwrap_or(model);
+            let base = spec.map_or_else(
+                || model.split('[').next().unwrap_or(model),
+                |spec| spec.id.as_str(),
+            );
             let suffix = entry.map_or("", |entry| entry.context_window_suffix(window));
             format!("{base}{suffix}")
         });
@@ -3728,6 +3733,34 @@ mod tests {
     }
 
     #[test]
+    fn strip_context_window_suffix_is_an_explicit_list() {
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[1m]"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[1M]"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[2m]"),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5"),
+            "claude-opus-5"
+        );
+        // Unlisted brackets are left alone: no `[*]` wildcard.
+        assert_eq!(
+            strip_context_window_suffix("claude-opus-5[3m]"),
+            "claude-opus-5[3m]"
+        );
+        assert_eq!(strip_context_window_suffix("opus[1m][2m]"), "opus[1m]");
+        assert_eq!(strip_context_window_suffix("[1m]"), "");
+        assert_eq!(CONTEXT_WINDOW_SUFFIXES, &["[1m]", "[2m]"]);
+    }
+
+    #[test]
     fn context_window_launch_semantics() {
         let catalog = crate::claude_manifest::test_catalog();
         let resolve = |model: &str, value: Option<Value>| {
@@ -3740,12 +3773,15 @@ mod tests {
         let auto_compact =
             |launch: &ClaudeLaunchOptions| settings(launch)["autoCompactWindow"].clone();
 
-        // Default window of a 1M-default profile: the manifest suffix is sent.
-        let launch = resolve("test-wide", None);
-        assert_eq!(launch.model_id.as_deref(), Some("test-wide[1m]"));
-        assert!(launch.settings_json.is_none());
+        // Default window of a 1M-default profile: the bare slug already runs
+        // at 1M, so no suffix is sent (and none is needed for `1m` either).
+        for value in [None, Some(json!("1m"))] {
+            let launch = resolve("test-wide", value);
+            assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
+            assert!(launch.settings_json.is_none());
+        }
         assert_eq!(catalog.resolved_context_window("test-wide", &[]), 1_000_000);
-        // A suffixed id resolves to the same model.
+        // A suffixed id still resolves to the same model.
         assert_eq!(
             catalog.resolved_context_window("test-wide[1m]", &[]),
             1_000_000
@@ -3756,7 +3792,7 @@ mod tests {
         assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
         assert_eq!(auto_compact(&launch), json!(200_000));
         let launch = resolve("test-wide", Some(json!(500_000)));
-        assert_eq!(launch.model_id.as_deref(), Some("test-wide[1m]"));
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
         assert_eq!(auto_compact(&launch), json!(500_000));
 
         // 200k-default profile: only the 1M expansion carries the suffix.
@@ -3783,6 +3819,13 @@ mod tests {
         let launch = resolve("test-fixed", Some(json!(500_000)));
         assert_eq!(launch.model_id.as_deref(), Some("test-fixed"));
         assert_eq!(auto_compact(&launch), json!(500_000));
+
+        // An alias launches as the canonical slug with the same semantics.
+        let launch = resolve("WIDE", Some(json!("200k")));
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
+        assert_eq!(auto_compact(&launch), json!(200_000));
+        let launch = resolve("test-wide.0[1m]", None);
+        assert_eq!(launch.model_id.as_deref(), Some("test-wide"));
 
         // No context data at all falls back to 200k and never emits settings.
         assert_eq!(catalog.resolved_context_window("test-plain", &[]), 200_000);

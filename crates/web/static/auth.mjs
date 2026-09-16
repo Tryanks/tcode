@@ -1,8 +1,26 @@
 // Password authentication belongs to the serving browser origin. Native clients
 // continue exchanging six-digit codes through /pair.
-export async function authenticate(api, password, configured, deviceName) {
+export async function authenticate(api, password, configured, device) {
   if (!configured) await api('/auth/setup', { password });
-  return api('/auth/login', { password, device_name: deviceName });
+  return api('/auth/login', { password, ...device });
+}
+
+// The same key the shell reads, so logging in again rotates this browser's
+// record on the host instead of adding one. The shell's hello then reports the
+// browser family and operating system.
+export function deviceIdentity(storage, mintId) {
+  let id = storage.getItem('tcode.device_id');
+  if (!id) {
+    id = mintId();
+    storage.setItem('tcode.device_id', id);
+  }
+  return { device_id: id, device_name: 'Browser' };
+}
+
+// `crypto.randomUUID` needs a secure context, which a LAN `http://` page is not.
+function randomId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 export async function authorizeBrowser() {
@@ -71,7 +89,7 @@ export async function authorizeBrowser() {
           const result = await api(path, body);
           if (path === '/auth/setup') state.configured = true;
           return result;
-        }, password.value, state.configured, 'Browser');
+        }, password.value, state.configured, deviceIdentity(localStorage, randomId));
         const host = { host_id: paired.host_id, name: paired.host_name, token: paired.token, origin: location.origin };
         hosts = hosts.filter(saved => saved.host_id !== host.host_id); hosts.push(host);
         localStorage.setItem('tcode.hosts', JSON.stringify(hosts));

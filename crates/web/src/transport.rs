@@ -8,7 +8,7 @@ use futures_lite::future::race;
 use tcode_client::{
     ConnectionFailure, ConnectionState,
     heartbeat::{Heartbeat, Tick},
-    host::Transport,
+    host::{DeviceIdentity, Transport},
     outgoing::{OutgoingReceiver, subscription_key},
     recovery::Backoff,
 };
@@ -139,14 +139,14 @@ impl Drop for Socket {
     }
 }
 
-pub fn connect(token: String, device_name: String) -> Transport {
+pub fn connect(token: String, device: DeviceIdentity) -> Transport {
     let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
     wasm_bindgen_futures::spawn_local(async move {
         // Receiver-only closure must also wake an idle connection/backoff.
         race(
-            connection_loop(token, device_name, &outgoing, &incoming, &state_tx),
+            connection_loop(token, device, &outgoing, &incoming, &state_tx),
             async {
                 race(incoming.closed(), state_tx.closed()).await;
             },
@@ -177,7 +177,7 @@ async fn next(outgoing: &OutgoingReceiver, events: &Receiver<Event>) -> Input {
 
 async fn connection_loop(
     token: String,
-    device_name: String,
+    device: DeviceIdentity,
     outgoing: &OutgoingReceiver,
     incoming: &Sender<String>,
     state: &Sender<ConnectionState>,
@@ -250,8 +250,7 @@ async fn connection_loop(
                         }
                     }
                     Input::Event(Event::Open) => {
-                        let hello = serde_json::json!({"type":"hello", "protocol_version":3, "supported_versions":[3,tcode_protocol::PROTOCOL_VERSION], "token":token, "device_name":device_name});
-                        if socket.send(&hello.to_string()).is_err() {
+                        if socket.send(&device.hello_line(&token)).is_err() {
                             break;
                         }
                     }

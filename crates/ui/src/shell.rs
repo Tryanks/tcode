@@ -2440,6 +2440,14 @@ mod tests {
             "returning phone".into()
         }
 
+        fn device_id(&self) -> String {
+            "returning-phone".into()
+        }
+
+        fn device_platform(&self) -> Option<String> {
+            None
+        }
+
         fn load_hosts(&self) -> Vec<tcode_client::pairing::PairedHost> {
             if self.machine_exists {
                 vec![self.saved.clone()]

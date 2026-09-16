@@ -599,7 +599,14 @@ impl Timeline {
             AgentEvent::ServedModel { model, reason } => {
                 let turn = self.ensure_turn(ts);
                 self.turns[turn].served_model = Some(model.clone());
-                if self.last_served_model.as_deref() != Some(model.as_str()) {
+                // A `[1m]` launch id and the bare id the API reports back
+                // name the same model, so that pair draws no divider.
+                let same_model = self
+                    .last_served_model
+                    .as_deref()
+                    .map(agent::claude::strip_context_window_suffix)
+                    == Some(agent::claude::strip_context_window_suffix(model));
+                if !same_model {
                     let from = self.last_served_model.clone();
                     let id = self.synthetic_id("model");
                     self.entries.push(Arc::new(TimelineEntry {
@@ -612,8 +619,8 @@ impl Timeline {
                         ts,
                         turn,
                     }));
-                    self.last_served_model = Some(model.clone());
                 }
+                self.last_served_model = Some(model.clone());
             }
             AgentEvent::TurnStarted { turn_id } => {
                 if let Some(usage) = self.usage.as_mut()
@@ -3397,6 +3404,39 @@ mod tests {
         // The second turn starts from a clean clock — no leakage across turns.
         assert_eq!(timeline.turns[1].timing.unwrap().tool_ms, 0);
         assert_eq!(timeline.turns[1].timing.unwrap().total_ms, 4_000);
+    }
+
+    #[test]
+    fn served_model_without_1m_suffix_is_not_a_model_change() {
+        let timeline = Timeline::fold_events([
+            AgentEvent::SessionStarted {
+                provider_session_id: "session".into(),
+                resume: ResumeCursor(json!({})),
+                model: Some("claude-opus-5[1m]".into()),
+            },
+            user_msg("user", "hello"),
+            AgentEvent::ServedModel {
+                model: "claude-opus-5".into(),
+                reason: None,
+            },
+            // Only the listed context suffixes are ignored, not any bracket.
+            AgentEvent::ServedModel {
+                model: "claude-opus-5[3m]".into(),
+                reason: None,
+            },
+        ]);
+        let changes = timeline
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.content {
+                EntryContent::ModelChanged { from, to, .. } => Some((from.clone(), to.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changes,
+            vec![(Some("claude-opus-5".into()), "claude-opus-5[3m]".into())]
+        );
     }
 
     #[test]
