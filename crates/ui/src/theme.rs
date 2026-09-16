@@ -347,6 +347,8 @@ pub fn change_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
     };
     cx.set_global(base_theme);
     cx.set_global(theme);
+    #[cfg(target_os = "macos")]
+    crate::macos_backdrop::sync_appearance(mode, cx);
     if let Some(window) = window {
         window.refresh();
     }

@@ -108,7 +108,7 @@ The material layers are:
 
 | Layer | Use | Treatment |
 | --- | --- | --- |
-| T0 | Sidebar and window edges | Translucent theme canvas over the native window material |
+| T0 | Sidebar and window edges | Native window material; the theme canvas tints it only where the material carries no tint of its own (Windows) |
 | T1 | Chat, right panel and Settings reading surfaces | Near-opaque warm paper in light mode, blue carbon in dark mode |
 | T2 | Inline fields, hover and selection | Theme-derived tints |
 | T3 | Composer, popovers, dialogs, menus and toasts | Opaque popover fill, hairline border and soft shadow |
@@ -128,13 +128,24 @@ from the command palette and sheets. They darken the page in both themes.
 
 ## Window material
 
-The persistent main window uses native backdrop material: macOS keeps its
-existing blurred vibrancy, while Windows deliberately uses GPUI's
-`WindowBackgroundAppearance::Blurred`, which the locked Windows backend maps to
-Acrylic Accent state 4. Mica was rejected because it did not provide the
-perceptible live background-through blur required in the exposed T0 sidebar and
-window-edge regions. Both native materials retain the embedded theme's
-translucent canvas so the system backdrop can show through.
+The persistent main window uses native backdrop material. macOS opens a
+`WindowBackgroundAppearance::Transparent` window and slides a stock
+`NSVisualEffectView` (`.sidebar` material, behind-window blending, following
+the window's active state) under the GPUI view
+([macos_backdrop.rs](../crates/ui/src/macos_backdrop.rs)). The material is
+left exactly as AppKit builds it, so it follows Reduce Transparency and the
+macOS 27 Liquid Glass slider, and it is pinned to the theme mode so a forced
+dark palette never sits on a light material. Because the system tint already
+carries the T0 tone, the theme canvas ([`material::canvas`](../crates/ui/src/material.rs))
+is fully transparent on macOS. GPUI's own `Blurred` path is not used on macOS:
+it strips the material's tint layers and depends on the `.selection` material
+for blur, which carries no backdrop layer on macOS 27.
+
+Windows deliberately uses GPUI's `WindowBackgroundAppearance::Blurred`, which
+the locked Windows backend maps to Acrylic Accent state 4. Mica was rejected
+because it did not provide the perceptible live background-through blur
+required in the exposed T0 sidebar and window-edge regions. Acrylic carries no
+tint of its own, so Windows keeps the embedded theme's translucent canvas over it.
 `TCODE_NO_VIBRANCY=1` keeps its macOS-only
 diagnostic behavior: an opaque window with a flattened canvas. Linux and other
 platforms remain opaque and flatten that canvas to its solid RGB base. In-app
