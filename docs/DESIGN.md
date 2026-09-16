@@ -616,10 +616,11 @@ in both states.
    while naming) + relative time (muted 11px); hover = accent bg. With the
    **Provider colors** switch on (the default) every thread row, child and
    compact rows included, carries a decorative provider mark painted under
-   its content: the provider's glyph (the ACP box for agents) at ~1.25× the
-   row height, vertically centred, anchored to the right edge and pushed
-   slightly past it so the row's clip cuts it, filled with the provider's
-   color at low alpha. The color is the provider card's accent when one is
+   its content: the provider's glyph (the ACP box for agents) in a square box
+   that fits the row height minus an 8px inset, vertically centred and
+   right-aligned inside the row's own horizontal padding — nothing overhangs
+   and the row gains no clipping — filled with the provider's color at low
+   alpha. The color is the provider card's accent when one is
    set, else the built-in brand color, else a stable palette slot for each
    user profile or ACP agent (owner: `Settings::provider_color` in
    `crates/core`). The mark takes no input and changes no geometry; the

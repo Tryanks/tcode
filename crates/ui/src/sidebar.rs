@@ -38,11 +38,11 @@ use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
 /// The provider mark behind a thread row: its provider's glyph at this alpha,
-/// scaled to this multiple of the row height and pushed past the right edge by
-/// this much so the row's clip cuts it.
-const PROVIDER_MARK_ALPHA: f32 = 0.14;
-const PROVIDER_MARK_SCALE: f32 = 1.25;
-const PROVIDER_MARK_OVERHANG: f32 = 6.;
+/// sized to the row height minus this vertical inset so it sits inside the row.
+const PROVIDER_MARK_ALPHA: f32 = 0.18;
+const PROVIDER_MARK_INSET: f32 = 8.;
+/// Horizontal padding of the grouped and flat thread rows (`px_2` / `pr_2`).
+const THREAD_ROW_PADDING_X: f32 = 8.;
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
@@ -2139,32 +2139,42 @@ impl SessionsSidebar {
     }
 
     /// The decorative provider mark painted under a thread row's content:
-    /// `meta`'s protocol glyph in its provider color, vertically centred and
-    /// hanging off the right edge. `None` while Provider colors is off. It has
-    /// no handlers, so the row's own hover, click and menu are unaffected.
-    fn provider_mark(&self, meta: &SessionMeta, row_height: f32, cx: &App) -> Option<gpui::Div> {
+    /// `meta`'s protocol glyph in its provider color, fitted to the row height
+    /// minus [`PROVIDER_MARK_INSET`], vertically centred and right-aligned
+    /// inside the row's `right_padding`. `None` while Provider colors is off.
+    /// It has no handlers, so the row's own hover, click and menu are unaffected.
+    fn provider_mark(
+        &self,
+        meta: &SessionMeta,
+        row_height: f32,
+        right_padding: f32,
+        cx: &App,
+    ) -> Option<gpui::Div> {
         let color: gpui::Hsla = gpui::rgb(self.store.read(cx).provider_color(meta)?).into();
         let glyph = match meta.provider {
             // ACP agents share the box glyph the composer rail and ACP panel use.
             agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
             kind => crate::provider_card::provider_glyph(kind),
         };
-        let size = px((row_height * PROVIDER_MARK_SCALE).round());
+        let size = px(row_height - PROVIDER_MARK_INSET);
         let id = meta.id.clone();
         Some(
             div()
                 .absolute()
                 .top_0()
                 .bottom_0()
-                .right(px(-PROVIDER_MARK_OVERHANG))
-                .w(size)
+                .right(px(right_padding))
                 .flex()
                 .items_center()
-                .debug_selector(move || format!("sidebar-provider-mark-{id}"))
                 .child(
-                    glyph
+                    div()
                         .size(size)
-                        .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
+                        .debug_selector(move || format!("sidebar-provider-mark-{id}"))
+                        .child(
+                            glyph
+                                .size(size)
+                                .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
+                        ),
                 ),
         )
     }
@@ -2453,12 +2463,12 @@ impl SessionsSidebar {
             .items_center()
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
-            .pr_2()
+            .pr(px(THREAD_ROW_PADDING_X))
             .rounded(px(6.))
             // First child so the row's content paints over the mark.
             .when_some(
-                self.provider_mark(meta, GROUPED_ROW_HEIGHT, cx),
-                |row, mark| row.relative().overflow_hidden().child(mark),
+                self.provider_mark(meta, GROUPED_ROW_HEIGHT, THREAD_ROW_PADDING_X, cx),
+                |row, mark| row.relative().child(mark),
             )
             .when_some(
                 Self::thread_status_badge(&state, working, cx),
@@ -2653,12 +2663,13 @@ impl SessionsSidebar {
                     .justify_center()
                     .gap(px(2.))
             })
-            .px_2()
+            .px(px(THREAD_ROW_PADDING_X))
             .rounded(px(6.))
             // First child so the row's content paints over the mark.
-            .when_some(self.provider_mark(meta, row_height, cx), |row, mark| {
-                row.relative().overflow_hidden().child(mark)
-            });
+            .when_some(
+                self.provider_mark(meta, row_height, THREAD_ROW_PADDING_X, cx),
+                |row, mark| row.relative().child(mark),
+            );
 
         let row = if is_child {
             let title_or_input = self.thread_title_or_input(meta, &state, false, cx);
@@ -3370,7 +3381,12 @@ impl SessionsSidebar {
         let click_id = session_id.clone();
         let disclosure_id = session_id.clone();
         let unavailable = meta.parent_session_id.is_some() && !state.is_child;
-        let mark = self.provider_mark(meta, crate::material::LIST_ROW_MIN_HEIGHT, cx);
+        let mark = self.provider_mark(
+            meta,
+            crate::material::LIST_ROW_MIN_HEIGHT,
+            crate::material::COMPACT_PAGE_INSET,
+            cx,
+        );
 
         let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
             .debug_selector({
@@ -3381,9 +3397,7 @@ impl SessionsSidebar {
                 row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
             })
             // First child so the row's content paints over the mark.
-            .when_some(mark, |row, mark| {
-                row.relative().overflow_hidden().child(mark)
-            })
+            .when_some(mark, |row, mark| row.relative().child(mark))
             .when(
                 self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
                 |row| row.bg(cx.theme().list_active).aria_selected(true),
@@ -4548,12 +4562,16 @@ mod tests {
                 .debug_bounds(mark_selector)
                 .expect("each row carries its provider mark");
             assert!(
-                mark.top() >= row.top() && mark.bottom() <= row.bottom(),
-                "mark stays within the row's vertical span: {mark:?} in {row:?}"
+                mark.top() >= row.top()
+                    && mark.bottom() <= row.bottom()
+                    && mark.right() <= row.right()
+                    && mark.left() >= row.left(),
+                "mark sits entirely inside the row: {mark:?} in {row:?}"
             );
-            assert!(
-                mark.right() >= row.right(),
-                "mark hangs off the right edge so the clip cuts it: {mark:?} in {row:?}"
+            assert_eq!(
+                mark.size.height,
+                row.size.height - px(PROVIDER_MARK_INSET),
+                "mark fits the row height minus the inset"
             );
         }
         let list_active = cx.update(|_, cx| cx.theme().list_active);
