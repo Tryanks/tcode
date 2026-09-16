@@ -7398,3 +7398,33 @@ fn settling_rejects_busy_descendants_and_accepted_input_reactivates_ancestors() 
     });
     cx.run_until_parked();
 }
+
+#[test]
+fn interrupt_reports_stopping_until_the_turn_completes() {
+    let store = TestStore::new("interrupt-stopping");
+    let mut state = AppState::new((*store).clone());
+    let context = TestAppContext::default();
+    let mut cx = context.host_cx();
+    let id = state.start_draft("fixture".into(), std::env::temp_dir(), &mut cx);
+    let (commands, _receiver) = smol::channel::unbounded();
+    let active = state.resident_mut(&id).unwrap();
+    active.runtime = Runtime::Live(commands);
+    active.turn_in_flight = true;
+    assert!(!state.session_status_snapshot(&id).unwrap().stopping);
+
+    state.interrupt(&id, &mut cx).unwrap();
+    assert!(state.session_status_snapshot(&id).unwrap().stopping);
+
+    state.on_event(
+        &id,
+        AgentEvent::TurnCompleted {
+            turn_id: "turn-1".into(),
+            status: TurnStatus::Interrupted,
+            usage: None,
+        },
+        &mut cx,
+    );
+    let status = state.session_status_snapshot(&id).unwrap();
+    assert!(!status.stopping);
+    assert!(!status.turn_running);
+}
