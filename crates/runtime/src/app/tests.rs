@@ -35,6 +35,12 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
         );
         parent_meta.id = "parent".into();
         parent_meta.project_id = Some("project".into());
+        parent_meta.approval_mode = ApprovalMode::ReadOnly;
+        parent_meta.interaction_mode = InteractionMode::Plan;
+        parent_meta.option_selections = vec![OptionSelection {
+            id: "reasoningEffort".into(),
+            value: serde_json::json!("high"),
+        }];
         state.sessions.push(parent_meta.clone());
         state.install_selected(ActiveSession::new(parent_meta, false, Vec::new()));
 
@@ -63,6 +69,37 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             .expect("native subagent mirror metadata");
         assert_eq!(mirror.parent_session_id.as_deref(), Some("parent"));
         assert_eq!(mirror.title, "explorer: Inspect event routing");
+        assert_eq!(mirror.approval_mode, ApprovalMode::ReadOnly);
+        assert_eq!(mirror.interaction_mode, InteractionMode::Plan);
+        assert_eq!(mirror.option_selections[0].value, serde_json::json!("high"));
+        assert_eq!(mirror.model.as_deref(), Some("gpt-test"));
+
+        state.on_event(
+            "parent",
+            AgentEvent::ItemUpdated(ThreadItem {
+                id: "spawn-1".into(),
+                parent_item_id: None,
+                content: ItemContent::Subagent {
+                    agent_type: "explorer".into(),
+                    description: "Inspect event routing".into(),
+                    status: ItemStatus::InProgress,
+                    summary: None,
+                    model: Some("child-model".into()),
+                    effort: Some("low".into()),
+                },
+            }),
+            cx,
+        );
+        let status = state.session_status_snapshot(&mirror.id).unwrap();
+        assert_eq!(status.requested_model.as_deref(), Some("child-model"));
+        assert_eq!(
+            status.provider_option_selections[0].value,
+            serde_json::json!("low")
+        );
+        assert_eq!(
+            state.resident("parent").unwrap().meta.model.as_deref(),
+            Some("gpt-test")
+        );
         assert!(state.resident(&mirror.id).unwrap().has_work());
         assert!(state.resident(&mirror.id).unwrap().timeline.turn_running);
 
@@ -126,6 +163,20 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
             .iter()
             .find(|meta| meta.native_subagent.as_deref() == Some("spawn-1"))
             .unwrap();
+        // A completion without model/effort must not erase the last observation,
+        // and reopening the persisted mirror must retain it.
+        let persisted = state
+            .store
+            .load_index()
+            .into_iter()
+            .find(|meta| meta.id == mirror.id)
+            .unwrap();
+        assert_eq!(persisted.model.as_deref(), Some("child-model"));
+        assert_eq!(
+            persisted.option_selections[0].value,
+            serde_json::json!("low")
+        );
+        assert_eq!(persisted.interaction_mode, InteractionMode::Plan);
         let mirror_events = state.store.read_events(&mirror.id);
         assert!(mirror_events.iter().any(|stored| matches!(
             &stored.event,

@@ -3084,6 +3084,138 @@ mod tests {
     }
 
     #[gpui::test]
+    fn native_subagent_composer_is_visible_inert_and_restores_parent_draft(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        let (shell, host, _, cx) =
+            mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
+        restore_index(&shell, &host, true, cx);
+        restore_status(&shell, &host, cx);
+        let store = store_of(&shell, cx);
+        let composer = shell.read_with(cx, |shell, cx| {
+            shell.attachment.as_ref().unwrap().chat.read(cx).composer()
+        });
+        let deliver = |session: &str, readonly: bool, cx: &mut VisualTestContext| {
+            let mut meta = tcode_core::project::SessionMeta::new(
+                agent::ProviderKind::Codex,
+                "/project".into(),
+                Some("child-model".into()),
+            );
+            meta.id = session.into();
+            meta.native_subagent = readonly.then(|| "spawn-1".into());
+            let mut status = session_status(session, std::path::Path::new("/project"));
+            status.requested_model = meta.model.clone();
+            status.interaction_mode = agent::InteractionMode::Plan;
+            status.turn_running = readonly;
+            status.provider_option_selections = vec![agent::OptionSelection {
+                id: "reasoningEffort".into(),
+                value: serde_json::json!("high"),
+            }];
+            store.update(cx, |store, _| store.select_session(session.into()));
+            for (topic, event) in [
+                (
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(Default::default()),
+                ),
+                (Topic::Index, ServerEvent::IndexUpsertSession(meta)),
+                (
+                    Topic::SessionStatus {
+                        session_id: session.into(),
+                    },
+                    ServerEvent::SessionStatusReplaced(status),
+                ),
+                (
+                    Topic::SessionEvents {
+                        session_id: session.into(),
+                    },
+                    ServerEvent::SessionSnapshot {
+                        total: 0,
+                        total_turns: 0,
+                        truncated: false,
+                        from: 0,
+                        records: vec![],
+                    },
+                ),
+            ] {
+                host.incoming
+                    .try_send(
+                        encode_line(&HostMessage::Event(EventEnvelope {
+                            request_id: None,
+                            topic,
+                            event,
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+            await_restore_update(&shell, cx, |store| !store.chat_loading());
+        };
+        deliver("thread-a", false, cx);
+        cx.update(|window, cx| {
+            composer.update(cx, |composer, cx| {
+                composer.set_draft("parent draft", window, cx);
+            })
+        });
+        draw(cx);
+        deliver("child", true, cx);
+        for width in [1200., 760., 393.] {
+            resize(cx, width);
+            shell.update(cx, |shell, cx| shell.go(Destination::Thread, cx));
+            cx.executor().advance_clock(Duration::from_millis(250));
+            draw(cx);
+            sent(&host);
+            assert!(cx.debug_bounds("composer-card").is_some());
+            for selector in [
+                "model-picker",
+                "traits-chip",
+                "mode-chip",
+                "permission-chip",
+                "send-message",
+            ] {
+                let bounds = cx.debug_bounds(selector).expect(selector);
+                assert!(bounds.size.width > px(0.) && bounds.size.height > px(0.));
+                cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+                draw(cx);
+            }
+            let card = cx.debug_bounds("composer-card").unwrap();
+            cx.simulate_click(
+                card.origin + gpui::point(px(20.), px(20.)),
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_keystrokes("x shift-tab enter");
+            draw(cx);
+            assert_eq!(
+                composer.read_with(cx, |composer, cx| composer.draft(cx)),
+                ""
+            );
+            assert!(
+                sent(&host)
+                    .iter()
+                    .all(|payload| !matches!(payload, ClientPayload::Command(_))),
+                "disabled composer must not send commands"
+            );
+            assert_eq!(
+                store.read_with(cx, |store, _| store.composer_state().interaction_mode),
+                agent::InteractionMode::Plan
+            );
+        }
+        deliver("thread-a", false, cx);
+        resize(cx, 1200.);
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "parent draft"
+        );
+        cx.update(|window, cx| composer.update(cx, |composer, cx| composer.focus(window, cx)));
+        cx.simulate_keystrokes("end x");
+        draw(cx);
+        assert_eq!(
+            composer.read_with(cx, |composer, cx| composer.draft(cx)),
+            "parent draftx"
+        );
+    }
+
+    #[gpui::test]
     fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
         cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
         let (shell, host, _, cx) = mount_restored_at_width(

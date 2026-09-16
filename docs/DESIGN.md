@@ -803,6 +803,16 @@ targets; access and context open their details sheets. The model name may
 truncate when space is tight, while the effort value stays fully visible.
 The card and drawer fit at 360pt in English and Simplified Chinese.
 
+Provider-native subagent threads retain the composer as a disabled card. The
+empty text field shows the existing “Read-only subagent thread” hint in muted
+text. Model, reasoning effort, access and Build/Plan controls remain visible
+and inert; narrow cards put access and Build/Plan in the lower drawer instead
+of hiding them in a disabled overflow menu. Typing, paste, drops, dictation,
+send/stop and the mode shortcut cannot change the child. Switching back restores
+the ordinary thread's draft and editable controls. Mirrors inherit their parent's
+settings at creation; provider-reported child model and effort replace those
+values and remain available when the thread is reopened.
+
 The traits popover (the effort chip's details) lists each model parameter as a
 section of selectable rows, except fast mode, which a lightning-bolt button
 pinned to the pane's top-right corner owns alone: filled amber

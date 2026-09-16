@@ -119,7 +119,7 @@ pub struct SessionMeta {
     pub parent_session_id: Option<String>,
     /// Set when this session mirrors a provider-native subagent transcript.
     /// Value is the parent-timeline Subagent item id (reattach key). Mirror
-    /// sessions are read-only: no composer, no provider process.
+    /// sessions are read-only: disabled composer, no provider process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_subagent: Option<String>,
     /// Whether this session receives the tcode_orchestrate MCP registration.
