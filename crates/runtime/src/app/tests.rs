@@ -5444,12 +5444,11 @@ fn resident_idle_reaper_shuts_down_untouched_provider() {
         state.install_selected(session);
         state.park_active(cx);
     });
-    cx.run_until_parked();
+    // The grace timer runs on the background executor, so wait for its
+    // completion to land rather than for the mailbox to look idle.
+    cx.run_until(|state| !state.residents.parked.contains_key("idle-resident"));
 
-    state.update(cx, |state, _| {
-        assert!(!state.residents.parked.contains_key("idle-resident"));
-        assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
-    });
+    assert!(matches!(actor.try_recv(), Ok(SessionCommand::Shutdown)));
 }
 
 #[test]
@@ -5464,15 +5463,15 @@ fn resident_idle_reaper_ignores_readopted_session() {
     let meta = session.meta.clone();
 
     state.update(cx, |state, cx| {
-        state.resident_idle_grace = Duration::from_millis(1);
         state.sessions.push(meta);
         state.install_selected(session);
         state.park_active(cx);
+        let idle_since = state.residents.parked["idle-resident"].idle_since.unwrap();
         state.select_session("idle-resident", cx);
-    });
-    cx.run_until_parked();
+        // Fire the grace timer that parking armed, now that its session has
+        // been re-adopted; the real timer would land identically but later.
+        state.reap_idle_resident("idle-resident", idle_since, cx);
 
-    state.update(cx, |state, _| {
         let active = state.selected_session().unwrap();
         assert_eq!(active.meta.id, "idle-resident");
         assert!(matches!(active.runtime, Runtime::Live(_)));
