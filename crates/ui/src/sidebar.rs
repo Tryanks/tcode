@@ -39,7 +39,7 @@ use crate::window_state::{Destination, Route, WindowState};
 
 /// The provider mark behind a thread row: its provider's glyph at this alpha,
 /// sized to the row height minus this vertical inset so it sits inside the row.
-const PROVIDER_MARK_ALPHA: f32 = 0.18;
+const PROVIDER_MARK_ALPHA: f32 = 0.32;
 const PROVIDER_MARK_INSET: f32 = 8.;
 /// Horizontal padding of the grouped and flat thread rows (`px_2` / `pr_2`).
 const THREAD_ROW_PADDING_X: f32 = 8.;
