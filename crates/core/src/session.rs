@@ -3497,11 +3497,11 @@ mod tests {
         ));
     }
 
-    /// pi streams every turn's assistant message under the same placeholder
-    /// id and only names it at completion. A stream continues the open
-    /// turn's item; the earlier turn's entry is a different message, and a
-    /// suffix of the log (as history pages load) must fold its turns exactly
-    /// like the whole log does.
+    /// Logs recorded before pi named its streamed messages carry every
+    /// turn's assistant stream under the same placeholder id. A stream
+    /// continues the open turn's item; the earlier turn's entry is a
+    /// different message, and a suffix of the log (as history pages load)
+    /// must fold its turns exactly like the whole log does.
     #[test]
     fn streamed_deltas_continue_the_open_turn_not_an_earlier_turn_with_the_same_id() {
         let turn = |n: u64| {

@@ -1349,9 +1349,9 @@ mod tests {
         );
 
         // A page that stays inside the partial first turn can merge its
-        // streamed fragments (pi reuses one placeholder id per turn), so the
-        // row shrinks. That is a remeasure while history remains, and only a
-        // replacement once the whole turn is known.
+        // streamed fragments (older pi logs reuse one placeholder id per
+        // turn), so the row shrinks. That is a remeasure while history
+        // remains, and only a replacement once the whole turn is known.
         let old = index(
             &[
                 entry("pi-assistant-0:1", assistant("tail of the answer")),

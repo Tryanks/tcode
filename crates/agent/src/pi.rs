@@ -815,6 +815,9 @@ struct PiMapper {
     failed: bool,
     tool_items: HashMap<String, PiTool>,
     finalized_messages: HashSet<String>,
+    /// Id of the assistant message being streamed. `message_update` carries
+    /// only the delta, so the id is taken from `message_start`.
+    streaming_assistant: Option<String>,
 }
 
 #[derive(Clone)]
@@ -835,6 +838,7 @@ impl PiMapper {
             failed: false,
             tool_items: HashMap::new(),
             finalized_messages: HashSet::new(),
+            streaming_assistant: None,
         }
     }
 
@@ -842,6 +846,13 @@ impl PiMapper {
         match message.get("type").and_then(Value::as_str).unwrap_or("") {
             "agent_start" => self.start_turn(),
             "agent_settled" => self.complete_turn(),
+            "message_start" => {
+                let message = message.get("message").unwrap_or(&Value::Null);
+                if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                    self.streaming_assistant = Some(assistant_message_id(message));
+                }
+                Vec::new()
+            }
             "message_update" => self.message_update(message),
             "message_end" => self.message_end(message),
             // Current pi emits both message_end and turn_end. Treat turn_end as
@@ -1010,7 +1021,9 @@ impl PiMapper {
             return Vec::new();
         }
         let index = crate::json_u64(event.get("contentIndex")).unwrap_or(0);
-        let message_id = assistant_message_id(message.get("message").unwrap_or(&Value::Null));
+        let message_id = self.streaming_assistant.clone().unwrap_or_else(|| {
+            assistant_message_id(message.get("message").unwrap_or(&Value::Null))
+        });
         vec![AgentEvent::Delta {
             item_id: format!("{message_id}:{index}"),
             kind,
@@ -1398,17 +1411,14 @@ fn result_text(result: &Value) -> String {
         .join("\n")
 }
 
+/// pi stamps `timestamp` when it creates the assistant message, before the
+/// first delta, and keeps it on the final message; `responseId` only arrives
+/// with the provider response, so it cannot name the item that was streamed.
 fn assistant_message_id(message: &Value) -> String {
-    message
-        .get("responseId")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            format!(
-                "pi-assistant-{}",
-                crate::json_u64(message.get("timestamp")).unwrap_or(0)
-            )
-        })
+    format!(
+        "pi-assistant-{}",
+        crate::json_u64(message.get("timestamp")).unwrap_or(0)
+    )
 }
 
 fn map_usage(usage: Option<&Value>) -> Option<TokenUsage> {
@@ -1876,12 +1886,35 @@ mod tests {
         assert!(map_model(&model, None, None).unwrap().options.is_empty());
     }
 
+    /// Replays `pi --mode rpc` output recorded from pi 0.85.1 with a scripted
+    /// provider: one prompt, an assistant message that thinks and calls
+    /// `bash`, then a second assistant message that thinks and answers.
+    fn recorded_rpc_events() -> Vec<Value> {
+        include_str!("../tests/fixtures/pi/rpc_events.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn streamed_text(events: &[AgentEvent], kind: DeltaKind) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Delta {
+                    kind: delta_kind,
+                    text,
+                    ..
+                } if *delta_kind == kind => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn maps_recorded_rpc_fixture() {
         let mut mapper = PiMapper::new();
         let mut events = Vec::new();
-        for line in include_str!("../tests/fixtures/pi/rpc_events.jsonl").lines() {
-            let message: Value = serde_json::from_str(line).unwrap();
+        for message in recorded_rpc_events() {
             events.extend(mapper.on_message(&message));
         }
         assert!(matches!(events[0], AgentEvent::TurnStarted { .. }));
@@ -1892,22 +1925,19 @@ mod tests {
                 ..
             }) if text == "DO NOT ECHO"
         )));
+        assert_eq!(streamed_text(&events, DeltaKind::AssistantText), "PONG");
+        assert_eq!(
+            streamed_text(&events, DeltaKind::ReasoningText),
+            "CheckingTool done"
+        );
         assert!(events.iter().any(|event| matches!(
             event,
-            AgentEvent::Delta { kind: DeltaKind::AssistantText, text, .. } if text == "PONG"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::Delta { kind: DeltaKind::ReasoningText, text, .. } if text == "Checking"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { output, .. }, .. }) if output == "accumulated\n"
+            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { output, .. }, .. }) if output == "ok"
         )));
         assert!(events.iter().any(|event| matches!(
             event,
             AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::CommandExecution { command, output, .. }, .. })
-                if command == "printf ok" && output == "accumulated\n"
+                if command == "printf ok" && output == "ok"
         )));
         assert_eq!(
             events
@@ -1940,17 +1970,76 @@ mod tests {
         ));
     }
 
+    /// pi streams `message_update` without the message, and `responseId`
+    /// only appears on `message_end`; the completed parts must still carry
+    /// the ids the deltas streamed under, or the timeline shows both.
+    #[test]
+    fn streamed_parts_complete_under_the_id_they_streamed_with() {
+        let mut mapper = PiMapper::new();
+        let mut events = Vec::new();
+        for message in recorded_rpc_events() {
+            events.extend(mapper.on_message(&message));
+        }
+        let mut streamed: Vec<(String, DeltaKind)> = Vec::new();
+        for event in &events {
+            if let AgentEvent::Delta { item_id, kind, .. } = event
+                && !streamed.iter().any(|(id, _)| id == item_id)
+            {
+                streamed.push((item_id.clone(), *kind));
+            }
+        }
+        let streamed_ids: Vec<&str> = streamed.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            streamed_ids,
+            [
+                "pi-assistant-1789592281572:0",
+                "pi-assistant-1789592281595:0",
+                "pi-assistant-1789592281595:1"
+            ],
+            "each assistant message streams under its own id"
+        );
+        for (item_id, kind) in &streamed {
+            let completed: Vec<&ItemContent> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ItemCompleted(item) if item.id == *item_id => Some(&item.content),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(completed.len(), 1, "{item_id} completes exactly once");
+            assert!(
+                matches!(
+                    (completed[0], kind),
+                    (ItemContent::Reasoning { .. }, DeltaKind::ReasoningText)
+                        | (
+                            ItemContent::AssistantMessage { .. },
+                            DeltaKind::AssistantText
+                        )
+                ),
+                "{item_id} completes as the kind it streamed"
+            );
+        }
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ItemCompleted(ThreadItem { id, content: ItemContent::Reasoning { .. } | ItemContent::AssistantMessage { .. }, .. })
+                    if !streamed_ids.contains(&id.as_str())
+            )),
+            "no assistant part completes under an id that was never streamed"
+        );
+    }
+
     #[test]
     fn multi_message_turn_sums_used_tokens() {
         let mut mapper = PiMapper::new();
         mapper.on_message(&json!({"type":"agent_start"}));
         mapper.on_message(&json!({
             "type":"message_end",
-            "message":{"role":"assistant","responseId":"one","usage":{"input":10,"output":2,"totalTokens":12}}
+            "message":{"role":"assistant","responseId":"one","usage":{"input":10,"output":2,"totalTokens":12},"timestamp":1785400000000_u64}
         }));
         mapper.on_message(&json!({
             "type":"message_end",
-            "message":{"role":"assistant","responseId":"two","usage":{"input":20,"output":3,"totalTokens":23}}
+            "message":{"role":"assistant","responseId":"two","usage":{"input":20,"output":3,"totalTokens":23},"timestamp":1785400000001_u64}
         }));
         let completed = mapper.on_message(&json!({"type":"agent_settled"}));
         assert!(matches!(
