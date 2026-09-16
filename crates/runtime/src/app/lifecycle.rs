@@ -337,7 +337,7 @@ impl AppState {
         self.upsert_session_in_memory(meta.clone());
     }
 
-    pub(crate) fn shutdown_active(&mut self, target_id: &str, _cx: &mut HostCx) {
+    pub(crate) fn shutdown_active(&mut self, target_id: &str, cx: &mut HostCx) {
         self.revoke_computer_use_registration(target_id);
         if let Some(session_id) = self
             .resident(target_id)
@@ -352,6 +352,7 @@ impl AppState {
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
         }
+        self.release_stale_session_logs(cx);
     }
 
     /// Shut down every provider process before the application exits.
@@ -413,6 +414,8 @@ impl AppState {
             if !has_work {
                 self.mark_resident_idle(&session_id, cx);
             }
+        } else {
+            self.release_stale_session_logs(cx);
         }
     }
 
@@ -512,6 +515,7 @@ impl AppState {
         {
             let _ = commands.try_send(SessionCommand::Shutdown);
         }
+        self.release_stale_session_logs(cx);
         self.reschedule_scheduled_wake(cx);
     }
 
