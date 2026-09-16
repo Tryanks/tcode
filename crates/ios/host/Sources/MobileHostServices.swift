@@ -44,6 +44,19 @@ public func tcodeIosHostDeviceName(
     copyUTF8(UIDevice.current.name, to: destination, capacity: capacity)
 }
 
+@_cdecl("tcode_ios_host_device_platform")
+public func tcodeIosHostDevicePlatform(
+    _ destination: UnsafeMutablePointer<UInt8>?,
+    _ capacity: Int
+) -> Int {
+    let device = UIDevice.current
+    return copyUTF8(
+        "\(device.systemName) \(device.systemVersion)",
+        to: destination,
+        capacity: capacity
+    )
+}
+
 @_cdecl("tcode_ios_host_system_locale")
 public func tcodeIosHostSystemLocale(
     _ destination: UnsafeMutablePointer<UInt8>?,

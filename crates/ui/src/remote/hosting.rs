@@ -604,7 +604,7 @@ impl HostingPanel {
             group = group.child(
                 row(compact)
                     .child(labels(
-                        device.name.clone().into(),
+                        super::device_label(&device.name, device.platform.as_deref()).into(),
                         crate::tr!(
                             "remote.devices.paired_on",
                             date = crate::time::humanize_ago(

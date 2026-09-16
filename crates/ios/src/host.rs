@@ -23,6 +23,7 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 unsafe extern "C" {
     fn tcode_ios_host_set_app_background_dark(dark: u8);
     fn tcode_ios_host_device_name(destination: *mut u8, capacity: usize) -> usize;
+    fn tcode_ios_host_device_platform(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_system_locale(destination: *mut u8, capacity: usize) -> usize;
     fn tcode_ios_host_start_camera_scan(request_id: u64);
     fn tcode_ios_host_browse(request_id: u64);
@@ -42,6 +43,12 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<Strin
     })
     .filter(|name| !name.trim().is_empty())
     .unwrap_or_else(|| "iPhone".into());
+    let platform = read_native_string(|destination, capacity| {
+        // SAFETY: Swift writes no more than `capacity` bytes during the call.
+        unsafe { tcode_ios_host_device_platform(destination, capacity) }
+    })
+    .filter(|platform| !platform.trim().is_empty())
+    .unwrap_or_else(|| "iOS".into());
     let system_locale = read_native_string(|destination, capacity| {
         // SAFETY: Swift writes no more than `capacity` bytes during the call.
         unsafe { tcode_ios_host_system_locale(destination, capacity) }
@@ -49,6 +56,7 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<Strin
     .filter(|locale| !locale.trim().is_empty());
 
     let host = NativeClientHost::from_env_with_device_name(device_name)
+        .with_platform(platform)
         .with_browser(|| -> HostFuture<'static, Vec<DiscoveredHost>> {
             let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);

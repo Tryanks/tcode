@@ -15,7 +15,7 @@ use sha1::{Digest as _, Sha1};
 use tungstenite::Message;
 use tungstenite::protocol::Role;
 
-use crate::auth::AuthStore;
+use crate::auth::{AuthStore, DeviceDetails};
 use crate::mux::HostMux;
 use crate::wire::{Request, content_type, read_request, response, response_with_body_mode};
 
@@ -52,6 +52,47 @@ pub struct DeviceInfo {
     pub id: String,
     pub name: String,
     pub created_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
+/// The device fields a client sends with `/pair`, `/auth/login` and hello.
+/// `device_id` and `platform` are optional so older clients keep working.
+#[derive(Deserialize)]
+struct DeviceClaim {
+    #[serde(default)]
+    device_name: String,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+}
+
+impl DeviceClaim {
+    fn name_is_valid(&self) -> bool {
+        !self.device_name.trim().is_empty() && self.device_name.len() <= 256
+    }
+
+    fn optional_fields_are_valid(&self) -> bool {
+        self.device_id
+            .as_deref()
+            .is_none_or(tcode_client::host::valid_device_id)
+            && self.platform.as_deref().is_none_or(|platform| {
+                platform.len() <= 256 && !platform.chars().any(char::is_control)
+            })
+    }
+
+    fn details(&self) -> DeviceDetails {
+        DeviceDetails {
+            name: self.device_name.clone(),
+            platform: self
+                .platform
+                .as_deref()
+                .map(str::trim)
+                .filter(|platform| !platform.is_empty())
+                .map(str::to_owned),
+        }
+    }
 }
 
 struct ActiveCode {
@@ -133,6 +174,7 @@ impl RemoteServer {
                 id: device.id.to_string(),
                 name: device.name.clone(),
                 created_unix: device.created_unix,
+                platform: device.platform.clone(),
             })
             .collect()
     }
@@ -365,7 +407,8 @@ where
 #[derive(Deserialize)]
 struct PairRequest {
     code: String,
-    device_name: String,
+    #[serde(flatten)]
+    device: DeviceClaim,
 }
 
 #[derive(Serialize)]
@@ -389,8 +432,8 @@ where
     }
     let request: PairRequest = match serde_json::from_slice::<PairRequest>(&request.body) {
         Ok(request)
-            if !request.device_name.trim().is_empty()
-                && request.device_name.len() <= 256
+            if request.device.name_is_valid()
+                && request.device.optional_fields_are_valid()
                 && request.code.len() <= 64 =>
         {
             request
@@ -416,7 +459,8 @@ where
     }
     let result = {
         let mut auth = shared.auth.lock().unwrap();
-        let token = auth.issue_token(request.device_name)?;
+        let details = request.device.details();
+        let token = auth.issue_token(request.device.device_id, details)?;
         PairResponse {
             host_id: auth.host_id.to_string(),
             host_name: auth.host_name.clone(),
@@ -434,8 +478,8 @@ where
     #[derive(Deserialize)]
     struct PasswordRequest {
         password: String,
-        #[serde(default)]
-        device_name: String,
+        #[serde(flatten)]
+        device: DeviceClaim,
     }
     // Requiring JSON prevents a cross-origin HTML form from claiming first setup.
     if !request.headers.get("content-type").is_some_and(|value| {
@@ -461,7 +505,8 @@ where
         .await;
     };
     if request.password.len() > 1024
-        || (!setup && (request.device_name.trim().is_empty() || request.device_name.len() > 256))
+        || !request.device.optional_fields_are_valid()
+        || (!setup && !request.device.name_is_valid())
     {
         return json_response(
             stream,
@@ -487,7 +532,8 @@ where
             auth.set_password(&request.password, false)?;
             Ok(("200 OK", serde_json::json!({"configured":true})))
         } else if auth.verify_password(&request.password) {
-            let token = auth.issue_token(request.device_name)?;
+            let details = request.device.details();
+            let token = auth.issue_token(request.device.device_id, details)?;
             Ok(("200 OK", serde_json::json!({"host_id":auth.host_id,"host_name":auth.host_name,"token":token})))
         } else {
             Ok(("403 Forbidden", serde_json::json!({"error":"invalid password or temporarily locked"})))
@@ -659,6 +705,8 @@ struct Hello {
     #[serde(default)]
     supported_versions: Vec<u32>,
     token: String,
+    #[serde(flatten)]
+    device: DeviceClaim,
 }
 
 async fn websocket<S>(mut stream: S, request: Request, shared: Arc<Shared>) -> io::Result<()>
@@ -707,12 +755,12 @@ where
             3
         }
     });
-    let token = hello.filter(|hello| {
+    let hello = hello.filter(|hello| {
         hello.kind == "hello"
             && matches!(hello.protocol_version, 3 | 4)
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
-    let Some(token) = token.map(|hello| hello.token) else {
+    let Some(hello) = hello else {
         let rejected = serde_json::json!({
             "type": "hello_rejected",
             "reason": "token"
@@ -723,6 +771,20 @@ where
         let _ = websocket.close(None).await;
         return Ok(());
     };
+    let token = hello.token;
+    // The hosting list shows what the device calls itself now, not what it
+    // said when it paired. The token already validated, so a failed write is
+    // not a reason to refuse the connection.
+    if hello.device.name_is_valid()
+        && hello.device.optional_fields_are_valid()
+        && let Err(error) = shared
+            .auth
+            .lock()
+            .unwrap()
+            .refresh_device(&token, hello.device.details())
+    {
+        log::warn!("could not record the connecting device's details: {error}");
+    }
     let hello_ok = {
         let auth = shared.auth.lock().unwrap();
         serde_json::json!({
@@ -915,6 +977,7 @@ fn hosting_action(
                 id: device.id.to_string(),
                 name: device.name.clone(),
                 created_unix: device.created_unix,
+                platform: device.platform.clone(),
             })
             .collect(),
     })

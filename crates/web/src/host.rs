@@ -1,4 +1,6 @@
-use tcode_client::host::{ClientHost, HostFuture, PairRequest, Transport};
+use tcode_client::host::{
+    ClientHost, DeviceIdentity, HostFuture, PairRequest, Transport, persistent_device_id,
+};
 use tcode_client::pairing::PairedHost;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -38,21 +40,63 @@ fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
 }
 
+fn user_agent() -> String {
+    window().navigator().user_agent().unwrap_or_default()
+}
+
+/// The browser family, which is the whole device name: the platform carries
+/// the operating system separately.
+fn browser_family(user_agent: &str) -> &'static str {
+    if user_agent.contains("Edg/") {
+        "Edge"
+    } else if user_agent.contains("Firefox/") || user_agent.contains("FxiOS/") {
+        "Firefox"
+    } else if user_agent.contains("Chrome/") || user_agent.contains("CriOS/") {
+        "Chrome"
+    } else if user_agent.contains("Safari/") {
+        "Safari"
+    } else {
+        "WebKit"
+    }
+}
+
+/// The operating system named by the user agent. Android must be checked
+/// before Linux, and iPadOS Safari reports itself as a Mac.
+fn browser_platform(user_agent: &str) -> Option<&'static str> {
+    if user_agent.contains("iPhone") || user_agent.contains("iPad") {
+        Some("iOS")
+    } else if user_agent.contains("Android") {
+        Some("Android")
+    } else if user_agent.contains("Mac OS X") {
+        Some("macOS")
+    } else if user_agent.contains("Windows") {
+        Some("Windows")
+    } else if user_agent.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    }
+}
+
 impl ClientHost for WebHost {
     fn device_name(&self) -> String {
-        let ua = window().navigator().user_agent().unwrap_or_default();
-        let family = if ua.contains("Edg/") {
-            "Edge"
-        } else if ua.contains("Firefox/") || ua.contains("FxiOS/") {
-            "Firefox"
-        } else if ua.contains("Chrome/") || ua.contains("CriOS/") {
-            "Chrome"
-        } else if ua.contains("Safari/") {
-            "Safari"
-        } else {
-            "WebKit"
-        };
-        format!("Browser ({family})")
+        browser_family(&user_agent()).to_owned()
+    }
+
+    /// Shared with the password login page, which stores the same key so a
+    /// browser that logs in again keeps its one record on the host.
+    fn device_id(&self) -> String {
+        let stored =
+            storage().and_then(|storage| storage.get_item("tcode.device_id").ok().flatten());
+        persistent_device_id(stored, |id| {
+            if let Some(storage) = storage() {
+                let _ = storage.set_item("tcode.device_id", id);
+            }
+        })
+    }
+
+    fn device_platform(&self) -> Option<String> {
+        browser_platform(&user_agent()).map(str::to_owned)
     }
 
     fn outbox_storage(
@@ -95,12 +139,12 @@ impl ClientHost for WebHost {
     }
 
     fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
-        let device_name = self.device_name();
-        Box::pin(async move { pair(&request.code, &device_name).await })
+        let device = self.device_identity();
+        Box::pin(async move { pair(&request.code, &device).await })
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
-        crate::transport::connect(host.token.clone(), self.device_name())
+        crate::transport::connect(host.token.clone(), self.device_identity())
     }
 
     fn supports_artifact_delivery(&self) -> bool {
@@ -133,13 +177,11 @@ fn download(name: &str, mime: &str, bytes: &[u8]) -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn pair(code: &str, device_name: &str) -> Result<PairedHost, String> {
-    async fn fetch(code: &str, device_name: &str) -> Result<PairedHost, JsValue> {
+async fn pair(code: &str, device: &DeviceIdentity) -> Result<PairedHost, String> {
+    async fn fetch(code: &str, device: &DeviceIdentity) -> Result<PairedHost, JsValue> {
         let options = web_sys::RequestInit::new();
         options.set_method("POST");
-        options.set_body(&JsValue::from_str(
-            &serde_json::json!({"code": code, "device_name": device_name}).to_string(),
-        ));
+        options.set_body(&JsValue::from_str(&device.pair_body(code)));
         let request = web_sys::Request::new_with_str_and_init("/pair", &options)?;
         request.headers().set("Content-Type", "application/json")?;
         let response: web_sys::Response = JsFuture::from(window().fetch_with_request(&request))
@@ -172,7 +214,7 @@ async fn pair(code: &str, device_name: &str) -> Result<PairedHost, String> {
             last_connected_unix: None,
         })
     }
-    fetch(code, device_name)
+    fetch(code, device)
         .await
         .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
 }

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
+use tcode_client::host::DeviceIdentity;
 use tcode_remote::client::{ConnectionFailure, ConnectionState, connect, pair};
 use tcode_remote::{HostMux, RemoteConfig, serve};
 use tungstenite::Message;
@@ -22,6 +23,15 @@ impl TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A client whose persistent device id derives from its name.
+fn device(name: &str) -> DeviceIdentity {
+    DeviceIdentity {
+        id: format!("{name}-id"),
+        name: name.into(),
+        platform: None,
     }
 }
 
@@ -126,9 +136,21 @@ fn pairing_is_single_use_and_five_failures_invalidate() {
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
     let port = server.local_addr().port();
     let code = server.new_pairing_code();
-    let paired = pair(&format!("http://127.0.0.1:{}", port), &code.code, "phone").unwrap();
+    let paired = pair(
+        &format!("http://127.0.0.1:{}", port),
+        &code.code,
+        &device("phone"),
+    )
+    .unwrap();
     assert!(!paired.token.is_empty());
-    assert!(pair(&format!("http://127.0.0.1:{}", port), &code.code, "again").is_err());
+    assert!(
+        pair(
+            &format!("http://127.0.0.1:{}", port),
+            &code.code,
+            &device("again")
+        )
+        .is_err()
+    );
 
     let code = server.new_pairing_code();
     let wrong = if code.code == "999999" {
@@ -137,9 +159,23 @@ fn pairing_is_single_use_and_five_failures_invalidate() {
         "999999"
     };
     for _ in 0..5 {
-        assert!(pair(&format!("http://127.0.0.1:{}", port), wrong, "attacker").is_err());
+        assert!(
+            pair(
+                &format!("http://127.0.0.1:{}", port),
+                wrong,
+                &device("attacker")
+            )
+            .is_err()
+        );
     }
-    assert!(pair(&format!("http://127.0.0.1:{}", port), &code.code, "phone").is_err());
+    assert!(
+        pair(
+            &format!("http://127.0.0.1:{}", port),
+            &code.code,
+            &device("phone")
+        )
+        .is_err()
+    );
     server.shutdown();
 }
 
@@ -150,11 +186,21 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     let server = serve(mux.clone(), config(data.0.clone(), 0)).unwrap();
     let port = server.local_addr().port();
     let code_a = server.new_pairing_code();
-    let host_a = pair(&format!("http://127.0.0.1:{}", port), &code_a.code, "A").unwrap();
+    let host_a = pair(
+        &format!("http://127.0.0.1:{}", port),
+        &code_a.code,
+        &device("A"),
+    )
+    .unwrap();
     let code_b = server.new_pairing_code();
-    let host_b = pair(&format!("http://127.0.0.1:{}", port), &code_b.code, "B").unwrap();
-    let client_a = connect(host_a, "A".into());
-    let client_b = connect(host_b, "B".into());
+    let host_b = pair(
+        &format!("http://127.0.0.1:{}", port),
+        &code_b.code,
+        &device("B"),
+    )
+    .unwrap();
+    let client_a = connect(host_a, device("A"));
+    let client_b = connect(host_b, device("B"));
     wait_state(&client_a, ConnectionState::Syncing);
     wait_state(&client_b, ConnectionState::Syncing);
     let subscribe = |id| {
@@ -251,7 +297,12 @@ fn devices_are_listed_and_revoking_refuses_the_token() {
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
     let port = server.local_addr().port();
     let code = server.new_pairing_code();
-    let paired = pair(&format!("http://127.0.0.1:{}", port), &code.code, "laptop").unwrap();
+    let paired = pair(
+        &format!("http://127.0.0.1:{}", port),
+        &code.code,
+        &device("laptop"),
+    )
+    .unwrap();
 
     let devices = server.devices();
     assert_eq!(devices.len(), 1);
@@ -349,7 +400,7 @@ fn admin_pair_is_plain_http_and_creates_no_certificate_identity() {
     );
     assert!(!data.0.join("remote-cert.der").exists());
     assert!(!data.0.join("remote-key.der").exists());
-    let host = pair(&origin, reply["code"].as_str().unwrap(), "phone").unwrap();
+    let host = pair(&origin, reply["code"].as_str().unwrap(), &device("phone")).unwrap();
     let client_data = TestDir::new();
     tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&host)).unwrap();
     assert_eq!(
@@ -378,7 +429,7 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
     let mut host = pair(
         &format!("http://127.0.0.1:{}", server.local_addr().port()),
         &code.code,
-        "deadline",
+        &device("deadline"),
     )
     .unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -396,7 +447,7 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
         })
     });
     let start = Instant::now();
-    let client = connect(host, "deadline".into());
+    let client = connect(host, device("deadline"));
     saw_tcp.recv_blocking().unwrap();
     smol::block_on(async {
         futures_lite::future::race(
@@ -463,9 +514,9 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
         token: paired["token"].as_str().unwrap().into(),
         last_connected_unix: None,
     };
-    let client = connect(host, "Browser".into());
+    let client = connect(host, device("Browser"));
     wait_state(&client, ConnectionState::Syncing);
-    let phone = pair(&origin, &server.new_pairing_code().code, "phone").unwrap();
+    let phone = pair(&origin, &server.new_pairing_code().code, &device("phone")).unwrap();
     let hosting = |action| {
         client
             .to_host
@@ -486,17 +537,63 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
     let state = hosting(tcode_protocol::HostingAction::State);
     assert_eq!(state["enabled"], true);
     assert_eq!(state["devices"].as_array().unwrap().len(), 2);
-    let phone_id = state["devices"]
+    let phone_row = state["devices"]
         .as_array()
         .unwrap()
         .iter()
         .find(|device| device["name"] == "phone")
-        .unwrap()["id"]
-        .as_str()
         .unwrap()
-        .to_owned();
+        .clone();
+    let phone_id = phone_row["id"].as_str().unwrap().to_owned();
+    // Pairing again with the same device id rotates that record instead of
+    // adding one; the earlier token dies with it.
+    let xiaomi = DeviceIdentity {
+        id: device("phone").id,
+        name: "Xiaomi 15".into(),
+        platform: Some("Android 15".into()),
+    };
+    let phone_again = pair(&origin, &server.new_pairing_code().code, &xiaomi).unwrap();
+    let stale = connect(phone, device("phone"));
+    wait_state(
+        &stale,
+        ConnectionState::Offline {
+            reason: ConnectionFailure::AuthenticationRejected,
+        },
+    );
+    stale.to_host.close();
+    let state = hosting(tcode_protocol::HostingAction::State);
+    let devices = state["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    assert_eq!(
+        devices.iter().find(|row| row["id"] == phone_id).unwrap(),
+        &json!({
+            "id": phone_id,
+            "name": "Xiaomi 15",
+            "created_unix": phone_row["created_unix"],
+            "platform": "Android 15",
+        })
+    );
+    // A hello with new details refreshes the record without pairing again.
+    let upgraded = connect(
+        phone_again.clone(),
+        DeviceIdentity {
+            platform: Some("Android 16".into()),
+            ..xiaomi
+        },
+    );
+    wait_state(&upgraded, ConnectionState::Syncing);
+    let state = hosting(tcode_protocol::HostingAction::State);
+    let refreshed = state["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == phone_id)
+        .unwrap()
+        .clone();
+    assert_eq!(refreshed["platform"], "Android 16");
+    upgraded.to_host.close();
     hosting(tcode_protocol::HostingAction::RevokeDevice(phone_id));
-    let revoked = connect(phone, "phone".into());
+    let revoked = connect(phone_again, device("phone"));
     wait_state(
         &revoked,
         ConnectionState::Offline {
@@ -507,7 +604,14 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
     let state = hosting(tcode_protocol::HostingAction::SetEnabled(false));
     assert_eq!(state["enabled"], false);
     assert!(state["code"].is_null());
-    assert!(pair(&origin, &server.new_pairing_code().code, "disabled phone").is_err());
+    assert!(
+        pair(
+            &origin,
+            &server.new_pairing_code().code,
+            &device("disabled phone")
+        )
+        .is_err()
+    );
     let stored: Value =
         serde_json::from_slice(&std::fs::read(root.0.join("remote.json")).unwrap()).unwrap();
     assert_eq!(stored["pairing_enabled"], false);
@@ -517,7 +621,14 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
     assert_eq!(state["enabled"], true);
     assert_eq!(state["code"].as_str().unwrap().len(), 6);
     let renewed = hosting(tcode_protocol::HostingAction::NewCode);
-    assert!(pair(&origin, renewed["code"].as_str().unwrap(), "renewed phone").is_ok());
+    assert!(
+        pair(
+            &origin,
+            renewed["code"].as_str().unwrap(),
+            &device("renewed phone")
+        )
+        .is_ok()
+    );
     for _ in 0..5 {
         assert!(
             http(
@@ -536,7 +647,14 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
             .contains("403")
     );
     // Browser lockout does not lock out code-based phone pairing.
-    assert!(pair(&origin, &server.new_pairing_code().code, "second phone").is_ok());
+    assert!(
+        pair(
+            &origin,
+            &server.new_pairing_code().code,
+            &device("second phone")
+        )
+        .is_ok()
+    );
     let state = hosting(tcode_protocol::HostingAction::State);
     let browser_id = state["devices"]
         .as_array()

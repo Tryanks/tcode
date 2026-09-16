@@ -183,9 +183,8 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
         code: code.clone(),
     }))?;
     let mut hosts = client_host.load_hosts();
-    hosts.retain(|existing| existing.host_id != host.host_id);
     let host_id = host.host_id.clone();
-    hosts.push(host);
+    tcode_client::pairing::remember_host(&mut hosts, host);
     client_host.save_hosts(&hosts);
     Ok(host_id)
 }

@@ -191,7 +191,10 @@ impl HostedPanel {
                 h_flex()
                     .p_3()
                     .gap_3()
-                    .child(div().flex_1().min_w_0().child(device.name))
+                    .child(div().flex_1().min_w_0().child(super::device_label(
+                        &device.name,
+                        device.platform.as_deref(),
+                    )))
                     .child(
                         Button::new(SharedString::from(format!("revoke-{}", device.id)))
                             .disabled(self.pending)

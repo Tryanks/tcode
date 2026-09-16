@@ -215,10 +215,13 @@ mod tests {
                 last_connected_unix: None,
             };
             let url = url::Url::parse(&origin).unwrap();
+            let device = tcode_client::host::DeviceIdentity {
+                id: "tls-device".into(),
+                name: "tls device".into(),
+                platform: None,
+            };
             let ws = endpoint
-                .establish(|stream| {
-                    crate::client::open_websocket(stream, &url, &paired, "tls device")
-                })
+                .establish(|stream| crate::client::open_websocket(stream, &url, &paired, &device))
                 .await
                 .unwrap();
             drop(ws);
@@ -261,10 +264,7 @@ mod tests {
             assert!(matches!(
                 endpoint
                     .establish(|stream| crate::client::open_websocket(
-                        stream,
-                        &url,
-                        &paired,
-                        "tls device"
+                        stream, &url, &paired, &device
                     ))
                     .await,
                 Err(tcode_client::ConnectionFailure::AuthenticationRejected)

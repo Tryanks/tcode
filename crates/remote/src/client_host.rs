@@ -8,6 +8,7 @@ use std::{
 
 use tcode_client::host::{
     ClientHost, ClientPreferences, DiscoveredHost, HostFuture, PairRequest, Transport,
+    persistent_device_id,
 };
 use tcode_client::pairing::PairedHost;
 
@@ -20,6 +21,7 @@ type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
 pub struct NativeClientHost {
     data_dir: PathBuf,
     default_device_name: String,
+    platform: Option<String>,
     qr_scanner: Option<Box<QrScanner>>,
     browser: Option<Box<HostBrowser>>,
     multicast_lock: Option<Arc<MulticastLock>>,
@@ -27,10 +29,13 @@ pub struct NativeClientHost {
 }
 
 impl NativeClientHost {
+    /// The platform starts as this operating system's description; mobile
+    /// bootstraps replace it with [`NativeClientHost::with_platform`].
     pub fn new(data_dir: PathBuf, device_name: impl Into<String>) -> Self {
         Self {
             data_dir,
             default_device_name: device_name.into(),
+            platform: default_device_platform(),
             qr_scanner: None,
             browser: None,
             multicast_lock: None,
@@ -52,6 +57,12 @@ impl NativeClientHost {
                 .join("tcode"),
         };
         Self::new(data_dir, device_name)
+    }
+
+    /// Operating system name and version reported to hosts, e.g. `Android 15`.
+    pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = Some(platform.into());
+        self
     }
 
     pub fn with_qr_scanner(
@@ -114,6 +125,22 @@ impl ClientHost for NativeClientHost {
             .device_name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| self.default_device_name.clone())
+    }
+
+    fn device_id(&self) -> String {
+        let mut prefs = self.prefs();
+        let stored = prefs
+            .get("device_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        persistent_device_id(stored, |id| {
+            prefs["device_id"] = serde_json::Value::String(id.to_owned());
+            self.write_prefs(&prefs);
+        })
+    }
+
+    fn device_platform(&self) -> Option<String> {
+        self.platform.clone()
     }
 
     fn load_preferences(&self) -> ClientPreferences {
@@ -182,10 +209,10 @@ impl ClientHost for NativeClientHost {
     }
 
     fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
-        let device_name = self.device_name();
-        Box::pin(async move {
-            crate::client::pair_async(&request.origin, &request.code, &device_name).await
-        })
+        let device = self.device_identity();
+        Box::pin(
+            async move { crate::client::pair_async(&request.origin, &request.code, &device).await },
+        )
     }
 
     fn open_in_editor(&self, path: &Path) -> Option<Result<(), String>> {
@@ -193,7 +220,7 @@ impl ClientHost for NativeClientHost {
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
-        let client = crate::client::connect(host.clone(), self.device_name());
+        let client = crate::client::connect(host.clone(), self.device_identity());
         Transport {
             to_host: client.to_host,
             from_host: client.from_host,
@@ -334,6 +361,116 @@ fn resolve_device_name(
         })
         .or_else(|| clean_name(etc_hostname))
         .unwrap_or_else(|| "Tcode".into())
+}
+
+/// This operating system's name and version, e.g. `macOS 26.0`,
+/// `Windows 10.0.26100` or an `/etc/os-release` pretty name. `None` where the
+/// platform bootstrap supplies it instead.
+pub fn default_device_platform() -> Option<String> {
+    static PLATFORM: OnceLock<Option<String>> = OnceLock::new();
+    PLATFORM
+        .get_or_init(resolve_default_device_platform)
+        .clone()
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_default_device_platform() -> Option<String> {
+    Some(os_with_version("macOS", macos_product_version()))
+}
+
+#[cfg(windows)]
+fn resolve_default_device_platform() -> Option<String> {
+    Some(os_with_version("Windows", windows_version()))
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_default_device_platform() -> Option<String> {
+    Some(
+        fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|contents| os_release_pretty_name(&contents))
+            .unwrap_or_else(|| "Linux".into()),
+    )
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+fn resolve_default_device_platform() -> Option<String> {
+    None
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn os_with_version(os: &str, version: Option<String>) -> String {
+    match clean_name(version) {
+        Some(version) => format!("{os} {version}"),
+        None => os.to_owned(),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn os_release_pretty_name(contents: &str) -> Option<String> {
+    contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("PRETTY_NAME="))
+        .and_then(|value| clean_name(Some(value.trim().trim_matches('"').to_owned())))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_product_version() -> Option<String> {
+    let name = c"kern.osproductversion";
+    let mut length = 0_usize;
+    // SAFETY: a null buffer asks sysctl for the value's length only.
+    let probed = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if probed != 0 || length == 0 {
+        return None;
+    }
+    let mut bytes = vec![0_u8; length];
+    // SAFETY: `bytes` holds `length` writable bytes and `length` is passed in
+    // and out by pointer, so sysctl never writes past the buffer.
+    let read = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    bytes.truncate(length.min(bytes.len()));
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8(bytes[..end].to_vec()).ok()
+}
+
+#[cfg(windows)]
+fn windows_version() -> Option<String> {
+    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: u32::try_from(std::mem::size_of::<OSVERSIONINFOW>()).ok()?,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a correctly sized OSVERSIONINFOW that outlives the
+    // call; RtlGetVersion only fills its fields. Unlike GetVersionEx it is not
+    // capped by the application manifest's compatibility declarations.
+    if unsafe { windows::Wdk::System::SystemServices::RtlGetVersion(&mut info) }.is_err() {
+        return None;
+    }
+    Some(format!(
+        "{}.{}.{}",
+        info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber
+    ))
 }
 
 fn clean_name(name: Option<String>) -> Option<String> {
@@ -490,6 +627,32 @@ mod tests {
             ),
             "Explicit name"
         );
+    }
+
+    #[test]
+    fn os_release_pretty_name_is_unquoted() {
+        let os_release = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n";
+        assert_eq!(
+            os_release_pretty_name(os_release).as_deref(),
+            Some("Ubuntu 24.04.1 LTS")
+        );
+        assert_eq!(
+            os_release_pretty_name("ID=alpine\nPRETTY_NAME=\"\"\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn device_id_is_minted_once_and_shared_by_later_instances() {
+        let dir = TestDir::new();
+        let first = NativeClientHost::new(dir.0.clone(), "phone");
+        let id = first.device_id();
+        assert!(tcode_client::host::valid_device_id(&id));
+        assert_eq!(first.device_id(), id);
+        first.set_last_host_id(Some("host"));
+        let second = NativeClientHost::new(dir.0.clone(), "phone");
+        assert_eq!(second.device_id(), id);
+        assert_eq!(second.last_host_id().as_deref(), Some("host"));
     }
 
     #[test]
