@@ -66,6 +66,7 @@ pub(crate) struct ComposerState {
     pub plan_ready_markdown: Option<String>,
     pub checkout: Option<ComposerCheckoutState>,
     pub turn_running: bool,
+    pub stopping: bool,
     pub pending_approval: Option<agent::ApprovalRequest>,
     pub pending_approval_count: usize,
 }
@@ -213,6 +214,7 @@ pub(crate) fn composer_state(
             .map(|plan| plan.markdown.clone()),
         checkout,
         turn_running: status.is_some_and(|status| status.turn_running),
+        stopping: status.is_some_and(|status| status.stopping),
         pending_approval: timeline.and_then(|timeline| timeline.pending_approvals.first().cloned()),
         pending_approval_count: timeline.map_or(0, |timeline| timeline.pending_approvals.len()),
     }
@@ -271,6 +273,7 @@ mod tests {
             terminal_height: 240.,
             delivery_in_flight: None,
             turn_running: false,
+            stopping: false,
             working: false,
             pending_approval: false,
             pending_user_input: false,

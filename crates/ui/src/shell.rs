@@ -4463,6 +4463,7 @@ mod tests {
             terminal_height: 240.,
             delivery_in_flight: None,
             turn_running: false,
+            stopping: false,
             working: false,
             pending_approval: false,
             pending_user_input: false,
