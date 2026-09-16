@@ -286,11 +286,15 @@ impl Session {
         }
     }
 
-    /// Replace the user's login shell with plain sh and silence its prompt, so
-    /// nothing prints asynchronously behind the assertions. Sentinels are
-    /// octal-escaped so the shell's echo of the typed line never matches.
+    /// Replace the user's login shell with plain sh and silence its prompt.
+    /// An explicit title also prevents foreground-process polling from changing
+    /// metadata between replica comparisons. Sentinels are octal-escaped so
+    /// the shell's echo of the typed line never matches.
     fn plain_shell(&self) {
-        self.send("exec /bin/sh\rPS1=; printf '\\122\\105\\101\\104\\131\\n'\r");
+        self.send(concat!(
+            "exec /bin/sh\rPS1=; printf '\\033]2;replication-test\\007",
+            "\\122\\105\\101\\104\\131\\n'\r",
+        ));
         self.wait_for("READY");
     }
 
