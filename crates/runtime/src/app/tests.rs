@@ -5942,10 +5942,7 @@ fn parked_readopt_refolds_events_appended_while_parked() {
         active.turn_in_flight = true;
         active.runtime = Runtime::Starting { generation: 1 };
         state.start_draft("other".into(), PathBuf::from("/tmp/other"), cx);
-        state
-            .store
-            .append_event(&id, 2, &persisted_assistant_event("while parked"))
-            .unwrap();
+        state.record_event(&id, &persisted_assistant_event("while parked"), cx);
         state.select_session(&id, cx);
     });
 
@@ -7048,7 +7045,9 @@ fn session_history_snapshot_pages_and_absolute_tail_cursors() {
                 },
             })
             .collect();
-        state.event_records.insert("large".into(), records.clone());
+        state
+            .event_records
+            .insert("large".into(), SessionLog::from_records(records.clone()));
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
@@ -7167,7 +7166,7 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
         assert_eq!(turn_starts, [0, 303, 606, 909, 1212]);
         state
             .event_records
-            .insert("streamed".into(), records.clone());
+            .insert("streamed".into(), SessionLog::from_records(records.clone()));
 
         let snapshot = state
             .subscription_snapshot(&tcode_protocol::Subscription {
@@ -7202,6 +7201,197 @@ fn history_snapshot_and_pages_start_at_turn_boundaries() {
     });
 }
 
+/// Persist `turns` streamed turns for `id` and return the records as the
+/// store replays them.
+fn persist_streamed_turns(store: &SessionStore, id: &str, turns: u64) -> Vec<SessionEventRecord> {
+    for turn in 0..turns {
+        let mut events = vec![
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: format!("user-{turn}"),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: format!("question {turn}"),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            AgentEvent::TurnStarted {
+                turn_id: format!("turn-{turn}"),
+            },
+        ];
+        events.extend((0..300).map(|_| AgentEvent::Delta {
+            item_id: "pi-assistant-0:0".into(),
+            kind: agent::DeltaKind::AssistantText,
+            text: "word ".into(),
+        }));
+        events.push(AgentEvent::TurnCompleted {
+            turn_id: format!("turn-{turn}"),
+            status: TurnStatus::Completed,
+            usage: None,
+        });
+        for (offset, event) in events.iter().enumerate() {
+            store
+                .append_event(id, turn * 1000 + offset as u64, event)
+                .unwrap();
+        }
+    }
+    store.read_events(id)
+}
+
+/// A client scrolling to the top of a long thread fetches one page per turn;
+/// every page must come from the log parsed when the thread was opened.
+#[test]
+fn history_pages_of_an_opened_session_parse_the_log_once() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-single-parse");
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
+    meta.id = "paged".into();
+    store.upsert_meta(&meta).unwrap();
+    let records = persist_streamed_turns(&store, "paged", 5);
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let reads_before_open = store.event_reads();
+
+    state.update(cx, |state, cx| state.select_session("paged", cx));
+    let (from, mut loaded) = state.update(cx, |state, _| {
+        let snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "paged".into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        let ServerEvent::SessionSnapshot {
+            from,
+            records,
+            total_turns,
+            ..
+        } = snapshot.event
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!(total_turns, 5, "the absolute turn count comes from the log");
+        (from, records)
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        assert_eq!(
+            state.resident("paged").unwrap().timeline.turns.len(),
+            5,
+            "the timeline load reuses the cached fold"
+        );
+        let mut before = from;
+        while before > 0 {
+            let QueryResponse::SessionHistoryPage {
+                records: page,
+                from,
+                ..
+            } = state.session_history_page("paged", before, 200).unwrap()
+            else {
+                panic!("page")
+            };
+            assert_eq!(from + page.len() as u64, before);
+            loaded.splice(0..0, page);
+            before = from;
+        }
+        assert_eq!(loaded, records);
+    });
+    assert_eq!(
+        store.event_reads() - reads_before_open,
+        1,
+        "opening, loading the timeline and paging parsed the log once"
+    );
+}
+
+/// The cached log follows residency: it serves appends whose disk writes
+/// are still queued, survives parking, and is dropped only after the session
+/// leaves residency and the store writer has flushed those appends, so the
+/// next cold open replays the whole conversation.
+#[test]
+fn session_log_follows_residency_and_flushes_before_release() {
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("history-log-residency");
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
+    meta.id = "resident".into();
+    store.upsert_meta(&meta).unwrap();
+    let persisted = persist_streamed_turns(&store, "resident", 2).len() as u64;
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let reads_before_open = store.event_reads();
+    let (commands, _actor) = smol::channel::unbounded();
+
+    state.update(cx, |state, cx| {
+        state.select_session("resident", cx);
+        state.record_event(
+            "resident",
+            &AgentEvent::ItemCompleted(ThreadItem {
+                id: "user-late".into(),
+                parent_item_id: None,
+                content: ItemContent::UserMessage {
+                    text: "one more question".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            cx,
+        );
+        let snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "resident".into(),
+                },
+                after: Some(persisted),
+            })
+            .unwrap();
+        let ServerEvent::SessionSnapshot {
+            records,
+            total,
+            total_turns,
+            ..
+        } = snapshot.event
+        else {
+            panic!("snapshot")
+        };
+        assert_eq!((total, total_turns), (persisted + 1, 3));
+        assert!(
+            matches!(&records[..], [record] if matches!(&record.event, AgentEvent::ItemCompleted(item) if item.id == "user-late"))
+        );
+        let QueryResponse::SessionHistoryPage { from, records, .. } = state
+            .session_history_page("resident", persisted + 1, 1)
+            .unwrap()
+        else {
+            panic!("page")
+        };
+        assert_eq!((from, records.len()), (persisted, 1));
+        assert_eq!(
+            state.store.event_reads() - reads_before_open,
+            1,
+            "the appended record is served from the log, not a re-parse"
+        );
+
+        // Parked with a live provider, the session stays resident and cached.
+        state.selected_session_mut().unwrap().runtime = Runtime::Live(commands);
+        state.park_active(cx);
+        assert!(state.residents.parked.contains_key("resident"));
+        assert!(state.event_records.contains_key("resident"));
+
+        state.drop_background("resident", cx);
+        assert!(state.resident("resident").is_none());
+        assert!(
+            state.event_records.contains_key("resident"),
+            "the log outlives residency until the store writer flushed its appends"
+        );
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        assert!(!state.event_records.contains_key("resident"));
+        assert_eq!(
+            state.store.read_events("resident").len() as u64,
+            persisted + 1
+        );
+    });
+    assert_eq!(store.event_reads() - reads_before_open, 2);
+}
+
 #[test]
 fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
     let cx = &mut TestAppContext::default();
@@ -7216,7 +7406,9 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
                 },
             })
             .collect();
-        state.event_records.insert("large".into(), records.clone());
+        state
+            .event_records
+            .insert("large".into(), SessionLog::from_records(records.clone()));
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionEvents {
                 session_id: "large".into(),
@@ -7277,9 +7469,13 @@ fn history_byte_budget_preserves_contiguous_records_and_reports_shrinking() {
         assert_eq!(from, 0);
         assert!(truncated);
         assert_eq!(tail, records[..tail.len()]);
-        state.event_records.get_mut("large").unwrap()[9].event = AgentEvent::Warning {
+        let mut records = records;
+        records[9].event = AgentEvent::Warning {
             message: "x".repeat(tcode_protocol::MAX_SESSION_HISTORY_BYTES),
         };
+        state
+            .event_records
+            .insert("large".into(), SessionLog::from_records(records));
         assert_eq!(
             state.session_history_page("large", 10, 1).unwrap_err().code,
             "history_record_too_large"
@@ -7570,4 +7766,68 @@ fn interrupt_reports_stopping_until_the_turn_completes() {
     let status = state.session_status_snapshot(&id).unwrap();
     assert!(!status.stopping);
     assert!(!status.turn_running);
+}
+
+/// Times the initial snapshot plus the pages a client fetches while scrolling
+/// to the top of a real long thread. Run with
+/// `TCODE_HISTORY_BENCH_LOG=/path/to/thread.jsonl cargo test -p tcode-runtime
+/// --release -- --ignored --nocapture history_paging_bench`.
+#[test]
+#[ignore = "manual benchmark: needs TCODE_HISTORY_BENCH_LOG pointing at a large JSONL log"]
+fn history_paging_bench() {
+    let source = std::env::var_os("TCODE_HISTORY_BENCH_LOG").expect("TCODE_HISTORY_BENCH_LOG");
+    let cx = &mut TestAppContext::default();
+    let store = TestStore::new("tcode-history-paging-bench");
+    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, store.root().clone(), None);
+    meta.id = "bench".into();
+    store.upsert_meta(&meta).unwrap();
+    fs::copy(&source, store.root().join("bench.jsonl")).unwrap();
+    let state = cx.new_entity(TestClientState::new((*store).clone()));
+    let started = Instant::now();
+    state.update(cx, |state, cx| state.select_session("bench", cx));
+    let opened = started.elapsed();
+    let (snapshot_elapsed, pages) = state.update(cx, |state, _| {
+        let started = Instant::now();
+        let snapshot = state
+            .subscription_snapshot(&tcode_protocol::Subscription {
+                topic: Topic::SessionEvents {
+                    session_id: "bench".into(),
+                },
+                after: None,
+            })
+            .unwrap();
+        let snapshot_elapsed = started.elapsed();
+        let ServerEvent::SessionSnapshot { from, total, .. } = snapshot.event else {
+            panic!("snapshot")
+        };
+        eprintln!("snapshot: {snapshot_elapsed:?} (from {from} of {total} records)");
+        let mut before = from;
+        let mut pages = Vec::new();
+        while before > 0 && pages.len() < 16 {
+            let started = Instant::now();
+            let QueryResponse::SessionHistoryPage { from, records, .. } = state
+                .session_history_page(
+                    "bench",
+                    before,
+                    tcode_protocol::SESSION_HISTORY_RECORDS as u32,
+                )
+                .unwrap()
+            else {
+                panic!("page")
+            };
+            pages.push((started.elapsed(), records.len()));
+            before = from;
+        }
+        (snapshot_elapsed, pages)
+    });
+    cx.run_until_parked();
+    let paged: Duration = pages.iter().map(|(elapsed, _)| *elapsed).sum();
+    for (index, (elapsed, records)) in pages.iter().enumerate() {
+        eprintln!("page {index}: {elapsed:?} ({records} records)");
+    }
+    eprintln!(
+        "select_session: {opened:?}; snapshot: {snapshot_elapsed:?}; {} pages: {paged:?}; snapshot + pages: {:?}",
+        pages.len(),
+        snapshot_elapsed + paged
+    );
 }
