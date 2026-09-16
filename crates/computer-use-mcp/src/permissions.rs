@@ -6,20 +6,7 @@
 //! effect after the app restarts (macOS shows its own "Quit & Reopen" dialog);
 //! callers must persist any restart-continuity marker *before* requesting.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionKind {
-    Accessibility,
-    ScreenRecording,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PermissionStatus {
-    pub accessibility: bool,
-    pub screen_recording: bool,
-}
+pub use tcode_core::permissions::{ComputerUsePermissions, PermissionKind, PermissionStatus};
 
 /// The explicit user-facing action to perform for a missing permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,22 +46,20 @@ impl PermissionGrantFlow {
     }
 }
 
-impl PermissionStatus {
-    pub fn granted(&self, kind: PermissionKind) -> bool {
-        match kind {
-            PermissionKind::Accessibility => self.accessibility,
-            PermissionKind::ScreenRecording => self.screen_recording,
-        }
-    }
-
-    pub fn all_granted(&self) -> bool {
-        self.accessibility && self.screen_recording
-    }
-}
-
 /// Non-prompting snapshot of both TCC grants for this process.
 pub fn check() -> PermissionStatus {
     imp::check()
+}
+
+/// Non-prompting host snapshot including whether these grants apply at all.
+pub fn host_status() -> ComputerUsePermissions {
+    if cfg!(target_os = "macos") {
+        ComputerUsePermissions::MacOs(check())
+    } else if cfg!(target_os = "windows") {
+        ComputerUsePermissions::NotRequired
+    } else {
+        ComputerUsePermissions::Unsupported
+    }
 }
 
 /// Fire the native request for one permission kind. The system prompt may

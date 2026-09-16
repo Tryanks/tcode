@@ -1080,12 +1080,18 @@ remote link, while operations that drive a local native facility require that
 facility here. Thus Browser is omitted without an embedded preview backend and
 Other devices is omitted without hosting support. A mixed section stays listed
 for its applicable rows and withholds only the unavailable rows. Computer Use
-configuration is replicated and stays editable; only its **System permissions**
-group is local — it shows live status and Grant/Recheck when this build can read
-them *and* the workspace is this machine's, and otherwise says to manage system
-permissions on the named host. A client never reports the host's permission
-state from its own OS. A stale deep link or command targeting a withheld section
-lands on the Settings root rather than opening an empty page.
+configuration is replicated and stays editable. Its **System permissions** group
+shows local status and Grant/Recheck when this build can manage permissions on
+this machine. Other attachments query the agent host and show separate
+Accessibility and Screen Recording status chips plus **Recheck**. Opening the
+section, reconnecting, or pressing Recheck reads a fresh, non-prompting snapshot.
+Remote clients name the host where grants must be managed and explain that a new
+Screen Recording grant requires restarting Tcode there. Loading, query failures,
+and disconnection are explicit unknown states, never missing or granted status;
+a disconnected snapshot is discarded. Hosts without these system gates say no
+separate grants are required; unsupported hosts say Computer Use is unavailable.
+The client's own OS never supplies the host's status. A stale deep link or command
+targeting a withheld section lands on the Settings root rather than opening an empty page.
 
 Editable fields are seeded from the host's settings the first time a real
 snapshot exists, not from local defaults, and a field the user has since edited

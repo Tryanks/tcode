@@ -594,6 +594,11 @@ fn dispatch_query(
                 message: "this host has no remote hosting controls".into(),
             })
         }),
+        Query::ComputerUsePermissions => cx.spawn_background(async {
+            Ok(QueryResponse::ComputerUsePermissions(
+                computer_use_mcp::permissions::host_status(),
+            ))
+        }),
         Query::Ping => cx.spawn_background(async { Ok(QueryResponse::Pong) }),
         Query::ListActiveWorkspace { session_id } => {
             let cwd = app

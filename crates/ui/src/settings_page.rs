@@ -330,6 +330,7 @@ pub struct SettingsPage {
     /// *and* the workspace is this machine's.
     #[cfg(all(feature = "local-permissions", target_os = "macos"))]
     local_permissions: Option<Entity<crate::local_permissions::LocalPermissions>>,
+    host_permissions: Option<Entity<crate::host_permissions::HostPermissions>>,
     /// One focus handle per toggle row, keyed by row id. The row owns keyboard
     /// activation, so its capture-phase Space handler must be able to tell
     /// "the row is focused" from "the inline reset button inside it is".
@@ -520,6 +521,7 @@ impl SettingsPage {
             hydrated: false,
             #[cfg(all(feature = "local-permissions", target_os = "macos"))]
             local_permissions,
+            host_permissions: None,
             toggle_focus: HashMap::new(),
             _subscriptions: subscriptions,
         };
@@ -715,6 +717,7 @@ impl SettingsPage {
     }
 
     fn select_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.host_permissions = None;
         if !section.applies(&self.capabilities) {
             self.section = Section::General;
             Self::return_to_settings_root(&self.window_state, cx);
@@ -1177,6 +1180,9 @@ impl SettingsPage {
             }
         } else {
             self.usage_refresh_sent = false;
+        }
+        if self.section != Section::ComputerUse {
+            self.host_permissions = None;
         }
         let column = match self.section {
             Section::General => self.render_general(cx),
@@ -2416,13 +2422,8 @@ impl SettingsPage {
         )
     }
 
-    /// The Computer Use "System permissions" group.
-    ///
-    /// Permissions belong to the machine that runs the agent, so only a local
-    /// attachment on a platform with TCC shows live status and grant controls.
-    /// A remote client is told where to manage them; it never infers the host's
-    /// permission state from its own operating system.
-    fn permissions_group(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Status belongs to the attached host; native grant controls stay local.
+    fn permissions_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let column =
             v_flex().child(self.section_label(crate::tr!("computer_use.permissions_section"), cx));
         if self.capabilities.can_manage_local_permissions()
@@ -2430,23 +2431,10 @@ impl SettingsPage {
         {
             return column.child(rows).into_any_element();
         }
-        let message = match self.store.read(cx).remote_host_name() {
-            Some(host) => crate::tr!("permissions.manage_on_host", host = host).into_owned(),
-            None => crate::tr!("permissions.unsupported").into_owned(),
-        };
-        column
-            .child(
-                crate::material::group(cx).child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_3()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(message),
-                ),
-            )
-            .into_any_element()
+        let rows = self.host_permissions.get_or_insert_with(|| {
+            cx.new(|cx| crate::host_permissions::HostPermissions::new(self.store.clone(), cx))
+        });
+        column.child(rows.clone()).into_any_element()
     }
 
     #[cfg(all(feature = "local-permissions", target_os = "macos"))]
