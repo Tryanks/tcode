@@ -575,7 +575,10 @@ Offline keeps the last received replica readable and disables writes; visited
 threads keep their events, and unvisited ones may have only their list summary.
 Reconnecting resubscribes to the current thread. A native app returning to the
 foreground, or a browser page becoming visible again, interrupts the backoff and
-retries at once.
+retries at once; so does a change of this device's network addresses. Finding
+the machine at another address is silent: the attempt counter keeps counting,
+the banner keeps naming the saved address's failure, and the saved record is
+updated without a prompt.
 
 ## Surface anatomy
 
