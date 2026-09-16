@@ -564,6 +564,10 @@ impl WorkspaceStore {
         }
     }
 
+    /// Feed LAN discovery hints to the transport once per unreachable retry.
+    /// The transport owns finding the machine again (saved candidates, gateway
+    /// probes, interface watching, identity-verified racing); this only runs
+    /// the platform browser, which iOS can drive solely from the UI thread.
     fn refresh_address(&mut self, state: &ConnectionState, cx: &mut Context<Self>) {
         if matches!(
             state,
@@ -594,11 +598,12 @@ impl WorkspaceStore {
             return;
         };
         self.address_refresh = Some(cx.spawn(async move |this, cx| {
-            if let Some(origin) = client.refresh_origin(&host_id).await {
+            let origins = client.discover_origins(&host_id).await;
+            if !origins.is_empty() {
                 let _ = this.update(cx, |store, _| {
                     store
                         .host
-                        .wake(tcode_client::recovery::Wake::Origin(origin));
+                        .wake(tcode_client::recovery::Wake::Candidates(origins));
                 });
             }
         }));

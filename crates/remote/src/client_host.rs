@@ -220,7 +220,11 @@ impl ClientHost for NativeClientHost {
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
-        let client = crate::client::connect(host.clone(), self.device_identity());
+        let client = crate::client::connect(
+            host.clone(),
+            self.device_identity(),
+            Some(self.data_dir.clone()),
+        );
         Transport {
             to_host: client.to_host,
             from_host: client.from_host,
@@ -272,34 +276,25 @@ impl ClientHost for NativeClientHost {
         }
     }
 
-    fn refresh_origin(&self, host_id: &str) -> HostFuture<'_, Option<String>> {
+    fn discover_origins(&self, host_id: &str) -> HostFuture<'_, Vec<String>> {
         let host_id = host_id.to_owned();
         Box::pin(async move {
-            let previous = self
-                .load_hosts()
+            // The transport never downgrades an HTTPS pairing to a plain LAN
+            // address, so browsing for one would only cost multicast traffic.
+            let plain = self.load_hosts().iter().any(|host| {
+                host.host_id == host_id && crate::client::plain_http_origin(&host.origin)
+            });
+            if !plain {
+                return Vec::new();
+            }
+            self.browse_hosts()
+                .await
                 .into_iter()
-                .find(|host| host.host_id == host_id)?;
-            if !lan_http_origin(&previous.origin) {
-                return None;
-            }
-            let hint = self.browse_hosts().await.into_iter().find(|hint| {
-                hint.host_id == host_id
-                    && hint.origin != previous.origin
-                    && lan_http_origin(&hint.origin)
-            })?;
-            // Reload after browsing so concurrent pairing/preferences never get overwritten.
-            let mut hosts = self.load_hosts();
-            let saved = hosts.iter_mut().find(|host| host.host_id == host_id)?;
-            if saved.origin != previous.origin {
-                return None;
-            }
-            saved.origin = hint.origin.clone();
-            crate::client::save_hosts(&self.data_dir, &hosts)
-                .map_err(|error| {
-                    log::error!("could not persist refreshed machine address: {error}");
+                .filter(|hint| {
+                    hint.host_id == host_id && crate::client::plain_http_origin(&hint.origin)
                 })
-                .ok()?;
-            Some(hint.origin)
+                .map(|hint| hint.origin)
+                .collect()
         })
     }
 
@@ -312,21 +307,6 @@ impl ClientHost for NativeClientHost {
             || Box::pin(async { Err("unsupported".into()) }) as HostFuture<'_, _>,
             |scanner| scanner(),
         )
-    }
-}
-
-fn lan_http_origin(origin: &str) -> bool {
-    let Ok(url) = url::Url::parse(origin) else {
-        return false;
-    };
-    if url.scheme() != "http" || tcode_client::pairing::parse_origin(origin).is_err() {
-        return false;
-    }
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_private() || ip.is_link_local(),
-        Some(url::Host::Ipv6(ip)) => ip.is_unique_local() || ip.is_unicast_link_local(),
-        Some(url::Host::Domain(name)) => name.ends_with(".local"),
-        None => false,
     }
 }
 
@@ -571,7 +551,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovery_refresh_matches_identity_persists_origin_and_preserves_token() {
+    fn discovery_hints_are_filtered_to_the_machine_identity_and_plain_origins() {
         let dir = TestDir::new();
         let calls = std::rc::Rc::new(std::cell::Cell::new(0));
         let observed = calls.clone();
@@ -589,30 +569,32 @@ mod tests {
                         name: "Right".into(),
                         origin: "http://192.168.1.25:47420".into(),
                     },
+                    DiscoveredHost {
+                        host_id: "right".into(),
+                        name: "Right".into(),
+                        origin: "https://right.example.com".into(),
+                    },
                 ]
             })
         });
-        let saved = PairedHost {
+        let mut saved = PairedHost {
             host_id: "right".into(),
             name: "My machine".into(),
             origin: "http://192.168.1.24:47420".into(),
+            candidates: Vec::new(),
             token: "unchanged-token".into(),
             last_connected_unix: Some(42),
         };
         client.save_hosts(std::slice::from_ref(&saved));
         assert_eq!(
-            smol::block_on(client.refresh_origin("right")).as_deref(),
-            Some("http://192.168.1.25:47420")
+            smol::block_on(client.discover_origins("right")),
+            vec!["http://192.168.1.25:47420".to_owned()]
         );
-        let refreshed = client.load_hosts().remove(0);
-        assert_eq!(refreshed.token, saved.token);
-        assert_eq!(refreshed.name, saved.name);
-        assert_eq!(refreshed.last_connected_unix, Some(42));
         assert_eq!(calls.get(), 1);
-        let mut tunnel = refreshed;
-        tunnel.origin = "https://tunnel.example.com".into();
-        client.save_hosts(&[tunnel]);
-        assert_eq!(smol::block_on(client.refresh_origin("right")), None);
+        assert!(smol::block_on(client.discover_origins("unknown")).is_empty());
+        saved.origin = "https://tunnel.example.com".into();
+        client.save_hosts(&[saved]);
+        assert!(smol::block_on(client.discover_origins("right")).is_empty());
         assert_eq!(calls.get(), 1, "HTTPS must not browse");
     }
 

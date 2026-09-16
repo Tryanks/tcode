@@ -300,10 +300,17 @@ port, so `https://tunnel.example.com` uses 443. IPv6 literals are supported,
 including `[fd00::1]:47420`. Paths, credentials, queries and fragments are not
 machine origins.
 
-Saved machines contain one `origin`, for example `http://192.168.1.10:47420`.
-Older `hosts.json` records migrate their first saved address and port to an HTTP
-origin, preserving the machine ID, name, token and last connection time. Saving
-writes the new format. Discovery and pairing invitations provide origin hints.
+Saved machines contain the `origin` that last completed a connection, for
+example `http://192.168.1.10:47420`, and up to 16 `candidates`: other origins
+the same machine answered at before, the addresses it reported for itself in
+its last hello, and nearby-machine hints. A pairing is bound to the machine
+identity, not to any of these addresses; see
+[Finding the machine again](#finding-the-machine-again). Older `hosts.json`
+records migrate their first saved address and port to the HTTP origin and any
+further addresses to candidates, preserving the machine ID, name, token and
+last connection time. Records with one origin and no candidates load unchanged.
+Saving writes the new format. Discovery and pairing invitations provide origin
+hints.
 
 ### Device preferences
 
@@ -327,7 +334,9 @@ overlay access rules. Tcode provides no relay or public discovery service. Treat
 nearby-machine search as LAN-only: it does not cross a normal overlay connection.
 Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
-access.
+access. A machine you already added is found again at its new address after
+either side changes network; see
+[Finding the machine again](#finding-the-machine-again).
 
 ### Remote Preview routing
 
@@ -514,13 +523,14 @@ Native foreground cancels pending backoff. After at least 10 s in the background
 it opens a new socket and replays subscriptions from applied cursors. After a
 shorter absence it probes once, allowing 3 s for a reply before reconnecting.
 Foreground and Active from the same return do not issue duplicate probes.
-Native network-path callbacks are not installed; lifecycle wake is the native
-wake signal.
+Native network-path callbacks are not installed; the client polls its own
+interface addresses instead, and a change is the other native wake signal.
 
-When a saved HTTP LAN origin is unreachable or times out, the native client
-browses nearby machines during retry. A changed LAN hint for the same machine ID
-updates and persists the origin and wakes an immediate retry. The token is never
-changed. HTTPS tunnels and the browser's fixed origin skip this refresh.
+When a saved HTTP origin is unreachable or times out, or this device's addresses
+change, the native client races every origin it knows for the same machine ID
+and promotes the one that answers; see
+[Finding the machine again](#finding-the-machine-again). The token is never
+changed. HTTPS tunnels and the browser's fixed origin skip this.
 
 Outgoing commands and queries are bounded to 256 lines and 8 MiB per attachment,
 including lines held for retry. A full queue rejects the new line with
@@ -642,6 +652,55 @@ accept it. A version-3 host ignores `key` and still works, but cannot deduplicat
 redelivery; a lost Ack can therefore repeat a mutation. Upgrade both ends for the
 bounded deduplication guarantee. Hosts older than version 3 remain incompatible
 with bounded history replay.
+
+### Finding the machine again
+
+A pairing is bound to the machine identity (`host_id`), never to an address.
+When the saved origin stops answering, or this device's network addresses
+change, a native client looks for the same machine at every origin it knows
+and resumes the same session; no re-pairing and no address entry.
+
+- **What is tried.** The saved origin alone on the first attempt after a loss.
+  From the next attempt on, or at once when this device's addresses changed,
+  the saved origin is raced against the saved candidates, the addresses the
+  machine reported in its last `hello_ok` (`addrs` and `port`), nearby-machine
+  hints for that machine ID, and probes derived from this device's own
+  interfaces: the gateway `.1` of each hotspot subnet it sits in (iOS
+  `172.20.10.0/28`, Android `192.168.43.0/24`, macOS Internet Sharing
+  `192.168.2.0/24`, Windows Mobile Hotspot `192.168.137.0/24`), the `.1` of
+  any private IPv4 network no larger than a /24, and every other host of a
+  private network no larger than a /28. Attempts start 250 ms apart and each
+  has a five-second budget; at most 32 origins are raced.
+- **Identity, not address, decides.** Every `hello_ok` and `hello_rejected`
+  names the answering machine's `host_id`. The first origin where the paired
+  machine accepts wins, is promoted to the saved `origin`, and the previous
+  origin becomes the first candidate; the record is saved. An origin where a
+  different machine answers, accepts or rejects, is simply unreachable: it is
+  never promoted and a stranger's token rejection never ends the pairing. Only
+  a token rejection from the paired machine itself, or from a machine at the
+  saved origin that is too old to name itself, shows **Pair again**.
+- **Network changes.** The client re-reads its interface addresses every
+  2.5 seconds while reconnecting and every 10 seconds while connected. A
+  change during reconnecting cuts the backoff short, resets the delay to one
+  second and retries with a fresh candidate list. A change while connected
+  sends a probe with a three-second reply budget, so a socket left on a
+  vanished interface is replaced within seconds instead of the idle window.
+  Each retry also re-runs the three-second nearby-machine search off the UI
+  thread; hints that add nothing do not interrupt an attempt in progress.
+- **Hotspots.** When the machine shares its connection, it is the gateway of
+  the hotspot subnet and the gateway probe finds it even where the hotspot
+  drops multicast. When this device shares its connection, the machine is
+  one of its guests: on an iOS hotspot (`/28`) every guest address is probed;
+  on larger hotspot subnets the nearby-machine search or the machine's
+  reported addresses must supply the address.
+- **Plain HTTP only.** Alternates are raced only for `http` origins, where the
+  token already travels in clear to the saved address. An `https` pairing,
+  such as a tunnel, is never downgraded to a LAN address; hints are still
+  remembered. The browser client keeps its page origin.
+- **Machine side.** The listener binds all interfaces, and the nearby-machine
+  beacon re-announces on interfaces that appear later, such as a hotspot
+  interface that only comes up once the first guest joins. `hello_ok` carries
+  the machine's current non-loopback, non-link-local addresses and its port.
 
 ### Native connection and imported stream ownership
 
