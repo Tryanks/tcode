@@ -613,7 +613,20 @@ in both states.
 5. Project groups: rotating chevron + project icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
-   while naming) + relative time (muted 11px); hover = accent bg. Inline rename
+   while naming) + relative time (muted 11px); hover = accent bg. With the
+   **Provider marks** switch on (off by default) every thread row, child and
+   compact rows included, carries a decorative provider mark painted under
+   its content: the provider's glyph (the ACP box for agents) in a square box
+   that fits the row height minus an 8px inset, vertically centred and
+   right-aligned inside the row's own horizontal padding — nothing overhangs
+   and the row gains no clipping — filled with the provider's color at
+   roughly a third opacity, so it reads without competing with the title. The
+   color is the provider card's accent when one is set, else the built-in
+   brand color, else a stable palette slot for each
+   user profile or ACP agent (owner: `Settings::provider_color` in
+   `crates/core`). The mark takes no input and changes no geometry; the
+   row's rest, hover, selected and semantic surfaces are exactly the neutral
+   ones described here, and with the switch off there is no mark. Inline rename
    commits on Enter and cancels on blur or any click outside the input.
    The thread context menu offers **Regenerate title / 重新生成标题** next to
    Rename in both layouts. It uses the original request and recent conversation
@@ -1054,8 +1067,9 @@ horizontal clipping. A row whose control is a 44pt switch keeps it beside the
 label at both widths, since a switch never squeezes the text.
 
 Both the compact list and wide rail divide Settings into two captioned groups,
-in this order: **This device** contains General (appearance, language and device
-name) plus Other devices wherever the build can host connections; **‹machine
+in this order: **This device** contains General (appearance — theme, the
+off-by-default **Provider marks** switch for the sidebar's provider marks —
+language and device name) plus Other devices wherever the build can host connections; **‹machine
 name› settings** contains Providers, Usage, Orchestrate, Computer Use, Browser
 and Archived Threads. The attached host's display name supplies ‹machine name›;
 a local attachment uses the machine name shown by the hosting panel, and a

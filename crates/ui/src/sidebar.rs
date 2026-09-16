@@ -37,6 +37,13 @@ use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
+/// The provider mark behind a thread row: its provider's glyph at this alpha,
+/// sized to the row height minus this vertical inset so it sits inside the row.
+const PROVIDER_MARK_ALPHA: f32 = 0.32;
+const PROVIDER_MARK_INSET: f32 = 8.;
+/// Horizontal padding of the grouped and flat thread rows (`px_2` / `pr_2`).
+const THREAD_ROW_PADDING_X: f32 = 8.;
+
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
 #[cfg(target_os = "macos")]
@@ -50,6 +57,10 @@ const THREADS_COLLAPSED_LIMIT: usize = 6;
 /// Flat-list row geometry, including the 2px gap reserved below every row.
 const FLAT_ROOT_ROW_HEIGHT: f32 = 50.;
 const FLAT_CHILD_ROW_HEIGHT: f32 = 32.;
+/// The clickable row inside each flat slot (the slot adds 2px of spacing).
+const FLAT_ROOT_ROW_INNER_HEIGHT: f32 = 48.;
+const FLAT_CHILD_ROW_INNER_HEIGHT: f32 = 30.;
+const GROUPED_ROW_HEIGHT: f32 = 30.;
 const SETTLED_HEADER_HEIGHT: f32 = 34.;
 
 /// A critically damped spring keeps reordering legible without bouncing rows
@@ -2127,6 +2138,47 @@ impl SessionsSidebar {
         }
     }
 
+    /// The decorative provider mark painted under a thread row's content:
+    /// `meta`'s protocol glyph in its provider color, fitted to the row height
+    /// minus [`PROVIDER_MARK_INSET`], vertically centred and right-aligned
+    /// inside the row's `right_padding`. `None` while Provider marks is off.
+    /// It has no handlers, so the row's own hover, click and menu are unaffected.
+    fn provider_mark(
+        &self,
+        meta: &SessionMeta,
+        row_height: f32,
+        right_padding: f32,
+        cx: &App,
+    ) -> Option<gpui::Div> {
+        let color: gpui::Hsla = gpui::rgb(self.store.read(cx).provider_color(meta)?).into();
+        let glyph = match meta.provider {
+            // ACP agents share the box glyph the composer rail and ACP panel use.
+            agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
+            kind => crate::provider_card::provider_glyph(kind),
+        };
+        let size = px(row_height - PROVIDER_MARK_INSET);
+        let id = meta.id.clone();
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(right_padding))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .size(size)
+                        .debug_selector(move || format!("sidebar-provider-mark-{id}"))
+                        .child(
+                            glyph
+                                .size(size)
+                                .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
+                        ),
+                ),
+        )
+    }
+
     fn thread_clickable_row(
         &self,
         base: gpui::Div,
@@ -2407,12 +2459,17 @@ impl SessionsSidebar {
                 is_active,
                 cx,
             )
-            .h(px(30.))
+            .h(px(GROUPED_ROW_HEIGHT))
             .items_center()
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
-            .pr_2()
+            .pr(px(THREAD_ROW_PADDING_X))
             .rounded(px(6.))
+            // First child so the row's content paints over the mark.
+            .when_some(
+                self.provider_mark(meta, GROUPED_ROW_HEIGHT, THREAD_ROW_PADDING_X, cx),
+                |row, mark| row.relative().child(mark),
+            )
             .when_some(
                 Self::thread_status_badge(&state, working, cx),
                 |row, badge| row.child(badge),
@@ -2577,6 +2634,11 @@ impl SessionsSidebar {
         let children_collapsed = state.children_collapsed;
         let renaming = state.renaming.is_some();
         let status = Self::thread_status_label(&state, working, cx);
+        let row_height = if is_child {
+            FLAT_CHILD_ROW_INNER_HEIGHT
+        } else {
+            FLAT_ROOT_ROW_INNER_HEIGHT
+        };
 
         let row = self
             .thread_clickable_row(
@@ -2591,10 +2653,23 @@ impl SessionsSidebar {
                 let id = session_id.clone();
                 move || format!("sidebar-thread-{id}")
             })
-            .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
-            .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
-            .px_2()
-            .rounded(px(6.));
+            .when(is_child, |row| {
+                row.h(px(FLAT_CHILD_ROW_INNER_HEIGHT))
+                    .items_center()
+                    .ml(px(12.))
+            })
+            .when(!is_child, |row| {
+                row.h(px(FLAT_ROOT_ROW_INNER_HEIGHT))
+                    .justify_center()
+                    .gap(px(2.))
+            })
+            .px(px(THREAD_ROW_PADDING_X))
+            .rounded(px(6.))
+            // First child so the row's content paints over the mark.
+            .when_some(
+                self.provider_mark(meta, row_height, THREAD_ROW_PADDING_X, cx),
+                |row, mark| row.relative().child(mark),
+            );
 
         let row = if is_child {
             let title_or_input = self.thread_title_or_input(meta, &state, false, cx);
@@ -3306,6 +3381,12 @@ impl SessionsSidebar {
         let click_id = session_id.clone();
         let disclosure_id = session_id.clone();
         let unavailable = meta.parent_session_id.is_some() && !state.is_child;
+        let mark = self.provider_mark(
+            meta,
+            crate::material::LIST_ROW_MIN_HEIGHT,
+            crate::material::COMPACT_PAGE_INSET,
+            cx,
+        );
 
         let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
             .debug_selector({
@@ -3315,6 +3396,8 @@ impl SessionsSidebar {
             .when(state.is_child, |row| {
                 row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
             })
+            // First child so the row's content paints over the mark.
+            .when_some(mark, |row, mark| row.relative().child(mark))
             .when(
                 self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
                 |row| row.bg(cx.theme().list_active).aria_selected(true),
@@ -4408,6 +4491,133 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-provider-mark-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.clone());
+        let mut codex = session("codex-thread", None);
+        codex.project_id = Some(project.id.clone());
+        let mut claude = session("claude-thread", None);
+        claude.provider = ProviderKind::ClaudeCode;
+        claude.project_id = Some(project.id.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.settings.auto_archive_disabled = true;
+            state.projects = vec![project];
+            state.sessions = vec![codex, claude];
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(320.), px(600.)));
+        store.update(cx, |store, _| store.select_session("codex-thread".into()));
+        // (row selector, mark selector); the active Codex row comes first.
+        let selectors = [
+            (
+                "sidebar-thread-codex-thread",
+                "sidebar-provider-mark-codex-thread",
+            ),
+            (
+                "sidebar-thread-claude-thread",
+                "sidebar-provider-mark-claude-thread",
+            ),
+        ];
+        let wait_for_rows = |cx: &mut VisualTestContext| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+                let rows: Vec<_> = selectors
+                    .iter()
+                    .filter_map(|(row, _)| cx.debug_bounds(row))
+                    .collect();
+                if rows.len() == selectors.len() {
+                    return rows;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "thread rows never rendered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        let set_marks = |cx: &mut VisualTestContext, enabled: bool| {
+            store.update(cx, |store, _| store.set_sidebar_provider_marks(enabled));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while store.read_with(cx, |store, _| store.settings().sidebar_provider_marks) != enabled
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "setting never replicated"
+                );
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+
+        // Off by default: rows render without a mark.
+        wait_for_rows(cx);
+        for (_, mark_selector) in selectors {
+            assert!(cx.debug_bounds(mark_selector).is_none());
+        }
+
+        set_marks(cx, true);
+        let rows = wait_for_rows(cx);
+        for ((_, mark_selector), row) in selectors.iter().zip(&rows) {
+            let mark = cx
+                .debug_bounds(mark_selector)
+                .expect("each row carries its provider mark once enabled");
+            assert!(
+                mark.top() >= row.top()
+                    && mark.bottom() <= row.bottom()
+                    && mark.right() <= row.right()
+                    && mark.left() >= row.left(),
+                "mark sits entirely inside the row: {mark:?} in {row:?}"
+            );
+            assert_eq!(
+                mark.size.height,
+                row.size.height - px(PROVIDER_MARK_INSET),
+                "mark fits the row height minus the inset"
+            );
+        }
+        let list_active = cx.update(|_, cx| cx.theme().list_active);
+        let painted_active = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
+            cx.update(|window, _| {
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == bounds.scale(window.scale_factor())
+                        && quad.background == gpui::Background::from(list_active)
+                })
+            })
+        };
+        assert!(
+            painted_active(cx, rows[0]),
+            "the active row keeps the neutral selected surface"
+        );
+
+        set_marks(cx, false);
+        let rows = wait_for_rows(cx);
+        for (_, mark_selector) in selectors {
+            assert!(
+                cx.debug_bounds(mark_selector).is_none(),
+                "with marks off again no mark is drawn"
+            );
+        }
+        assert!(painted_active(cx, rows[0]));
         let _ = std::fs::remove_dir_all(root);
     }
 

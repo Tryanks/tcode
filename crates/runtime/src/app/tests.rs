@@ -534,6 +534,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         theme_mode: ThemeMode::Dark,
         language: Some("zh-CN".into()),
         word_wrap_diffs: true,
+        sidebar_provider_marks: true,
         auto_archive_max_idle_days: 99,
         ..Settings::default()
     };
@@ -591,6 +592,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         assert_eq!(reset.theme_mode, ThemeMode::System);
         assert_eq!(reset.language, None);
         assert!(!reset.word_wrap_diffs);
+        assert!(!reset.sidebar_provider_marks);
         assert_eq!(reset.auto_archive_max_idle_days, 7);
         assert_eq!(reset.browser.home_url, None);
 

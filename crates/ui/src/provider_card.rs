@@ -28,9 +28,7 @@ use gpui::{Styled as _, rgb};
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
 use agent::ProviderKind;
-
-/// Claude's official Clay brand color from Anthropic's media resources.
-pub const CLAUDE_BRAND_COLOR: u32 = 0xD97757;
+use tcode_core::settings::builtin_provider_color;
 
 pub struct ProviderCard {
     store: Entity<WorkspaceStore>,
@@ -406,14 +404,16 @@ impl Render for ProviderCard {
 }
 
 /// The provider's glyph (the same asset the composer's picker rail uses).
+/// Claude's is pre-tinted with its brand color; the others take the text color.
 pub fn provider_glyph(provider: ProviderKind) -> Icon {
-    match provider {
-        ProviderKind::ClaudeCode => Icon::empty()
-            .path("icons/claude.svg")
-            .text_color(rgb(CLAUDE_BRAND_COLOR)),
-        ProviderKind::Codex => Icon::empty().path("icons/openai.svg"),
-        ProviderKind::Pi => Icon::empty().path("icons/pi.svg"),
-        ProviderKind::OpenCode => Icon::empty().path("icons/opencode.svg"),
-        ProviderKind::Acp => Icon::empty(),
-    }
+    let (path, tint) = match provider {
+        ProviderKind::ClaudeCode => ("icons/claude.svg", builtin_provider_color(provider)),
+        ProviderKind::Codex => ("icons/openai.svg", None),
+        ProviderKind::Pi => ("icons/pi.svg", None),
+        ProviderKind::OpenCode => ("icons/opencode.svg", None),
+        ProviderKind::Acp => return Icon::empty(),
+    };
+    Icon::empty()
+        .path(path)
+        .when_some(tint, |icon, tint| icon.text_color(rgb(tint)))
 }

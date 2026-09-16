@@ -1653,6 +1653,15 @@ impl WorkspaceStore {
         !self.settings_replica.live_command_panel_disabled
     }
 
+    /// The `0xRRGGBB` color of `meta`'s sidebar provider mark, `None` while
+    /// the Provider marks setting is off.
+    pub fn provider_color(&self, meta: &SessionMeta) -> Option<u32> {
+        self.settings_replica.sidebar_provider_marks.then(|| {
+            self.settings_replica
+                .provider_color(&meta.provider_color_key())
+        })
+    }
+
     pub fn archived_groups(&self) -> Vec<ProjectGroup> {
         let archived: Vec<_> = self
             .index_replica
@@ -1959,15 +1968,10 @@ impl WorkspaceStore {
     }
 
     pub fn provider_profile_accent(&self, profile_id: &str) -> Option<u32> {
-        let raw = self
-            .settings_replica
+        self.settings_replica
             .resolved_profile(profile_id)?
             .settings
-            .accent_color?;
-        let hex = raw.trim().trim_start_matches('#');
-        (hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
-            .then(|| u32::from_str_radix(hex, 16).ok())
-            .flatten()
+            .accent_rgb()
     }
 
     pub fn provider_update_command(&self, provider: agent::ProviderKind) -> Option<String> {
