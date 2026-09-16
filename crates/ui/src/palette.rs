@@ -64,6 +64,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
 /// A concrete action a palette row triggers.
 #[derive(Clone)]
 enum Action {
+    ChangeProjectIcon(tcode_core::project::Project),
     NewThread {
         cwd: std::path::PathBuf,
         project_id: String,
@@ -255,12 +256,18 @@ impl CommandPalette {
         };
         for group in store.grouped_sessions() {
             push_action(
-                crate::tr!("palette.new_thread", project = group.project.name).into_owned(),
+                crate::tr!("palette.new_thread", project = group.project.name.clone()).into_owned(),
                 IconName::Plus,
                 Action::NewThread {
                     cwd: group.project.root.clone(),
                     project_id: group.project.id.clone(),
                 },
+            );
+            push_action(
+                crate::tr!("project_icon.action", project = group.project.name.clone())
+                    .into_owned(),
+                IconName::Folder,
+                Action::ChangeProjectIcon(group.project),
             );
         }
         push_action(
@@ -413,6 +420,10 @@ impl CommandPalette {
 
     fn activate(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         match action {
+            Action::ChangeProjectIcon(project) => {
+                self.close(cx);
+                crate::project_icon::open(self.store.clone(), project, window, cx);
+            }
             Action::NewThread { cwd, project_id } => {
                 self.close(cx);
                 self.store.update(cx, |store, cx| {
@@ -592,7 +603,28 @@ impl Render for CommandPalette {
                         .when(!is_sel, |s| {
                             s.hover(|style| style.bg(cx.theme().list_hover))
                         })
-                        .child(Icon::new(item.icon.clone()).small().text_color(muted))
+                        .child(match &item.action {
+                            Action::ChangeProjectIcon(project) => {
+                                crate::project_icon::artwork(project, 16.).into_any_element()
+                            }
+                            Action::NewThread { project_id, .. } => self
+                                .store
+                                .read(cx)
+                                .project(project_id)
+                                .map(|project| {
+                                    crate::project_icon::artwork(project, 16.).into_any_element()
+                                })
+                                .unwrap_or_else(|| {
+                                    Icon::new(item.icon.clone())
+                                        .small()
+                                        .text_color(muted)
+                                        .into_any_element()
+                                }),
+                            _ => Icon::new(item.icon.clone())
+                                .small()
+                                .text_color(muted)
+                                .into_any_element(),
+                        })
                         .child(
                             v_flex()
                                 .flex_1()

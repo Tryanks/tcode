@@ -16,6 +16,9 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub root: PathBuf,
+    /// Host-owned image selected by the user; absent uses the project config's iconPath.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<PathBuf>,
     pub created_at: u64,
 }
 
@@ -29,6 +32,7 @@ impl Project {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             root,
+            icon_path: None,
             created_at: now_secs(),
         }
     }
@@ -527,18 +531,21 @@ mod tests {
                 id: "p-old".into(),
                 name: "Old".into(),
                 root: PathBuf::from("/old"),
+                icon_path: None,
                 created_at: 1,
             },
             Project {
                 id: "p-new".into(),
                 name: "New".into(),
                 root: PathBuf::from("/new"),
+                icon_path: None,
                 created_at: 2,
             },
             Project {
                 id: "p-empty".into(),
                 name: "Empty".into(),
                 root: PathBuf::from("/empty"),
+                icon_path: None,
                 created_at: 15,
             },
         ];
@@ -572,6 +579,7 @@ mod tests {
             id: "p".into(),
             name: "Project".into(),
             root: PathBuf::from("/p"),
+            icon_path: None,
             created_at: 1,
         }];
         let make = |id: &str, updated_at: u64, parent: Option<&str>| {

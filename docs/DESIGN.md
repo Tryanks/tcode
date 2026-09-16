@@ -610,7 +610,7 @@ in both states.
    persistent features are rows here, not new controls elsewhere.
 4. Project/thread header: sort, grouped/flat layout and add-project controls.
    Sorting and layout choices are persisted.
-5. Project groups: rotating chevron + folder icon + 13px medium name; hover
+5. Project groups: rotating chevron + project icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. Inline rename
@@ -639,6 +639,47 @@ replaces Chat in the content column, and selecting a thread, starting a draft,
 or choosing its project switches that column back to Chat. Wide routes do not
 put Back in the Machines header or accumulate a page history. Compact keeps the
 single navigation stack and its Back semantics described above.
+
+### Project icons
+
+Projects use their custom image wherever a project folder glyph appears, including
+wide and compact group headers, wide flat-row metadata, the start hub, and
+project actions in the command palette. Missing or invalid artwork falls back
+to the folder glyph without changing row geometry.
+
+Compact ungrouped rows show a 20px project icon in the leading slot beside the
+title. Approval, input, working, and unread indicators take precedence in that
+slot. The project name stays in the metadata line without a second icon.
+
+**Change project icon** in a wide project context menu, or **Change icon for
+‹project›** in the command palette at either width, opens the same in-app picker.
+It browses folders on the attached host, identifies that machine, and shows only
+folders and PNG, JPEG, WebP, GIF, BMP, TIFF and ICO files. The path field and Up /
+Project folder controls navigate; a filter narrows the current directory. Image
+tiles show thumbnails and a selection border. Use image saves; Cancel discards
+selection. Loading, empty directories and failures are shown inside the dialog.
+The file grid scrolls, and the dialog fits narrow and short viewports.
+
+Selected artwork is copied into host-owned storage as a static PNG of at most
+128 × 128 pixels, preserving aspect ratio and transparency. Originals are never
+modified. Inputs are limited to 8 MiB and 8192 pixels per dimension, with a
+bounded decoder allocation and at most 4,194,304 source pixels. Replacement and project removal clean up the previous
+managed image after persisting the new project state.
+
+The 128px image remains the saved source. The host produces Lanczos3 rasters at
+requested physical display sizes, cached by the client: a 16px glyph requests
+16px at 1× and 32px at 2×, up to 128px. The host owns both thumbnail and glyph
+resizing, with premultiplied alpha to avoid dark fringes at transparent edges.
+Images preserve aspect ratio; display-scale changes select the matching raster.
+
+Project config location, `iconPath`, legacy fallback, limits and failure handling
+are specified in [Project configuration](project-config.md). **Use project
+default** clears the override and refreshes connected clients even when no
+manual icon was selected. Defaults also refresh after reconnecting or restarting
+the client; config/image edits are not watched live. The picker never edits
+config files. Folder entries carry complete host paths; clients do not assemble
+paths using their own operating system's separators. Image selection is exposed
+to assistive technology as well as shown by its border.
 
 ### Chat header
 

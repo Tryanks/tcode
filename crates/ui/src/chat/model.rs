@@ -1272,6 +1272,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             root: PathBuf::from(format!("/{id}")),
+            icon_path: None,
             created_at: 0,
         };
         let projects = vec![

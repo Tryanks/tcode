@@ -8949,6 +8949,7 @@ dependencies = [
  "chrono",
  "dirs 7.0.0",
  "flate2",
+ "image",
  "log",
  "serde",
  "serde_json",

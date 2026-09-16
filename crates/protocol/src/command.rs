@@ -198,6 +198,11 @@ pub enum Command {
         index: usize,
     },
     CycleProjectSort,
+    /// A normalized PNG override, or None to use the project config again.
+    SetProjectIcon {
+        project_id: String,
+        png: Option<Vec<u8>>,
+    },
     /// Register a project rooted at `root`. The host validates the path against
     /// its own filesystem — a client never decides whether a host path is
     /// absolute or exists — and answers `invalid_project_root` when it is not an

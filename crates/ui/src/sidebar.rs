@@ -530,6 +530,10 @@ struct ProjectArchiveAll(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectDelete(String);
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = tcode_project, no_json)]
+struct ChangeProjectIcon(String);
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = tcode_project, no_json)]
 struct ProjectReveal(String);
@@ -1367,6 +1371,18 @@ impl SessionsSidebar {
         });
     }
 
+    fn on_change_project_icon(
+        &mut self,
+        action: &ChangeProjectIcon,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let project = self.store.read(cx).project(&action.0).cloned();
+        if let Some(project) = project {
+            crate::project_icon::open(self.store.clone(), project, window, cx);
+        }
+    }
+
     fn on_project_delete(
         &mut self,
         action: &ProjectDelete,
@@ -1905,11 +1921,7 @@ impl SessionsSidebar {
             .size_4()
             .text_color(cx.theme().muted_foreground),
         )
-        .child(
-            Icon::new(IconName::Folder)
-                .size_4()
-                .text_color(cx.theme().muted_foreground),
-        )
+        .child(crate::project_icon::artwork(&group.project, 16.))
         .child(
             truncated_sidebar_label()
                 .text_sm()
@@ -1972,7 +1984,11 @@ impl SessionsSidebar {
                 .context_menu(move |menu, _window, _cx| {
                     let id = menu_project_id.clone();
                     let delete_label = crate::tr!("sidebar.remove_project").into_owned();
-                    menu.menu_with_enable(
+                    menu.menu(
+                        crate::tr!("project_icon.title"),
+                        Box::new(ChangeProjectIcon(id.clone())),
+                    )
+                    .menu_with_enable(
                         crate::tr!("sidebar.archive_all").into_owned(),
                         Box::new(ProjectArchiveAll(id.clone())),
                         can_archive,
@@ -2666,10 +2682,15 @@ impl SessionsSidebar {
                 })
                 .when_some(project_name, |line, project_name| {
                     line.child(
-                        Icon::new(IconName::Folder)
-                            .flex_none()
-                            .size_3()
-                            .text_color(cx.theme().muted_foreground),
+                        self.store
+                            .read(cx)
+                            .project(meta.project_id.as_deref().unwrap_or_default())
+                            .map(|project| {
+                                crate::project_icon::artwork(project, 12.).into_any_element()
+                            })
+                            .unwrap_or_else(|| {
+                                Icon::new(IconName::Folder).size_3().into_any_element()
+                            }),
                     )
                     .child(truncated_sidebar_label().child(project_name))
                 })
@@ -3235,7 +3256,10 @@ impl SessionsSidebar {
         }))
         .text_size(px(13.))
         .text_color(cx.theme().muted_foreground)
-        .child(Icon::new(IconName::Folder).size(px(14.)))
+        .when_some(
+            self.store.read(cx).project(&row.project_id),
+            |el, project| el.child(crate::project_icon::artwork(project, 14.)),
+        )
         .child(
             div()
                 .flex_1()
@@ -3269,6 +3293,14 @@ impl SessionsSidebar {
         let state = &cached.state;
         let working = cached.working;
         let project_name = cached.project_name.clone();
+        let project = if project_name.is_some() {
+            self.store
+                .read(cx)
+                .project(meta.project_id.as_deref().unwrap_or_default())
+                .cloned()
+        } else {
+            None
+        };
         let session_id = state.session_id.clone();
         let status = compact_status_line(state, working, cx);
         let click_id = session_id.clone();
@@ -3309,7 +3341,7 @@ impl SessionsSidebar {
                 this.window_state
                     .update(cx, |state, cx| state.open_thread(cx));
             }))
-            .child(compact_status_glyph(state, working, cx))
+            .child(compact_status_glyph(state, working, project.as_ref(), cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -3418,8 +3450,13 @@ impl SessionsSidebar {
 }
 
 /// The 20×20 status slot at the head of a compact row. The slot is
-/// always taken so titles line up whether or not a thread has a status.
-fn compact_status_glyph(state: &ThreadRowState, working: bool, cx: &App) -> gpui::AnyElement {
+/// always taken so titles line up. Idle ungrouped rows show their project artwork.
+fn compact_status_glyph(
+    state: &ThreadRowState,
+    working: bool,
+    project: Option<&tcode_core::project::Project>,
+    cx: &App,
+) -> gpui::AnyElement {
     let slot = div().flex_none().size(px(20.)).flex().items_center();
     if state.waiting_for_approval {
         return slot
@@ -3461,7 +3498,12 @@ fn compact_status_glyph(state: &ThreadRowState, working: bool, cx: &App) -> gpui
             .child(div().size(px(8.)).rounded_full().bg(cx.theme().primary))
             .into_any_element();
     }
-    slot.into_any_element()
+    slot.justify_center()
+        .text_color(cx.theme().muted_foreground)
+        .when_some(project, |slot, project| {
+            slot.child(crate::project_icon::artwork(project, 20.))
+        })
+        .into_any_element()
 }
 
 /// Status label and color, or `None` for an idle thread that shows only its time.
@@ -3717,6 +3759,7 @@ impl Render for SessionsSidebar {
             .on_action(cx.listener(Self::on_delete))
             .on_action(cx.listener(Self::on_project_archive_all))
             .on_action(cx.listener(Self::on_project_delete))
+            .on_action(cx.listener(Self::on_change_project_icon))
             .on_action(cx.listener(Self::on_project_reveal))
             .on_action(cx.listener(Self::on_filter_project))
             .on_action(cx.listener(Self::on_start_draft_for_project))

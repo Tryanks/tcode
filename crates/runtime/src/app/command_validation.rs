@@ -31,6 +31,7 @@ impl AppState {
                 ));
             }
             Command::ToggleProjectCollapsed { project_id }
+            | Command::SetProjectIcon { project_id, .. }
             | Command::DeleteProject { project_id }
                 if !self
                     .projects
