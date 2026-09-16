@@ -2358,6 +2358,20 @@ impl WorkspaceStore {
         })
     }
 
+    pub fn computer_use_permissions(
+        &self,
+        cx: &mut App,
+    ) -> Task<Result<tcode_core::permissions::ComputerUsePermissions, String>> {
+        let host = self.host.clone();
+        cx.spawn(
+            async move |_| match host.query(Query::ComputerUsePermissions).await {
+                Ok(QueryResponse::ComputerUsePermissions(status)) => Ok(status),
+                Ok(_) => Err("unexpected computer-use permissions response".into()),
+                Err(error) => Err(error.message),
+            },
+        )
+    }
+
     #[cfg(target_family = "wasm")]
     pub fn hosting(
         &self,

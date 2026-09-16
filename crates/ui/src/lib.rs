@@ -15,10 +15,11 @@ pub(crate) mod diff;
 pub mod gallery_support;
 pub(crate) mod git;
 mod highlight;
+mod host_permissions;
 pub mod i18n;
 pub mod icon;
 /// macOS TCC permission status and grant flow. Compiled only where the platform
-/// actually has one; every other build shows the host/unsupported note instead.
+/// actually has one; other attachments query the host for read-only status.
 #[cfg(all(feature = "local-permissions", target_os = "macos"))]
 mod local_permissions;
 pub mod markdown;
