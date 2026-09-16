@@ -654,11 +654,11 @@ fn dispatch_query(
                     .map_err(io_protocol_error)
             })
         }
-        Query::ReadProjectIcon { project_id } => {
+        Query::ReadProjectIcon { project_id, pixels } => {
             let project = app.projects.iter().find(|p| p.id == project_id).cloned();
             let task = cx.unblock(move || {
                 let project = project.ok_or_else(|| std::io::Error::other("unknown project"))?;
-                tcode_services::project_icons::read_project_icon(&project)
+                tcode_services::project_icons::read_project_icon(&project, pixels)
             });
             cx.spawn_background(async move {
                 task.await
@@ -1213,10 +1213,28 @@ mod tests {
         });
         let QueryResponse::FileBytes(png) = smol::block_on(link.query(Query::ReadProjectIcon {
             project_id: "p".into(),
+            pixels: 128,
         }))
         .unwrap() else {
             panic!()
         };
+        link.command_blocking(Command::SetProjectIcon {
+            project_id: "p".into(),
+            png: None,
+        })
+        .unwrap();
+        let refreshed = next_event(
+            &events,
+            |event| matches!(&event.event, ServerEvent::IndexUpsertProject(project) if project.id == "p"),
+        );
+        assert_eq!(refreshed.topic, Topic::Index);
+        assert!(
+            link.command_blocking(Command::SetProjectIcon {
+                project_id: "missing".into(),
+                png: None
+            })
+            .is_err()
+        );
         assert!(
             link.command_blocking(Command::SetProjectIcon {
                 project_id: "p".into(),
@@ -1249,7 +1267,8 @@ mod tests {
         let link = host.link();
         assert!(matches!(
             smol::block_on(link.query(Query::ReadProjectIcon {
-                project_id: "p".into()
+                project_id: "p".into(),
+                pixels: 128,
             }))
             .unwrap(),
             QueryResponse::FileBytes(_)
@@ -1273,7 +1292,8 @@ mod tests {
         .unwrap();
         assert!(matches!(
             smol::block_on(link.query(Query::ReadProjectIcon {
-                project_id: "p".into()
+                project_id: "p".into(),
+                pixels: 128,
             }))
             .unwrap(),
             QueryResponse::FileBytes(_)

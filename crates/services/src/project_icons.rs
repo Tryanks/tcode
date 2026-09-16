@@ -1,13 +1,12 @@
 //! Project defaults and bounded image decoding for the host-owned icon picker.
-use image::{ImageFormat, ImageReader, Limits};
-use serde::Deserialize;
+use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use std::{
     fs,
     io::{self, Cursor, Read},
     path::Path,
 };
 use tcode_core::project::Project;
-use tcode_protocol::{PathEntry, QueryResponse};
+use tcode_protocol::{IconImageEntry, QueryResponse};
 
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 const ICON_SIZE: u32 = 128;
@@ -36,12 +35,13 @@ pub fn browse(directory: &Path) -> io::Result<QueryResponse> {
         if !is_dir && (!metadata.is_file() || !supported(&entry.path())) {
             continue;
         }
-        entries.push(PathEntry::from_rel(
-            entry.file_name().to_string_lossy().into_owned(),
+        entries.push(IconImageEntry {
+            path: entry.path(),
+            name: entry.file_name().to_string_lossy().into_owned(),
             is_dir,
-        ));
+        });
     }
-    entries.sort_by_cached_key(|entry| (!entry.is_dir, entry.basename.to_lowercase()));
+    entries.sort_by_cached_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
     Ok(QueryResponse::IconImages {
         parent: directory.parent().map(Path::to_path_buf),
         directory,
@@ -55,7 +55,9 @@ fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
         .take(limit + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
-        return Err(io::Error::other("image exceeds the 8 MiB size limit"));
+        return Err(io::Error::other(format!(
+            "file exceeds the {limit} byte size limit"
+        )));
     }
     Ok(bytes)
 }
@@ -66,12 +68,32 @@ fn decode(bytes: &[u8], max_dimension: u32) -> io::Result<image::DynamicImage> {
     limits.max_image_width = Some(max_dimension);
     limits.max_image_height = Some(max_dimension);
     limits.max_alloc = Some(128 * 1024 * 1024);
-    reader.limits(limits);
-    reader.decode().map_err(io::Error::other)
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(io::Error::other)?;
+    let (width, height) = decoder.dimensions();
+    // RGBA32F needs 16 bytes per pixel beyond the decoder's own allocation.
+    // Bound the source before decoding or converting, including grayscale input.
+    if u64::from(width) * u64::from(height) > 4 * 1024 * 1024 {
+        return Err(io::Error::other("image exceeds the 4 megapixel size limit"));
+    }
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(io::Error::other)?;
+    decoder.set_limits(limits).map_err(io::Error::other)?;
+    image::DynamicImage::from_decoder(decoder).map_err(io::Error::other)
 }
 
 /// Decode away from the host event loop and send only a small, static PNG to clients.
 pub fn thumbnail(path: &Path) -> io::Result<Vec<u8>> {
+    raster(path, ICON_SIZE)
+}
+
+fn raster(path: &Path, pixels: u32) -> io::Result<Vec<u8>> {
+    if !(1..=ICON_SIZE).contains(&pixels) {
+        return Err(io::Error::other(
+            "icon size must be between 1 and 128 pixels",
+        ));
+    }
     let mut rgba = decode(&read_bounded(path, MAX_BYTES)?, 8192)?.into_rgba32f();
     // Average premultiplied colors so transparent pixels cannot darken the preview.
     for pixel in rgba.pixels_mut() {
@@ -81,7 +103,7 @@ pub fn thumbnail(path: &Path) -> io::Result<Vec<u8>> {
         }
     }
     let mut resized = image::DynamicImage::ImageRgba32F(rgba)
-        .resize(ICON_SIZE, ICON_SIZE, image::imageops::FilterType::Lanczos3)
+        .resize(pixels, pixels, image::imageops::FilterType::Lanczos3)
         .into_rgba32f();
     for pixel in resized.pixels_mut() {
         let alpha = pixel[3];
@@ -97,27 +119,16 @@ pub fn thumbnail(path: &Path) -> io::Result<Vec<u8>> {
     Ok(png.into_inner())
 }
 
-pub fn read_project_icon(project: &Project) -> io::Result<Vec<u8>> {
-    if let Some(path) = &project.icon_path {
-        return thumbnail(path);
-    }
-    #[derive(Deserialize)]
-    struct Config {
-        #[serde(rename = "iconPath")]
-        icon_path: Option<String>,
-    }
-    let bytes = match read_bounded(&project.root.join("tcode.json"), 1024 * 1024) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            read_bounded(&project.root.join("t3.json"), 1024 * 1024)?
-        }
-        result => result?,
+pub fn read_project_icon(project: &Project, pixels: u32) -> io::Result<Vec<u8>> {
+    let path = match &project.icon_path {
+        Some(path) => path.clone(),
+        None => crate::project_config::read(&project.root)?
+            .icon_path
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| project.root.join(path))
+            .ok_or_else(|| io::Error::other("project has no iconPath"))?,
     };
-    let config: Config = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-    let path = config
-        .icon_path
-        .filter(|path| !path.trim().is_empty())
-        .ok_or_else(|| io::Error::other("project has no iconPath"))?;
-    thumbnail(&project.root.join(path))
+    raster(&path, pixels)
 }
 
 /// Accept only the small PNG produced by the picker, including on remote writes.
@@ -151,83 +162,152 @@ mod tests {
         })
         .save(&path)
         .unwrap();
-        let png = thumbnail(&path).unwrap();
-        fs::remove_dir_all(root).unwrap();
-        let resized = image::load_from_memory(&png).unwrap().into_rgba8();
-        assert_eq!(resized.dimensions(), (128, 64));
-        let edge = resized.get_pixel(60, 32);
-        assert!(edge[3] > 0 && edge[3] < 255);
-        assert_eq!(&edge.0[..3], &[255, 0, 0]);
-    }
-
-    #[test]
-    fn tcode_config_takes_precedence_over_t3_config() {
-        let root = std::env::temp_dir().join(format!("tcode-icons-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        for (name, color) in [("red", [255, 0, 0, 255]), ("blue", [0, 0, 255, 255])] {
-            image::RgbaImage::from_pixel(16, 16, image::Rgba(color))
-                .save(root.join(format!("{name}.png")))
-                .unwrap();
+        let mut project = Project::from_root(root.clone());
+        project.icon_path = Some(path.clone());
+        for size in [12, 14, 16, 20, 32, 128] {
+            let png = if size == 128 {
+                thumbnail(&path).unwrap()
+            } else {
+                read_project_icon(&project, size).unwrap()
+            };
+            let resized = image::load_from_memory(&png).unwrap().into_rgba8();
+            assert_eq!(resized.dimensions(), (size, size / 2));
+            let edges: Vec<_> = resized
+                .pixels()
+                .filter(|pixel| pixel[3] > 0 && pixel[3] < 255)
+                .collect();
+            assert!(!edges.is_empty(), "edge must be antialiased at {size}px");
+            assert!(
+                edges
+                    .iter()
+                    .all(|pixel| pixel[0] >= 254 && pixel[1] == 0 && pixel[2] == 0)
+            );
         }
-        let project = Project::from_root(root.clone());
-        fs::write(root.join("tcode.json"), r#"{"iconPath":"red.png"}"#).unwrap();
-        let expected = thumbnail(&root.join("red.png")).unwrap();
-        assert_eq!(read_project_icon(&project).unwrap(), expected);
-
-        fs::write(root.join("t3.json"), r#"{"iconPath":"blue.png"}"#).unwrap();
-        assert_eq!(read_project_icon(&project).unwrap(), expected);
-        fs::write(root.join("tcode.json"), "broken json").unwrap();
-        assert!(read_project_icon(&project).is_err());
-
-        fs::remove_file(root.join("tcode.json")).unwrap();
-        assert_eq!(
-            read_project_icon(&project).unwrap(),
-            thumbnail(&root.join("blue.png")).unwrap()
-        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn picker_filters_files_and_project_defaults_yield_to_custom_images() {
+    fn project_icons_resolve_host_paths_and_manual_choices_override_config() {
         let root = std::env::temp_dir().join(format!("tcode-icons-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("assets")).unwrap();
-        let sample = include_bytes!("../../../assets/icons/app/tcode.png");
-        fs::write(root.join("assets/logo.PNG"), sample).unwrap();
-        fs::write(root.join("notes.txt"), "notes").unwrap();
-        fs::write(
-            root.join("t3.json"),
-            r#"{"iconPath":"assets/logo.PNG","scripts":[{"command":"ignored"}]}"#,
-        )
-        .unwrap();
-        let QueryResponse::IconImages { entries, .. } = browse(&root).unwrap() else {
-            panic!()
-        };
+        for (name, color) in [("red", [255, 0, 0, 255]), ("blue", [0, 0, 255, 255])] {
+            image::RgbaImage::from_pixel(16, 16, image::Rgba(color))
+                .save(root.join("assets").join(format!("{name}.png")))
+                .unwrap();
+        }
+        let mut project = Project::from_root(root.clone());
+        for path in [
+            Path::new("assets/red.png").to_path_buf(),
+            root.join("assets/red.png"),
+        ] {
+            fs::write(
+                root.join("tcode.json"),
+                serde_json::json!({"iconPath": path}).to_string(),
+            )
+            .unwrap();
+            let png = read_project_icon(&project, 16).unwrap();
+            assert_eq!(
+                image::load_from_memory(&png)
+                    .unwrap()
+                    .into_rgba8()
+                    .get_pixel(0, 0)
+                    .0,
+                [255, 0, 0, 255]
+            );
+        }
+        project.icon_path = Some(root.join("assets/blue.png"));
+        fs::write(root.join("tcode.json"), "broken json").unwrap();
+        let png = read_project_icon(&project, 16).unwrap();
         assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.basename.as_str())
-                .collect::<Vec<_>>(),
-            ["assets"]
+            image::load_from_memory(&png)
+                .unwrap()
+                .into_rgba8()
+                .get_pixel(0, 0)
+                .0,
+            [0, 0, 255, 255]
         );
-        let QueryResponse::IconImages { entries, .. } = browse(&root.join("assets")).unwrap()
+        fs::remove_file(project.icon_path.as_ref().unwrap()).unwrap();
+        assert!(read_project_icon(&project, 16).is_err());
+        project.icon_path = None;
+        for config in [
+            "{}",
+            r#"{"iconPath": "  "}"#,
+            r#"{"iconPath": "missing.png"}"#,
+            "broken json",
+        ] {
+            fs::write(root.join("tcode.json"), config).unwrap();
+            assert!(read_project_icon(&project, 16).is_err(), "{config}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn picker_returns_host_paths_and_sorts_folders_before_supported_images() {
+        let root = std::env::temp_dir().join(format!("tcode-icons-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("Z-folder")).unwrap();
+        for name in ["a.PNG", "B.jpg", "notes.txt"] {
+            fs::write(root.join(name), []).unwrap();
+        }
+        let QueryResponse::IconImages {
+            directory,
+            parent,
+            entries,
+        } = browse(&root).unwrap()
         else {
             panic!()
         };
-        assert_eq!(entries[0].basename, "logo.PNG");
-        let mut project = Project::from_root(root.clone());
-        let png = read_project_icon(&project).unwrap();
-        let decoded = image::load_from_memory(&png).unwrap();
-        assert!(decoded.width() <= 128 && decoded.height() <= 128);
-        let custom = root.join("custom.png");
-        save_override(&custom, &png).unwrap();
-        project.icon_path = Some(custom);
-        fs::write(root.join("t3.json"), "broken json").unwrap();
-        assert!(read_project_icon(&project).is_ok());
-        project.icon_path = None;
-        assert!(read_project_icon(&project).is_err());
-        fs::write(root.join("t3.json"), r#"{"iconPath":"missing.png"}"#).unwrap();
-        assert!(read_project_icon(&project).is_err());
-        assert!(save_override(&root.join("bad.png"), b"not an image").is_err());
+        assert_eq!(parent, directory.parent().map(Path::to_path_buf));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.is_dir))
+                .collect::<Vec<_>>(),
+            [("Z-folder", true), ("a.PNG", false), ("B.jpg", false)]
+        );
+        for entry in entries {
+            assert_eq!(entry.path, directory.join(&entry.name));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn images_over_resource_limits_are_rejected_before_conversion_or_save() {
+        let root = std::env::temp_dir().join(format!("tcode-icons-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("large.png");
+        // Tiny compressed grayscale input used to expand into an unbounded RGBA32F buffer.
+        image::GrayImage::new(8192, 513).save(&path).unwrap();
+        assert!(
+            thumbnail(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("megapixel")
+        );
+        image::GrayImage::new(8193, 1).save(&path).unwrap();
+        assert!(thumbnail(&path).is_err());
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_BYTES + 1)
+            .unwrap();
+        assert!(
+            thumbnail(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("byte size limit")
+        );
+        let destination = root.join("managed/icon.png");
+        let mut png = Cursor::new(Vec::new());
+        image::RgbaImage::new(129, 1)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        for invalid in [
+            b"not an image".to_vec(),
+            vec![0; 128 * 1024 + 1],
+            png.into_inner(),
+        ] {
+            assert!(save_override(&destination, &invalid).is_err());
+            assert!(!destination.exists());
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

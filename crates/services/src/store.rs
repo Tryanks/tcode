@@ -398,6 +398,36 @@ mod tests {
     }
 
     #[test]
+    fn removing_project_cleans_only_managed_icons_after_persisting() {
+        let root =
+            std::env::temp_dir().join(format!("tcode-icon-cleanup-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
+        fs::create_dir(root.join("project-icons")).unwrap();
+        let mut project = Project::from_root(root.join("project"));
+        for (path, managed) in [
+            (root.join("project-icons/icon.png"), true),
+            (root.join("original.png"), false),
+        ] {
+            fs::write(&path, b"stored image").unwrap();
+            project.icon_path = Some(path.clone());
+            store.upsert_project(&project).unwrap();
+            // A failed index replacement must retain the image still referenced on disk.
+            fs::create_dir(root.join("sessions.json.tmp")).unwrap();
+            assert!(store.remove_project(&project.id).is_err());
+            assert!(path.exists());
+            assert_eq!(
+                store.read_file().projects[0].icon_path.as_ref(),
+                Some(&path)
+            );
+            fs::remove_dir(root.join("sessions.json.tmp")).unwrap();
+            store.remove_project(&project.id).unwrap();
+            assert!(store.read_file().projects.is_empty());
+            assert_eq!(path.exists(), !managed);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn index_roundtrip_and_sort() {
         let store = SessionStore::open_at(temp_root()).unwrap();
         let mut a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/a"), None);

@@ -663,24 +663,23 @@ The file grid scrolls, and the dialog fits narrow and short viewports.
 Selected artwork is copied into host-owned storage as a static PNG of at most
 128 × 128 pixels, preserving aspect ratio and transparency. Originals are never
 modified. Inputs are limited to 8 MiB and 8192 pixels per dimension, with a
-bounded decoder allocation. Replacement and project removal clean up the previous
+bounded decoder allocation and at most 4,194,304 source pixels. Replacement and project removal clean up the previous
 managed image after persisting the new project state.
 
-The 128px image remains the preview/source. Project glyphs use separately cached
-Lanczos3 rasters at their displayed physical pixel size: a 16px glyph uses 16px
-at 1×, 32px at 2×; compact 14px/20px and metadata 12px glyphs follow the same rule.
-Both the initial 128px thumbnail and the small rasters use Lanczos3 with
-premultiplied alpha to avoid dark fringes around transparent edges, preserving
-aspect ratio. Moving between display scales selects the
-matching raster without changing the project's saved image.
+The 128px image remains the saved source. The host produces Lanczos3 rasters at
+requested physical display sizes, cached by the client: a 16px glyph requests
+16px at 1× and 32px at 2×, up to 128px. The host owns both thumbnail and glyph
+resizing, with premultiplied alpha to avoid dark fringes at transparent edges.
+Images preserve aspect ratio; display-scale changes select the matching raster.
 
-Without a custom override, the host reads only `iconPath` from the project's
-`tcode.json`, falling back to `t3.json` only when `tcode.json` is absent, and
-resolves relative paths against the project root. Both files use the same schema. Other fields,
-including scripts, are ignored. **Use project default** clears the override.
-Defaults are loaded when first displayed and refreshed on reset, after reconnecting,
-or after restarting the client; live watching of config/image edits is not part of this
-contract. The picker never edits either config file.
+Project config location, `iconPath`, legacy fallback, limits and failure handling
+are specified in [Project configuration](project-config.md). **Use project
+default** clears the override and refreshes connected clients even when no
+manual icon was selected. Defaults also refresh after reconnecting or restarting
+the client; config/image edits are not watched live. The picker never edits
+config files. Folder entries carry complete host paths; clients do not assemble
+paths using their own operating system's separators. Image selection is exposed
+to assistive technology as well as shown by its border.
 
 ### Chat header
 

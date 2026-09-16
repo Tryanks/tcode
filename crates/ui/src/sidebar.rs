@@ -1377,12 +1377,7 @@ impl SessionsSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let project = self
-            .store
-            .read(cx)
-            .projects()
-            .into_iter()
-            .find(|p| p.id == action.0);
+        let project = self.store.read(cx).project(&action.0).cloned();
         if let Some(project) = project {
             crate::project_icon::open(self.store.clone(), project, window, cx);
         }
@@ -2689,11 +2684,9 @@ impl SessionsSidebar {
                     line.child(
                         self.store
                             .read(cx)
-                            .projects()
-                            .into_iter()
-                            .find(|project| Some(&project.id) == meta.project_id.as_ref())
+                            .project(meta.project_id.as_deref().unwrap_or_default())
                             .map(|project| {
-                                crate::project_icon::artwork(&project, 12.).into_any_element()
+                                crate::project_icon::artwork(project, 12.).into_any_element()
                             })
                             .unwrap_or_else(|| {
                                 Icon::new(IconName::Folder).size_3().into_any_element()
@@ -3264,12 +3257,8 @@ impl SessionsSidebar {
         .text_size(px(13.))
         .text_color(cx.theme().muted_foreground)
         .when_some(
-            self.store
-                .read(cx)
-                .projects()
-                .into_iter()
-                .find(|project| project.id == row.project_id),
-            |el, project| el.child(crate::project_icon::artwork(&project, 14.)),
+            self.store.read(cx).project(&row.project_id),
+            |el, project| el.child(crate::project_icon::artwork(project, 14.)),
         )
         .child(
             div()
@@ -3307,9 +3296,8 @@ impl SessionsSidebar {
         let project = if project_name.is_some() {
             self.store
                 .read(cx)
-                .projects()
-                .into_iter()
-                .find(|project| Some(&project.id) == meta.project_id.as_ref())
+                .project(meta.project_id.as_deref().unwrap_or_default())
+                .cloned()
         } else {
             None
         };

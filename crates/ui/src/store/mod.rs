@@ -902,13 +902,14 @@ impl WorkspaceStore {
             }
             (Topic::Index, ServerEvent::IndexSnapshot(snapshot)) => {
                 self.index_hydrated = true;
-                self.baseline_topics.insert(Topic::Index);
+                let fresh_baseline = self.baseline_topics.insert(Topic::Index);
                 for project in &snapshot.projects {
-                    if self
-                        .index_replica
-                        .1
-                        .iter()
-                        .any(|old| old.id == project.id && old.icon_path != project.icon_path)
+                    if fresh_baseline
+                        || self
+                            .index_replica
+                            .1
+                            .iter()
+                            .any(|old| old.id == project.id && old.icon_path != project.icon_path)
                     {
                         images::invalidate_project_icon(project, cx);
                     }
@@ -1691,6 +1692,10 @@ impl WorkspaceStore {
             .cloned()
             .collect();
         order_sessions_with_children(visible)
+    }
+
+    pub(crate) fn project(&self, id: &str) -> Option<&Project> {
+        self.index_replica.1.iter().find(|project| project.id == id)
     }
 
     pub fn projects(&self) -> Vec<Project> {
@@ -2514,12 +2519,11 @@ impl WorkspaceStore {
     ) -> Task<Result<QueryResponse, ProtocolError>> {
         let host = self.host.clone();
         #[cfg(test)]
-        {
+        if cx.global::<images::HostImages>().blocking_queries {
             let result =
                 futures_lite::future::block_on(host.query(Query::BrowseIconImages { directory }));
-            cx.spawn(async move |_| result)
+            return cx.spawn(async move |_| result);
         }
-        #[cfg(not(test))]
         cx.spawn(async move |_| host.query(Query::BrowseIconImages { directory }).await)
     }
 

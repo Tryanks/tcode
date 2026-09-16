@@ -21,6 +21,7 @@ enum ImageRequest {
     Project {
         id: String,
         override_path: Option<PathBuf>,
+        pixels: u32,
     },
 }
 
@@ -44,7 +45,10 @@ impl Asset for HostImage {
             let query = match request {
                 ImageRequest::File(path) => Query::ReadFileBytes { path },
                 ImageRequest::Thumbnail(path) => Query::ReadIconImage { path },
-                ImageRequest::Project { id, .. } => Query::ReadProjectIcon { project_id: id },
+                ImageRequest::Project { id, pixels, .. } => Query::ReadProjectIcon {
+                    project_id: id,
+                    pixels,
+                },
             };
             let host = host?;
             #[cfg(test)]
@@ -72,106 +76,54 @@ impl Asset for HostImage {
     }
 }
 
-/// A separate cache entry for each physical display size keeps the GPU from
-/// minifying the 128px preview with a four-sample bilinear lookup.
-struct IconRaster;
-impl Asset for IconRaster {
-    type Source = (Arc<Image>, u32);
-    type Output = Result<Arc<Image>, ImageCacheError>;
-
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "async fn would capture the borrowed, non-Send App; Asset requires a Send + 'static future"
-    )]
-    fn load(
-        (image, pixels): Self::Source,
-        _: &mut App,
-    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
-        async move { rasterize_icon(&image, pixels) }
-    }
-}
-
-fn rasterize_icon(image: &Image, pixels: u32) -> Result<Arc<Image>, ImageCacheError> {
-    let mut rgba = image::load_from_memory(&image.bytes)?.into_rgba32f();
-    // Filter premultiplied colors so transparent pixels cannot leave dark fringes.
-    for pixel in rgba.pixels_mut() {
-        let alpha = pixel[3];
-        for channel in &mut pixel.0[..3] {
-            *channel *= alpha;
-        }
-    }
-    let mut resized = image::DynamicImage::ImageRgba32F(rgba)
-        .resize(pixels, pixels, image::imageops::FilterType::Lanczos3)
-        .into_rgba32f();
-    for pixel in resized.pixels_mut() {
-        let alpha = pixel[3];
-        for channel in &mut pixel.0[..3] {
-            *channel = if alpha > 0. { *channel / alpha } else { 0. };
-        }
-    }
-    let mut png = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba32F(resized)
-        .to_rgba8()
-        .write_to(&mut png, image::ImageFormat::Png)?;
-    Ok(Arc::new(Image::from_bytes(
-        gpui::ImageFormat::Png,
-        png.into_inner(),
-    )))
-}
-
-fn source(request: ImageRequest, logical_size: Option<f32>) -> ImageSource {
+fn source(request: impl Fn(&gpui::Window) -> ImageRequest + 'static) -> ImageSource {
     ImageSource::from(move |window: &mut gpui::Window, cx: &mut App| {
         let namespace = cx.try_global::<HostImages>()?.namespace;
-        match window.use_asset::<HostImage>(&(namespace, request.clone()), cx)? {
-            Ok(image) => {
-                let image = if let Some(size) = logical_size {
-                    let pixels = (size * window.scale_factor()).round().max(1.) as u32;
-                    match window.use_asset::<IconRaster>(&(image, pixels), cx)? {
-                        Ok(image) => image,
-                        Err(error) => return Some(Err(error)),
-                    }
-                } else {
-                    image
-                };
-                image.use_render_image(window, cx).map(Ok)
-            }
+        match window.use_asset::<HostImage>(&(namespace, request(window)), cx)? {
+            Ok(image) => image.use_render_image(window, cx).map(Ok),
             Err(error) => Some(Err(error)),
         }
     })
 }
 
 pub(crate) fn host_image(path: PathBuf) -> ImageSource {
-    source(ImageRequest::File(path), None)
+    source(move |_| ImageRequest::File(path.clone()))
 }
 
 pub(crate) fn icon_thumbnail(path: PathBuf) -> ImageSource {
-    source(ImageRequest::Thumbnail(path), None)
+    source(move |_| ImageRequest::Thumbnail(path.clone()))
 }
 
 pub(crate) fn project_icon(
     project: &tcode_core::project::Project,
     logical_size: f32,
 ) -> ImageSource {
-    source(
-        ImageRequest::Project {
-            id: project.id.clone(),
-            override_path: project.icon_path.clone(),
-        },
-        Some(logical_size),
-    )
+    let id = project.id.clone();
+    let override_path = project.icon_path.clone();
+    source(move |window| ImageRequest::Project {
+        id: id.clone(),
+        override_path: override_path.clone(),
+        pixels: (logical_size * window.scale_factor())
+            .round()
+            .clamp(1., 128.) as u32,
+    })
 }
 
 /// A reset can return to a previously cached default after the project config changes.
 pub(crate) fn invalidate_project_icon(project: &tcode_core::project::Project, cx: &mut App) {
     if let Some(images) = cx.try_global::<HostImages>() {
-        let key = (
-            images.namespace,
-            ImageRequest::Project {
-                id: project.id.clone(),
-                override_path: project.icon_path.clone(),
-            },
-        );
-        cx.remove_asset::<HostImage>(&key);
+        let namespace = images.namespace;
+        // Each display scale has its own host-rendered raster, including cached errors.
+        for pixels in 1..=128 {
+            cx.remove_asset::<HostImage>(&(
+                namespace,
+                ImageRequest::Project {
+                    id: project.id.clone(),
+                    override_path: project.icon_path.clone(),
+                    pixels,
+                },
+            ));
+        }
     }
 }
 
@@ -186,34 +138,91 @@ mod tests {
     };
     use tcode_protocol::{ClientPayload, HostMessage, decode_client_line, encode_line};
 
-    #[test]
-    fn small_icon_rasters_preserve_aspect_and_transparent_edge_color() {
-        // Opaque red beside transparent black exposes dark fringes if the
-        // downsampling averages straight-alpha colors.
-        let pixels = image::RgbaImage::from_fn(128, 64, |x, _| {
-            if x < 61 {
-                image::Rgba([255, 0, 0, 255])
-            } else {
-                image::Rgba([0, 0, 0, 0])
-            }
-        });
-        let mut png = std::io::Cursor::new(Vec::new());
-        pixels.write_to(&mut png, image::ImageFormat::Png).unwrap();
-        let source = Image::from_bytes(gpui::ImageFormat::Png, png.into_inner());
-        for size in [14, 16, 32] {
-            let raster = rasterize_icon(&source, size).unwrap();
-            let resized = image::load_from_memory(&raster.bytes).unwrap().into_rgba8();
-            assert_eq!(resized.dimensions(), (size, size / 2));
-            let edge: Vec<_> = resized
-                .pixels()
-                .filter(|p| p[3] > 0 && p[3] < 255)
-                .collect();
-            assert!(!edge.is_empty(), "the edge should be antialiased");
+    #[gpui::test]
+    async fn project_icon_cache_refreshes_defaults_and_errors_after_reset_or_reconnect(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::store::WorkspaceStore;
+        use tcode_core::project::Project;
+        use tcode_protocol::{EventEnvelope, IndexSnapshot, ServerEvent, Topic};
+        use tcode_runtime::pipe::{HostServices, spawn_host};
+        use tcode_services::store::SessionStore;
+
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-icon-cache-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = Project::from_root(root.clone());
+        let disk = SessionStore::open_at(root.join("data")).unwrap();
+        disk.upsert_project(&project).unwrap();
+        let host = spawn_host(disk, HostServices::default()).unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let namespace = cx.update(|cx| cx.global::<HostImages>().namespace);
+        let key = |pixels| {
+            (
+                namespace,
+                ImageRequest::Project {
+                    id: project.id.clone(),
+                    override_path: None,
+                    pixels,
+                },
+            )
+        };
+        for pixels in [16, 32] {
             assert!(
-                edge.iter().all(|p| p[0] >= 254 && p[1] == 0 && p[2] == 0),
-                "transparent black must not darken the red edge"
+                cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).0)
+                    .await
+                    .is_err()
             );
         }
+        std::fs::write(root.join("tcode.json"), r#"{"iconPath":"logo.png"}"#).unwrap();
+        for (reconnect, color) in [(true, [255, 0, 0, 255]), (false, [0, 0, 255, 255])] {
+            image::RgbaImage::from_pixel(32, 32, image::Rgba(color))
+                .save(root.join("logo.png"))
+                .unwrap();
+            // Both success and error entries stay cached until the host/connection event.
+            for pixels in [16, 32] {
+                assert!(!cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).1));
+            }
+            store.update(cx, |store, cx| {
+                let event = if reconnect {
+                    store.apply_connection_state(tcode_client::ConnectionState::Syncing);
+                    ServerEvent::IndexSnapshot(IndexSnapshot {
+                        sessions: vec![],
+                        projects: vec![project.clone()],
+                        activity: Default::default(),
+                        title_generating: Default::default(),
+                    })
+                } else {
+                    // This is also delivered to clients that did not open the picker.
+                    ServerEvent::IndexUpsertProject(project.clone())
+                };
+                store.apply_domain_event(
+                    &EventEnvelope {
+                        request_id: None,
+                        topic: Topic::Index,
+                        event,
+                    },
+                    cx,
+                );
+            });
+            for pixels in [16, 32] {
+                let image = cx
+                    .update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).0)
+                    .await
+                    .unwrap();
+                let rgba = image::load_from_memory(&image.bytes).unwrap().into_rgba8();
+                assert_eq!(rgba.dimensions(), (pixels, pixels));
+                assert_eq!(rgba.get_pixel(0, 0).0, color);
+            }
+        }
+        host.shutdown_blocking().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     struct ImageMessage {

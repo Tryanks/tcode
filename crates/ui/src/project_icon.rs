@@ -19,7 +19,7 @@ use gpui::{
 use gpui_base::{h_flex, v_flex};
 use std::path::PathBuf;
 use tcode_core::project::Project;
-use tcode_protocol::{PathEntry, QueryResponse};
+use tcode_protocol::{IconImageEntry, QueryResponse};
 
 pub(crate) fn artwork(project: &Project, size: f32) -> impl IntoElement + use<> {
     img(images::project_icon(project, size))
@@ -58,9 +58,8 @@ struct Picker {
     project: Project,
     path: Entity<InputState>,
     search: Entity<InputState>,
-    directory: PathBuf,
     parent: Option<PathBuf>,
-    entries: Vec<PathEntry>,
+    entries: Vec<IconImageEntry>,
     selected: Option<PathBuf>,
     loading: bool,
     saving: bool,
@@ -92,7 +91,6 @@ impl Picker {
             cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
         Self {
-            directory: project.root.clone(),
             store,
             project,
             path,
@@ -139,7 +137,6 @@ impl Picker {
                         this.path.update(cx, |input, cx| {
                             input.set_value(directory.to_string_lossy().to_string(), window, cx)
                         });
-                        this.directory = directory;
                         this.parent = parent;
                         this.entries = entries;
                     }
@@ -159,7 +156,6 @@ impl Picker {
         }
         self.saving = true;
         self.error = None;
-        let reset = path.is_none();
         let task = self.store.update(cx, |store, cx| {
             store.set_project_icon(self.project.id.clone(), path, cx)
         });
@@ -169,11 +165,6 @@ impl Picker {
                 this.saving = false;
                 match result {
                     Ok(_) => {
-                        if reset {
-                            let mut default_project = this.project.clone();
-                            default_project.icon_path = None;
-                            images::invalidate_project_icon(&default_project, cx);
-                        }
                         window.close_dialog(cx);
                     }
                     Err(error) => this.error = Some(error.message),
@@ -204,10 +195,10 @@ impl Render for Picker {
         for entry in self
             .entries
             .iter()
-            .filter(|entry| entry.basename.to_lowercase().contains(&search))
+            .filter(|entry| entry.name.to_lowercase().contains(&search))
         {
             count += 1;
-            let path = self.directory.join(&entry.basename);
+            let path = entry.path.clone();
             let is_dir = entry.is_dir;
             let is_selected = selected.as_ref() == Some(&path);
             let content = if is_dir {
@@ -229,13 +220,14 @@ impl Render for Picker {
             grid = grid.child(
                 crate::material::accessible_clickable(
                     v_flex(),
-                    SharedString::from(format!("icon-file-{}", entry.basename)),
+                    SharedString::from(format!("icon-file-{}", entry.name)),
                     Role::Button,
-                    entry.basename.clone(),
+                    entry.name.clone(),
                     cx,
                 )
+                .aria_selected(is_selected)
                 .debug_selector({
-                    let name = entry.basename.clone();
+                    let name = entry.name.clone();
                     move || format!("icon-file-{name}")
                 })
                 .w(px(96.))
@@ -271,7 +263,7 @@ impl Render for Picker {
                         .w_full()
                         .truncate()
                         .text_size(px(11.))
-                        .child(entry.basename.clone()),
+                        .child(entry.name.clone()),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if this.saving {
@@ -392,10 +384,10 @@ impl Render for Picker {
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
                     .child(
-                        selected
-                            .as_ref()
-                            .and_then(|path| path.file_name())
-                            .map(|name| name.to_string_lossy().to_string())
+                        self.entries
+                            .iter()
+                            .find(|entry| Some(&entry.path) == selected.as_ref())
+                            .map(|entry| entry.name.clone())
                             .unwrap_or_else(|| crate::tr!("project_icon.hint").into_owned()),
                     ),
             )
@@ -461,6 +453,65 @@ mod tests {
             let _ = window.draw(cx);
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn picker_returns_foreign_host_paths_unchanged(cx: &mut TestAppContext) {
+        use tcode_client::HostLink;
+        use tcode_protocol::{ClientPayload, Query, decode_client_line};
+        cx.update(crate::theme::init);
+        let (to_host, requests) = async_channel::unbounded();
+        let (_replies, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                false,
+                cx,
+            )
+        });
+        let (picker, cx) = cx.add_window_view(|window, cx| {
+            Picker::new(
+                store.clone(),
+                Project::from_root(PathBuf::from("/project")),
+                window,
+                cx,
+            )
+        });
+        // These are opaque host paths, including the opposite platform's separators.
+        for path in [r"Q:\host\images\logo.png", "/host/images/logo.png"] {
+            picker.update(cx, |picker, cx| {
+                picker.entries = vec![IconImageEntry {
+                    path: PathBuf::from(path),
+                    name: "logo.png".into(),
+                    is_dir: false,
+                }];
+                cx.notify();
+            });
+            draw(cx);
+            let tile = cx.debug_bounds("icon-file-logo.png").unwrap();
+            cx.simulate_click(tile.center(), gpui::Modifiers::default());
+            assert_eq!(
+                picker.read_with(cx, |picker, _| picker.selected.clone()),
+                Some(PathBuf::from(path))
+            );
+            draw(cx);
+            let read = std::iter::from_fn(|| requests.try_recv().ok())
+                .filter_map(|line| {
+                    let request = decode_client_line(&line).unwrap();
+                    match request.payload {
+                        ClientPayload::Query(Query::ReadIconImage { path }) => Some(path),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                read.contains(&PathBuf::from(path)),
+                "thumbnail must use the host path: {read:?}"
+            );
+        }
     }
 
     #[gpui::test]

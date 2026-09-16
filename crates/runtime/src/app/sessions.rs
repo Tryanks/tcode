@@ -137,8 +137,17 @@ impl AppState {
         } else {
             None
         };
+        let refresh_default = path.is_none() && project.icon_path.is_none();
         project.icon_path = path;
         let project = project.clone();
+        if refresh_default {
+            // Reset also refreshes edited defaults when the persisted selection is unchanged.
+            cx.emit(HostEvent::Domain(EventEnvelope {
+                request_id: None,
+                topic: Topic::Index,
+                event: ServerEvent::IndexUpsertProject(project.clone()),
+            }));
+        }
         self.enqueue_store_write(StoreWrite::UpsertProject(project), cx);
         Ok(())
     }

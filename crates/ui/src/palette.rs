@@ -610,11 +610,9 @@ impl Render for CommandPalette {
                             Action::NewThread { project_id, .. } => self
                                 .store
                                 .read(cx)
-                                .projects()
-                                .into_iter()
-                                .find(|project| &project.id == project_id)
+                                .project(project_id)
                                 .map(|project| {
-                                    crate::project_icon::artwork(&project, 16.).into_any_element()
+                                    crate::project_icon::artwork(project, 16.).into_any_element()
                                 })
                                 .unwrap_or_else(|| {
                                     Icon::new(item.icon.clone())

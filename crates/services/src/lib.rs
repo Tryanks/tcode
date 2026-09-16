@@ -6,6 +6,7 @@ pub mod export;
 pub mod git;
 pub mod import;
 pub mod process;
+pub mod project_config;
 pub mod project_icons;
 pub mod provider_auth;
 pub mod provider_probe;
