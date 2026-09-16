@@ -271,16 +271,28 @@ impl Session {
             .unwrap();
     }
 
-    /// Block until the host grid shows `needle` anywhere on screen.
+    /// Block until the host grid shows `needle` and has consumed the line
+    /// ending printed after it. The line discipline hands the sentinel and its
+    /// `\r\n` to the master side as separate writes, so the needle alone can
+    /// show up while the cursor move is still in flight, and a grid compared
+    /// moments later would already differ.
     fn wait_for(&self, needle: &str) {
         let deadline = Instant::now() + Duration::from_secs(60);
-        while !frame_text(&host_frame(&self.terminal))
-            .iter()
-            .any(|row| row.contains(needle))
-        {
+        loop {
+            let host = host_frame(&self.terminal);
+            let sentinel_row = frame_text(&host)
+                .iter()
+                .position(|row| row.contains(needle));
+            let settled = sentinel_row.is_some_and(|row| {
+                host.cursor
+                    .is_some_and(|cursor| (usize::from(cursor.row), cursor.col) == (row + 1, 0))
+            });
+            if settled {
+                return;
+            }
             assert!(
                 Instant::now() < deadline,
-                "the host terminal never showed {needle}"
+                "the host terminal never showed {needle} followed by a newline"
             );
             std::thread::sleep(Duration::from_millis(20));
         }

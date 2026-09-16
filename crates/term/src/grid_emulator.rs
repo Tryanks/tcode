@@ -696,8 +696,14 @@ impl GridEmulator {
         let keyboard_mode = state.term.keyboard_mode();
         let lines_evicted = state.term.lines_evicted();
         let cursor_blinking = state.term.blinking_cursor;
+        // Exit is fed after the child's last output, so read it while the grid
+        // is still locked: a snapshot that reports the exit must also hold
+        // every byte that preceded it.
+        let (exited, exit_code) = {
+            let lifecycle = self.core.lifecycle.lock_recover();
+            (lifecycle.exited, lifecycle.exit_code)
+        };
         drop(state);
-        let lifecycle = self.core.lifecycle.lock_recover();
         TermSnapshot {
             cols,
             screen_lines,
@@ -709,8 +715,8 @@ impl GridEmulator {
             cursor,
             cursor_blinking,
             title: self.title(),
-            exited: lifecycle.exited,
-            exit_code: lifecycle.exit_code,
+            exited,
+            exit_code,
             display_offset,
             history_size,
             lines_evicted,

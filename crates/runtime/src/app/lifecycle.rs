@@ -472,24 +472,34 @@ impl AppState {
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
             smol::Timer::after(resident_idle_grace).await;
-            host_cx.enqueue(move |state, cx| {
-                let still_idle = state
-                    .residents
-                    .parked
-                    .get(&session_id)
-                    .is_some_and(|session| {
-                        session.idle_since == Some(idle_since)
-                            && session.queue.is_empty()
-                            && !session.turn_in_flight
-                            && session.delivery_in_flight.is_none()
-                            && session.background_task_count == 0
-                    })
-                    && !state.pending_native_rewinds.contains_key(&session_id);
-                if still_idle {
-                    state.drop_background(&session_id, cx);
-                }
-            });
+            host_cx.enqueue(move |state, cx| state.reap_idle_resident(&session_id, idle_since, cx));
         });
+    }
+
+    /// The idle grace timer's expiry: shut the resident down only if it is
+    /// still parked in the same idle period the timer was started for, so a
+    /// re-adopted or re-parked session is left to its newer timer.
+    pub(super) fn reap_idle_resident(
+        &mut self,
+        session_id: &str,
+        idle_since: Instant,
+        cx: &mut HostCx,
+    ) {
+        let still_idle = self
+            .residents
+            .parked
+            .get(session_id)
+            .is_some_and(|session| {
+                session.idle_since == Some(idle_since)
+                    && session.queue.is_empty()
+                    && !session.turn_in_flight
+                    && session.delivery_in_flight.is_none()
+                    && session.background_task_count == 0
+            })
+            && !self.pending_native_rewinds.contains_key(session_id);
+        if still_idle {
+            self.drop_background(session_id, cx);
+        }
     }
 
     /// Shut down and forget a parked session (archive/delete paths).
