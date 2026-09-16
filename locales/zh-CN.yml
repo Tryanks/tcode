@@ -282,7 +282,7 @@ settings:
     description: "智能体工作时自动展开最新命令的输出。"
   provider_colors:
     title: "提供方颜色"
-    description: "在侧边栏中以所属提供方的颜色为每个对话着色。"
+    description: "在侧边栏每个对话的背景中以所属提供方的颜色显示其图标。"
   provider_updates:
     title: "提供方更新检查"
     description: "启动时检查 Tcode 和提供方 CLI 的新版本，并从 t3code 刷新 Claude Code 模型列表。"

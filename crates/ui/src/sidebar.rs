@@ -37,12 +37,12 @@ use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
-/// Alpha steps of the provider tint on a thread row. One hue per provider,
-/// three strengths, so rest, hover and selection stay recognisably the same
-/// color on both light and dark canvases.
-const PROVIDER_TINT_REST: f32 = 0.08;
-const PROVIDER_TINT_HOVER: f32 = 0.16;
-const PROVIDER_TINT_ACTIVE: f32 = 0.26;
+/// The provider mark behind a thread row: its provider's glyph at this alpha,
+/// scaled to this multiple of the row height and pushed past the right edge by
+/// this much so the row's clip cuts it.
+const PROVIDER_MARK_ALPHA: f32 = 0.14;
+const PROVIDER_MARK_SCALE: f32 = 1.25;
+const PROVIDER_MARK_OVERHANG: f32 = 6.;
 
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
@@ -57,6 +57,10 @@ const THREADS_COLLAPSED_LIMIT: usize = 6;
 /// Flat-list row geometry, including the 2px gap reserved below every row.
 const FLAT_ROOT_ROW_HEIGHT: f32 = 50.;
 const FLAT_CHILD_ROW_HEIGHT: f32 = 32.;
+/// The clickable row inside each flat slot (the slot adds 2px of spacing).
+const FLAT_ROOT_ROW_INNER_HEIGHT: f32 = 48.;
+const FLAT_CHILD_ROW_INNER_HEIGHT: f32 = 30.;
+const GROUPED_ROW_HEIGHT: f32 = 30.;
 const SETTLED_HEADER_HEIGHT: f32 = 34.;
 
 /// A critically damped spring keeps reordering legible without bouncing rows
@@ -2134,13 +2138,35 @@ impl SessionsSidebar {
         }
     }
 
-    /// The provider color behind `meta`'s row, `None` while Provider colors is
-    /// off. Callers pick the alpha for their state.
-    fn provider_tint(&self, meta: &SessionMeta, cx: &App) -> Option<gpui::Hsla> {
-        self.store
-            .read(cx)
-            .provider_color(meta)
-            .map(|rgb| gpui::rgb(rgb).into())
+    /// The decorative provider mark painted under a thread row's content:
+    /// `meta`'s protocol glyph in its provider color, vertically centred and
+    /// hanging off the right edge. `None` while Provider colors is off. It has
+    /// no handlers, so the row's own hover, click and menu are unaffected.
+    fn provider_mark(&self, meta: &SessionMeta, row_height: f32, cx: &App) -> Option<gpui::Div> {
+        let color: gpui::Hsla = gpui::rgb(self.store.read(cx).provider_color(meta)?).into();
+        let glyph = match meta.provider {
+            // ACP agents share the box glyph the composer rail and ACP panel use.
+            agent::ProviderKind::Acp => Icon::empty().path("icons/box.svg"),
+            kind => crate::provider_card::provider_glyph(kind),
+        };
+        let size = px((row_height * PROVIDER_MARK_SCALE).round());
+        let id = meta.id.clone();
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right(px(-PROVIDER_MARK_OVERHANG))
+                .w(size)
+                .flex()
+                .items_center()
+                .debug_selector(move || format!("sidebar-provider-mark-{id}"))
+                .child(
+                    glyph
+                        .size(size)
+                        .text_color(color.opacity(PROVIDER_MARK_ALPHA)),
+                ),
+        )
     }
 
     fn thread_clickable_row(
@@ -2154,7 +2180,6 @@ impl SessionsSidebar {
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
         let has_direct_children = state.has_direct_children();
-        let tint = self.provider_tint(meta, cx);
         crate::material::accessible_clickable(
             base,
             row_id,
@@ -2172,13 +2197,9 @@ impl SessionsSidebar {
         })
         .group(state.row_key.clone())
         .cursor_pointer()
-        .map(|row| match tint {
-            Some(tint) if is_active => row.bg(tint.opacity(PROVIDER_TINT_ACTIVE)),
-            Some(tint) => row
-                .bg(tint.opacity(PROVIDER_TINT_REST))
-                .hover(move |row| row.bg(tint.opacity(PROVIDER_TINT_HOVER))),
-            None if is_active => row.bg(cx.theme().list_active),
-            None => row.hover(|row| row.bg(cx.theme().sidebar_accent)),
+        .when(is_active, |row| row.bg(cx.theme().list_active))
+        .when(!is_active, |row| {
+            row.hover(|row| row.bg(cx.theme().sidebar_accent))
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
@@ -2428,12 +2449,17 @@ impl SessionsSidebar {
                 is_active,
                 cx,
             )
-            .h(px(30.))
+            .h(px(GROUPED_ROW_HEIGHT))
             .items_center()
             .gap_2()
             .pl(px(if is_child { 42. } else { 30. }))
             .pr_2()
             .rounded(px(6.))
+            // First child so the row's content paints over the mark.
+            .when_some(
+                self.provider_mark(meta, GROUPED_ROW_HEIGHT, cx),
+                |row, mark| row.relative().overflow_hidden().child(mark),
+            )
             .when_some(
                 Self::thread_status_badge(&state, working, cx),
                 |row, badge| row.child(badge),
@@ -2598,6 +2624,11 @@ impl SessionsSidebar {
         let children_collapsed = state.children_collapsed;
         let renaming = state.renaming.is_some();
         let status = Self::thread_status_label(&state, working, cx);
+        let row_height = if is_child {
+            FLAT_CHILD_ROW_INNER_HEIGHT
+        } else {
+            FLAT_ROOT_ROW_INNER_HEIGHT
+        };
 
         let row = self
             .thread_clickable_row(
@@ -2612,10 +2643,22 @@ impl SessionsSidebar {
                 let id = session_id.clone();
                 move || format!("sidebar-thread-{id}")
             })
-            .when(is_child, |row| row.h(px(30.)).items_center().ml(px(12.)))
-            .when(!is_child, |row| row.h(px(48.)).justify_center().gap(px(2.)))
+            .when(is_child, |row| {
+                row.h(px(FLAT_CHILD_ROW_INNER_HEIGHT))
+                    .items_center()
+                    .ml(px(12.))
+            })
+            .when(!is_child, |row| {
+                row.h(px(FLAT_ROOT_ROW_INNER_HEIGHT))
+                    .justify_center()
+                    .gap(px(2.))
+            })
             .px_2()
-            .rounded(px(6.));
+            .rounded(px(6.))
+            // First child so the row's content paints over the mark.
+            .when_some(self.provider_mark(meta, row_height, cx), |row, mark| {
+                row.relative().overflow_hidden().child(mark)
+            });
 
         let row = if is_child {
             let title_or_input = self.thread_title_or_input(meta, &state, false, cx);
@@ -3327,7 +3370,7 @@ impl SessionsSidebar {
         let click_id = session_id.clone();
         let disclosure_id = session_id.clone();
         let unavailable = meta.parent_session_id.is_some() && !state.is_child;
-        let tint = self.provider_tint(meta, cx);
+        let mark = self.provider_mark(meta, crate::material::LIST_ROW_MIN_HEIGHT, cx);
 
         let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
             .debug_selector({
@@ -3337,9 +3380,10 @@ impl SessionsSidebar {
             .when(state.is_child, |row| {
                 row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
             })
-            // The provider tint is the resting fill; selection and the semantic
-            // washes below replace it rather than stack on it.
-            .when_some(tint, |row, tint| row.bg(tint.opacity(PROVIDER_TINT_REST)))
+            // First child so the row's content paints over the mark.
+            .when_some(mark, |row, mark| {
+                row.relative().overflow_hidden().child(mark)
+            })
             .when(
                 self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
                 |row| row.bg(cx.theme().list_active).aria_selected(true),
@@ -4437,10 +4481,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn thread_rows_carry_the_provider_tint_until_the_setting_is_off(cx: &mut TestAppContext) {
+    fn thread_rows_carry_the_provider_mark_until_the_setting_is_off(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
-            "tcode-provider-tint-{}",
+            "tcode-provider-mark-{}",
             tcode_services::store::now_millis()
         ));
         let host = spawn_host(
@@ -4467,16 +4511,28 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(320.), px(600.)));
         store.update(cx, |store, _| store.select_session("codex-thread".into()));
+        // (row selector, mark selector); the active Codex row comes first.
+        let selectors = [
+            (
+                "sidebar-thread-codex-thread",
+                "sidebar-provider-mark-codex-thread",
+            ),
+            (
+                "sidebar-thread-claude-thread",
+                "sidebar-provider-mark-claude-thread",
+            ),
+        ];
         let wait_for_rows = |cx: &mut VisualTestContext| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             loop {
                 store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 draw(cx);
-                if let (Some(codex), Some(claude)) = (
-                    cx.debug_bounds("sidebar-thread-codex-thread"),
-                    cx.debug_bounds("sidebar-thread-claude-thread"),
-                ) {
-                    return (codex, claude);
+                let rows: Vec<_> = selectors
+                    .iter()
+                    .filter_map(|(row, _)| cx.debug_bounds(row))
+                    .collect();
+                if rows.len() == selectors.len() {
+                    return rows;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -4485,26 +4541,33 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
-        let painted =
-            |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>, color: gpui::Hsla| {
-                cx.update(|window, _| {
-                    window.painted_quads().iter().any(|quad| {
-                        quad.bounds == bounds.scale(window.scale_factor())
-                            && quad.background == gpui::Background::from(color)
-                    })
-                })
-            };
-        let codex_tint: gpui::Hsla = gpui::rgb(0x8B5CF6).into();
-        let claude_tint: gpui::Hsla = gpui::rgb(0xD97757).into();
 
-        let (codex_row, claude_row) = wait_for_rows(cx);
+        let rows = wait_for_rows(cx);
+        for ((_, mark_selector), row) in selectors.iter().zip(&rows) {
+            let mark = cx
+                .debug_bounds(mark_selector)
+                .expect("each row carries its provider mark");
+            assert!(
+                mark.top() >= row.top() && mark.bottom() <= row.bottom(),
+                "mark stays within the row's vertical span: {mark:?} in {row:?}"
+            );
+            assert!(
+                mark.right() >= row.right(),
+                "mark hangs off the right edge so the clip cuts it: {mark:?} in {row:?}"
+            );
+        }
+        let list_active = cx.update(|_, cx| cx.theme().list_active);
+        let painted_active = |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>| {
+            cx.update(|window, _| {
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds == bounds.scale(window.scale_factor())
+                        && quad.background == gpui::Background::from(list_active)
+                })
+            })
+        };
         assert!(
-            painted(cx, codex_row, codex_tint.opacity(PROVIDER_TINT_ACTIVE)),
-            "the active row is its provider's color at the selected strength"
-        );
-        assert!(
-            painted(cx, claude_row, claude_tint.opacity(PROVIDER_TINT_REST)),
-            "a resting row is its own provider's color at the resting strength"
+            painted_active(cx, rows[0]),
+            "the active row keeps the neutral selected surface"
         );
 
         store.update(cx, |store, _| store.set_provider_colors_disabled(true));
@@ -4517,21 +4580,14 @@ mod tests {
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let (codex_row, claude_row) = wait_for_rows(cx);
-        let list_active = cx.update(|_, cx| cx.theme().list_active);
-        assert!(
-            painted(cx, codex_row, list_active),
-            "with colors off the active row is the neutral selected surface"
-        );
-        assert!(
-            !painted(cx, codex_row, codex_tint.opacity(PROVIDER_TINT_ACTIVE)),
-            "with colors off no provider tint remains"
-        );
-        assert!(!painted(
-            cx,
-            claude_row,
-            claude_tint.opacity(PROVIDER_TINT_REST)
-        ));
+        let rows = wait_for_rows(cx);
+        for (_, mark_selector) in selectors {
+            assert!(
+                cx.debug_bounds(mark_selector).is_none(),
+                "with colors off no mark is drawn"
+            );
+        }
+        assert!(painted_active(cx, rows[0]));
         let _ = std::fs::remove_dir_all(root);
     }
 

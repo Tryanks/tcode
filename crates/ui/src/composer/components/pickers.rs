@@ -1088,7 +1088,11 @@ fn render_model_row(
                 })
                 .xsmall()
                 .text_color(if is_fav {
-                    rgb(CLAUDE_BRAND_COLOR).into()
+                    rgb(
+                        tcode_core::settings::builtin_provider_color(ProviderKind::ClaudeCode)
+                            .expect("Claude has a brand color"),
+                    )
+                    .into()
                 } else {
                     muted
                 }),

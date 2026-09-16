@@ -282,7 +282,7 @@ settings:
     description: "Automatically expand the latest command output while the agent is working."
   provider_colors:
     title: "Provider colors"
-    description: "Tint each thread in the sidebar with its provider's color."
+    description: "Show each thread's provider mark in its color behind the sidebar row."
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer Tcode and provider CLI versions on launch, and refresh the Claude Code model list from t3code."

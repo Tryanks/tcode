@@ -614,16 +614,17 @@ in both states.
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
    while naming) + relative time (muted 11px); hover = accent bg. With the
-   **Provider colors** switch on (the default) every thread row, child rows
-   included, carries a subtle wash of its provider's color instead: the
-   provider card's accent when one is set, else the built-in brand color, else
-   a stable palette slot for each user profile or ACP agent (owner:
-   `Settings::provider_color` in `crates/core`).
-   The wash is the same hue at three strengths — resting (~8%), hover (~16%)
-   and selected (~26%) — so hover and selection never change geometry or hue.
-   Compact rows take only the resting wash; the selected surface and the
-   waiting-for-approval / waiting-for-input semantic washes replace it. With
-   the switch off, rows are the neutral surfaces described here. Inline rename
+   **Provider colors** switch on (the default) every thread row, child and
+   compact rows included, carries a decorative provider mark painted under
+   its content: the provider's glyph (the ACP box for agents) at ~1.25× the
+   row height, vertically centred, anchored to the right edge and pushed
+   slightly past it so the row's clip cuts it, filled with the provider's
+   color at low alpha. The color is the provider card's accent when one is
+   set, else the built-in brand color, else a stable palette slot for each
+   user profile or ACP agent (owner: `Settings::provider_color` in
+   `crates/core`). The mark takes no input and changes no geometry; the
+   row's rest, hover, selected and semantic surfaces are exactly the neutral
+   ones described here, and with the switch off there is no mark. Inline rename
    commits on Enter and cancels on blur or any click outside the input.
    The thread context menu offers **Regenerate title / 重新生成标题** next to
    Rename in both layouts. It uses the original request and recent conversation
@@ -1065,8 +1066,8 @@ label at both widths, since a switch never squeezes the text.
 
 Both the compact list and wide rail divide Settings into two captioned groups,
 in this order: **This device** contains General (appearance — theme, the
-**Provider colors** switch for the sidebar's per-provider thread tint — language
-and device name) plus Other devices wherever the build can host connections; **‹machine
+**Provider colors** switch for the sidebar's provider marks — language and
+device name) plus Other devices wherever the build can host connections; **‹machine
 name› settings** contains Providers, Usage, Orchestrate, Computer Use, Browser
 and Archived Threads. The attached host's display name supplies ‹machine name›;
 a local attachment uses the machine name shown by the hosting panel, and a
