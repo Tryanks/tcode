@@ -438,8 +438,6 @@ impl Render for Picker {
 mod tests {
     use super::*;
     use gpui::{TestAppContext, VisualTestContext, size};
-    use tcode_runtime::pipe::{HostServices, spawn_host};
-    use tcode_services::store::SessionStore;
 
     struct EmptyView;
     impl Render for EmptyView {
@@ -515,28 +513,75 @@ mod tests {
     }
 
     #[gpui::test]
-    fn entering_a_folder_keeps_the_picker_open_and_lists_only_images(cx: &mut TestAppContext) {
+    fn entering_a_folder_keeps_the_picker_open_and_displays_the_host_listing(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_client::HostLink;
+        use tcode_protocol::{ClientPayload, HostMessage, Query, decode_client_line, encode_line};
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-icon-picker-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = PathBuf::from("/host/project");
         let folder = root.join("pictures");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(
-            folder.join("logo.png"),
-            include_bytes!("../../../assets/icons/app/tcode.png"),
-        )
-        .unwrap();
-        std::fs::write(folder.join("notes.txt"), "not an image").unwrap();
         let project = Project::from_root(root.clone());
-        let disk = SessionStore::open_at(root.join("data")).unwrap();
-        disk.upsert_project(&project).unwrap();
-        let host = spawn_host(disk, HostServices::default()).unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link.clone(),
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                false,
+                cx,
+            )
+        });
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let requested_folder = folder.clone();
+        let _host = cx.background_executor.spawn(async move {
+            while let Ok(line) = requests.recv().await {
+                let request = decode_client_line(&line).unwrap();
+                let response = match request.payload {
+                    ClientPayload::Query(Query::BrowseIconImages { directory }) => {
+                        let entries = if directory == root {
+                            vec![IconImageEntry {
+                                path: requested_folder.clone(),
+                                name: "pictures".into(),
+                                is_dir: true,
+                            }]
+                        } else {
+                            assert_eq!(directory, requested_folder);
+                            vec![IconImageEntry {
+                                path: directory.join("logo.png"),
+                                name: "logo.png".into(),
+                                is_dir: false,
+                            }]
+                        };
+                        QueryResponse::IconImages {
+                            parent: directory.parent().map(PathBuf::from),
+                            directory,
+                            entries,
+                        }
+                    }
+                    ClientPayload::Query(Query::ReadIconImage { .. }) => QueryResponse::FileBytes(
+                        include_bytes!("../../../assets/icons/app/tcode.png").to_vec(),
+                    ),
+                    _ => continue,
+                };
+                replies
+                    .send(
+                        encode_line(&HostMessage::QueryResult {
+                            id: request.id,
+                            result: Ok(response),
+                        })
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| EmptyView);
             crate::overlay::OverlayHost::new(view, window, cx)
@@ -555,9 +600,6 @@ mod tests {
             "Enter dismissed the picker"
         );
         assert!(cx.debug_bounds("icon-file-logo.png").is_some());
-        assert!(cx.debug_bounds("icon-file-notes.txt").is_none());
         cx.update(|window, cx| window.close_dialog(cx));
-        host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

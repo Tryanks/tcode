@@ -7,10 +7,6 @@ use tcode_protocol::{Query, QueryResponse};
 pub(super) struct HostImages {
     pub link: Option<HostLink>,
     pub namespace: u64,
-    /// Real host fixtures pump on an OS thread; do not give that thread a
-    /// deterministic GPUI scheduler waker. Scripted image fixtures stay async.
-    #[cfg(test)]
-    pub blocking_queries: bool,
 }
 impl Global for HostImages {}
 
@@ -39,8 +35,6 @@ impl Asset for HostImage {
             .clone()
             .filter(|_| images.namespace == namespace)
             .ok_or_else(|| std::io::Error::other("image belongs to a detached host"));
-        #[cfg(test)]
-        let blocking_queries = images.blocking_queries;
         async move {
             let query = match request {
                 ImageRequest::File(path) => Query::ReadFileBytes { path },
@@ -51,15 +45,7 @@ impl Asset for HostImage {
                 },
             };
             let host = host?;
-            #[cfg(test)]
-            let result = if blocking_queries {
-                futures_lite::future::block_on(host.query(query))
-            } else {
-                host.query(query).await
-            };
-            #[cfg(not(test))]
-            let result = host.query(query).await;
-            let bytes = match result {
+            let bytes = match host.query(query).await {
                 Ok(QueryResponse::FileBytes(bytes)) => bytes,
                 result => {
                     return Err(std::io::Error::other(format!(
@@ -142,26 +128,27 @@ mod tests {
     async fn project_icon_cache_refreshes_defaults_and_errors_after_reset_or_reconnect(
         cx: &mut TestAppContext,
     ) {
-        use crate::store::WorkspaceStore;
+        use crate::store::{WorkspaceAttachment, WorkspaceStore};
         use tcode_core::project::Project;
-        use tcode_protocol::{EventEnvelope, IndexSnapshot, ServerEvent, Topic};
-        use tcode_runtime::pipe::{HostServices, spawn_host};
-        use tcode_services::store::SessionStore;
+        use tcode_protocol::{EventEnvelope, IndexSnapshot, ProtocolError, ServerEvent, Topic};
 
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-icon-cache-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let project = Project::from_root(root.clone());
-        let disk = SessionStore::open_at(root.join("data")).unwrap();
-        disk.upsert_project(&project).unwrap();
-        let host = spawn_host(disk, HostServices::default()).unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let (to_host, requests) = async_channel::unbounded();
+        let (replies, from_host) = async_channel::unbounded();
+        let link = HostLink::new(to_host, from_host);
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, false, cx)
+        });
+        store.update(cx, |store, _| {
+            // Keep navigation out of this cache test when its Index baseline arrives.
+            store.selected_session_id = Some("selected".into());
+        });
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            link.pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let project = Project::from_root(PathBuf::from("/host/project"));
         let namespace = cx.update(|cx| cx.global::<HostImages>().namespace);
         let key = |pixels| {
             (
@@ -173,56 +160,93 @@ mod tests {
                 },
             )
         };
-        for pixels in [16, 32] {
-            assert!(
-                cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).0)
-                    .await
-                    .is_err()
-            );
-        }
-        std::fs::write(root.join("tcode.json"), r#"{"iconPath":"logo.png"}"#).unwrap();
-        for (reconnect, color) in [(true, [255, 0, 0, 255]), (false, [0, 0, 255, 255])] {
-            image::RgbaImage::from_pixel(32, 32, image::Rgba(color))
-                .save(root.join("logo.png"))
-                .unwrap();
-            // Both success and error entries stay cached until the host/connection event.
+        for (reconnect, color) in [
+            (None, None),
+            (Some(true), Some([255, 0, 0, 255])),
+            (Some(false), Some([0, 0, 255, 255])),
+        ] {
+            if let Some(reconnect) = reconnect {
+                store.update(cx, |store, cx| {
+                    let event = if reconnect {
+                        store.apply_connection_state(tcode_client::ConnectionState::Syncing);
+                        ServerEvent::IndexSnapshot(IndexSnapshot {
+                            sessions: vec![],
+                            projects: vec![project.clone()],
+                            activity: Default::default(),
+                            title_generating: Default::default(),
+                        })
+                    } else {
+                        // Also delivered to clients that did not open the picker.
+                        ServerEvent::IndexUpsertProject(project.clone())
+                    };
+                    store.apply_domain_event(
+                        &EventEnvelope {
+                            request_id: None,
+                            topic: Topic::Index,
+                            event,
+                        },
+                        cx,
+                    );
+                });
+            }
             for pixels in [16, 32] {
+                let (image, requested) = cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)));
+                assert!(
+                    requested,
+                    "a host event must invalidate both success and error entries"
+                );
+                cx.run_until_parked();
+                let request = std::iter::from_fn(|| requests.try_recv().ok())
+                    .map(|line| decode_client_line(&line).unwrap())
+                    .find(|request| {
+                        matches!(
+                            request.payload,
+                            ClientPayload::Query(Query::ReadProjectIcon { .. })
+                        )
+                    })
+                    .expect("an uncached project icon must query the host");
+                assert_eq!(
+                    request.payload,
+                    ClientPayload::Query(Query::ReadProjectIcon {
+                        project_id: project.id.clone(),
+                        pixels,
+                    })
+                );
+                let result = match color {
+                    Some(color) => {
+                        let mut png = std::io::Cursor::new(Vec::new());
+                        image::RgbaImage::from_pixel(pixels, pixels, image::Rgba(color))
+                            .write_to(&mut png, image::ImageFormat::Png)
+                            .unwrap();
+                        Ok(QueryResponse::FileBytes(png.into_inner()))
+                    }
+                    None => Err(ProtocolError {
+                        code: "not_found".into(),
+                        message: "no default icon".into(),
+                    }),
+                };
+                replies
+                    .send_blocking(
+                        encode_line(&HostMessage::QueryResult {
+                            id: request.id,
+                            result,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                cx.run_until_parked();
+                match color {
+                    Some(color) => {
+                        let image = image.await.unwrap();
+                        let rgba = image::load_from_memory(&image.bytes).unwrap().into_rgba8();
+                        assert_eq!(rgba.dimensions(), (pixels, pixels));
+                        assert_eq!(rgba.get_pixel(0, 0).0, color);
+                    }
+                    None => assert!(image.await.is_err()),
+                }
                 assert!(!cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).1));
             }
-            store.update(cx, |store, cx| {
-                let event = if reconnect {
-                    store.apply_connection_state(tcode_client::ConnectionState::Syncing);
-                    ServerEvent::IndexSnapshot(IndexSnapshot {
-                        sessions: vec![],
-                        projects: vec![project.clone()],
-                        activity: Default::default(),
-                        title_generating: Default::default(),
-                    })
-                } else {
-                    // This is also delivered to clients that did not open the picker.
-                    ServerEvent::IndexUpsertProject(project.clone())
-                };
-                store.apply_domain_event(
-                    &EventEnvelope {
-                        request_id: None,
-                        topic: Topic::Index,
-                        event,
-                    },
-                    cx,
-                );
-            });
-            for pixels in [16, 32] {
-                let image = cx
-                    .update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).0)
-                    .await
-                    .unwrap();
-                let rgba = image::load_from_memory(&image.bytes).unwrap().into_rgba8();
-                assert_eq!(rgba.dimensions(), (pixels, pixels));
-                assert_eq!(rgba.get_pixel(0, 0).0, color);
-            }
         }
-        host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     struct ImageMessage {
@@ -251,7 +275,6 @@ mod tests {
             cx.set_global(HostImages {
                 link: Some(link.clone()),
                 namespace: 1,
-                blocking_queries: false,
             });
         });
         let executor = cx.background_executor.clone();
