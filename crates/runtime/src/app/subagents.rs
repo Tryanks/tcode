@@ -44,6 +44,8 @@ impl AppState {
             agent_type,
             description,
             status,
+            model,
+            effort,
             ..
         } = &item.content
         else {
@@ -60,7 +62,34 @@ impl AppState {
                 if title_changed {
                     mirror.meta.title = title;
                 }
-                if !in_progress || title_changed {
+                let mut settings_changed = false;
+                if let Some(model) = model
+                    && mirror.meta.model.as_ref() != Some(model)
+                {
+                    mirror.meta.model = Some(model.clone());
+                    settings_changed = true;
+                }
+                if let Some(effort) = effort {
+                    let value = serde_json::Value::String(effort.clone());
+                    if let Some(selection) = mirror
+                        .meta
+                        .option_selections
+                        .iter_mut()
+                        .find(|selection| selection.id == "reasoningEffort")
+                    {
+                        if selection.value != value {
+                            selection.value = value;
+                            settings_changed = true;
+                        }
+                    } else {
+                        mirror.meta.option_selections.push(OptionSelection {
+                            id: "reasoningEffort".into(),
+                            value,
+                        });
+                        settings_changed = true;
+                    }
+                }
+                if !in_progress || title_changed || settings_changed {
                     mirror.meta.updated_at = now_secs();
                     Some(mirror.meta.clone())
                 } else {
@@ -154,6 +183,11 @@ impl AppState {
         let mut meta = SessionMeta::new(parent.provider, parent.cwd.clone(), parent.model.clone());
         meta.project_id = parent.project_id.clone();
         meta.profile_id = parent.profile_id.clone();
+        // Native children inherit the launch settings until the provider reports
+        // a child-specific model or effort on its Subagent item.
+        meta.approval_mode = parent.approval_mode;
+        meta.interaction_mode = parent.interaction_mode;
+        meta.option_selections = parent.option_selections.clone();
         meta.acp_agent_id = parent.acp_agent_id.clone();
         meta.parent_session_id = Some(parent.id.clone());
         meta.native_subagent = Some(subagent_item_id.to_string());

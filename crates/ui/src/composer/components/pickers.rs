@@ -201,7 +201,7 @@ impl Composer {
 
         let trigger = Button::new("model-picker")
             .debug_selector(|| "model-picker".into())
-            .when(self.compact, |button| {
+            .when(self.compact || store.native_subagent_readonly(), |button| {
                 button.w_full().max_w(px(160.)).min_w_0().overflow_hidden()
             })
             .ghost()
@@ -212,14 +212,18 @@ impl Composer {
             .rounded(crate::material::radius_input())
             .child(
                 h_flex()
-                    .when(self.compact, |el| el.w_full().min_w_0().overflow_hidden())
+                    .when(self.compact || store.native_subagent_readonly(), |el| {
+                        el.w_full().min_w_0().overflow_hidden()
+                    })
                     .gap_1p5()
                     .items_center()
                     .text_size(px(13.))
                     .child(tinted_provider_glyph(provider, store).small())
                     .child(
                         div()
-                            .when(self.compact, |el| el.min_w_0().truncate())
+                            .when(self.compact || store.native_subagent_readonly(), |el| {
+                                el.min_w_0().truncate()
+                            })
                             .font_medium()
                             .child(display),
                     )
@@ -236,7 +240,7 @@ impl Composer {
             .when(self.compact, |popover| {
                 popover.bottom_sheet(crate::tr!("mobile.model"))
             })
-            .default_open(self.model_picker_token > 0)
+            .default_open(self.model_picker_token > 0 && self.interactive(cx))
             .trigger(trigger)
             .content(move |_state, _window, cx| {
                 let rows = rows.clone();
@@ -273,6 +277,39 @@ impl Composer {
         // agents push theirs over the wire (`AgentEvent::ProviderOptions`). Both
         // arrive as `OptionDescriptor`s and render through this one picker.
         let descriptors = composer.active_option_descriptors.clone();
+        if store.native_subagent_readonly() {
+            let effort =
+                option_selection_str(&composer.active_option_selections, "reasoningEffort");
+            let descriptor = descriptors.iter().find(|option| {
+                matches!(option, OptionDescriptor::Select { id, .. } if id == "reasoningEffort")
+            });
+            let label = if let Some(OptionDescriptor::Select {
+                options,
+                default_value,
+                ..
+            }) = descriptor
+            {
+                let value = effort.or(default_value.as_deref());
+                value.map(|value| {
+                    options
+                        .iter()
+                        .find(|option| option.value == value)
+                        .map_or_else(|| value.to_owned(), |option| option.label.clone())
+                })
+            } else {
+                effort.map(str::to_owned)
+            }
+            .unwrap_or_else(|| crate::tr!("composer.context_unknown").into_owned());
+            return Button::new("traits-chip")
+                .debug_selector(|| "traits-chip".into())
+                .ghost()
+                .compact()
+                .h(px(28.))
+                .when(self.compact, |button| button.min_h(px(44.)).min_w(px(44.)))
+                .disabled(true)
+                .label(label)
+                .into_any_element();
+        }
         if descriptors.is_empty() {
             return div().into_any_element();
         }

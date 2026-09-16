@@ -2418,6 +2418,15 @@ impl WorkspaceStore {
         })
     }
 
+    pub(crate) fn native_subagent_readonly(&self) -> bool {
+        self.session_status_replica.as_ref().is_some_and(|status| {
+            self.index_replica
+                .0
+                .iter()
+                .any(|meta| meta.id == status.session_id && meta.native_subagent.is_some())
+        })
+    }
+
     pub(crate) fn composer_state(&self) -> ComposerState {
         snapshots::composer_state(
             self.session_status_replica.as_ref(),

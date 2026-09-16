@@ -2635,15 +2635,6 @@ impl Render for ChatView {
                 .child(self.render_empty_state(window, cx));
         };
 
-        let active_session_id = self.workspace_store.read(cx).active_session_id();
-        let native_subagent_readonly = active_session_id.as_deref().is_some_and(|active_id| {
-            self.workspace_store
-                .read(cx)
-                .sidebar_sessions()
-                .iter()
-                .any(|meta| meta.id == active_id && meta.native_subagent.is_some())
-        });
-
         let title = if is_draft { None } else { Some(title) };
         let header = self.render_header(title, is_draft, Some(cwd.clone()), window, cx);
         let panel = self.workspace_store.read(cx).panel_state();
@@ -2792,18 +2783,7 @@ impl Render for ChatView {
                 .into_any_element()
         };
 
-        let composer: AnyElement = if native_subagent_readonly {
-            div()
-                .w_full()
-                .py_3()
-                .text_center()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .child(crate::tr!("chat.subagent_readonly"))
-                .into_any_element()
-        } else {
-            self.composer.clone().into_any_element()
-        };
+        let composer = self.composer.clone().into_any_element();
         let deliveries = self.workspace_store.read(cx).delivery_messages();
         let waiting = *self.workspace_store.read(cx).connection_state()
             != tcode_client::ConnectionState::Connected;

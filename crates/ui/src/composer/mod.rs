@@ -190,12 +190,13 @@ impl EventEmitter<ComposerEvent> for Composer {}
 
 impl Composer {
     fn interactive(&self, cx: &App) -> bool {
-        !matches!(self.workspace_store.read(cx).connection_state(),
+        !self.workspace_store.read(cx).native_subagent_readonly()
+            && !matches!(self.workspace_store.read(cx).connection_state(),
             tcode_client::ConnectionState::Offline { reason } if reason.is_terminal())
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
+        if self.interactive(cx) && !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
     }
@@ -286,6 +287,7 @@ impl Composer {
                 &workspace_store,
                 &[
                     TopicKind::ActiveSession,
+                    TopicKind::Index,
                     TopicKind::SessionStatus,
                     TopicKind::SessionEvents,
                     TopicKind::Settings,
@@ -522,6 +524,9 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.workspace_store.read(cx).native_subagent_readonly() {
+            return;
+        }
         if self.compact
             && *self.workspace_store.read(cx).connection_state()
                 != tcode_client::ConnectionState::Connected
@@ -920,6 +925,17 @@ impl Composer {
     /// The composer's primary control: the stop button while a turn runs, the
     /// Refine / Implement (split) controls in the plan-ready state, else send.
     fn render_primary_action(&self, turn_running: bool, cx: &mut Context<Self>) -> AnyElement {
+        if self.workspace_store.read(cx).native_subagent_readonly() {
+            return Button::new("send-message")
+                .debug_selector(|| "send-message".into())
+                .ghost()
+                .compact()
+                .disabled(true)
+                .aria_label(crate::tr!("composer.send").into_owned())
+                .size(px(if self.compact { 44. } else { 28. }))
+                .child(Icon::new(IconName::ArrowUp).small())
+                .into_any_element();
+        }
         if turn_running {
             return self.render_send_or_stop(true, cx);
         }
@@ -958,6 +974,7 @@ impl Render for Composer {
         self.sync_native_rewind_prefill(window, cx);
         self.sync_fallback_review_draft(window, cx);
         let composer_state = self.workspace_store.read(cx).composer_state();
+        let readonly = self.workspace_store.read(cx).native_subagent_readonly();
         let turn_running = composer_state.turn_running;
         let approval = composer_state.pending_approval;
         let approval_count = composer_state.pending_approval_count;
@@ -995,7 +1012,7 @@ impl Render for Composer {
             .items_center();
 
         #[cfg(all(feature = "voice", target_os = "macos"))]
-        let mic = if self.compact {
+        let mic = if self.compact || readonly {
             None
         } else {
             self.render_mic_button(cx)
@@ -1003,7 +1020,7 @@ impl Render for Composer {
         #[cfg(not(all(feature = "voice", target_os = "macos")))]
         let mic: Option<AnyElement> = None;
 
-        let control_row = if self.compact {
+        let control_row = if self.compact || (readonly && compact) {
             control_row_base
                 .child(div().flex_1().min_w_0().child(self.render_model_picker(cx)))
                 .child(self.render_traits_picker(cx))
@@ -1056,7 +1073,9 @@ impl Render for Composer {
             });
         // Only Plan mode refines: in Build a typed message is an ordinary build
         // turn, so promising refinement there would misdescribe what Enter does.
-        let desired_placeholder = if plan_ready_title.is_some() && self.refines_the_plan(cx) {
+        let desired_placeholder = if readonly {
+            crate::tr!("chat.subagent_readonly").into_owned()
+        } else if plan_ready_title.is_some() && self.refines_the_plan(cx) {
             crate::tr!("plan.refine_placeholder").into_owned()
         } else if self.compact && !self.interactive(cx) {
             crate::tr!("mobile.offline_message").into_owned()
@@ -1145,7 +1164,7 @@ impl Render for Composer {
 
         // Focus swaps the hairline to primary in one frame. Geometry stays
         // fixed: focus never changes border width, radius, or layout.
-        let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let composer_focused = !readonly && self.input.read(cx).focus_handle(cx).is_focused(window);
         let card = v_flex()
             .debug_selector(|| "composer-card".into())
             .w_full()
@@ -1170,7 +1189,7 @@ impl Render for Composer {
             // the Paste *action* in the capture phase. Swallow it only when the
             // clipboard held an image; text paste propagates to the editor.
             .capture_action(cx.listener(|this, _: &Paste, window, cx| {
-                if !this.compact && this.paste_clipboard_image(window, cx) {
+                if this.interactive(cx) && !this.compact && this.paste_clipboard_image(window, cx) {
                     cx.stop_propagation();
                 }
             }))
@@ -1215,7 +1234,7 @@ impl Render for Composer {
                 move |paths: &ExternalPaths, window: &mut Window, cx: &mut App| {
                     let paths: Vec<PathBuf> = paths.paths().to_vec();
                     composer.update(cx, |this, cx| {
-                        if this.compact {
+                        if this.compact || !this.interactive(cx) {
                             return;
                         }
                         for path in paths {
@@ -1234,6 +1253,7 @@ impl Render for Composer {
             // Match sent-message typography while composing.
             .child(
                 Textarea::new(&self.input)
+                    .disabled(readonly)
                     .appearance(false)
                     .text_size(px(13.5))
                     .line_height(px(21.)),
@@ -1256,7 +1276,8 @@ impl Render for Composer {
             }))
             .pb_2()
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift {
+                if this.interactive(cx) && ev.keystroke.key == "tab" && ev.keystroke.modifiers.shift
+                {
                     this.workspace_store
                         .update(cx, |store, _cx| store.toggle_interaction_mode());
                     cx.notify();
@@ -1281,27 +1302,30 @@ impl Render for Composer {
                     })
                     .children(self.render_trigger_menu(cx))
                     .children(self.render_queue_strip(cx))
-                    .child(v_flex().w_full().child(card).when(self.compact, |el| {
-                        el.child(
-                            h_flex()
-                                .debug_selector(|| "composer-settings-drawer".into())
-                                .mx_2()
-                                .px_1()
-                                .min_w_0()
-                                .gap_1()
-                                .items_center()
-                                .rounded_b(px(12.))
-                                .border_1()
-                                .border_t_0()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().muted)
-                                .child(self.render_permission_picker(cx))
-                                .child(self.render_mode_chip(cx))
-                                .child(div().flex_1())
-                                .child(self.render_context_meter(cx)),
-                        )
-                    }))
-                    .when(!self.compact, |el| {
+                    .child(v_flex().w_full().child(card).when(
+                        self.compact || (readonly && compact),
+                        |el| {
+                            el.child(
+                                h_flex()
+                                    .debug_selector(|| "composer-settings-drawer".into())
+                                    .mx_2()
+                                    .px_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .items_center()
+                                    .rounded_b(px(12.))
+                                    .border_1()
+                                    .border_t_0()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().muted)
+                                    .child(self.render_permission_picker(cx))
+                                    .child(self.render_mode_chip(cx))
+                                    .child(div().flex_1())
+                                    .child(self.render_context_meter(cx)),
+                            )
+                        },
+                    ))
+                    .when(!self.compact && !readonly, |el| {
                         el.children(self.render_checkout_row(cx))
                     }),
             )
