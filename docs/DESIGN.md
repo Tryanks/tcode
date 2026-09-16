@@ -613,7 +613,16 @@ in both states.
 5. Project groups: rotating chevron + project icon + 13px medium name; hover
    shows "+" (new thread in project); collapse state persisted.
    Thread rows: single-line truncated AI-generated title (first-message fallback
-   while naming) + relative time (muted 11px); hover = accent bg. Inline rename
+   while naming) + relative time (muted 11px); hover = accent bg. With the
+   **Provider colors** switch on (the default) every thread row, child rows
+   included, carries a subtle wash of its provider's color instead: built-in
+   providers use their brand color and each user profile or ACP agent takes a
+   stable palette slot (owner: `Settings::provider_color` in `crates/core`).
+   The wash is the same hue at three strengths — resting (~8%), hover (~16%)
+   and selected (~26%) — so hover and selection never change geometry or hue.
+   Compact rows take only the resting wash; the selected surface and the
+   waiting-for-approval / waiting-for-input semantic washes replace it. With
+   the switch off, rows are the neutral surfaces described here. Inline rename
    commits on Enter and cancels on blur or any click outside the input.
    The thread context menu offers **Regenerate title / 重新生成标题** next to
    Rename in both layouts. It uses the original request and recent conversation
@@ -1054,8 +1063,9 @@ horizontal clipping. A row whose control is a 44pt switch keeps it beside the
 label at both widths, since a switch never squeezes the text.
 
 Both the compact list and wide rail divide Settings into two captioned groups,
-in this order: **This device** contains General (appearance, language and device
-name) plus Other devices wherever the build can host connections; **‹machine
+in this order: **This device** contains General (appearance — theme, the
+**Provider colors** switch for the sidebar's per-provider thread tint — language
+and device name) plus Other devices wherever the build can host connections; **‹machine
 name› settings** contains Providers, Usage, Orchestrate, Computer Use, Browser
 and Archived Threads. The attached host's display name supplies ‹machine name›;
 a local attachment uses the machine name shown by the hosting panel, and a

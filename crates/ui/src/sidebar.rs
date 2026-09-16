@@ -37,6 +37,13 @@ use crate::time::{humanize_ago, now_secs};
 use crate::window_drag_area;
 use crate::window_state::{Destination, Route, WindowState};
 
+/// Alpha steps of the provider tint on a thread row. One hue per provider,
+/// three strengths, so rest, hover and selection stay recognisably the same
+/// color on both light and dark canvases.
+const PROVIDER_TINT_REST: f32 = 0.08;
+const PROVIDER_TINT_HOVER: f32 = 0.16;
+const PROVIDER_TINT_ACTIVE: f32 = 0.26;
+
 /// Left padding on the sidebar's top row so branding clears the native macOS
 /// traffic lights (ending near x=72 on macOS 26); a small inset elsewhere.
 #[cfg(target_os = "macos")]
@@ -2127,6 +2134,15 @@ impl SessionsSidebar {
         }
     }
 
+    /// The provider color behind `meta`'s row, `None` while Provider colors is
+    /// off. Callers pick the alpha for their state.
+    fn provider_tint(&self, meta: &SessionMeta, cx: &App) -> Option<gpui::Hsla> {
+        self.store
+            .read(cx)
+            .provider_color(meta)
+            .map(|rgb| gpui::rgb(rgb).into())
+    }
+
     fn thread_clickable_row(
         &self,
         base: gpui::Div,
@@ -2138,6 +2154,7 @@ impl SessionsSidebar {
     ) -> gpui::Stateful<gpui::Div> {
         let session_id = state.session_id.clone();
         let has_direct_children = state.has_direct_children();
+        let tint = self.provider_tint(meta, cx);
         crate::material::accessible_clickable(
             base,
             row_id,
@@ -2155,9 +2172,13 @@ impl SessionsSidebar {
         })
         .group(state.row_key.clone())
         .cursor_pointer()
-        .when(is_active, |row| row.bg(cx.theme().list_active))
-        .when(!is_active, |row| {
-            row.hover(|row| row.bg(cx.theme().sidebar_accent))
+        .map(|row| match tint {
+            Some(tint) if is_active => row.bg(tint.opacity(PROVIDER_TINT_ACTIVE)),
+            Some(tint) => row
+                .bg(tint.opacity(PROVIDER_TINT_REST))
+                .hover(move |row| row.bg(tint.opacity(PROVIDER_TINT_HOVER))),
+            None if is_active => row.bg(cx.theme().list_active),
+            None => row.hover(|row| row.bg(cx.theme().sidebar_accent)),
         })
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
@@ -3306,6 +3327,7 @@ impl SessionsSidebar {
         let click_id = session_id.clone();
         let disclosure_id = session_id.clone();
         let unavailable = meta.parent_session_id.is_some() && !state.is_child;
+        let tint = self.provider_tint(meta, cx);
 
         let row = crate::material::list_row(cached.row_id.clone(), cached.label.clone(), cx)
             .debug_selector({
@@ -3315,6 +3337,9 @@ impl SessionsSidebar {
             .when(state.is_child, |row| {
                 row.pl(px(crate::material::COMPACT_PAGE_INSET + 16.))
             })
+            // The provider tint is the resting fill; selection and the semantic
+            // washes below replace it rather than stack on it.
+            .when_some(tint, |row, tint| row.bg(tint.opacity(PROVIDER_TINT_REST)))
             .when(
                 self.store.read(cx).active_session_id().as_deref() == Some(session_id.as_str()),
                 |row| row.bg(cx.theme().list_active).aria_selected(true),
@@ -4408,6 +4433,105 @@ mod tests {
                 .expect("read host title");
         assert_eq!(title, "Original title");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn thread_rows_carry_the_provider_tint_until_the_setting_is_off(cx: &mut TestAppContext) {
+        cx.update(crate::theme::init);
+        let root = std::env::temp_dir().join(format!(
+            "tcode-provider-tint-{}",
+            tcode_services::store::now_millis()
+        ));
+        let host = spawn_host(
+            SessionStore::open_at(root.clone()).unwrap(),
+            HostServices::default(),
+        )
+        .unwrap();
+        let project = Project::from_root(root.clone());
+        let mut codex = session("codex-thread", None);
+        codex.project_id = Some(project.id.clone());
+        let mut claude = session("claude-thread", None);
+        claude.provider = ProviderKind::ClaudeCode;
+        claude.project_id = Some(project.id.clone());
+        smol::block_on(host.update_state_for_test(move |state, _| {
+            state.settings.auto_archive_disabled = true;
+            state.projects = vec![project];
+            state.sessions = vec![codex, claude];
+        }))
+        .unwrap();
+        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let window_state = cx.new(|_| WindowState::new(false));
+        let (_, cx) =
+            cx.add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state, cx));
+        let cx: &mut VisualTestContext = cx;
+        cx.simulate_resize(size(px(320.), px(600.)));
+        store.update(cx, |store, _| store.select_session("codex-thread".into()));
+        let wait_for_rows = |cx: &mut VisualTestContext| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+                if let (Some(codex), Some(claude)) = (
+                    cx.debug_bounds("sidebar-thread-codex-thread"),
+                    cx.debug_bounds("sidebar-thread-claude-thread"),
+                ) {
+                    return (codex, claude);
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "thread rows never rendered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let painted =
+            |cx: &mut VisualTestContext, bounds: gpui::Bounds<gpui::Pixels>, color: gpui::Hsla| {
+                cx.update(|window, _| {
+                    window.painted_quads().iter().any(|quad| {
+                        quad.bounds == bounds.scale(window.scale_factor())
+                            && quad.background == gpui::Background::from(color)
+                    })
+                })
+            };
+        let codex_tint: gpui::Hsla = gpui::rgb(0x8B5CF6).into();
+        let claude_tint: gpui::Hsla = gpui::rgb(0xD97757).into();
+
+        let (codex_row, claude_row) = wait_for_rows(cx);
+        assert!(
+            painted(cx, codex_row, codex_tint.opacity(PROVIDER_TINT_ACTIVE)),
+            "the active row is its provider's color at the selected strength"
+        );
+        assert!(
+            painted(cx, claude_row, claude_tint.opacity(PROVIDER_TINT_REST)),
+            "a resting row is its own provider's color at the resting strength"
+        );
+
+        store.update(cx, |store, _| store.set_provider_colors_disabled(true));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !store.read_with(cx, |store, _| store.settings().provider_colors_disabled) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "setting never replicated"
+            );
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (codex_row, claude_row) = wait_for_rows(cx);
+        let list_active = cx.update(|_, cx| cx.theme().list_active);
+        assert!(
+            painted(cx, codex_row, list_active),
+            "with colors off the active row is the neutral selected surface"
+        );
+        assert!(
+            !painted(cx, codex_row, codex_tint.opacity(PROVIDER_TINT_ACTIVE)),
+            "with colors off no provider tint remains"
+        );
+        assert!(!painted(
+            cx,
+            claude_row,
+            claude_tint.opacity(PROVIDER_TINT_REST)
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

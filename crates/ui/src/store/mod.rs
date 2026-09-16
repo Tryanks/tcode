@@ -1653,6 +1653,15 @@ impl WorkspaceStore {
         !self.settings_replica.live_command_panel_disabled
     }
 
+    /// The `0xRRGGBB` color tinting `meta`'s sidebar row, `None` while the
+    /// Provider colors setting is off.
+    pub fn provider_color(&self, meta: &SessionMeta) -> Option<u32> {
+        (!self.settings_replica.provider_colors_disabled).then(|| {
+            self.settings_replica
+                .provider_color(&meta.provider_color_key())
+        })
+    }
+
     pub fn archived_groups(&self) -> Vec<ProjectGroup> {
         let archived: Vec<_> = self
             .index_replica

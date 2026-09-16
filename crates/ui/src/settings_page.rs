@@ -1220,9 +1220,27 @@ impl SettingsPage {
         let language_overridden = store.client_language_override().is_some();
         let theme_overridden = store.client_theme_override().is_some();
         let device_name_overridden = store.client_device_name_override().is_some();
+        let provider_colors_reset = self.reset_action(
+            "reset-provider-colors",
+            settings.provider_colors_disabled,
+            cx,
+            |this, _, cx| {
+                this.dispatch_settings(|store| store.set_provider_colors_disabled(false), cx)
+            },
+        );
         let appearance = vec![
             self.language_row(settings.language.as_deref(), language_overridden, cx),
             self.theme_row(settings.theme_mode, theme_overridden, cx),
+            self.toggle_row(
+                "provider-colors",
+                crate::tr!("settings.provider_colors.title"),
+                crate::tr!("settings.provider_colors.description"),
+                // Stored inverted: checked = enabled.
+                !settings.provider_colors_disabled,
+                provider_colors_reset,
+                cx,
+                |store, checked| store.set_provider_colors_disabled(!checked),
+            ),
             self.device_name_row(device_name_overridden, cx),
         ];
         let delete_confirm_reset = self.reset_action(

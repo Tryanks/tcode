@@ -280,6 +280,9 @@ settings:
   live_command_panel:
     title: "Live command panel"
     description: "Automatically expand the latest command output while the agent is working."
+  provider_colors:
+    title: "Provider colors"
+    description: "Tint each thread in the sidebar with its provider's color."
   provider_updates:
     title: "Provider update checks"
     description: "Check for newer Tcode and provider CLI versions on launch, and refresh the Claude Code model list from t3code."
