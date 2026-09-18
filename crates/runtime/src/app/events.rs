@@ -364,18 +364,35 @@ impl AppState {
                 ..
             } => {
                 if self.settings.abort_on_model_fallback {
-                    let is_active = self
+                    let stopped_turn = self
                         .residents
                         .live
                         .get_mut(session_id)
                         .filter(|active| active.meta.id == session_id)
-                        .is_some_and(|active| {
+                        .map(|active| {
+                            let turn_id = active
+                                .timeline
+                                .turns
+                                .last()
+                                .and_then(|turn| turn.provider_turn_id.clone())
+                                .unwrap_or_default();
                             active.queue.clear();
-                            active.timeline.mark_idle();
                             active.shutdown_to_idle();
-                            true
+                            turn_id
                         });
-                    if is_active {
+                    if let Some(turn_id) = stopped_turn {
+                        // Shutdown drops the provider pump, so its completion cannot
+                        // close the persisted turn or the clients' running indicators.
+                        self.record_event(session_id, &event, cx);
+                        self.on_event(
+                            session_id,
+                            AgentEvent::TurnCompleted {
+                                turn_id,
+                                status: TurnStatus::Interrupted,
+                                usage: None,
+                            },
+                            cx,
+                        );
                         self.emit_domain(
                             Topic::SessionStatus {
                                 session_id: session_id.to_owned(),
@@ -389,6 +406,7 @@ impl AppState {
                             },
                             cx,
                         );
+                        return;
                     }
                 }
             }

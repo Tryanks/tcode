@@ -290,8 +290,8 @@ settings:
     title: "后台帧率限制"
     description: "窗口失焦时将刷新率降至约 2 FPS 以节省能耗。重启后生效。"
   abort_on_model_fallback:
-    title: "模型回退时中止"
-    description: "开启后，Tcode 会监控 Claude Code 的流，在检测到安全分类器回退或标记时从对话层面停止当前轮次，并将控制权交还给你。子代理不受影响。"
+    title: "模型更改时中止"
+    description: "开启后，若 Claude Code 使用了不同的模型，或安全分类器标记了本轮，Tcode 会中止当前轮次。忽略 [1m] 等上下文窗口后缀差异。子代理不受影响。"
   resume_on_limit_reset:
     title: "额度重置后继续任务"
     description: "当 Claude Code 因 5 小时用量窗口耗尽而停止本轮时，Tcode 会在窗口重置的时刻自动继续任务。关闭后，错误卡片上会提供一个按钮供手动安排。"
@@ -751,6 +751,8 @@ userinput:
   next_question: "下一个问题"
   done: "完成"
 fallback:
+  model_changed_title: "本轮因模型更改而中止"
+  reason_model_changed: "实际响应的模型与所选模型 %{model} 不同，Tcode 已中止本轮。"
   title: "本轮已被安全分类器中止"
   reason_cyber: "Claude Code 的安全分类器认为本轮可能涉及网络安全内容。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"
   reason_bio: "Claude Code 的安全分类器认为本轮可能涉及生物学内容。Tcode 已将其中止，而不是让 Claude 悄悄切换模型。"

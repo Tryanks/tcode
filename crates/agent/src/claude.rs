@@ -1159,11 +1159,12 @@ struct PendingRewind {
     conversation: bool,
 }
 
-fn served_model_is_fallback(expected: &str, served: &str) -> bool {
-    (expected.contains("fable") && served.contains("opus"))
-        || (served.contains("opus-4-8")
-            && expected.contains("opus")
-            && !expected.contains("opus-4-8"))
+fn served_model_changed(expected: &str, served: &str) -> bool {
+    // CLI-generated errors/refusals do not identify a serving model.
+    !served.is_empty()
+        && served != "<synthetic>"
+        && !strip_context_window_suffix(expected)
+            .eq_ignore_ascii_case(strip_context_window_suffix(served))
 }
 
 pub(crate) struct Mapper {
@@ -1243,7 +1244,7 @@ pub(crate) struct Mapper {
     native_rewind: bool,
     /// Last assistant model published to the canonical event stream.
     last_served_model: Option<String>,
-    /// Model selected for this session, used when Claude reports a synthetic refusal message.
+    /// Selected model: the comparison baseline and the source for synthetic refusals.
     expected_model: Option<String>,
     /// Whether a served-model mismatch was already reported for the active turn.
     fallback_detected: bool,
@@ -1693,6 +1694,9 @@ impl Mapper {
             log::debug!("claude: ignoring malformed model_refusal_fallback");
             return Vec::new();
         };
+        if !served_model_changed(expected, actual) {
+            return Vec::new();
+        }
         self.fallback_detected = true;
         vec![AgentEvent::ModelFallbackDetected {
             expected: expected.to_owned(),
@@ -1996,11 +2000,13 @@ impl Mapper {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let message = &event["message"];
-                self.observe_request_usage(
+                let mut events = self.observe_served_model(message);
+                events.extend(self.observe_request_usage(
                     message.get("id").and_then(Value::as_str),
                     message.get("usage"),
                     true,
-                )
+                ));
+                events
             }
             Some("content_block_delta") => {
                 let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -2118,6 +2124,39 @@ impl Mapper {
         }
     }
 
+    fn observe_served_model(&mut self, message: &Value) -> Vec<AgentEvent> {
+        let Some(model) = message
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty() && *model != "<synthetic>")
+        else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        if !self.fallback_detected
+            && let Some(expected) = self.expected_model.as_deref()
+            && served_model_changed(expected, model)
+        {
+            self.fallback_detected = true;
+            events.push(AgentEvent::ModelFallbackDetected {
+                expected: expected.to_owned(),
+                actual: model.to_owned(),
+                category: None,
+                checkpoint_id: None,
+                // Child messages are routed to their own mapper by on_message.
+                parent_tool_use_id: None,
+            });
+        }
+        if self.last_served_model.as_deref() != Some(model) {
+            self.last_served_model = Some(model.to_owned());
+            events.push(AgentEvent::ServedModel {
+                model: model.to_owned(),
+                reason: None,
+            });
+        }
+        events
+    }
+
     fn on_assistant(&mut self, msg: &Value) -> Vec<AgentEvent> {
         let message = match msg.get("message") {
             Some(m) => m,
@@ -2138,42 +2177,7 @@ impl Mapper {
                 .and_then(Value::as_str)
                 .map(ClassifierCategory::parse);
         }
-        if let Some(model) = message.get("model").and_then(Value::as_str) {
-            if !self.fallback_detected
-                && let Some(expected) = self.expected_model.as_deref()
-            {
-                let normalized_expected = expected
-                    .split('[')
-                    .next()
-                    .unwrap_or(expected)
-                    .to_ascii_lowercase();
-                let normalized_served = model
-                    .split('[')
-                    .next()
-                    .unwrap_or(model)
-                    .to_ascii_lowercase();
-                if served_model_is_fallback(&normalized_expected, &normalized_served) {
-                    self.fallback_detected = true;
-                    out.push(AgentEvent::ModelFallbackDetected {
-                        expected: expected.to_owned(),
-                        actual: model.to_owned(),
-                        category: None,
-                        checkpoint_id: None,
-                        parent_tool_use_id: msg
-                            .get("parent_tool_use_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                    });
-                }
-            }
-            if self.last_served_model.as_deref() != Some(model) {
-                self.last_served_model = Some(model.to_owned());
-                out.push(AgentEvent::ServedModel {
-                    model: model.to_owned(),
-                    reason: None,
-                });
-            }
-        }
+        out.extend(self.observe_served_model(message));
         out.extend(self.observe_stop_reason(message.get("stop_reason").and_then(Value::as_str)));
         let msg_id = message
             .get("id")
@@ -3396,35 +3400,57 @@ mod tests {
     }
 
     #[test]
-    fn served_model_fallback_family_rule() {
-        let cases = [
-            ("claude-fable-5", "claude-opus-4-8", true),
-            ("claude-fable-5", "claude-opus-5", true),
-            ("claude-opus-5", "claude-opus-4-8", true),
-            ("claude-opus-4-8", "claude-opus-4-8", false),
-            ("claude-fable-5", "claude-fable-5", false),
-            ("claude-fable-5", "claude-sonnet-4-5", false),
-            ("claude-fable-5", "claude-haiku-4-5", false),
-            ("anything", "<synthetic>", false),
-        ];
-        for (expected, served, is_fallback) in cases {
-            assert_eq!(
-                served_model_is_fallback(expected, served),
-                is_fallback,
-                "expected={expected}, served={served}"
+    fn assistant_model_changes_are_detected_without_family_rules() {
+        for (expected, served, changed) in [
+            ("claude-fable-5-1", "claude-fable-5", true),
+            ("claude-fable-5-1", "claude-opus-5", true),
+            ("claude-fable-5-1", "claude-opus-4-8", true),
+            ("claude-fable-5-1", "claude-sonnet-4-5", true),
+            ("claude-fable-5-1", "claude-haiku-4-5", true),
+            ("claude-opus-4-8", "claude-opus-5", true),
+            ("custom-model", "another-model", true),
+            ("claude-fable-5-1", "claude-fable-5-1", false),
+            ("claude-opus-5[1m]", "claude-opus-5", false),
+            ("claude-opus-5", "CLAUDE-OPUS-5[1M]", false),
+            ("claude-opus-5[2m]", "claude-opus-5", false),
+            ("custom-model[variant]", "custom-model", true),
+            ("claude-fable-5-1", "<synthetic>", false),
+        ] {
+            let mut mapper = Mapper::new_configured(
+                false,
+                InteractionMode::Build,
+                "default",
+                "default".into(),
+                ApprovalMode::Supervised,
+                false,
+                Some(expected.into()),
             );
+            mapper.start_turn();
+            let events = mapper.on_message(json!({
+                "type": "assistant",
+                "message": { "id": "msg-change", "model": served, "content": [] },
+                "parent_tool_use_id": null,
+            }));
+            let changes: Vec<_> = events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
+                .collect();
+            assert_eq!(
+                changes.len(),
+                usize::from(changed),
+                "{expected} -> {served}"
+            );
+            if changed {
+                assert!(matches!(changes[0], AgentEvent::ModelFallbackDetected {
+                    expected: requested, actual, category: None,
+                    checkpoint_id: None, parent_tool_use_id: None,
+                } if requested == expected && actual == served));
+            }
         }
-
-        let expected = "claude-opus-5[1m]";
-        let normalized_expected = expected.split('[').next().unwrap_or(expected);
-        assert!(served_model_is_fallback(
-            normalized_expected,
-            "claude-opus-4-8"
-        ));
     }
 
     #[test]
-    fn assistant_model_mismatch_emits_one_fallback_per_turn() {
+    fn model_changes_are_detected_at_stream_start_once_per_turn() {
         let mut mapper = Mapper::new_configured(
             false,
             InteractionMode::Build,
@@ -3432,42 +3458,70 @@ mod tests {
             "default".into(),
             ApprovalMode::Supervised,
             false,
-            Some("claude-fable-5".into()),
+            Some("claude-fable-5-1".into()),
         );
-        mapper.start_turn();
+        for served in ["claude-opus-5", "claude-opus-4-8", "claude-fable-5"] {
+            let stream = json!({
+                "type": "stream_event",
+                "event": { "type": "message_start", "message": {
+                    "id": "msg-change", "model": served,
+                } },
+                "parent_tool_use_id": null,
+            });
+            for _ in 0..2 {
+                mapper.start_turn();
+                // A child using another model must not consume the parent's guard.
+                let mut child = stream.clone();
+                child["parent_tool_use_id"] = json!("child-tool");
+                let child_events = mapper.on_message(child);
+                assert!(
+                    !child_events
+                        .iter()
+                        .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
+                );
+                let first = mapper.on_message(stream.clone());
+                assert_eq!(
+                    first
+                        .iter()
+                        .filter(|event| matches!(
+                            event, AgentEvent::ModelFallbackDetected { expected, actual, .. }
+                                if expected == "claude-fable-5-1" && actual == served
+                        ))
+                        .count(),
+                    1
+                );
+                let repeated = mapper.on_message(stream.clone());
+                let completed = mapper.on_message(json!({
+                    "type": "assistant", "message": {
+                        "id": "msg-change", "model": served, "content": [],
+                    }, "parent_tool_use_id": null,
+                }));
+                assert!(
+                    !repeated
+                        .iter()
+                        .chain(&completed)
+                        .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
+                );
+            }
+        }
+    }
 
-        let first = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"id":"msg-fallback-1","model":"claude-opus-4-8","content":[]},"parent_tool_use_id":null}"#,
-        );
-        assert_eq!(
-            first
-                .iter()
-                .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-                .count(),
-            1
-        );
-        assert!(first.iter().any(|event| matches!(
-            event,
-            AgentEvent::ModelFallbackDetected {
-                expected,
-                actual,
-                category: None,
-                checkpoint_id: None,
-                parent_tool_use_id: None,
-            } if expected == "claude-fable-5"
-                && actual == "claude-opus-4-8"
-        )));
-
-        let second = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"id":"msg-fallback-2","model":"claude-opus-4-8","content":[]},"parent_tool_use_id":null}"#,
-        );
-        assert!(
-            !second
-                .iter()
-                .any(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
-        );
+    #[test]
+    fn explicit_model_changes_ignore_only_context_suffix_differences() {
+        for (actual, changed) in [("claude-opus-5", false), ("claude-opus-4-8", true)] {
+            let mut mapper = Mapper::new();
+            let events = mapper.on_message(json!({
+                "type": "system", "subtype": "model_refusal_fallback",
+                "original_model": "claude-opus-5[1m]", "fallback_model": actual,
+            }));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, AgentEvent::ModelFallbackDetected { .. }))
+                    .count(),
+                usize::from(changed)
+            );
+        }
     }
 
     #[test]

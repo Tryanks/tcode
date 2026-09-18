@@ -4889,7 +4889,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
             &session_id,
             AgentEvent::ModelFallbackDetected {
                 expected: "claude-fable-5-1".into(),
-                actual: "claude-opus-4-8".into(),
+                actual: "claude-fable-5".into(),
                 category: None,
                 checkpoint_id: None,
                 parent_tool_use_id: None,
@@ -4902,10 +4902,27 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
         assert!(matches!(active.runtime, Runtime::Idle));
         assert!(!active.turn_in_flight);
         assert!(!active.timeline.turn_running);
+        assert_eq!(
+            active.timeline.last_turn_status,
+            Some(TurnStatus::Interrupted)
+        );
+        assert!(active.timeline.turns.last().unwrap().end_ts.is_some());
     });
 
     assert!(matches!(receiver.try_recv(), Ok(SessionCommand::Shutdown)));
-    assert!(cx.drain_outgoing().iter().any(|message| matches!(
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Event(EventEnvelope {
+            topic: Topic::SessionEvents { .. },
+            event: ServerEvent::SessionEvent(SessionEventRecord {
+                event: AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. },
+                ..
+            }),
+            ..
+        }) if turn_id == "turn-fallback"
+    )));
+    assert!(outgoing.iter().any(|message| matches!(
         message,
         HostMessage::Event(EventEnvelope { request_id: None,
             topic: Topic::SessionStatus { .. },
@@ -4914,7 +4931,7 @@ fn model_fallback_stops_active_session_when_abort_on_model_fallback_is_enabled()
                 fallback_model: Some(fallback_model),
                 ..
             },
-        }) if model == "claude-fable-5-1" && fallback_model == "claude-opus-4-8"
+        }) if model == "claude-fable-5-1" && fallback_model == "claude-fable-5"
     )));
 }
 
