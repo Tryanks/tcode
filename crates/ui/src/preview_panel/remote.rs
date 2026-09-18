@@ -107,10 +107,10 @@ define_class!(
 impl RemoteBrowser {
     pub(super) fn install(
         view: &Entity<WebView>,
-        host: tcode_client::pairing::PairedHost,
+        endpoint: tcode_remote::preview::PreviewEndpoint,
         cx: &mut Context<BrowserLifecycle>,
     ) -> Self {
-        let routes = Rc::new(RefCell::new(PreviewRoutes::new(host)));
+        let routes = Rc::new(RefCell::new(PreviewRoutes::new(endpoint)));
         let generation = Rc::new(Cell::new(0_u64));
         let (events, received) = async_channel::unbounded::<Navigation>();
         let native = view.read(cx).raw().webview();

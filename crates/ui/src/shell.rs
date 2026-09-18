@@ -782,16 +782,11 @@ impl AppShell {
         }
         attachment.stamped = true;
         if let Some(client) = cx.try_global::<crate::remote::ClientAttachment>() {
-            // Discovery may have refreshed the origin while startup retried.
-            // Stamp the saved record, preserving its current origin and token.
-            if let Some(mut saved) = client
-                .hosts()
-                .into_iter()
-                .find(|saved| saved.host_id == host.host_id)
-            {
-                saved.last_connected_unix = Some(crate::time::now_secs());
-                client.save_host(saved);
-            }
+            // The timestamp mutation must share the transport's persistence
+            // transaction so it cannot restore a pre-migration address.
+            client
+                .host()
+                .stamp_connected(&host.host_id, crate::time::now_secs());
         }
     }
 
@@ -2525,12 +2520,14 @@ mod tests {
                 origin: "http://127.0.0.1:47503".into(),
                 candidates: Vec::new(),
                 token: "test-token".into(),
+                identity_key: None,
                 last_connected_unix: Some(1),
             },
             transport: RefCell::new(Some(Transport {
                 to_host: to_host.into(),
                 from_host,
                 state,
+                current_host: None,
             })),
             preferences: RefCell::new(tcode_client::host::ClientPreferences {
                 navigation: Some(serde_json::json!({
@@ -2602,12 +2599,14 @@ mod tests {
                 origin: "http://127.0.0.1:48442".into(),
                 candidates: Vec::new(),
                 token: "fixture".into(),
+                identity_key: None,
                 last_connected_unix: None,
             },
             transport: RefCell::new(Some(Transport {
                 to_host: to_host.into(),
                 from_host,
                 state,
+                current_host: None,
             })),
             preferences: RefCell::new(Default::default()),
             machine_exists: true,
@@ -3598,6 +3597,7 @@ mod tests {
             to_host: to_host.into(),
             from_host,
             state,
+            current_host: None,
         }));
         let (shell, cx) = cx.add_window_view(move |window, cx| {
             let window_state = cx.new(|_| WindowState::new(false));

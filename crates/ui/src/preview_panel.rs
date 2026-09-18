@@ -216,6 +216,22 @@ impl PreviewPanel {
                 this.sync_visibility(cx);
                 cx.notify();
             }),
+            #[cfg(all(
+                feature = "native-preview",
+                any(target_os = "macos", target_os = "windows", target_os = "android")
+            ))]
+            cx.subscribe(
+                &store,
+                |this, _, state: &tcode_client::ConnectionState, cx| {
+                    if matches!(
+                        state,
+                        tcode_client::ConnectionState::Syncing
+                            | tcode_client::ConnectionState::Connected
+                    ) {
+                        this.refresh_preview_endpoint(cx);
+                    }
+                },
+            ),
             cx.observe(&window_state, |this, _, cx| {
                 this.sync_visibility(cx);
                 cx.notify();

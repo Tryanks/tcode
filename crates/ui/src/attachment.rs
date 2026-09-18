@@ -152,6 +152,7 @@ impl Attachment {
                 link.clone(),
                 identity,
                 client_host,
+                transport.current_host,
                 seed_blocking && local,
                 cx,
             )
@@ -223,6 +224,7 @@ mod tests {
             to_host: to_host.into(),
             from_host,
             state,
+            current_host: None,
         }
     }
 

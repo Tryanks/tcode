@@ -17,6 +17,29 @@ pub struct Transport {
     pub to_host: crate::outgoing::Outgoing,
     pub from_host: async_channel::Receiver<String>,
     pub state: async_channel::Receiver<ConnectionState>,
+    /// Native routes follow this attachment's authenticated endpoint even when
+    /// persisting it fails. Local and fixed-origin browser transports use None.
+    pub current_host: Option<LiveHost>,
+}
+
+/// The transport publishes its current pairing before emitting Syncing.
+/// Consumers take an atomic snapshot; saved hosts are only restart storage.
+#[derive(Clone)]
+pub struct LiveHost(std::sync::Arc<std::sync::Mutex<PairedHost>>);
+
+impl LiveHost {
+    pub fn new(host: PairedHost) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(host)))
+    }
+
+    pub fn snapshot(&self) -> PairedHost {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Called by the owning transport only after authenticating the endpoint.
+    pub fn authenticated(&self, host: &PairedHost) {
+        *self.0.lock().unwrap() = host.clone();
+    }
 }
 
 /// What the pairing form submits.
@@ -24,6 +47,9 @@ pub struct Transport {
 pub struct PairRequest {
     pub origin: String,
     pub code: String,
+    pub host_id: Option<String>,
+    pub identity_key: Option<String>,
+    pub candidates: Vec<String>,
 }
 
 /// A host advertised on the client's local network.
@@ -153,13 +179,14 @@ pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
             })
         })
         .collect();
-    // One row per host. Native mDNS already ranks by the receiving interface;
-    // JSON platform browsers preserve their first, platform-ranked address.
+    // A machine may advertise Wi-Fi, virtual bridge and IPv6 addresses. Keep
+    // every distinct origin so an unreachable first choice cannot hide it.
     found.retain(|host| {
         !host.origin.starts_with("http://127.") && !host.origin.starts_with("http://[::1]")
     });
     found.sort_by_key(|host| (host.host_id.clone(), host.origin.contains('[')));
-    found.dedup_by(|a, b| a.host_id == b.host_id);
+    let mut seen = std::collections::HashSet::new();
+    found.retain(|host| seen.insert((host.host_id.clone(), host.origin.clone())));
     found
 }
 
@@ -195,6 +222,28 @@ pub trait ClientHost: 'static {
 
     fn load_hosts(&self) -> Vec<PairedHost>;
     fn save_hosts(&self, hosts: &[PairedHost]);
+
+    /// Replace one pairing while preserving unrelated saved machines. Native
+    /// adapters make these mutations atomic with transport address updates.
+    fn remember_host(&self, host: PairedHost) {
+        let mut hosts = self.load_hosts();
+        crate::pairing::remember_host(&mut hosts, host);
+        self.save_hosts(&hosts);
+    }
+
+    fn remove_host(&self, host_id: &str) {
+        let mut hosts = self.load_hosts();
+        hosts.retain(|host| host.host_id != host_id);
+        self.save_hosts(&hosts);
+    }
+
+    fn stamp_connected(&self, host_id: &str, timestamp: u64) {
+        let mut hosts = self.load_hosts();
+        if let Some(host) = hosts.iter_mut().find(|host| host.host_id == host_id) {
+            host.last_connected_unix = Some(timestamp);
+            self.save_hosts(&hosts);
+        }
+    }
 
     /// `Some(id)` of the host to reconnect to on launch.
     fn last_host_id(&self) -> Option<String>;
@@ -316,16 +365,30 @@ mod tests {
             {"host_id":"b","name":"IPv6","addr":"fd00::2","port":47420},
             {"host_id":"a","name":"Loopback","addr":"127.0.0.1","port":47420},
             {"host_id":"b","name":"IPv4","addr":"192.168.1.2","port":47420},
+            {"host_id":"b","name":"IPv4 duplicate","addr":"192.168.1.2","port":47420},
+            {"host_id":"b","name":"Virtual bridge","addr":"192.168.139.3","port":47420},
             {"host_id":"d","name":"Bad port","addr":"192.168.1.4","port":0}
         ]);
 
         assert_eq!(
             parse_discovered_hosts(&json.to_string()),
-            vec![DiscoveredHost {
-                host_id: "b".into(),
-                name: "IPv4".into(),
-                origin: "http://192.168.1.2:47420".into(),
-            }]
+            vec![
+                DiscoveredHost {
+                    host_id: "b".into(),
+                    name: "IPv4".into(),
+                    origin: "http://192.168.1.2:47420".into(),
+                },
+                DiscoveredHost {
+                    host_id: "b".into(),
+                    name: "Virtual bridge".into(),
+                    origin: "http://192.168.139.3:47420".into(),
+                },
+                DiscoveredHost {
+                    host_id: "b".into(),
+                    name: "IPv6".into(),
+                    origin: "http://[fd00::2]:47420".into(),
+                },
+            ]
         );
         assert!(parse_discovered_hosts("not json").is_empty());
         assert!(parse_discovered_hosts(&" ".repeat(65_537)).is_empty());

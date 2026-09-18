@@ -358,6 +358,15 @@ launch behavior is unchanged.
   Labels sit above full-width fields, the primary action is pinned at the foot
   of the page above the keyboard, and adding ends with the machine name and **Connect**. The single **Address**
   field accepts a host, host:port, or full HTTP(S) origin.
+  Pairing errors stay in the form and give localized recovery advice. A host
+  identity failure asks the user to check connectivity, update Tcode on both
+  devices and scan a new QR code; malformed invitations use the existing invalid
+  link message. An incomplete or timed-out pairing response says the result is
+  unconfirmed and asks for a newly generated code, without automatically sending
+  the old code again. An explicit disabled-pairing response points to **Allow
+  other devices** on the host. A rejected or expired code asks the user to check
+  that setting and use a new code; an HTTP 403 alone never claims the code expired
+  or that a valid six-digit code has the wrong format.
 - **Threads** — the shared sidebar under a nav bar titled **Threads**, with the
   attached machine's name as its subtitle and new-thread and settings actions.
   New thread starts a draft directly when the machine has one project and
@@ -572,11 +581,11 @@ settings page.
 | State | Presentation |
 | --- | --- |
 | Connecting | The initial index has not arrived; the thread list shows a loading skeleton |
-| Syncing | Hello accepted; waiting for the first host message |
-| Connected | First host message received and the link healthy; no status banner |
+| Syncing | Hello accepted; waiting for required workspace and selected-thread baselines |
+| Connected | Required baselines received and the link healthy; no status banner |
 | Reconnecting | Content is kept; the banner names the retry attempt and failure reason |
 | Offline | Terminal authentication or protocol failure; the banner explains how to recover |
-| Certificate changed / authentication rejected | An explicit error and a **Pair again** entry point; retrying stops |
+| Authentication rejected | An explicit error and a **Pair again** entry point; retrying stops |
 | Protocol mismatch | **Update the app**; retrying stops |
 
 Offline keeps the last received replica readable and disables writes; visited
@@ -586,7 +595,12 @@ foreground, or a browser page becoming visible again, interrupts the backoff and
 retries at once; so does a change of this device's network addresses. Finding
 the machine at another address is silent: the attempt counter keeps counting,
 the banner keeps naming the saved address's failure, and the saved record is
-updated without a prompt.
+updated without a prompt. A nearby-machine search already in progress may finish
+across multiple transport retries; another retry must not repeatedly cancel it.
+Recording when a connection succeeded must not overwrite a newer saved address;
+an older connection must not overwrite a newer pairing. Preview follows the
+authenticated replacement address without replacing its browsers; see
+[Native paired Preview connection ownership](#native-paired-preview-connection-ownership).
 
 ## Surface anatomy
 
@@ -1224,17 +1238,19 @@ so the section only exists where the client can host — a phone or a browser ha
 no such setting. Choosing which machine to talk to is a product surface, not a
 setting: it lives in **Machines**, reached from the sidebar's feature area at
 both widths. Adding a machine follows the same rules everywhere: an answer
-from a superseded attempt is discarded; the form accepts one HTTP(S) origin;
-and a browser fixes that origin to the page that served it, hides discovery,
-and hides camera scanning. Pairing confirmation shows the machine name and
+from a superseded attempt is discarded before it can change either the form or
+the saved machine credentials; the form accepts one HTTP(S) origin; and a browser
+fixes that origin to the page that served it, hides discovery, and hides camera
+scanning. Pairing confirmation shows the machine name and
 **Connect**. Rejected authentication offers **Pair again**.
 Protocol mismatch says **Update the app**. The shell banner and
 attached machine row show the connection failure reason. The sidebar machine dot
 and Machines page share the same severity colors: syncing and reconnecting
-use a warning dot, terminal offline failures use a danger dot, and only a
-connection that has received its first host message uses a success dot. Syncing
-remains visible between hello acceptance and that first message. Connection loss
-updates the banner immediately, before the retry delay.
+use a warning dot, terminal offline failures use a danger dot, and a healthy
+connection uses a success dot only after its required baselines arrive. Syncing
+remains visible until Index and Settings, plus the selected thread's status and
+events when applicable, have been applied. Connection loss updates the banner
+immediately, before the retry delay.
 
 ### Command palette (⌘K on macOS, Ctrl+K on Windows/Linux)
 
@@ -1454,6 +1470,21 @@ bridge origin; attachment teardown cancels its listener and connections.
 Windows remote WebView2 environments use temporary directories owned with the
 environment, since each attachment has different proxy arguments. Local Preview
 retains its existing directory.
-macOS retains its per-browser URL mappings and route lifetimes, now using the
-same HTTP(S) establishment owner. No new controls or transport selections are
-introduced. See [Remote Preview routing](remote.md#remote-preview-routing).
+macOS retains its per-browser URL mappings and route lifetimes, using the same
+HTTP(S) establishment owner. When the main connection authenticates the machine
+at a new address, existing browsers retain their local proxy or forwarding ports,
+logical URLs, history and website stores. Their new connections use that address.
+The transport publishes an attachment-owned in-memory pairing before its Syncing
+event; Preview reads that snapshot, so a saved-host write failure does not leave
+the browser using a stale address. Persisted hosts are used again on restart.
+Connections to the previous entry are closed; Tcode does not replay their requests
+or automatically reload pages. A page interrupted during the move can need the
+existing Reload action. Learning the machine's identity key also retires older
+connections so subsequent requests use the pinned identity.
+
+Preview accepts address changes only for the attachment's existing machine and
+credential, preserves a known identity key, and never downgrades HTTPS to HTTP.
+Native connection establishment checks the machine identity on the connection
+that will carry proxy credentials; the compatibility exceptions and transport
+requirements are documented in [Remote Preview routing](remote.md#remote-preview-routing).
+This adds no controls or transport selections.
