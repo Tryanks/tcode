@@ -290,8 +290,8 @@ settings:
     title: "Background frame throttle"
     description: "Drop to ~2 FPS while the window is unfocused to save energy. Takes effect after restart."
   abort_on_model_fallback:
-    title: "Abort on model fallback"
-    description: "When on, Tcode watches Claude Code's stream for safety-classifier fallbacks or flags and stops the turn at the conversation level, handing control back to you. Subagents are unaffected."
+    title: "Abort on model change"
+    description: "When on, Tcode stops the turn if Claude Code serves a different model or the safety classifier flags it. Context-window suffix differences such as [1m] are ignored. Subagents are unaffected."
   resume_on_limit_reset:
     title: "Resume when the usage limit resets"
     description: "When Claude Code stops a turn because the 5-hour usage window is exhausted, Tcode schedules a resume for the moment the window resets. Off: the error card offers a button to schedule it by hand."
@@ -757,6 +757,8 @@ userinput:
   next_question: "Next question"
   done: "Done"
 fallback:
+  model_changed_title: "Turn stopped after a model change"
+  reason_model_changed: "The responding model differs from the selected model, %{model}. Tcode stopped the turn."
   title: "Turn stopped by the safety classifier"
   reason_cyber: "Claude Code's safety classifier flagged this turn as potentially cyber-related. Tcode stopped it instead of letting Claude silently switch models."
   reason_bio: "Claude Code's safety classifier flagged this turn as potentially biology-related. Tcode stopped it instead of letting Claude silently switch models."
