@@ -86,14 +86,17 @@ impl ProviderCard {
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
-        // Name, enabled state, and probe result all belong to this profile;
-        // update-check versions remain shared by protocol kind.
+        // Update checks target the built-in installation; a custom profile can
+        // launch another binary with a different package-manager environment.
         let store = self.store.read(cx);
         let name = store.provider_profile_display_name(&self.profile_id);
         let enabled = store.provider_profile_settings(&self.profile_id).enabled;
         let snapshot = store.provider_profile_snapshot(&self.profile_id);
         let summary = crate::provider_status::summarize(provider, snapshot.as_ref(), enabled);
-        let provider_version = store.provider_version_status(provider);
+        let provider_version = (self.profile_id
+            == tcode_core::settings::Settings::builtin_profile_id(provider))
+        .then(|| store.provider_version_status(provider))
+        .flatten();
         let version = snapshot
             .as_ref()
             .and_then(|s| s.version.clone())
@@ -291,8 +294,12 @@ impl ProviderCard {
     fn render_update_popover(&self, cx: &mut Context<Self>) -> AnyElement {
         let provider = self.provider;
         let version = self.store.read(cx).provider_version_status(provider);
-        let updating = version.is_some_and(|v| v.updating);
-        let command = self.store.read(cx).provider_update_command(provider);
+        let updating = version.as_ref().is_some_and(|v| v.updating);
+        let requires_terminal = version.as_ref().is_some_and(|v| v.update_requires_terminal);
+        let command = version.as_ref().and_then(|v| v.update_command.clone());
+        let summary = version
+            .as_ref()
+            .and_then(|v| v.update_command_summary.clone());
         let store = self.store.clone();
 
         crate::material::overlay_popover("update-popover")
@@ -319,13 +326,16 @@ impl ProviderCard {
                             .font_semibold()
                             .child(crate::tr!("providers.update_title")),
                     )
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(muted)
-                            .child(crate::tr!("providers.update_message")),
-                    );
-                if command.is_some() {
+                    .child(div().text_size(px(13.)).text_color(muted).child(
+                        if command.is_none() {
+                            crate::tr!("providers.update_unmanaged")
+                        } else if requires_terminal {
+                            crate::tr!("providers.update_terminal")
+                        } else {
+                            crate::tr!("providers.update_message")
+                        },
+                    ));
+                if command.is_some() && !requires_terminal {
                     pane = pane.child(
                         Button::new("update-now")
                             .primary()
@@ -349,13 +359,13 @@ impl ProviderCard {
                 if let Some(command) = command {
                     let copy = command.clone();
                     pane = pane
-                        .child(
-                            div()
-                                .pt_1()
-                                .text_size(px(11.))
-                                .text_color(muted)
-                                .child(crate::tr!("providers.update_manual")),
-                        )
+                        .child(div().pt_1().text_size(px(11.)).text_color(muted).child(
+                            if requires_terminal {
+                                crate::tr!("providers.update_command")
+                            } else {
+                                crate::tr!("providers.update_manual")
+                            },
+                        ))
                         .child(
                             h_flex()
                                 .w_full()
@@ -375,7 +385,7 @@ impl ProviderCard {
                                         .text_ellipsis()
                                         .font_family("monospace")
                                         .text_size(px(11.))
-                                        .child(command.clone()),
+                                        .child(summary.clone().unwrap_or_else(|| command.clone())),
                                 )
                                 .child(
                                     Button::new("copy-command")

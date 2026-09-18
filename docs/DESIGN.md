@@ -1153,6 +1153,21 @@ to the safety classifier, names the selected and actual models, and offers an
 explicit retry on the actual model. Categorized classifier blocks retain their
 existing explanation and retry target. Nothing retries automatically.
 
+Provider update popovers describe the installation used by the host. The
+displayed command and **Update now** action share one verified update plan,
+including the package manager, package identity and install location. Version
+checks follow that installation's channel and version constraints. The command
+label shows the manager and arguments; **Copy command** also includes the working
+directory and installation environment needed to target the same installation.
+**Update now** appears only for a verified noninteractive route; commands requiring a
+terminal or elevation are copyable manual instructions that name the provider
+host as their execution location. When no route can be verified, the popover
+directs the user to the original installer or package manager. Changing a
+provider's configuration invalidates previous update results, and executing an
+update rechecks installation ownership before running the displayed plan.
+Update controls belong to built-in provider cards; custom profiles show their
+own probed version and never offer an update for another profile's installation.
+
 Provider profiles expose only applicable options. Pi defaults to no Tcode
 permission extension; its Native approvals toggle enables the gate for
 supervised and auto-accept-edits sessions. Without it those stored modes take

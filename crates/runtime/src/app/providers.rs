@@ -38,6 +38,40 @@ impl ProviderCatalog {
         *self.usage_revisions.entry(id.to_owned()).or_default() += 1;
     }
 
+    pub(super) fn invalidate_versions(&mut self) {
+        for status in self.provider_versions.values_mut() {
+            *status = ProviderVersionState {
+                revision: status.revision + 1,
+                updating: status.updating,
+                ..Default::default()
+            };
+        }
+    }
+
+    fn complete_version_check(
+        &mut self,
+        provider: ProviderKind,
+        revision: u64,
+        installation: Option<Installation>,
+        assessment: provider_updates::Assessment,
+    ) -> Option<String> {
+        let status = self.provider_versions.entry(provider).or_default();
+        if status.revision != revision {
+            return None;
+        }
+        let already = status.update_available;
+        status.checking = false;
+        status.installation = installation;
+        status.installed = assessment.current;
+        status.latest = assessment.latest;
+        status.update_available = assessment.update_available;
+        if status.update_available && !already {
+            status.latest.clone()
+        } else {
+            None
+        }
+    }
+
     fn complete_usage(
         &mut self,
         id: String,
@@ -67,6 +101,10 @@ impl ProviderCatalog {
                 .provider_versions
                 .iter()
                 .map(|(&provider, status)| {
+                    let command = status
+                        .installation
+                        .as_ref()
+                        .and_then(|installation| installation.update.as_ref());
                     (
                         provider,
                         ProtocolProviderVersionStatus {
@@ -75,7 +113,10 @@ impl ProviderCatalog {
                             update_available: status.update_available,
                             checking: status.checking,
                             updating: status.updating,
-                            update_command: update_command_string(provider, status.install_source),
+                            update_command: command.map(|command| command.display()),
+                            update_command_summary: command.map(|command| command.summary()),
+                            update_requires_terminal: command
+                                .is_some_and(|command| command.requires_terminal),
                         },
                     )
                 })
@@ -182,6 +223,9 @@ impl AppState {
     pub fn reload_provider(&mut self, cx: &mut HostCx) {
         self.refresh_model_catalogs(cx);
         self.refresh_provider_status(cx);
+        if self.provider_update_checks_enabled() {
+            self.check_provider_versions(cx);
+        }
     }
 
     // A *profile* is a named configuration on top of a protocol `ProviderKind`.
@@ -242,6 +286,9 @@ impl AppState {
         cx: &mut HostCx,
     ) {
         self.providers.invalidate_usage(id);
+        if Settings::builtin_kind_from_id(id).is_some() {
+            self.providers.invalidate_versions();
+        }
         self.enqueue_store_write(
             StoreWrite::SetProfileSecret {
                 profile_id: id.to_string(),
@@ -490,15 +537,15 @@ impl AppState {
                 .provider_versions
                 .entry(provider)
                 .or_default();
-            if status.checking {
+            if status.checking || status.updating {
                 continue;
             }
             status.checking = true;
+            let revision = status.revision;
             let program = binary
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| default_program(provider));
-            let package = npm_package(provider);
             let settings = self.settings.clone();
             let settings_store = self.settings_store.clone();
             let host_cx = cx.clone();
@@ -511,43 +558,37 @@ impl AppState {
                     })
                     .await;
                 let installed = run_capture_env(&program, &["--version"], &env).await;
-                let latest = run_capture("npm", &["view", package, "version"]).await;
-                let assessment = host_cx
-                    .unblock(move || {
-                        provider_updates::check(ProviderCheckInput {
-                            binary_path: binary.as_deref(),
-                            installed_output: installed.as_deref(),
-                            latest_output: latest.as_deref(),
-                        })
-                    })
-                    .await;
+                let installation = match binary.as_deref() {
+                    Some(binary) => {
+                        Some(provider_updates::resolve_installation(provider, binary, &env).await)
+                    }
+                    None => None,
+                };
+                let latest = match installation.as_ref() {
+                    Some(installation) => {
+                        let installation = installation.clone();
+                        host_cx
+                            .unblock(move || provider_updates::latest_version(&installation))
+                            .await
+                    }
+                    None => None,
+                };
+                let assessment = provider_updates::check(ProviderCheckInput {
+                    installed_output: installed.as_deref(),
+                    latest_output: latest.as_deref(),
+                });
                 host_cx.enqueue(move |state, cx| {
-                    let already = state
-                        .providers
-                        .provider_versions
-                        .get(&provider)
-                        .map(|s| s.update_available)
-                        .unwrap_or(false);
-                    let status = state
-                        .providers
-                        .provider_versions
-                        .entry(provider)
-                        .or_default();
-                    status.checking = false;
-                    status.install_source = assessment.install_source;
-                    status.installed = assessment.current;
-                    status.latest = assessment.latest;
-                    status.update_available = assessment.update_available;
-                    // Toast once when an update becomes newly available.
-                    if status.update_available
-                        && !already
-                        && let Some(version) = &status.latest
-                    {
+                    if let Some(version) = state.providers.complete_version_check(
+                        provider,
+                        revision,
+                        installation,
+                        assessment,
+                    ) {
                         emit_runtime(
                             cx,
                             RuntimeEvent::Notice(RuntimeNotice::UpdateAvailable {
                                 provider,
-                                version: version.clone(),
+                                version,
                             }),
                         );
                     }
@@ -590,16 +631,23 @@ impl AppState {
         });
     }
 
-    /// Run the provider's self-update command (per its detected install source),
-    /// showing an "updating" toast, then re-check its version.
+    /// Revalidate the displayed installation before executing its update plan.
     pub fn update_provider(&mut self, provider: ProviderKind, cx: &mut HostCx) {
-        let source = self
+        let installation = self
             .providers
             .provider_versions
             .get(&provider)
-            .map(|s| s.install_source)
-            .unwrap_or_default();
-        let Some(command) = update_command(provider, source) else {
+            .and_then(|s| s.installation.clone());
+        let Some(installation) = installation.filter(|installation| {
+            installation
+                .update
+                .as_ref()
+                .is_some_and(|command| !command.requires_terminal)
+        }) else {
+            self.report_error(RuntimeError::UpdateUnknown { provider }, cx);
+            return;
+        };
+        let Some(binary) = self.resolve_provider_binary(provider) else {
             self.report_error(RuntimeError::UpdateUnknown { provider }, cx);
             return;
         };
@@ -612,28 +660,63 @@ impl AppState {
             return;
         }
         status.updating = true;
+        status.checking = false;
+        status.revision += 1;
+        let revision = status.revision;
         emit_runtime(
             cx,
             RuntimeEvent::Notice(RuntimeNotice::UpdatingProvider { provider }),
         );
+        let settings = self.settings.clone();
+        let settings_store = self.settings_store.clone();
         let host_cx = cx.clone();
         HostCx::spawn_detached(cx, async move {
-            let args: Vec<&str> = command[1..].iter().map(String::as_str).collect();
-            let ok = run_status(&command[0], &args).await;
+            let env = host_cx
+                .unblock(move || {
+                    let profile_id = Settings::builtin_profile_id(provider);
+                    let secrets = settings_store.profile_secrets(profile_id);
+                    launch_env_for_profile(&settings, profile_id, secrets).pairs(provider)
+                })
+                .await;
+            let current = provider_updates::resolve_installation(provider, &binary, &env).await;
             host_cx.enqueue(move |state, cx| {
-                if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
-                    status.updating = false;
-                }
-                if ok {
-                    emit_runtime(
-                        cx,
-                        RuntimeEvent::Notice(RuntimeNotice::UpdateDone { provider }),
-                    );
-                    // Refresh the version so the "update available" state clears.
+                if state
+                    .providers
+                    .provider_versions
+                    .get(&provider)
+                    .map(|s| s.revision)
+                    != Some(revision)
+                    || state.resolve_provider_binary(provider).as_ref() != Some(&binary)
+                    || current != installation
+                {
+                    if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
+                        status.updating = false;
+                        status.installation = None;
+                    }
+                    state.report_error(RuntimeError::UpdateUnknown { provider }, cx);
                     state.check_provider_versions(cx);
-                } else {
-                    state.report_error(RuntimeError::UpdateFailed { provider }, cx);
+                    return;
                 }
+                let command = current.update.expect("validated automatic update plan");
+                let host_cx = cx.clone();
+                HostCx::spawn_detached(cx, async move {
+                    let ok = command.run().await;
+                    host_cx.enqueue(move |state, cx| {
+                        if let Some(status) = state.providers.provider_versions.get_mut(&provider) {
+                            status.updating = false;
+                        }
+                        if ok {
+                            emit_runtime(
+                                cx,
+                                RuntimeEvent::Notice(RuntimeNotice::UpdateDone { provider }),
+                            );
+                            state.refresh_provider_status(cx);
+                        } else {
+                            state.report_error(RuntimeError::UpdateFailed { provider }, cx);
+                        }
+                        state.check_provider_versions(cx);
+                    });
+                });
             });
         });
     }
@@ -869,8 +952,94 @@ pub(super) fn session_options(
 }
 
 #[cfg(test)]
-mod usage_lifecycle_tests {
+mod provider_lifecycle_tests {
     use super::*;
+
+    #[test]
+    fn changing_binary_discards_old_update_results_without_finishing_the_new_check() {
+        use crate::app::test_support::*;
+        let cx = &mut TestAppContext::default();
+        let test_store = TestStore::new("tcode-update-installation-race");
+        let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+        state.update(cx, |state, cx| {
+            let provider = ProviderKind::ClaudeCode;
+            state.providers.provider_versions.insert(
+                provider,
+                ProviderVersionState {
+                    installed: Some("1.0.0".into()),
+                    latest: Some("2.0.0".into()),
+                    update_available: true,
+                    checking: true,
+                    updating: true,
+                    ..Default::default()
+                },
+            );
+            let previous = state.providers.provider_versions[&provider].revision;
+            let mut settings = state.settings.clone();
+            settings.provider_mut(provider).binary_path = Some(PathBuf::from("/new/claude"));
+            state.update_settings(settings, cx);
+            let status = state
+                .providers
+                .provider_versions
+                .get_mut(&provider)
+                .unwrap();
+            assert!(!status.update_available);
+            assert!(status.installed.is_none());
+            assert!(status.installation.is_none());
+            assert!(
+                status.updating,
+                "configuration edits must not allow duplicate updates"
+            );
+            status.checking = true;
+
+            let result = provider_updates::check(ProviderCheckInput {
+                installed_output: Some("3.0.0"),
+                latest_output: Some("3.0.1"),
+            });
+            assert_eq!(
+                state
+                    .providers
+                    .complete_version_check(provider, previous, None, result.clone()),
+                None
+            );
+            let status = &state.providers.provider_versions[&provider];
+            assert!(status.checking);
+            assert!(!status.update_available);
+            assert!(status.latest.is_none());
+            let revision = status.revision;
+            assert_eq!(
+                state
+                    .providers
+                    .complete_version_check(provider, revision, None, result,),
+                Some("3.0.1".into())
+            );
+            let status = &state.providers.provider_versions[&provider];
+            assert!(!status.checking);
+            assert_eq!(status.installed.as_deref(), Some("3.0.0"));
+            assert!(status.update_available);
+
+            // Secret values live outside Settings, so changing a manager's
+            // environment must independently invalidate the cached plan.
+            state.set_profile_secret("claude", "MISE_DATA_DIR", Some("/new/mise"), cx);
+            let result = provider_updates::check(ProviderCheckInput {
+                installed_output: Some("3.0.0"),
+                latest_output: Some("3.0.2"),
+            });
+            assert_eq!(
+                state
+                    .providers
+                    .complete_version_check(provider, revision, None, result),
+                None
+            );
+            assert!(!state.providers.provider_versions[&provider].update_available);
+            assert!(
+                state.providers.provider_versions[&provider]
+                    .latest
+                    .is_none()
+            );
+        });
+        cx.run_until_parked();
+    }
 
     #[test]
     fn configuration_invalidation_rejects_old_probe_without_finishing_new_probe() {

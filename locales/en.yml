@@ -456,7 +456,10 @@ providers:
   # Update popover (T3 §3)
   update_aria: "Update available — view details"
   update_title: "Update available"
-  update_message: "Install the update now or review provider settings."
+  update_message: "Update this installation using the command below."
+  update_unmanaged: "Update this installation with its original installer or package manager. An automatic update route could not be verified."
+  update_terminal: "Run the command below in a terminal on the machine hosting this provider."
+  update_command: "Update command"
   update_now: "Update now"
   updating: "Updating"
   update_manual: "or, update manually using"

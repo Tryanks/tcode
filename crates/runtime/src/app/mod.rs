@@ -68,16 +68,13 @@ use tcode_services::git::{
 use tcode_services::import::{
     ExternalRoots, ImportOutcome, existing_external_ids, import_thread, scan_recent_dirs,
 };
-use tcode_services::provider_probe::{
-    default_program, probe_provider, run_capture, run_capture_env, run_status,
-};
+use tcode_services::provider_probe::{default_program, probe_provider, run_capture_env};
 use tcode_services::session_search::SessionSearch;
 use tcode_services::settings::SettingsStore;
 use tcode_services::store::{SessionStore, now_millis, now_secs};
 use tcode_services::user_files;
 use tcode_services::version_check::provider_updates::{
-    self, CheckInput as ProviderCheckInput, InstallSource, npm_package, update_command,
-    update_command_string,
+    self, CheckInput as ProviderCheckInput, Installation,
 };
 use tcode_services::version_check::{self as app_releases, fetch_latest_tcode_release_json};
 use tcode_services::workspace::list_workspace;
@@ -274,18 +271,20 @@ use store_write::{StoreWrite, run_store_write};
 /// The result of a provider version check.
 #[derive(Debug, Clone, Default)]
 pub struct ProviderVersionState {
+    /// Rejects checks completed after a configuration change or update start.
+    revision: u64,
     /// Installed version (raw string, e.g. `"2.1.206"`); `None` if `--version` failed.
     pub installed: Option<String>,
-    /// Latest published version from npm; `None` if the lookup failed.
+    /// Latest version offered by this installation's channel and constraints.
     pub latest: Option<String>,
     /// Whether `latest` is strictly newer than `installed`.
     pub update_available: bool,
     /// Whether a version check is currently running.
     pub checking: bool,
-    /// Whether a self-update command is currently running.
+    /// Whether an installation update is currently running.
     pub updating: bool,
-    /// How the binary was installed (drives the update command).
-    pub install_source: InstallSource,
+    /// Verified installation and the exact update plan presented to the user.
+    pub installation: Option<Installation>,
 }
 
 /// The result of checking the running tcode build against GitHub Releases.

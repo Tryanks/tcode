@@ -7,6 +7,22 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn provider_update_status_accepts_older_hosts_and_preserves_terminal_requirement() {
+    let older = json!({
+        "installed": "1.0.0", "latest": "1.0.1", "update_available": true,
+        "checking": false, "updating": false, "update_command": "brew upgrade codex"
+    });
+    let status: ProviderVersionStatus = serde_json::from_value(older.clone()).unwrap();
+    assert!(!status.update_requires_terminal);
+    let mut terminal = older;
+    terminal["update_command"] = json!("sudo apt-get install --only-upgrade claude-code");
+    terminal["update_requires_terminal"] = json!(true);
+    let status: ProviderVersionStatus = serde_json::from_value(terminal.clone()).unwrap();
+    assert!(status.update_requires_terminal);
+    assert_eq!(serde_json::to_value(status).unwrap(), terminal);
+}
+
+#[test]
 fn client_ndjson_preserves_ids_text_and_record_boundaries() {
     let message = ClientMessage {
         key: None,

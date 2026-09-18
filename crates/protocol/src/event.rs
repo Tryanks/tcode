@@ -191,6 +191,12 @@ pub struct ProviderVersionStatus {
     pub checking: bool,
     pub updating: bool,
     pub update_command: Option<String>,
+    /// Compact label; `update_command` retains the copyable execution context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_command_summary: Option<String>,
+    /// The command needs an interactive terminal (for example, elevation).
+    #[serde(default)]
+    pub update_requires_terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

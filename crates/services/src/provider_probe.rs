@@ -163,18 +163,6 @@ fn finalize_probe(
     }
 }
 
-/// Run `program args...` for a side effect and report successful exit status.
-pub async fn run_status(program: &str, args: &[&str]) -> bool {
-    crate::process::async_command(program)
-        .args(args)
-        .env_remove("CLAUDECODE")
-        .env_remove("CLAUDE_CODE_ENTRYPOINT")
-        .output()
-        .await
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
