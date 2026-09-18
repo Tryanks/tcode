@@ -1,15 +1,27 @@
 //! Assessment of provider CLI updates from process-runner facts.
 
-use std::path::Path;
-
 use agent::ProviderKind;
+
+mod installation;
+#[path = "provider_updates/system_managers.rs"]
+mod system_managers;
+pub use installation::{Installation, UpdateCommand, latest_version, resolve_installation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InstallSource {
+    Mise,
     Brew,
     Npm,
     Bun,
     Pnpm,
+    Yarn,
+    Volta,
+    Asdf,
+    Scoop,
+    Chocolatey,
+    Winget,
+    System,
+    Nix,
     Native,
     #[default]
     Unknown,
@@ -17,7 +29,6 @@ pub enum InstallSource {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CheckInput<'a> {
-    pub binary_path: Option<&'a Path>,
     pub installed_output: Option<&'a str>,
     pub latest_output: Option<&'a str>,
 }
@@ -26,7 +37,6 @@ pub struct CheckInput<'a> {
 pub struct Assessment {
     pub current: Option<String>,
     pub latest: Option<String>,
-    pub install_source: InstallSource,
     /// True only when both versions were parsed and latest is newer.
     pub update_available: bool,
 }
@@ -39,10 +49,6 @@ pub fn check(input: CheckInput<'_>) -> Assessment {
     Assessment {
         current: input.installed_output.map(normalize_version),
         latest: input.latest_output.map(normalize_version),
-        install_source: input
-            .binary_path
-            .map(detect_install_source)
-            .unwrap_or_default(),
         update_available: installed_version
             .zip(latest_version)
             .is_some_and(|(installed, latest)| latest > installed),
@@ -59,79 +65,6 @@ pub fn npm_package(provider: ProviderKind) -> &'static str {
         ProviderKind::OpenCode => "opencode-ai",
         ProviderKind::Acp => "",
     }
-}
-
-/// Guess the install source from a resolved binary path. Existing paths are
-/// canonicalized so package-manager symlinks are classified by their targets.
-pub fn detect_install_source(path: &Path) -> InstallSource {
-    let canonical = path.canonicalize();
-    let path = canonical.as_deref().unwrap_or(path);
-    let raw = path.to_string_lossy();
-    let p = raw.replace('\\', "/");
-    let brew = cfg!(not(windows))
-        && (p.contains("/Cellar/")
-            || p.contains("/opt/homebrew/")
-            || p.contains("/homebrew/")
-            || p.contains("/usr/local/Cellar/"));
-    if p.contains("/.bun/") || p.contains("/bun/install/") {
-        InstallSource::Bun
-    } else if p.contains("/.pnpm")
-        || p.contains("/pnpm/")
-        || p.contains("/Library/pnpm")
-        || p.contains("/AppData/Local/pnpm")
-    {
-        InstallSource::Pnpm
-    } else if p.contains("/node_modules/")
-        || p.contains("/.nvm/")
-        || p.contains("/.volta/")
-        || p.contains("/fnm")
-        || p.contains("/npm/")
-        || p.contains("/lib/node_modules/")
-        || p.contains("/AppData/Roaming/npm")
-    {
-        InstallSource::Npm
-    } else if brew {
-        InstallSource::Brew
-    } else if p.contains("/.local/") {
-        InstallSource::Native
-    } else {
-        InstallSource::Unknown
-    }
-}
-
-fn brew_formula(provider: ProviderKind) -> &'static str {
-    match provider {
-        ProviderKind::ClaudeCode => "claude-code",
-        ProviderKind::Codex => "codex",
-        ProviderKind::Pi => "pi-coding-agent",
-        ProviderKind::OpenCode => "opencode",
-        ProviderKind::Acp => "",
-    }
-}
-
-/// Return the provider's self-update command for its inferred install source.
-pub fn update_command(provider: ProviderKind, source: InstallSource) -> Option<Vec<String>> {
-    if provider == ProviderKind::Acp {
-        return None;
-    }
-    let s = |value: &str| value.to_string();
-    let package = || format!("{}@latest", npm_package(provider));
-    match (provider, source) {
-        (provider, InstallSource::Brew) => {
-            Some(vec![s("brew"), s("upgrade"), s(brew_formula(provider))])
-        }
-        (_, InstallSource::Npm) => Some(vec![s("npm"), s("install"), s("-g"), package()]),
-        (_, InstallSource::Bun) => Some(vec![s("bun"), s("i"), s("-g"), package()]),
-        (_, InstallSource::Pnpm) => Some(vec![s("pnpm"), s("add"), s("-g"), package()]),
-        (ProviderKind::ClaudeCode, InstallSource::Native) => Some(vec![s("claude"), s("update")]),
-        (ProviderKind::Pi, InstallSource::Native) => Some(vec![s("pi"), s("update"), s("self")]),
-        (ProviderKind::OpenCode, InstallSource::Native) => Some(vec![s("opencode"), s("upgrade")]),
-        _ => None,
-    }
-}
-
-pub fn update_command_string(provider: ProviderKind, source: InstallSource) -> Option<String> {
-    update_command(provider, source).map(|parts| parts.join(" "))
 }
 
 /// Parse the first provider-version token from loose, human-facing CLI output.
@@ -165,11 +98,9 @@ fn format_version((major, minor, patch): (u32, u32, u32)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn input<'a>(installed: Option<&'a str>, latest: Option<&'a str>) -> CheckInput<'a> {
         CheckInput {
-            binary_path: None,
             installed_output: installed,
             latest_output: latest,
         }
@@ -205,136 +136,5 @@ mod tests {
             assert_eq!(assessment.current.as_deref(), installed);
             assert_eq!(assessment.latest.as_deref(), latest);
         }
-    }
-
-    #[test]
-    fn infers_install_source_through_check() {
-        let paths = [
-            ("/Users/x/.local/bin/claude", InstallSource::Native),
-            (
-                "/Users/x/.nvm/versions/node/v20/bin/codex",
-                InstallSource::Npm,
-            ),
-            ("/Users/x/.bun/bin/claude", InstallSource::Bun),
-            ("/Users/x/Library/pnpm/codex", InstallSource::Pnpm),
-            ("/usr/bin/codex", InstallSource::Unknown),
-            (
-                r"C:\Users\x\AppData\Roaming\npm\claude.cmd",
-                InstallSource::Npm,
-            ),
-            (
-                r"C:\Users\x\AppData\Local\pnpm\codex.cmd",
-                InstallSource::Pnpm,
-            ),
-            (r"C:\Users\x\.bun\bin\claude.exe", InstallSource::Bun),
-            (
-                r"C:\Program Files\nodejs\node_modules\npm\bin\codex.cmd",
-                InstallSource::Npm,
-            ),
-            (r"C:\tools\codex.exe", InstallSource::Unknown),
-        ];
-        for (path, expected) in paths {
-            let path = PathBuf::from(path);
-            let assessment = check(CheckInput {
-                binary_path: Some(&path),
-                installed_output: Some("1.0.0"),
-                latest_output: Some("1.0.0"),
-            });
-            assert_eq!(assessment.install_source, expected, "{path:?}");
-        }
-    }
-
-    #[test]
-    fn maps_update_commands_per_source_and_provider() {
-        use InstallSource::*;
-        use ProviderKind::*;
-        let table: [(ProviderKind, InstallSource, Option<&str>); 28] = [
-            (Codex, Npm, Some("npm install -g @openai/codex@latest")),
-            (
-                ClaudeCode,
-                Npm,
-                Some("npm install -g @anthropic-ai/claude-code@latest"),
-            ),
-            (
-                Pi,
-                Npm,
-                Some("npm install -g @earendil-works/pi-coding-agent@latest"),
-            ),
-            (OpenCode, Npm, Some("npm install -g opencode-ai@latest")),
-            (Codex, Bun, Some("bun i -g @openai/codex@latest")),
-            (
-                ClaudeCode,
-                Bun,
-                Some("bun i -g @anthropic-ai/claude-code@latest"),
-            ),
-            (
-                Pi,
-                Bun,
-                Some("bun i -g @earendil-works/pi-coding-agent@latest"),
-            ),
-            (OpenCode, Bun, Some("bun i -g opencode-ai@latest")),
-            (Codex, Pnpm, Some("pnpm add -g @openai/codex@latest")),
-            (
-                ClaudeCode,
-                Pnpm,
-                Some("pnpm add -g @anthropic-ai/claude-code@latest"),
-            ),
-            (
-                Pi,
-                Pnpm,
-                Some("pnpm add -g @earendil-works/pi-coding-agent@latest"),
-            ),
-            (OpenCode, Pnpm, Some("pnpm add -g opencode-ai@latest")),
-            (Codex, Brew, Some("brew upgrade codex")),
-            (ClaudeCode, Brew, Some("brew upgrade claude-code")),
-            (Pi, Brew, Some("brew upgrade pi-coding-agent")),
-            (OpenCode, Brew, Some("brew upgrade opencode")),
-            (ClaudeCode, Native, Some("claude update")),
-            (Pi, Native, Some("pi update self")),
-            (OpenCode, Native, Some("opencode upgrade")),
-            (Codex, Native, None),
-            (Codex, Unknown, None),
-            (ClaudeCode, Unknown, None),
-            (Pi, Unknown, None),
-            (OpenCode, Unknown, None),
-            (Acp, Npm, None),
-            (Acp, Brew, None),
-            (Acp, Native, None),
-            (Acp, Unknown, None),
-        ];
-        for (provider, source, expected) in table {
-            assert_eq!(
-                update_command_string(provider, source).as_deref(),
-                expected,
-                "{provider:?} / {source:?}"
-            );
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn canonicalizes_package_manager_symlinks() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
-        let root =
-            std::env::temp_dir().join(format!("tcode-version-check-{}", uuid::Uuid::new_v4()));
-        let prefix = root.join("opt/homebrew");
-        let target = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
-        let launcher = prefix.join("bin/codex");
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::write(&target, "#!/bin/sh\n").unwrap();
-        let mut permissions = std::fs::metadata(&target).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&target, permissions).unwrap();
-        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
-        symlink("../lib/node_modules/@openai/codex/bin/codex.js", &launcher).unwrap();
-
-        let assessment = check(CheckInput {
-            binary_path: Some(&launcher),
-            installed_output: Some("1.0.0"),
-            latest_output: Some("1.0.0"),
-        });
-        assert_eq!(assessment.install_source, InstallSource::Npm);
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

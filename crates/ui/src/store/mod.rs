@@ -1990,13 +1990,6 @@ impl WorkspaceStore {
             .accent_rgb()
     }
 
-    pub fn provider_update_command(&self, provider: agent::ProviderKind) -> Option<String> {
-        self.providers_replica
-            .provider_versions
-            .get(&provider)
-            .and_then(|status| status.update_command.clone())
-    }
-
     pub fn provider_profile_stored_secret_names(&self, profile_id: &str) -> HashSet<String> {
         self.providers_replica
             .secret_names
