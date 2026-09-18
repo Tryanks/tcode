@@ -691,9 +691,6 @@ with bounded history replay.
 
 ### Finding the machine again
 
-The [#409 implementation review](remote-recovery-review.md) records the original
-failure, the replacement design, regression evidence and remaining field checks.
-
 A pairing identifies the machine independently of its current address. Native
 clients preserve the token and session subscriptions when moving between networks;
 recovery can find an address the client has never seen before. It still requires a
