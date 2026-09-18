@@ -13,7 +13,7 @@ fn retry_model(category: Option<&ClassifierCategory>) -> &'static str {
 }
 
 impl Composer {
-    /// The recovery card for a turn Claude Code's safety classifier stopped.
+    /// Recovery for a classifier block or an unexpected model change.
     /// Every action here is a user click — nothing retries or reroutes by itself.
     pub(in super::super) fn render_fallback_panel(
         &self,
@@ -21,9 +21,19 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let model_change = block.category.is_none() && block.fallback_model.is_some();
+        let title = if model_change {
+            crate::tr!("fallback.model_changed_title")
+        } else {
+            crate::tr!("fallback.title")
+        };
         let reason = match block.category.as_ref() {
             Some(ClassifierCategory::Cyber) => crate::tr!("fallback.reason_cyber"),
             Some(ClassifierCategory::Bio) => crate::tr!("fallback.reason_bio"),
+            None if model_change => crate::tr!(
+                "fallback.reason_model_changed",
+                model = block.model.clone().unwrap_or_default()
+            ),
             _ => crate::tr!("fallback.reason_generic"),
         };
         let outcome = match block.fallback_model.as_ref() {
@@ -34,7 +44,11 @@ impl Composer {
             ),
         };
 
-        let model = retry_model(block.category.as_ref());
+        let model = if model_change {
+            block.fallback_model.clone().unwrap_or_default()
+        } else {
+            retry_model(block.category.as_ref()).to_owned()
+        };
         // The refused prompt is the last user message of this session; the
         // rewind path additionally needs its turn to have a provider checkpoint.
         let refused = self.workspace_store.read(cx).last_user_message();
@@ -50,13 +64,7 @@ impl Composer {
             .gap_2()
             .items_center()
             .child(Icon::new(IconName::Info).small().text_color(muted))
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.))
-                    .font_medium()
-                    .child(crate::tr!("fallback.title")),
-            )
+            .child(div().flex_1().text_size(px(13.)).font_medium().child(title))
             .child(
                 crate::material::accessible_clickable(
                     div(),
@@ -112,12 +120,12 @@ impl Composer {
                         .small()
                         .h(px(28.))
                         .rounded(crate::material::radius_input())
-                        .label(crate::tr!("fallback.retry_on", model = model))
+                        .label(crate::tr!("fallback.retry_on", model = model.clone()))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.workspace_store.update(cx, |store, _cx| {
                                 store.set_active_model(
                                     ProviderKind::ClaudeCode,
-                                    Some(model.to_string()),
+                                    Some(model.clone()),
                                     None,
                                 );
                                 store.dismiss_fallback_block();

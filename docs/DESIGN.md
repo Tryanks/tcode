@@ -1130,6 +1130,18 @@ project spanning a page boundary repeats its caption on the next page. The same
 row ends with a danger **Delete all**, which always confirms — the skip-confirm
 preference does not apply to deleting every archived thread at once.
 
+**Abort on model change** stops a Claude Code turn whenever the serving model
+ID differs from the selected model, including changes within the same model
+family or to a newer model. Comparison ignores case and the supported context
+window suffixes (`[1m]` / `[2m]`). CLI synthetic error messages do not identify a
+serving model; native subagents remain outside the parent guard. Detection starts
+at the streamed message header and also handles completed assistant messages and
+explicit model-fallback notices. Classifier flags still stop the turn.
+The recovery card describes an uncategorized model change without attributing it
+to the safety classifier, names the selected and actual models, and offers an
+explicit retry on the actual model. Categorized classifier blocks retain their
+existing explanation and retry target. Nothing retries automatically.
+
 Provider profiles expose only applicable options. Pi defaults to no Tcode
 permission extension; its Native approvals toggle enables the gate for
 supervised and auto-accept-edits sessions. Without it those stored modes take
