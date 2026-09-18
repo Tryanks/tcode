@@ -595,11 +595,8 @@ foreground, or a browser page becoming visible again, interrupts the backoff and
 retries at once; so does a change of this device's network addresses. Finding
 the machine at another address is silent: the attempt counter keeps counting,
 the banner keeps naming the saved address's failure, and the saved record is
-updated without a prompt. A nearby-machine search already in progress may finish
-across multiple transport retries; another retry must not repeatedly cancel it.
-Recording when a connection succeeded must not overwrite a newer saved address;
-an older connection must not overwrite a newer pairing. Preview follows the
-authenticated replacement address without replacing its browsers; see
+updated without a prompt. Preview follows the authenticated replacement address
+without replacing its browsers; see
 [Native paired Preview connection ownership](#native-paired-preview-connection-ownership).
 
 ## Surface anatomy
@@ -1474,17 +1471,8 @@ macOS retains its per-browser URL mappings and route lifetimes, using the same
 HTTP(S) establishment owner. When the main connection authenticates the machine
 at a new address, existing browsers retain their local proxy or forwarding ports,
 logical URLs, history and website stores. Their new connections use that address.
-The transport publishes an attachment-owned in-memory pairing before its Syncing
-event; Preview reads that snapshot, so a saved-host write failure does not leave
-the browser using a stale address. Persisted hosts are used again on restart.
 Connections to the previous entry are closed; Tcode does not replay their requests
 or automatically reload pages. A page interrupted during the move can need the
-existing Reload action. Learning the machine's identity key also retires older
-connections so subsequent requests use the pinned identity.
-
-Preview accepts address changes only for the attachment's existing machine and
-credential, preserves a known identity key, and never downgrades HTTPS to HTTP.
-Native connection establishment checks the machine identity on the connection
-that will carry proxy credentials; the compatibility exceptions and transport
-requirements are documented in [Remote Preview routing](remote.md#remote-preview-routing).
-This adds no controls or transport selections.
+existing Reload action. This adds no controls or transport selections. See
+[Remote Preview routing](remote.md#remote-preview-routing) for connection ownership,
+identity checks and compatibility requirements.
