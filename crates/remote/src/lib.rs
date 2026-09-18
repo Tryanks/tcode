@@ -7,6 +7,8 @@ pub mod client;
 #[cfg(feature = "client")]
 pub mod client_host;
 pub mod discovery;
+#[cfg(any(feature = "server", feature = "client"))]
+mod identity;
 #[cfg(feature = "server")]
 pub mod mux;
 #[cfg(feature = "server")]

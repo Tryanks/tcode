@@ -192,7 +192,7 @@ mod tests {
                 .await;
         });
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
         workspace.update(cx, |store, _| {
             store.selected_session_id = Some("large".into());

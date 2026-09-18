@@ -16,7 +16,7 @@ pub use tcode_client::pairing::{
 pub use tcode_client::{ConnectionFailure, ConnectionState};
 
 use tcode_client::{
-    host::DeviceIdentity,
+    host::{DeviceIdentity, LiveHost},
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     recovery::{Backoff, Wake},
 };
@@ -27,6 +27,7 @@ pub struct RemoteClient {
     pub to_host: Outgoing,
     pub from_host: Receiver<String>,
     pub state: Receiver<ConnectionState>,
+    pub current_host: LiveHost,
 }
 
 #[derive(Deserialize)]
@@ -34,6 +35,8 @@ struct PairResponse {
     host_id: String,
     host_name: String,
     token: String,
+    #[serde(default)]
+    identity_key: Option<String>,
 }
 
 pub fn pair(origin: &str, code: &str, device: &DeviceIdentity) -> Result<PairedHost, String> {
@@ -50,16 +53,158 @@ pub(crate) async fn pair_async(
         return Err("invalid pairing request".into());
     }
     let bytes = http_request(&origin, "POST", "/pair", &device.pair_body(code)).await?;
-    let response: PairResponse =
+    let mut response: PairResponse =
         serde_json::from_slice(&bytes).map_err(|_| "invalid pairing response")?;
+    if let Some(key) = &mut response.identity_key {
+        if !tcode_client::pairing::valid_identity_key(key) {
+            return Err("invalid pairing identity".into());
+        }
+        key.make_ascii_lowercase();
+    }
     Ok(PairedHost {
         host_id: response.host_id,
         name: response.host_name,
         origin,
         candidates: Vec::new(),
         token: response.token,
+        identity_key: response.identity_key,
         last_connected_unix: None,
     })
+}
+
+/// New QR invitations carry the host key and every advertised address. Race
+/// identity checks only; consume the single-use pairing code on the winner.
+pub(crate) async fn pair_request(
+    mut request: tcode_client::host::PairRequest,
+    device: &DeviceIdentity,
+) -> Result<PairedHost, String> {
+    if request.identity_key.is_some() && request.host_id.as_ref().is_none_or(String::is_empty) {
+        return Err("missing pairing identity".into());
+    }
+    if let Some(key) = &mut request.identity_key {
+        key.make_ascii_lowercase();
+    }
+    let (Some(host_id), Some(identity_key)) = (&request.host_id, &request.identity_key) else {
+        let paired = pair_async(&request.origin, &request.code, device).await?;
+        if request
+            .host_id
+            .as_ref()
+            .is_some_and(|host_id| *host_id != paired.host_id)
+        {
+            return Err("pairing identity changed".into());
+        }
+        return Ok(paired);
+    };
+    if !is_pairing_code(&request.code)
+        || !tcode_client::pairing::valid_identity_key(identity_key)
+        || request.candidates.len() > tcode_client::pairing::MAX_CANDIDATE_ORIGINS
+    {
+        return Err("invalid pairing invitation".into());
+    }
+    let primary = tcode_client::pairing::parse_origin(&request.origin)?;
+    let mut origins = vec![primary.clone()];
+    for candidate in &request.candidates {
+        let candidate = tcode_client::pairing::parse_origin(candidate)?;
+        if primary.starts_with("https:") && !candidate.starts_with("https:") {
+            return Err("invalid insecure pairing alternative".into());
+        }
+        if !origins.contains(&candidate) {
+            origins.push(candidate);
+        }
+    }
+    let started = Instant::now();
+    let attempts = futures_util::stream::iter(origins.iter().enumerate().map(
+        |(index, origin)| async move {
+            smol::Timer::at(started + RACE_STAGGER * index as u32).await;
+            let result = futures_lite::future::race(
+                async {
+                    let url =
+                        url::Url::parse(origin).map_err(|_| ConnectionFailure::Unreachable)?;
+                    let endpoint =
+                        crate::endpoint::Endpoint::new(origin).map_err(connection_failure)?;
+                    endpoint
+                        .establish(|stream| async {
+                            let mut socket = upgrade_websocket(stream, &url, true).await?;
+                            let challenge =
+                                crate::identity::IdentityChallenge::for_pairing(host_id)
+                                    .map_err(|_| ConnectionFailure::Unreachable)?;
+                            let _ =
+                                identify_websocket(&mut socket, &challenge, "", Some(identity_key))
+                                    .await?;
+                            Ok(socket)
+                        })
+                        .await
+                },
+                async {
+                    smol::Timer::after(RACE_BUDGET).await;
+                    Err(ConnectionFailure::Timeout)
+                },
+            )
+            .await;
+            (origin, result)
+        },
+    ))
+    .buffer_unordered(MAX_PARALLEL_ORIGINS);
+    futures_util::pin_mut!(attempts);
+    while let Some((origin, result)) = attempts.next().await {
+        let Ok(mut socket) = result else {
+            continue;
+        };
+        let exchange = async {
+            let mut body: serde_json::Value =
+                serde_json::from_str(&device.pair_body(&request.code))
+                    .map_err(|error| error.to_string())?;
+            body["type"] = "pair".into();
+            socket
+                .send(Message::Text(body.to_string().into()))
+                .await
+                .map_err(|error| error.to_string())?;
+            let text = match socket.next().await {
+                Some(Ok(Message::Text(text)))
+                    if text.len() <= crate::identity::MAX_IDENTITY_MESSAGE_BYTES =>
+                {
+                    text
+                }
+                _ => return Err("incomplete pairing response".into()),
+            };
+            let reply: serde_json::Value =
+                serde_json::from_str(&text).map_err(|error| error.to_string())?;
+            if reply["type"] != "pair_ok" {
+                return Err(reply["error"]
+                    .as_str()
+                    .unwrap_or("pairing rejected")
+                    .to_owned());
+            }
+            let response: PairResponse =
+                serde_json::from_value(reply).map_err(|error| error.to_string())?;
+            if response.host_id != *host_id
+                || !response
+                    .identity_key
+                    .as_deref()
+                    .is_some_and(|key| key.eq_ignore_ascii_case(identity_key))
+            {
+                return Err("pairing identity changed".into());
+            }
+            let mut paired = PairedHost {
+                host_id: response.host_id,
+                name: response.host_name,
+                origin: origin.clone(),
+                token: response.token,
+                identity_key: Some(identity_key.clone()),
+                candidates: Vec::new(),
+                last_connected_unix: None,
+            };
+            paired.add_candidates(origins.iter().map(String::as_str));
+            Ok(paired)
+        };
+        // Never resubmit a possibly consumed code after losing its response.
+        return futures_lite::future::race(exchange, async {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            Err("pairing response timed out".into())
+        })
+        .await;
+    }
+    Err("could not authenticate the machine at any invited address".into())
 }
 
 /// Bounded HTTP/1.1; HTTPS origins use the standard WebPKI trust roots.
@@ -160,6 +305,38 @@ pub fn load_hosts(data_dir: &Path) -> io::Result<Vec<PairedHost>> {
 }
 
 pub fn save_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
+    let _lock = hosts_lock(data_dir)?;
+    write_hosts(data_dir, hosts)
+}
+
+/// Serialize field-level changes from UI and transport, including other app
+/// processes sharing this profile. Readers see either complete version via rename.
+pub fn update_hosts(data_dir: &Path, update: impl FnOnce(&mut Vec<PairedHost>)) -> io::Result<()> {
+    let _lock = hosts_lock(data_dir)?;
+    let mut hosts = load_hosts(data_dir)?;
+    let before = hosts.clone();
+    update(&mut hosts);
+    if hosts != before {
+        write_hosts(data_dir, &hosts)?;
+    }
+    Ok(())
+}
+
+fn hosts_lock(data_dir: &Path) -> io::Result<fs::File> {
+    fs::create_dir_all(data_dir)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(data_dir.join("hosts.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
+fn write_hosts(data_dir: &Path, hosts: &[PairedHost]) -> io::Result<()> {
     fs::create_dir_all(data_dir)?;
     let bytes = serde_json::to_vec_pretty(hosts).map_err(io::Error::other)?;
     let temporary = data_dir.join("hosts.json.tmp");
@@ -188,11 +365,21 @@ pub fn connect(
     let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
+    let current_host = LiveHost::new(host);
+    let transport_host = current_host.clone();
     std::thread::Builder::new()
         .name("tcode-remote-client".into())
         .spawn(move || {
             smol::block_on(connection_loop(
-                host, device, data_dir, outgoing, incoming, state_tx,
+                transport_host,
+                device,
+                data_dir,
+                outgoing,
+                incoming,
+                state_tx,
+                |host, device, race, round| async move {
+                    establish_websocket(&host, &device, race, round).await
+                },
             ));
         })
         .expect("failed to spawn remote client thread");
@@ -200,6 +387,7 @@ pub fn connect(
         to_host,
         from_host,
         state,
+        current_host,
     }
 }
 
@@ -210,8 +398,9 @@ const CONNECTED_INTERFACE_POLL: Duration = Duration::from_secs(10);
 /// Handshake budget per origin when several are raced, and the delay between
 /// starting one origin and the next.
 const RACE_BUDGET: Duration = Duration::from_secs(5);
-const RACE_STAGGER: Duration = Duration::from_millis(250);
-const MAX_RACED_ORIGINS: usize = 32;
+const RACE_STAGGER: Duration = Duration::from_millis(20);
+const PROBE_BUDGET: Duration = Duration::from_millis(1_500);
+const MAX_PARALLEL_ORIGINS: usize = 16;
 
 /// What interrupted an attempt or a backoff sleep.
 enum Interrupt {
@@ -219,27 +408,32 @@ enum Interrupt {
     NetworkChanged,
 }
 
-async fn connection_loop(
-    mut host: PairedHost,
+async fn connection_loop<F, Fut>(
+    current_host: LiveHost,
     device: DeviceIdentity,
     data_dir: Option<PathBuf>,
     outgoing: OutgoingReceiver,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
-) {
+    establish: F,
+) where
+    F: Fn(PairedHost, DeviceIdentity, bool, u32) -> Fut,
+    Fut: std::future::Future<Output = Result<Established, ConnectionFailure>>,
+{
+    let mut host = current_host.snapshot();
     let mut buffered = VecDeque::<String>::new();
     let mut subscriptions = HashMap::<String, String>::new();
     let mut backoff = Backoff::default();
     let mut reason = None;
     let mut interfaces = InterfaceWatch::new(local_networks());
-    // The saved origin is tried alone first; candidates are raced once it
-    // failed to answer, or as soon as this device's addresses changed.
-    let mut race = false;
+    // A stale-network black hole must not postpone discovery. Staggering lets
+    // a healthy saved origin normally win before LAN probing starts.
+    let mut probe_round = 0;
     while !outgoing.is_closed() && !incoming.is_closed() {
         outgoing.discard_retained_writes(&mut buffered);
         if interfaces.observe(local_networks()) {
             backoff.network_changed();
-            race = true;
+            probe_round = 0;
         }
         let _ = state
             .send(ConnectionState::Reconnecting {
@@ -251,7 +445,7 @@ async fn connection_loop(
         let mut interrupted = None;
         let opened = {
             let attempt = host.clone();
-            let establishing = establish_websocket(&attempt, &device, race).fuse();
+            let establishing = establish(attempt, device.clone(), true, probe_round).fuse();
             let wakes = async {
                 loop {
                     let wake = outgoing.wake.recv().await;
@@ -274,17 +468,19 @@ async fn connection_loop(
             }
         };
         let opened = match opened {
-            Ok(result) => result,
+            Ok(result) => {
+                probe_round = probe_round.wrapping_add(1);
+                result
+            }
             Err(Interrupt::Wake(wake)) => {
                 if let Ok(Wake::Candidates(origins)) = wake {
-                    remember_candidates(&mut host, data_dir.as_deref(), &origins);
-                    race = true;
+                    remember_candidates(&mut host, &origins);
                 }
                 continue;
             }
             Err(Interrupt::NetworkChanged) => {
                 backoff.network_changed();
-                race = true;
+                probe_round = 0;
                 continue;
             }
         };
@@ -294,13 +490,20 @@ async fn connection_loop(
                     mut websocket,
                     origin,
                     reported,
+                    identity_key,
                 } = established;
                 let promoted = host.promote_origin(&origin);
-                let learned = host.add_candidates(reported.iter().map(String::as_str));
-                if promoted || learned {
-                    save_origins(data_dir.as_deref(), &host);
+                host.add_candidates(reported.iter().map(String::as_str));
+                host.identity_key = identity_key;
+                current_host.authenticated(&host);
+                // Hints can have changed in memory before this attempt without
+                // changing its winning origin, advertised addresses, or pin.
+                // Persistence compares against disk and skips unchanged writes.
+                save_origins(data_dir.as_deref(), &host);
+                if promoted {
+                    log::info!("remote connection recovered at {}", host.origin);
                 }
-                race = false;
+                probe_round = 0;
                 let _ = state.send(ConnectionState::Syncing).await;
                 let mut failure = None;
                 for line in subscriptions.values() {
@@ -310,6 +513,7 @@ async fn connection_loop(
                         Instant::now()
                             + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS),
                         &outgoing,
+                        &mut host,
                         &mut interrupted,
                     )
                     .await
@@ -329,6 +533,7 @@ async fn connection_loop(
                             Instant::now()
                                 + Duration::from_millis(tcode_client::heartbeat::NATIVE_IDLE_MS),
                             &outgoing,
+                            &mut host,
                             &mut interrupted,
                         )
                         .await
@@ -352,7 +557,6 @@ async fn connection_loop(
                             &mut buffered,
                             &state,
                             &mut host,
-                            data_dir.as_deref(),
                             &mut interfaces,
                         )
                         .await;
@@ -361,7 +565,6 @@ async fn connection_loop(
                         }
                         if lost.network_changed {
                             backoff.network_changed();
-                            race = true;
                         }
                         if lost.wake.is_some() {
                             continue;
@@ -374,8 +577,7 @@ async fn connection_loop(
         };
         if let Some(wake) = interrupted {
             if let Wake::Candidates(origins) = wake {
-                remember_candidates(&mut host, data_dir.as_deref(), &origins);
-                race = true;
+                remember_candidates(&mut host, &origins);
             }
             continue;
         }
@@ -390,12 +592,6 @@ async fn connection_loop(
             break;
         }
         reason = Some(failure);
-        if matches!(
-            failure,
-            ConnectionFailure::Unreachable | ConnectionFailure::Timeout
-        ) {
-            race = true;
-        }
         let delay = backoff.failed(stable_ms, jitter_sample());
         // Publish loss before sleeping, so the UI never claims this socket is alive.
         let _ = state
@@ -416,14 +612,13 @@ async fn connection_loop(
             .await
             {
                 Some(Interrupt::Wake(Ok(Wake::Candidates(origins)))) => {
-                    if remember_candidates(&mut host, data_dir.as_deref(), &origins) {
-                        race = true;
+                    if remember_candidates(&mut host, &origins) {
                         break;
                     }
                 }
                 Some(Interrupt::NetworkChanged) => {
                     backoff.network_changed();
-                    race = true;
+                    probe_round = 0;
                     break;
                 }
                 Some(Interrupt::Wake(_)) | None => break,
@@ -449,55 +644,57 @@ async fn watch_interfaces(interfaces: &mut InterfaceWatch, every: Duration) {
 }
 
 fn new_candidates(host: &PairedHost, origins: &[String]) -> bool {
-    remember_candidates(&mut host.clone(), None, origins)
+    remember_candidates(&mut host.clone(), origins)
 }
 
-/// Merge discovery hints into the saved record; true when any were new.
-fn remember_candidates(host: &mut PairedHost, data_dir: Option<&Path>, origins: &[String]) -> bool {
-    let added = host.add_candidates(
+/// Keep unauthenticated hints in memory until an authenticated connection wins.
+fn remember_candidates(host: &mut PairedHost, origins: &[String]) -> bool {
+    host.add_candidates(
         origins
             .iter()
             .filter(|origin| plain_http_origin(origin))
             .map(String::as_str),
-    );
-    if added {
-        save_origins(data_dir, host);
-    }
-    added
+    )
 }
 
 /// Persist the origin and candidates of `host` on its hosts.json record. The
 /// record's token, name and connection stamp belong to the UI, which may have
-/// changed them meanwhile, so only the address fields are replaced.
+/// changed them meanwhile. An established identity pin can never be erased or
+/// replaced by a stale connection using the same device token.
 fn save_origins(data_dir: Option<&Path>, host: &PairedHost) {
     let Some(data_dir) = data_dir else {
         return;
     };
-    let result = load_hosts(data_dir).and_then(|mut hosts| {
-        let Some(saved) = hosts.iter_mut().find(|saved| saved.host_id == host.host_id) else {
-            return Ok(());
+    let result = update_hosts(data_dir, |hosts| {
+        let Some(saved) = hosts
+            .iter_mut()
+            .find(|saved| saved.host_id == host.host_id && saved.token == host.token)
+        else {
+            return;
         };
-        if saved.origin == host.origin && saved.candidates == host.candidates {
-            return Ok(());
+        if saved
+            .identity_key
+            .as_ref()
+            .is_some_and(|key| host.identity_key.as_ref() != Some(key))
+        {
+            return;
         }
         saved.origin = host.origin.clone();
         saved.candidates = host.candidates.clone();
-        save_hosts(data_dir, &hosts)
+        saved.identity_key = host.identity_key.clone();
     });
     if let Err(error) = result {
         log::error!("could not persist the machine's addresses: {error}");
     }
 }
 
-/// Whether alternates may be raced for this origin: the token already
-/// travels in clear to it, so probing other plain addresses adds no
-/// exposure. An HTTPS pairing is never downgraded.
+/// LAN recovery is enabled for plain origins. An HTTPS pairing is never
+/// downgraded; every new LAN connection must prove its identity before hello.
 pub(crate) fn plain_http_origin(origin: &str) -> bool {
     url::Url::parse(origin).is_ok_and(|url| url.scheme() == "http")
 }
 
-/// A machine reached over loopback is this device; the gateways of its
-/// networks are other devices entirely.
+/// A loopback origin names this device, so LAN neighbours are not substitutes.
 fn loopback_origin(origin: &str) -> bool {
     url::Url::parse(origin).is_ok_and(|url| match url.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -520,62 +717,111 @@ struct Established {
     origin: String,
     /// Origins the machine reports for itself.
     reported: Vec<String>,
+    identity_key: Option<String>,
 }
 
 /// Try the saved origin, and when `race` is set every other origin the
-/// machine may answer at: saved candidates and the gateways of this device's
-/// current networks. The first identity-verified hello wins; an origin where
+/// machine may answer at: saved candidates and pages of attached private
+/// networks. The first authenticated hello wins; an origin where
 /// a different machine answers counts as unreachable. A rejection is only
 /// terminal when it comes from the paired machine itself.
 async fn establish_websocket(
     host: &PairedHost,
     device: &DeviceIdentity,
     race: bool,
+    probe_round: u32,
 ) -> Result<Established, ConnectionFailure> {
-    let mut origins = vec![host.origin.clone()];
+    let origins = recovery_origins(host, race, probe_round, &local_networks());
+    log::debug!(
+        "remote recovery: {} known origins, {} LAN probes, round {}",
+        origins.iter().filter(|(_, probe)| !probe).count(),
+        origins.iter().filter(|(_, probe)| *probe).count(),
+        probe_round
+    );
+    connect_origins(origins, |origin, primary| async move {
+        attempt_origin(&origin, host, device, primary).await
+    })
+    .await
+}
+
+fn recovery_origins(
+    host: &PairedHost,
+    race: bool,
+    probe_round: u32,
+    networks: &[crate::discovery::LocalNetwork],
+) -> Vec<(String, bool)> {
+    let mut origins = vec![(host.origin.clone(), false)];
     if race && plain_http_origin(&host.origin) {
-        origins.extend(host.candidates.iter().cloned());
+        origins.extend(
+            host.candidates
+                .iter()
+                .cloned()
+                .map(|origin| (origin, false)),
+        );
         if !loopback_origin(&host.origin) {
             let port = url::Url::parse(&host.origin)
                 .ok()
                 .and_then(|url| url.port_or_known_default())
                 .unwrap_or(tcode_client::pairing::DEFAULT_REMOTE_PORT);
-            origins.extend(crate::discovery::interface_probe_origins(
-                &local_networks(),
-                port,
-            ));
+            origins.extend(
+                crate::discovery::interface_probe_origins(networks, port, probe_round)
+                    .into_iter()
+                    .map(|origin| (origin, true)),
+            );
         }
-        let mut seen = std::collections::HashSet::new();
-        origins.retain(|origin| seen.insert(origin.clone()));
-        origins.truncate(MAX_RACED_ORIGINS);
     }
+    let mut seen = std::collections::HashSet::new();
+    origins.retain(|(origin, _)| seen.insert(origin.clone()));
+    origins
+}
+
+/// The bounded scheduler is shared by cached addresses and private LAN pages.
+/// The dial seam lets recovery tests replay an address change without altering
+/// the developer machine's interfaces or contacting its LAN neighbours.
+async fn connect_origins<F, Fut>(
+    origins: Vec<(String, bool)>,
+    dial: F,
+) -> Result<Established, ConnectionFailure>
+where
+    F: Fn(String, bool) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<(WebSocket, Vec<String>, Option<String>), ConnectionFailure>,
+        >,
+{
+    let started = Instant::now();
     let racing = origins.len() > 1;
-    let mut attempts = futures_util::stream::FuturesUnordered::new();
-    for (index, origin) in origins.into_iter().enumerate() {
-        attempts.push(async move {
-            smol::Timer::after(RACE_STAGGER * index as u32).await;
-            let attempt = attempt_origin(&origin, host, device, index == 0);
-            let result = if racing {
-                futures_lite::future::race(attempt, async {
-                    smol::Timer::after(RACE_BUDGET).await;
-                    Err(ConnectionFailure::Timeout)
-                })
-                .await
-            } else {
-                attempt.await
-            };
-            (index == 0, origin, result)
-        });
-    }
+    let attempts = futures_util::stream::iter(origins.into_iter().enumerate().map(
+        |(index, (origin, probe))| {
+            let dial = &dial;
+            async move {
+                smol::Timer::at(started + RACE_STAGGER * index as u32).await;
+                let attempt = dial(origin.clone(), index == 0);
+                let budget = if probe { PROBE_BUDGET } else { RACE_BUDGET };
+                let result = if racing {
+                    futures_lite::future::race(attempt, async {
+                        smol::Timer::after(budget).await;
+                        Err(ConnectionFailure::Timeout)
+                    })
+                    .await
+                } else {
+                    attempt.await
+                };
+                (index == 0, origin, result)
+            }
+        },
+    ))
+    .buffer_unordered(MAX_PARALLEL_ORIGINS);
+    futures_util::pin_mut!(attempts);
     let mut failure = ConnectionFailure::Unreachable;
     let mut primary_failure = None;
     while let Some((primary, origin, result)) = attempts.next().await {
         match result {
-            Ok((websocket, reported)) => {
+            Ok((websocket, reported, identity_key)) => {
                 return Ok(Established {
                     websocket,
                     origin,
                     reported,
+                    identity_key,
                 });
             }
             Err(error) if error.is_terminal() => return Err(error),
@@ -583,7 +829,6 @@ async fn establish_websocket(
             Err(error) => failure = error,
         }
     }
-    // The banner explains the saved origin, not whichever probe failed last.
     Err(primary_failure.unwrap_or(failure))
 }
 
@@ -592,7 +837,7 @@ async fn attempt_origin(
     host: &PairedHost,
     device: &DeviceIdentity,
     primary: bool,
-) -> Result<(WebSocket, Vec<String>), ConnectionFailure> {
+) -> Result<(WebSocket, Vec<String>, Option<String>), ConnectionFailure> {
     let url = url::Url::parse(origin).map_err(|e| connection_failure(e.to_string()))?;
     let endpoint = crate::endpoint::Endpoint::new(origin).map_err(connection_failure)?;
     endpoint
@@ -605,13 +850,29 @@ async fn send_interruptible(
     message: Message,
     deadline: Instant,
     outgoing: &OutgoingReceiver,
+    host: &mut PairedHost,
     interrupted: &mut Option<Wake>,
 ) -> Result<(), ConnectionFailure> {
-    futures_lite::future::race(send_before(socket, message, deadline), async {
-        *interrupted = outgoing.wake.recv().await.ok();
-        Err(ConnectionFailure::Unreachable)
-    })
-    .await
+    // A sink send may already have written part of a frame. New address hints
+    // must neither cancel it nor restart it with a second copy of the message.
+    let sending = send_before(socket, message, deadline).fuse();
+    futures_util::pin_mut!(sending);
+    loop {
+        let wake = outgoing.wake.recv().fuse();
+        futures_util::pin_mut!(wake);
+        futures_util::select! {
+            result = sending => return result,
+            wake = wake => match wake {
+                Ok(Wake::Candidates(origins)) => {
+                    remember_candidates(host, &origins);
+                }
+                other => {
+                    *interrupted = other.ok();
+                    return Err(ConnectionFailure::Unreachable);
+                }
+            },
+        }
+    }
 }
 
 async fn send_before(
@@ -636,27 +897,28 @@ async fn send_before(
     .await
 }
 
-/// Complete the WebSocket upgrade and hello on `stream`. `primary` marks the
-/// saved origin: an older machine there that rejects without naming itself is
-/// still taken to be the paired one; anywhere else it is a stranger.
+/// Authenticate the stream before WebSocket upgrade and credential-bearing
+/// hello. Legacy TLS/loopback primaries already establish a trusted scope.
 pub(crate) async fn open_websocket(
-    stream: crate::endpoint::Stream,
+    mut stream: crate::endpoint::Stream,
     origin: &url::Url,
     host: &PairedHost,
     device: &DeviceIdentity,
     primary: bool,
-) -> Result<(WebSocket, Vec<String>), ConnectionFailure> {
-    let mut url = origin.clone();
-    url.set_scheme(if origin.scheme() == "https" {
-        "wss"
+) -> Result<(WebSocket, Vec<String>, Option<String>), ConnectionFailure> {
+    let identity_key = if primary
+        && host.identity_key.is_none()
+        && (origin.scheme() == "https" || loopback_origin(origin.as_str()))
+    {
+        // These saved endpoints already have an authenticated TLS origin or a
+        // local-only scope. Keep old hosts usable without enabling LAN downgrade.
+        None
     } else {
-        "ws"
-    })
-    .map_err(|_| ConnectionFailure::Unreachable)?;
-    url.set_path("/ws");
-    let (mut websocket, _) = async_tungstenite::client_async(url.as_str(), stream)
-        .await
-        .map_err(|e| connection_failure(e.to_string()))?;
+        let endpoint =
+            crate::endpoint::Endpoint::new(origin.as_str()).map_err(connection_failure)?;
+        Some(crate::endpoint::authenticate_stream(&mut stream, &endpoint.authority(), host).await?)
+    };
+    let mut websocket = upgrade_websocket(stream, origin, false).await?;
     websocket
         .send(Message::Text(device.hello_line(&host.token).into()))
         .await
@@ -665,13 +927,75 @@ pub(crate) async fn open_websocket(
         Some(Ok(Message::Text(text))) => {
             let value: serde_json::Value = serde_json::from_str(&text)
                 .map_err(|error| connection_failure(error.to_string()))?;
-            hello_verdict(&value, &host.host_id, primary).map(|reported| (websocket, reported))
+            hello_verdict(&value, &host.host_id, primary).map(|reported| {
+                let key = identity_key.or_else(|| {
+                    value["identity_key"]
+                        .as_str()
+                        .filter(|key| tcode_client::pairing::valid_identity_key(key))
+                        .map(str::to_ascii_lowercase)
+                });
+                (websocket, reported, key)
+            })
         }
         Some(Ok(Message::Close(_))) => Err(ConnectionFailure::HostClosed),
         Some(Ok(_)) => Err(ConnectionFailure::Unreachable),
         Some(Err(error)) => Err(connection_failure(error.to_string())),
         None => Err(ConnectionFailure::HostClosed),
     }
+}
+
+async fn upgrade_websocket(
+    stream: crate::endpoint::Stream,
+    origin: &url::Url,
+    pairing: bool,
+) -> Result<WebSocket, ConnectionFailure> {
+    let mut url = origin.clone();
+    url.set_scheme(if origin.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    })
+    .map_err(|_| ConnectionFailure::Unreachable)?;
+    url.set_path("/ws");
+    // Pairing never carries session snapshots. Reject large declared frame
+    // lengths before tungstenite reserves their payload buffer.
+    let config = pairing.then(|| {
+        tungstenite::protocol::WebSocketConfig::default()
+            .read_buffer_size(crate::identity::MAX_IDENTITY_MESSAGE_BYTES)
+            .max_frame_size(Some(crate::identity::MAX_IDENTITY_MESSAGE_BYTES))
+            .max_message_size(Some(crate::identity::MAX_IDENTITY_MESSAGE_BYTES))
+    });
+    let (websocket, _) = async_tungstenite::client_async_with_config(url.as_str(), stream, config)
+        .await
+        .map_err(|e| connection_failure(e.to_string()))?;
+    Ok(websocket)
+}
+
+async fn identify_websocket(
+    websocket: &mut WebSocket,
+    challenge: &crate::identity::IdentityChallenge,
+    token: &str,
+    key: Option<&str>,
+) -> Result<String, ConnectionFailure> {
+    websocket
+        .send(Message::Text(
+            serde_json::to_string(challenge)
+                .map_err(|error| connection_failure(error.to_string()))?
+                .into(),
+        ))
+        .await
+        .map_err(|error| connection_failure(error.to_string()))?;
+    let reply = match websocket.next().await {
+        Some(Ok(Message::Text(text)))
+            if text.len() <= crate::identity::MAX_IDENTITY_MESSAGE_BYTES =>
+        {
+            serde_json::from_str(&text).map_err(|_| ConnectionFailure::Unreachable)?
+        }
+        _ => return Err(ConnectionFailure::Unreachable),
+    };
+    challenge
+        .verify(token, key, &reply)
+        .ok_or(ConnectionFailure::Unreachable)
 }
 
 /// Judge a hello reply against the paired machine identity. Accepting a
@@ -758,7 +1082,6 @@ async fn relay_connected(
     buffered: &mut VecDeque<String>,
     state: &Sender<ConnectionState>,
     host: &mut PairedHost,
-    data_dir: Option<&Path>,
     interfaces: &mut InterfaceWatch,
 ) -> Lost {
     let mut healthy = false;
@@ -813,6 +1136,7 @@ async fn relay_connected(
                     Message::Ping(Vec::new().into()),
                     deadline,
                     outgoing,
+                    host,
                     &mut interrupted,
                 )
                 .await
@@ -820,7 +1144,7 @@ async fn relay_connected(
             }
             Input::Wake(Ok(Wake::Candidates(origins))) => {
                 // A late discovery result must not cost a healthy link.
-                remember_candidates(host, data_dir, &origins);
+                remember_candidates(host, &origins);
                 None
             }
             Input::Wake(Ok(wake)) => {
@@ -851,6 +1175,7 @@ async fn relay_connected(
                             Message::Ping(Vec::new().into()),
                             deadline,
                             outgoing,
+                            host,
                             &mut interrupted,
                         )
                         .await
@@ -869,6 +1194,7 @@ async fn relay_connected(
                     Message::Ping(Vec::new().into()),
                     deadline,
                     outgoing,
+                    host,
                     &mut interrupted,
                 )
                 .await
@@ -886,6 +1212,7 @@ async fn relay_connected(
                     Message::Text(line.trim_end().to_owned().into()),
                     send_deadline,
                     outgoing,
+                    host,
                     &mut interrupted,
                 )
                 .await
@@ -916,6 +1243,7 @@ async fn relay_connected(
                 Message::Pong(payload),
                 deadline,
                 outgoing,
+                host,
                 &mut interrupted,
             )
             .await
@@ -1000,6 +1328,69 @@ fn jitter_sample() -> f64 {
 #[cfg(test)]
 mod establishment_tests {
     use super::*;
+
+    #[test]
+    fn stale_connections_and_discovery_cannot_replace_authenticated_persistence() {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-saved-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut stale = PairedHost {
+            host_id: "workstation".into(),
+            name: "Desk".into(),
+            origin: "http://192.168.31.42:47420".into(),
+            candidates: Vec::new(),
+            token: "paired-token".into(),
+            identity_key: None,
+            last_connected_unix: None,
+        };
+        save_hosts(&root, &[stale.clone()]).unwrap();
+        let mut authenticated = stale.clone();
+        authenticated.promote_origin("http://192.168.1.161:47420");
+        authenticated.identity_key = Some("ab".repeat(32));
+        save_origins(Some(&root), &authenticated);
+        update_hosts(&root, |hosts| {
+            hosts[0].name = "Renamed".into();
+            hosts[0].last_connected_unix = Some(42);
+        })
+        .unwrap();
+        let expected = load_hosts(&root).unwrap();
+
+        assert!(remember_candidates(
+            &mut stale,
+            &["http://192.168.139.3:47420".into()]
+        ));
+        assert_eq!(
+            load_hosts(&root).unwrap(),
+            expected,
+            "a discovery hint is not an authenticated route"
+        );
+        for key in [None, Some("cd".repeat(32))] {
+            stale.identity_key = key;
+            save_origins(Some(&root), &stale);
+            assert_eq!(
+                load_hosts(&root).unwrap(),
+                expected,
+                "a stale or conflicting pin must not overwrite the saved machine"
+            );
+        }
+        authenticated.promote_origin("http://192.168.31.99:47420");
+        save_origins(Some(&root), &authenticated);
+        let saved = load_hosts(&root).unwrap().remove(0);
+        assert_eq!(saved.origin, authenticated.origin);
+        assert_eq!(saved.identity_key, authenticated.identity_key);
+        assert_eq!(saved.name, "Renamed");
+        assert_eq!(saved.last_connected_unix, Some(42));
+        stale.token = "superseded-token".into();
+        stale.identity_key = authenticated.identity_key;
+        save_origins(Some(&root), &stale);
+        assert_eq!(load_hosts(&root).unwrap(), [saved]);
+        fs::remove_dir_all(root).unwrap();
+    }
     use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[test]
@@ -1133,3 +1524,7 @@ mod establishment_tests {
         });
     }
 }
+
+#[cfg(all(test, feature = "server"))]
+#[path = "client_recovery_tests.rs"]
+mod recovery_tests;

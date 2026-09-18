@@ -151,7 +151,14 @@ mod tests {
         let (replies, from_host) = async_channel::unbounded();
         let link = HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         store.update(cx, |store, _| {
             // Keep navigation out of this cache test when its Index baseline arrives.

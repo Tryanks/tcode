@@ -625,6 +625,7 @@ mod tests {
                     host_name: "build-box".into(),
                 },
                 None,
+                None,
                 true,
                 cx,
             )

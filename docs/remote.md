@@ -309,8 +309,19 @@ identity, not to any of these addresses; see
 records migrate their first saved address and port to the HTTP origin and any
 further addresses to candidates, preserving the machine ID, name, token and
 last connection time. Records with one origin and no candidates load unchanged.
-Saving writes the new format. Discovery and pairing invitations provide origin
-hints.
+Saving writes the new format. Discovery preserves distinct address hints for the
+same machine. New QR invitations carry the machine's identity key and alternate
+addresses: the native client checks those addresses against the key before sending
+the single-use code to one verified machine. An unreachable preferred address
+therefore does not hide another reachable address in that invitation. A manually
+entered address or an older invitation without a key still uses its single origin.
+
+Discovery hints remain in memory until an authenticated connection wins. Native
+pairing changes, last-connected timestamps and transport address updates share
+one locked persistence transaction. Recording a connection cannot restore an old
+address over a newer one, and an older connection cannot update a replacement
+pairing's record. A successful response from a superseded pairing attempt is
+discarded before saving; it cannot overwrite a newer token.
 
 ### Device preferences
 
@@ -334,8 +345,9 @@ overlay access rules. Tcode provides no relay or public discovery service. Treat
 nearby-machine search as LAN-only: it does not cross a normal overlay connection.
 Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
-access. A machine you already added is found again at its new address after
-either side changes network; see
+access. After either side changes network, native clients can recover an added
+machine through saved hints, nearby discovery or private-LAN probes, subject to
+reachability and host-version limits; see
 [Finding the machine again](#finding-the-machine-again).
 
 ### Remote Preview routing
@@ -415,13 +427,32 @@ networking and its existing store.
 Windows uses WebView2's proxy configuration and proxy authentication callback, with implicit
 loopback bypass disabled. Unsupported proxy facilities fail closed; there is no
 unauthenticated IP allowlist or direct-network fallback. Windows and Android use
-an attachment-owned loopback bridge to the paired HTTP(S) origin. It forwards
-the existing proxy bytes and authentication unchanged; closing the attachment
-cancels the listener and active connections. The native authentication callback
-uses this local proxy origin and the existing paired token. macOS keeps its
-per-browser URL mapping and uses the same native HTTP(S) connection establishment.
-HTTP reverse-proxy tunnels must support forward-proxy requests and CONNECT to
-carry preview traffic; ordinary website forwarding is insufficient.
+an attachment-owned loopback bridge to the paired HTTP(S) origin. After machine
+identity verification, it forwards the existing proxy bytes and authentication
+unchanged; closing the attachment cancels the listener and active connections.
+The native authentication callback uses this local proxy origin and the existing
+paired token. macOS keeps its per-browser URL mapping and uses the same native
+HTTP(S) connection establishment.
+
+When the main connection authenticates a replacement address, it publishes the
+attachment's current pairing in memory before notifying Preview. Existing
+Preview browsers follow it even if saving the new address fails; the saved hosts
+file is restart storage, not the live route source. Their local proxy/forwarding
+ports, URLs, history and website stores survive. Connections to the previous
+entry are cancelled, and new connections use the replacement. Tcode does not
+replay interrupted requests or reload pages automatically: use the existing Reload
+action if a page was interrupted. Learning an identity key also retires the older
+connections. Another machine, a replacement token, a changed pinned key or an
+HTTPS-to-HTTP downgrade cannot retarget an existing attachment's Preview.
+
+For a pinned machine, native Preview first completes an identity challenge on the
+same HTTP connection that will carry CONNECT or proxy traffic. A LAN pairing that
+has no saved key uses token-derived proof; it does not send the bearer token to an
+unverified address. Saved HTTPS or loopback origins without a key retain legacy
+compatibility. HTTP reverse-proxy tunnels must support that persistent identity
+exchange, forward-proxy requests and CONNECT to carry paired Preview traffic;
+ordinary website forwarding is insufficient. These checks identify the peer;
+they do not encrypt plain HTTP or prevent an active plaintext relay.
 
 The iOS embedded preview remains unsupported. A future backend can use
 WKWebView `proxyConfigurations` on iOS 17+ with the same paired credential and
@@ -441,16 +472,19 @@ with a trusted LAN or VPN. Removing a connected device revokes its proxy access.
 ### Device tokens and storage
 
 Adding a device issues a random bearer device token. The machine's `remote.json`
-stores device names, operating systems, IDs and token hashes, not raw tokens.
+stores device names, operating systems, IDs and token hashes, not raw tokens. It
+also retains the machine's private identity signing seed across network moves and
+restarts; keep that host profile private.
+
 Each device also sends a persistent, self-generated device id when it is added
 and when it connects; a device presenting a known id replaces its own token
 rather than adding a record, so removing a row revokes that device entirely.
 Devices from older app versions that send no id get a new record each time they
 are added. For headless browser login it also stores a randomly salted
 PBKDF2-HMAC-SHA256 password hash with 600,000 iterations; it never stores the
-password itself. Native apps store raw tokens and origins in `hosts.json`, and
-their device id in `mobile.json`, in their own data directory.
-Phone records are in the app's private data directory; Android uses its
+password itself. Native apps store raw tokens, origins and learned machine
+identity keys in `hosts.json`, and their device id in `mobile.json`, in their own
+data directory. Phone records are in the app's private data directory; Android uses its
 `filesDir`. Browser records use `localStorage` as described above, with the
 device id under `tcode.device_id`.
 
@@ -500,7 +534,8 @@ use their own transports.
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
 | Browser fails before adding the machine | Check the HTTP host or your HTTPS tunnel. Check that JavaScript and site storage are allowed. |
 | Connection rejected after adding the machine | Check whether the device was removed. Log in again in the browser, or add the native device with a fresh code if access is intended. Keep the machine and device builds on a matching protocol version. |
-| Preview cannot load a dev server | Check that the dev server runs on the machine, hosting is on, the device is still paired, and its WebView supports proxy routing. Use `localhost` for a machine-loopback server. |
+| Preview cannot load a dev server | Check that the dev server runs on the machine, hosting is on, the device is still paired, and its WebView supports proxy routing. Use `localhost` for a machine-loopback server. If a request was interrupted by a network move, wait for the main connection to recover and use Reload. |
+| Devices can ping each other but do not reconnect | Ping does not establish that Tcode's TCP port or mDNS multicast is allowed. Update both apps, check the listener and firewall, and see [Finding the machine again](#finding-the-machine-again) for LAN-probe coverage and limits. |
 
 **Syncing… / 同步中** means the workspace is waiting for its baseline: applied
 Index and Settings snapshots, plus SessionStatus and SessionEvents for the
@@ -538,10 +573,11 @@ including lines held for retry. A full queue rejects the new line with
 updates coalesce by topic outside those slots. The store exposes the pending
 count through `queued_outgoing()`.
 
-A disconnected device keeps cached thread content for reading and disables
-writes; unvisited threads may have only cached list information. Subscriptions
-resume after reconnecting. Temporary network failures keep retrying. Rejected
-authentication stops at **Offline** with **Pair again**; protocol mismatches
+A disconnected device keeps cached thread content for reading; unvisited threads
+may have only cached list information. Queries need a live connection, while
+retained writes follow the [outbox policy](#weak-networks) and remain pending
+until acknowledged. Subscriptions resume after reconnecting. Temporary network
+failures keep retrying. Rejected authentication stops at **Offline** with **Pair again**; protocol mismatches
 stop with **Update the app**. TLS errors on an HTTPS tunnel are logged and
 reported as unreachable.
 
@@ -655,52 +691,63 @@ with bounded history replay.
 
 ### Finding the machine again
 
-A pairing is bound to the machine identity (`host_id`), never to an address.
-When the saved origin stops answering, or this device's network addresses
-change, a native client looks for the same machine at every origin it knows
-and resumes the same session; no re-pairing and no address entry.
+The [#409 implementation review](remote-recovery-review.md) records the original
+failure, the replacement design, regression evidence and remaining field checks.
 
-- **What is tried.** The saved origin alone on the first attempt after a loss.
-  From the next attempt on, or at once when this device's addresses changed,
-  the saved origin is raced against the saved candidates, the addresses the
-  machine reported in its last `hello_ok` (`addrs` and `port`), nearby-machine
-  hints for that machine ID, and probes derived from this device's own
-  interfaces: the gateway `.1` of each hotspot subnet it sits in (iOS
-  `172.20.10.0/28`, Android `192.168.43.0/24`, macOS Internet Sharing
-  `192.168.2.0/24`, Windows Mobile Hotspot `192.168.137.0/24`), the `.1` of
-  any private IPv4 network no larger than a /24, and every other host of a
-  private network no larger than a /28. Attempts start 250 ms apart and each
-  has a five-second budget; at most 32 origins are raced.
-- **Identity, not address, decides.** Every `hello_ok` and `hello_rejected`
-  names the answering machine's `host_id`. The first origin where the paired
-  machine accepts wins, is promoted to the saved `origin`, and the previous
-  origin becomes the first candidate; the record is saved. An origin where a
-  different machine answers, accepts or rejects, is simply unreachable: it is
-  never promoted and a stranger's token rejection never ends the pairing. Only
-  a token rejection from the paired machine itself, or from a machine at the
-  saved origin that is too old to name itself, shows **Pair again**.
-- **Network changes.** The client re-reads its interface addresses every
-  2.5 seconds while reconnecting and every 10 seconds while connected. A
-  change during reconnecting cuts the backoff short, resets the delay to one
-  second and retries with a fresh candidate list. A change while connected
-  sends a probe with a three-second reply budget, so a socket left on a
-  vanished interface is replaced within seconds instead of the idle window.
-  Each retry also re-runs the three-second nearby-machine search off the UI
-  thread; hints that add nothing do not interrupt an attempt in progress.
-- **Hotspots.** When the machine shares its connection, it is the gateway of
-  the hotspot subnet and the gateway probe finds it even where the hotspot
-  drops multicast. When this device shares its connection, the machine is
-  one of its guests: on an iOS hotspot (`/28`) every guest address is probed;
-  on larger hotspot subnets the nearby-machine search or the machine's
-  reported addresses must supply the address.
-- **Plain HTTP only.** Alternates are raced only for `http` origins, where the
-  token already travels in clear to the saved address. An `https` pairing,
-  such as a tunnel, is never downgraded to a LAN address; hints are still
-  remembered. The browser client keeps its page origin.
-- **Machine side.** The listener binds all interfaces, and the nearby-machine
-  beacon re-announces on interfaces that appear later, such as a hotspot
-  interface that only comes up once the first guest joins. `hello_ok` carries
-  the machine's current non-loopback, non-link-local addresses and its port.
+A pairing identifies the machine independently of its current address. Native
+clients preserve the token and session subscriptions when moving between networks;
+recovery can find an address the client has never seen before. It still requires a
+reachable Tcode listener and compatible apps on both ends. It is not a relay or a
+promise to reach a machine across isolated networks.
+
+- **Address discovery.** Every connection attempt starts the saved origin first
+  and also races saved candidates, addresses reported
+  by the machine, nearby-machine hints, and probes of attached private IPv4
+  networks at the saved listener port. It tries ordinary host addresses, not just
+  the `.1` gateway. Larger networks are visited in bounded pages, beginning with
+  the client's own page; multiple attached networks rotate across retries.
+  Physical LAN interfaces are preferred while bridge and tunnel alternatives
+  remain available. Probe coverage is owned by
+  [`discovery.rs`](../crates/remote/src/discovery.rs), and concurrency, staggering
+  and per-attempt budgets by [`client.rs`](../crates/remote/src/client.rs).
+- **Authenticate before sending the token.** A matching advertised `host_id` is
+  only a hint. Native LAN connections challenge the answering machine before
+  sending a bearer token on that connection. A saved key verifies the response;
+  older saved pairings can learn the key from a token-derived proof without
+  exposing the raw token. A stranger or invalid proof does not replace the saved
+  address or trigger **Pair again**. A verified machine's rejected token does.
+  An accepted connection promotes its origin and retains the previous address
+  as a candidate. The machine's name, token and connection timestamp are
+  preserved by the shared persistence owner.
+- **Network changes and mDNS.** Interface changes interrupt reconnect backoff.
+  A changed interface on a connected client triggers a liveness probe so a stale
+  socket need not wait for normal idle detection. Nearby discovery runs alongside
+  connection retries. An in-progress browse is allowed to finish even when
+  retries are faster; later retry cycles can start another after it completes.
+  Reaching the machine or ending the attachment cancels the pending result.
+  Hints that add nothing do not interrupt an active connection attempt.
+- **Hotspots and company Wi-Fi.** Private-LAN probes can find both the computer
+  sharing its connection and a computer connected as a hotspot guest, including
+  ordinary `/24` Wi-Fi networks where mDNS does not work. Both endpoints must
+  still permit the listener's TCP connection. Ping alone proves neither mDNS
+  delivery nor listener reachability. Large subnets can take multiple retry
+  cycles; no arbitrary IPv6 range, public subnet or detached network is scanned.
+  An unknown changed listener port also needs a new address hint.
+- **HTTPS and browser clients.** An HTTPS pairing retains its HTTPS origin and
+  is never downgraded to a LAN address. The browser client keeps its page origin.
+  These clients need that origin to remain reachable, for example through a
+  stable tunnel or overlay address.
+- **Version compatibility.** Update both native client and machine for LAN
+  identity checks and recovery. An older LAN server that cannot answer identity
+  challenges is treated as unreachable; retrying or re-entering its code does
+  not add this capability. Saved HTTPS and loopback origins without a pinned key
+  retain their older connection path.
+- **Machine side.** The default desktop listener accepts connections on all
+  IPv4 interfaces, while a custom headless bind can restrict this. Nearby beacons
+  track interfaces that appear later, such as a hotspot interface brought up by
+  its first guest. Successful hello responses report current usable addresses
+  and the listener port. Existing Preview browsers follow the authenticated
+  replacement entry as described in [Remote Preview routing](#remote-preview-routing).
 
 ### Native connection and imported stream ownership
 
@@ -708,9 +755,10 @@ and resumes the same session; no re-pairing and no address entry.
 DNS, staggered address attempts and TCP/TLS establishment for pairing HTTP,
 the main WebSocket and paired Preview. WebSocket attempts race through hello,
 so a stalled handshake cannot hide a healthy address. NativeClientHost keeps
-pairing and attachment ownership; cancelling pairing drops its asynchronous
-request. HTTP requests retain bounded responses and a five-second request
-budget (60 seconds for password setup/login).
+pairing and attachment ownership. Dropping a pairing future cancels its
+asynchronous request, and the UI discards superseded results before saving them.
+HTTP requests retain bounded responses and a five-second request budget
+(60 seconds for password setup/login).
 
 [`RemoteServer::admit`](../crates/remote/src/server.rs) accepts a duplex async
 stream into the same HTTP/WS/CONNECT dispatch as the direct listener. Imported

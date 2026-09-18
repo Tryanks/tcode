@@ -171,6 +171,8 @@ impl HostedPanel {
                     host_id: state.host_id,
                     name: state.host_name,
                     origin,
+                    candidates: Vec::new(),
+                    identity_key: None,
                     code,
                 });
                 row = row.children(super::qr::qr_element(&invite));

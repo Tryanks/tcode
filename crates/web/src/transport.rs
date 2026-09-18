@@ -160,6 +160,7 @@ pub fn connect(token: String, device: DeviceIdentity) -> Transport {
         to_host,
         from_host,
         state,
+        current_host: None,
     }
 }
 

@@ -13,7 +13,7 @@ use futures_util::{FutureExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use tungstenite::Message;
-use tungstenite::protocol::Role;
+use tungstenite::protocol::{Role, WebSocketConfig};
 
 use crate::auth::{AuthStore, DeviceDetails};
 use crate::mux::HostMux;
@@ -41,6 +41,7 @@ pub struct PairingCode {
     pub browser_url: String,
     pub expires_in_secs: u64,
     pub host_id: String,
+    pub identity_key: String,
     pub host_name: String,
     pub port: u16,
     pub addrs: Vec<String>,
@@ -291,7 +292,7 @@ where
     S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
 {
     let mut stream = stream;
-    let request = match futures_lite::future::race(read_request(&mut stream), async {
+    let mut request = match futures_lite::future::race(read_request(&mut stream), async {
         futures_lite::future::race(
             async {
                 smol::Timer::after(Duration::from_secs(5)).await;
@@ -323,6 +324,31 @@ where
             return Err(error);
         }
     };
+    if request.method == "POST" && request.path == "/identity" {
+        // Main connections and Preview verify this stream before upgrading
+        // to WebSocket or sending a credential-bearing proxy request.
+        request =
+            match futures_lite::future::race(http_identity(&mut stream, request, &shared), async {
+                futures_lite::future::race(
+                    async {
+                        smol::Timer::after(Duration::from_secs(5)).await;
+                    },
+                    async {
+                        let _ = shared.shutdown.recv().await;
+                    },
+                )
+                .await;
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "identity exchange timed out",
+                ))
+            })
+            .await?
+            {
+                Some(request) => request,
+                None => return Ok(()),
+            };
+    }
     if request.method == "GET" && request.path == "/ws" && is_websocket_upgrade(&request) {
         // The WS loop sends its existing close frame. Bound teardown as well
         // when an admitted stream is blocked writing to an unresponsive peer.
@@ -338,6 +364,40 @@ where
         Ok(())
     })
     .await
+}
+
+async fn http_identity<S>(
+    stream: &mut S,
+    request: Request,
+    shared: &Shared,
+) -> io::Result<Option<Request>>
+where
+    S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin,
+{
+    let challenge = (request.body.len() <= crate::identity::MAX_IDENTITY_MESSAGE_BYTES)
+        .then(|| serde_json::from_slice::<crate::identity::IdentityChallenge>(&request.body).ok())
+        .flatten();
+    let proof = challenge.and_then(|challenge| shared.auth.lock().unwrap().identify(&challenge));
+    let Some(proof) = proof else {
+        json_response(
+            stream,
+            "403 Forbidden",
+            &serde_json::json!({"error": "invalid host identity challenge"}),
+        )
+        .await?;
+        return Ok(None);
+    };
+    let body = serde_json::to_vec(&proof).map_err(io::Error::other)?;
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    stream.flush().await?;
+    // Exactly one follow-up request. Another /identity enters normal dispatch
+    // and is rejected, rather than resetting the unauthenticated deadline.
+    read_request(stream).await.map(Some)
 }
 
 async fn dispatch<S>(
@@ -414,6 +474,7 @@ struct PairRequest {
 #[derive(Serialize)]
 struct PairResponse {
     host_id: String,
+    identity_key: String,
     host_name: String,
     token: String,
 }
@@ -422,15 +483,37 @@ async fn pair<S>(stream: &mut S, request: Request, shared: &Shared) -> io::Resul
 where
     S: futures_lite::io::AsyncWrite + Unpin,
 {
-    if shared.browser_password && !shared.auth.lock().unwrap().pairing_enabled {
-        return json_response(
-            stream,
-            "403 Forbidden",
-            &serde_json::json!({"error":"pairing_disabled"}),
-        )
-        .await;
+    match pairing_result(&request.body, shared)? {
+        Ok(paired) => json_response(stream, "200 OK", &paired).await,
+        Err(rejected) => {
+            json_response(
+                stream,
+                rejected.status,
+                &serde_json::json!({"error": rejected.reason}),
+            )
+            .await
+        }
     }
-    let request: PairRequest = match serde_json::from_slice::<PairRequest>(&request.body) {
+}
+
+struct PairingRejection {
+    status: &'static str,
+    reason: &'static str,
+}
+
+/// HTTP code entry and a QR-authenticated socket consume the same single-use
+/// code and apply the same device validation and token rotation policy.
+fn pairing_result(
+    body: &[u8],
+    shared: &Shared,
+) -> io::Result<Result<PairResponse, PairingRejection>> {
+    if shared.browser_password && !shared.auth.lock().unwrap().pairing_enabled {
+        return Ok(Err(PairingRejection {
+            status: "403 Forbidden",
+            reason: "pairing_disabled",
+        }));
+    }
+    let request: PairRequest = match serde_json::from_slice::<PairRequest>(body) {
         Ok(request)
             if request.device.name_is_valid()
                 && request.device.optional_fields_are_valid()
@@ -439,23 +522,17 @@ where
             request
         }
         _ => {
-            return response(
-                stream,
-                "400 Bad Request",
-                "application/json",
-                br#"{"error":"malformed pairing request"}"#,
-            )
-            .await;
+            return Ok(Err(PairingRejection {
+                status: "400 Bad Request",
+                reason: "malformed pairing request",
+            }));
         }
     };
     if !consume_pairing_code(shared, &request.code) {
-        return response(
-            stream,
-            "403 Forbidden",
-            "application/json",
-            br#"{"error":"invalid or expired pairing code"}"#,
-        )
-        .await;
+        return Ok(Err(PairingRejection {
+            status: "403 Forbidden",
+            reason: "invalid or expired pairing code",
+        }));
     }
     let result = {
         let mut auth = shared.auth.lock().unwrap();
@@ -463,11 +540,12 @@ where
         let token = auth.issue_token(request.device.device_id, details)?;
         PairResponse {
             host_id: auth.host_id.to_string(),
+            identity_key: auth.identity_public_key(),
             host_name: auth.host_name.clone(),
             token,
         }
     };
-    json_response(stream, "200 OK", &result).await
+    Ok(Ok(result))
 }
 
 // Password hashing runs off the executor; the auth lock serializes setup and login.
@@ -534,7 +612,7 @@ where
         } else if auth.verify_password(&request.password) {
             let details = request.device.details();
             let token = auth.issue_token(request.device.device_id, details)?;
-            Ok(("200 OK", serde_json::json!({"host_id":auth.host_id,"host_name":auth.host_name,"token":token})))
+            Ok(("200 OK", serde_json::json!({"host_id":auth.host_id,"host_name":auth.host_name,"token":token,"identity_key":auth.identity_public_key()})))
         } else {
             Ok(("403 Forbidden", serde_json::json!({"error":"invalid password or temporarily locked"})))
         }
@@ -618,6 +696,7 @@ fn mint_pairing_code(shared: &Shared) -> PairingCode {
         browser_url,
         expires_in_secs: PAIRING_LIFETIME.as_secs(),
         host_id: auth.host_id.to_string(),
+        identity_key: auth.identity_public_key(),
         host_name: auth.host_name.clone(),
         port: shared.local_addr.port(),
         addrs,
@@ -690,6 +769,12 @@ struct Hello {
     device: DeviceClaim,
 }
 
+enum Handshake {
+    Hello(Hello),
+    PairingComplete,
+    Invalid,
+}
+
 async fn websocket<S>(mut stream: S, request: Request, shared: Arc<Shared>) -> io::Result<()>
 where
     S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin + Send,
@@ -704,15 +789,22 @@ where
     );
     stream.write_all(handshake.as_bytes()).await?;
     stream.flush().await?;
-    let mut websocket = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
-    let first = futures_lite::future::race(websocket.next(), async {
+    // Apply the existing 64 KiB input contract while assembling frames too,
+    // before an unauthenticated peer can consume tungstenite's 64 MiB default.
+    let config = WebSocketConfig::default()
+        .read_buffer_size(crate::identity::MAX_IDENTITY_MESSAGE_BYTES)
+        .max_message_size(Some(crate::wire::MAX_BODY_BYTES))
+        .max_frame_size(Some(crate::wire::MAX_BODY_BYTES));
+    let mut websocket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
+    let hello = futures_lite::future::race(receive_handshake(&mut websocket, &shared), async {
         smol::Timer::after(Duration::from_secs(5)).await;
-        None
+        Ok(Handshake::Invalid)
     })
-    .await;
-    let hello = match first {
-        Some(Ok(Message::Text(text))) => serde_json::from_str::<Hello>(&text).ok(),
-        _ => None,
+    .await?;
+    let hello = match hello {
+        Handshake::Hello(hello) => Some(hello),
+        Handshake::PairingComplete => return Ok(()),
+        Handshake::Invalid => None,
     };
     if let Some(hello) = &hello
         && !matches!(hello.protocol_version, 3 | 4)
@@ -743,8 +835,8 @@ where
             && shared.auth.lock().unwrap().token_is_valid(&hello.token)
     });
     let Some(hello) = hello else {
-        // The identity lets a client tell "my machine revoked me" from "a
-        // different machine now answers at this address".
+        // Native recovery trusts this rejection only after an identity proof;
+        // the public host id also remains available to older hello clients.
         let rejected = serde_json::json!({
             "type": "hello_rejected",
             "reason": "token",
@@ -777,6 +869,7 @@ where
         serde_json::json!({
             "type": "hello_ok",
             "host_id": auth.host_id,
+            "identity_key": auth.identity_public_key(),
             "host_name": auth.host_name,
             "protocol_version": version,
             "addrs": crate::discovery::local_addrs(),
@@ -908,6 +1001,69 @@ where
     Ok(())
 }
 
+/// Optional identity proof followed by pairing or hello shares one deadline.
+/// A second identify is rejected: this socket only signs one challenge.
+async fn receive_handshake<S>(
+    websocket: &mut WebSocketStream<S>,
+    shared: &Shared,
+) -> io::Result<Handshake>
+where
+    S: futures_lite::io::AsyncRead + futures_lite::io::AsyncWrite + Unpin,
+{
+    let Some(Ok(Message::Text(mut first))) = websocket.next().await else {
+        return Ok(Handshake::Invalid);
+    };
+    if first.len() > crate::identity::MAX_IDENTITY_MESSAGE_BYTES {
+        return Ok(Handshake::Invalid);
+    }
+    if let Ok(challenge) = serde_json::from_str::<crate::identity::IdentityChallenge>(&first) {
+        let proof = shared.auth.lock().unwrap().identify(&challenge);
+        let Some(proof) = proof else {
+            return Ok(Handshake::Invalid);
+        };
+        websocket
+            .send(Message::Text(
+                serde_json::to_string(&proof)
+                    .map_err(io::Error::other)?
+                    .into(),
+            ))
+            .await
+            .map_err(io::Error::other)?;
+        let Some(Ok(Message::Text(next))) = websocket.next().await else {
+            return Ok(Handshake::Invalid);
+        };
+        first = next;
+        if first.len() > crate::identity::MAX_IDENTITY_MESSAGE_BYTES {
+            return Ok(Handshake::Invalid);
+        }
+        if serde_json::from_str::<serde_json::Value>(&first)
+            .ok()
+            .is_some_and(|value| value["type"] == "pair")
+        {
+            let response = match pairing_result(first.as_bytes(), shared)? {
+                Ok(paired) => {
+                    let mut value = serde_json::to_value(paired).map_err(io::Error::other)?;
+                    value["type"] = "pair_ok".into();
+                    value
+                }
+                Err(rejected) => serde_json::json!({
+                    "type": "pair_rejected", "error": rejected.reason,
+                }),
+            };
+            websocket
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .map_err(io::Error::other)?;
+            let _ = websocket.close(None).await;
+            return Ok(Handshake::PairingComplete);
+        }
+    }
+    if first.len() > crate::identity::MAX_IDENTITY_MESSAGE_BYTES {
+        return Ok(Handshake::Invalid);
+    }
+    Ok(serde_json::from_str(&first).map_or(Handshake::Invalid, Handshake::Hello))
+}
+
 fn hosting_action(
     shared: &Shared,
     action: tcode_protocol::HostingAction,
@@ -970,4 +1126,300 @@ fn hosting_action(
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_lite::io::AsyncReadExt as _;
+    use sha2::Sha256;
+
+    struct Fixture {
+        server: RemoteServer,
+        root: PathBuf,
+        _host_rx: async_channel::Receiver<String>,
+        _host_tx: async_channel::Sender<String>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("tcode-identify-{}", uuid::Uuid::new_v4()));
+            let (to_host, host_rx) = async_channel::unbounded();
+            let (host_tx, from_host) = async_channel::unbounded();
+            let server = serve(
+                HostMux::new(to_host, from_host),
+                RemoteConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    host_name: "Desk".into(),
+                    data_dir: root.clone(),
+                    static_bundle: None,
+                    browser_password: false,
+                },
+            )
+            .unwrap();
+            Self {
+                server,
+                root,
+                _host_rx: host_rx,
+                _host_tx: host_tx,
+            }
+        }
+
+        async fn socket(&self) -> WebSocketStream<smol::net::TcpStream> {
+            let stream = smol::net::TcpStream::connect(self.server.local_addr())
+                .await
+                .unwrap();
+            async_tungstenite::client_async(format!("ws://{}/ws", self.server.local_addr()), stream)
+                .await
+                .unwrap()
+                .0
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.server.shutdown.close();
+            if let Some(thread) = self.server.thread.take() {
+                thread.join().unwrap();
+            }
+            std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    async fn reply(ws: &mut WebSocketStream<smol::net::TcpStream>) -> serde_json::Value {
+        let message =
+            futures_lite::future::race(async { ws.next().await.unwrap().unwrap() }, async {
+                smol::Timer::after(Duration::from_secs(2)).await;
+                panic!("server did not answer the handshake");
+            })
+            .await;
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+
+    async fn http_reply(stream: &mut smol::net::TcpStream) -> (String, Vec<u8>) {
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).await.unwrap();
+            head.extend_from_slice(&byte);
+            assert!(head.len() < 4096);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        (head, body)
+    }
+
+    #[test]
+    fn identity_proof_precedes_token_on_the_same_websocket() {
+        let fixture = Fixture::new();
+        let server = &fixture.server;
+        let (host_id, token) = {
+            let mut auth = server.shared.auth.lock().unwrap();
+            let token = auth
+                .issue_token(
+                    None,
+                    DeviceDetails {
+                        name: "Phone".into(),
+                        platform: None,
+                    },
+                )
+                .unwrap();
+            (auth.host_id.to_string(), token)
+        };
+        smol::block_on(async {
+            let mut ws = fixture.socket().await;
+            let nonce = "12".repeat(32);
+            let challenge = serde_json::json!({
+                "type": "identify",
+                "host_id": host_id,
+                "token_id": crate::auth::hex_hash(&Sha256::digest(token.as_bytes())),
+                "nonce": nonce,
+            });
+            ws.send(Message::Text(challenge.to_string().into()))
+                .await
+                .unwrap();
+            let response = reply(&mut ws).await;
+            assert_eq!(response["type"], "identity");
+            assert_eq!(response["host_id"], host_id);
+            assert_eq!(response["nonce"], nonce);
+            ws.send(Message::Text(
+                serde_json::json!({
+                    "type": "hello", "protocol_version": 4, "token": token,
+                    "device_name": "Phone"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            let response = reply(&mut ws).await;
+            assert_eq!(response["type"], "hello_ok");
+        });
+    }
+
+    #[test]
+    fn http_identity_keeps_one_verified_stream_for_the_request_and_never_repeats() {
+        let fixture = Fixture::new();
+        let invite = fixture.server.new_pairing_code();
+        smol::block_on(futures_lite::future::race(
+            async {
+                for repeat_identity in [false, true] {
+                    let mut stream = smol::net::TcpStream::connect(fixture.server.local_addr())
+                        .await
+                        .unwrap();
+                    let challenge =
+                        crate::identity::IdentityChallenge::for_pairing(&invite.host_id).unwrap();
+                    let body = serde_json::to_string(&challenge).unwrap();
+                    let identify = format!(
+                        "POST /identity HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(identify.as_bytes()).await.unwrap();
+                    let (head, body) = http_reply(&mut stream).await;
+                    assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+                    assert!(head.contains("Connection: keep-alive\r\n"));
+                    let proof = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        challenge.verify("", Some(&invite.identity_key), &proof),
+                        Some(invite.identity_key.clone())
+                    );
+                    if repeat_identity {
+                        stream.write_all(identify.as_bytes()).await.unwrap();
+                        let (head, _) = http_reply(&mut stream).await;
+                        assert!(head.starts_with("HTTP/1.1 404 Not Found\r\n"));
+                    } else {
+                        let body = serde_json::json!({"code": invite.code, "device_name": "Phone"})
+                            .to_string();
+                        stream.write_all(format!("POST /pair HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                        let (head, body) = http_reply(&mut stream).await;
+                        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+                        let paired: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(paired["host_id"], invite.host_id);
+                        assert!(
+                            fixture
+                                .server
+                                .shared
+                                .auth
+                                .lock()
+                                .unwrap()
+                                .token_is_valid(paired["token"].as_str().unwrap())
+                        );
+                    }
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+                }
+            },
+            async {
+                smol::Timer::after(Duration::from_secs(3)).await;
+                panic!("HTTP identity exchange stalled");
+            },
+        ));
+    }
+
+    #[test]
+    fn qr_pairing_follows_host_proof_and_uses_the_existing_single_use_code() {
+        let fixture = Fixture::new();
+        let invite = fixture.server.new_pairing_code();
+        let request = serde_json::json!({
+            "type": "pair", "code": invite.code, "device_name": "Phone",
+            "device_id": "phone-id", "platform": "Android 15"
+        });
+        smol::block_on(async {
+            // Pair frames are only admitted after the optional identity exchange.
+            let mut direct = fixture.socket().await;
+            direct
+                .send(Message::Text(request.to_string().into()))
+                .await
+                .unwrap();
+            assert_eq!(reply(&mut direct).await["type"], "hello_rejected");
+            assert!(fixture.server.devices().is_empty());
+
+            for expected in ["pair_ok", "pair_rejected"] {
+                let mut ws = fixture.socket().await;
+                let challenge =
+                    crate::identity::IdentityChallenge::for_pairing(&invite.host_id).unwrap();
+                ws.send(Message::Text(
+                    serde_json::to_string(&challenge).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+                let proof = reply(&mut ws).await;
+                assert_eq!(
+                    challenge.verify("", Some(&invite.identity_key), &proof),
+                    Some(invite.identity_key.clone())
+                );
+                ws.send(Message::Text(request.to_string().into()))
+                    .await
+                    .unwrap();
+                let paired = reply(&mut ws).await;
+                assert_eq!(paired["type"], expected);
+                if expected == "pair_ok" {
+                    assert_eq!(paired["host_id"], invite.host_id);
+                    assert_eq!(paired["identity_key"], invite.identity_key);
+                    assert!(
+                        fixture
+                            .server
+                            .shared
+                            .auth
+                            .lock()
+                            .unwrap()
+                            .token_is_valid(paired["token"].as_str().unwrap())
+                    );
+                } else {
+                    assert_eq!(paired["error"], "invalid or expired pairing code");
+                }
+                assert!(matches!(
+                    ws.next().await,
+                    Some(Ok(Message::Close(_))) | None
+                ));
+            }
+        });
+        assert_eq!(fixture.server.devices().len(), 1);
+    }
+
+    #[test]
+    fn unauthenticated_handshake_rejects_malformed_identity_and_oversized_frames() {
+        let fixture = Fixture::new();
+        let invite = fixture.server.new_pairing_code();
+        smol::block_on(async {
+            let challenge =
+                crate::identity::IdentityChallenge::for_pairing(&invite.host_id).unwrap();
+            let challenge = serde_json::to_value(challenge).unwrap();
+            for (field, bad) in [
+                ("host_id", "another-host".to_owned()),
+                ("nonce", "12".repeat(33)),
+                ("token_id", "garbage".to_owned()),
+                (
+                    "padding",
+                    "x".repeat(crate::identity::MAX_IDENTITY_MESSAGE_BYTES),
+                ),
+                ("padding", "x".repeat(crate::wire::MAX_BODY_BYTES)),
+            ] {
+                let mut ws = fixture.socket().await;
+                let mut request = challenge.clone();
+                request[field] = bad.into();
+                ws.send(Message::Text(request.to_string().into()))
+                    .await
+                    .unwrap();
+                let response = futures_lite::future::race(ws.next(), async {
+                    smol::Timer::after(Duration::from_secs(2)).await;
+                    panic!("server did not reject invalid handshake");
+                })
+                .await;
+                if let Some(Ok(Message::Text(response))) = response {
+                    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+                    assert_eq!(response["type"], "hello_rejected");
+                }
+            }
+        });
+        assert!(fixture.server.devices().is_empty());
+    }
 }

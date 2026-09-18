@@ -178,6 +178,7 @@ mod tests {
                     host_name: "Agent Mac".into(),
                 },
                 None,
+                None,
                 false,
                 cx,
             )

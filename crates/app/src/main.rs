@@ -181,11 +181,12 @@ fn pair_command(args: &[String], client_host: &NativeClientHost) -> Result<Strin
     let host = smol::block_on(client_host.pair(tcode_client::host::PairRequest {
         origin: tcode_client::pairing::lan_origin(addr, port),
         code: code.clone(),
+        host_id: None,
+        identity_key: None,
+        candidates: Vec::new(),
     }))?;
-    let mut hosts = client_host.load_hosts();
     let host_id = host.host_id.clone();
-    tcode_client::pairing::remember_host(&mut hosts, host);
-    client_host.save_hosts(&hosts);
+    client_host.remember_host(host);
     Ok(host_id)
 }
 
@@ -249,6 +250,7 @@ impl LocalKernel {
             to_host: connection.to_host.into(),
             from_host: connection.from_host,
             state,
+            current_host: None,
         }
     }
 

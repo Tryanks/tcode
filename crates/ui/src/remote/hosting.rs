@@ -509,6 +509,13 @@ impl HostingPanel {
                     .unwrap_or("127.0.0.1"),
                 code.port,
             ),
+            candidates: code
+                .addrs
+                .iter()
+                .skip(1)
+                .map(|addr| tcode_client::pairing::lan_origin(addr, code.port))
+                .collect(),
+            identity_key: Some(code.identity_key.clone()),
             code: code.code.clone(),
         });
         let addresses = if code.addrs.is_empty() {

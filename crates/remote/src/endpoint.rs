@@ -37,6 +37,30 @@ impl Endpoint {
             .map_err(|error| io::Error::other(format!("{error:?}")))
     }
 
+    /// Authenticate this exact connection before a Preview proxy writes any
+    /// bearer credentials. The host leaves the verified HTTP stream open for
+    /// the caller's CONNECT or ordinary proxy request.
+    pub(crate) async fn connect_paired(
+        &self,
+        host: &tcode_client::pairing::PairedHost,
+    ) -> io::Result<Stream> {
+        let local = match self.url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => false,
+        };
+        if host.identity_key.is_none() && (self.url.scheme() == "https" || local) {
+            return self.connect().await;
+        }
+        self.establish(|mut stream| async move {
+            authenticate_stream(&mut stream, &self.authority(), host).await?;
+            Ok(stream)
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("host identity check failed: {error:?}")))
+    }
+
     /// Race complete protocol handshakes, not just TCP connects: a reachable
     /// address that stalls during TLS or hello must not hide a healthy address.
     pub(crate) async fn establish<T, F, Fut>(
@@ -127,6 +151,74 @@ impl Endpoint {
     }
 }
 
+/// Bound unauthenticated HTTP before allowing a WebSocket decoder or writing
+/// bearer credentials. Verification applies to this exact TCP/TLS stream.
+pub(crate) async fn authenticate_stream(
+    stream: &mut Stream,
+    authority: &str,
+    host: &tcode_client::pairing::PairedHost,
+) -> Result<String, tcode_client::ConnectionFailure> {
+    use tcode_client::ConnectionFailure;
+    let challenge = crate::identity::IdentityChallenge::new(&host.host_id, &host.token)
+        .map_err(|_| ConnectionFailure::Unreachable)?;
+    let body = serde_json::to_string(&challenge).map_err(|_| ConnectionFailure::Unreachable)?;
+    let reply = identity_exchange(stream, authority, &body)
+        .await
+        .map_err(|_| ConnectionFailure::Unreachable)?;
+    challenge
+        .verify(&host.token, host.identity_key.as_deref(), &reply)
+        .ok_or(ConnectionFailure::Unreachable)
+}
+
+async fn identity_exchange(
+    stream: &mut Stream,
+    authority: &str,
+    body: &str,
+) -> io::Result<serde_json::Value> {
+    use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid host identity response");
+    stream.write_all(format!(
+        "POST /identity HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}", body.len()
+    ).as_bytes()).await?;
+    stream.flush().await?;
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= crate::identity::MAX_IDENTITY_MESSAGE_BYTES {
+            return Err(invalid());
+        }
+        let mut byte = [0];
+        stream.read_exact(&mut byte).await?;
+        head.push(byte[0]);
+    }
+    let head = std::str::from_utf8(&head).map_err(|_| invalid())?;
+    let mut lines = head.split("\r\n");
+    if !lines
+        .next()
+        .is_some_and(|line| line.starts_with("HTTP/1.1 200 "))
+    {
+        return Err(invalid());
+    }
+    let mut length = None;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (key, value) = line.split_once(':').ok_or_else(invalid)?;
+        if key.eq_ignore_ascii_case("transfer-encoding") {
+            return Err(invalid());
+        }
+        if key.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                return Err(invalid());
+            }
+            length = Some(value.trim().parse::<usize>().map_err(|_| invalid())?);
+        }
+    }
+    let length = length
+        .filter(|length| *length <= crate::identity::MAX_IDENTITY_MESSAGE_BYTES)
+        .ok_or_else(invalid)?;
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await?;
+    serde_json::from_slice(&body).map_err(|_| invalid())
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
@@ -213,6 +305,7 @@ mod tests {
                 host_id: response["host_id"].as_str().unwrap().into(),
                 name: "entry fixture".into(),
                 candidates: Vec::new(),
+                identity_key: None,
                 last_connected_unix: None,
             };
             let url = url::Url::parse(&origin).unwrap();
@@ -243,14 +336,14 @@ mod tests {
                 .await
                 .unwrap();
             let (browser, _) = viewing.accept().await.unwrap();
-            let token = paired.token.clone();
+            let forwarding_host = paired.clone();
             let endpoint = Arc::new(endpoint);
             let forwarding_endpoint = endpoint.clone();
             let forwarding = smol::spawn(async move {
                 crate::preview::forward(
                     browser,
                     &forwarding_endpoint,
-                    &token,
+                    &forwarding_host,
                     &address.to_string(),
                 )
                 .await

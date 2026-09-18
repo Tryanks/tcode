@@ -3006,7 +3006,14 @@ mod tests {
         )
         .expect("spawn settings test host");
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(
+                host.link(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (probe, cx) = cx.add_window_view(|window, cx| {
@@ -3090,7 +3097,14 @@ mod tests {
         // No blocking seed: this is the portable client's timeline, where the
         // first snapshot lands after the page already exists.
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.link(), WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(
+                host.link(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         let window_state = cx.new(|_| WindowState::new(false));
         let (page, cx) = cx.add_window_view(|window, cx| {

@@ -118,26 +118,34 @@ fn races_stalled_address_and_applies_first_host_message() {
 
 #[test]
 fn rejected_token_is_terminal_without_retry() {
-    let data = TestDir::new();
-    let server = server(&data);
-    let code = server.new_pairing_code();
-    let mut host = pair(
-        &format!("http://127.0.0.1:{}", server.local_addr().port()),
-        &code.code,
-        &device("reject"),
-    )
-    .unwrap();
-    host.token = "invalid".into();
-    let client = connect(host, device("reject"), None);
-    wait(&client, Duration::from_secs(2), |s| {
-        *s == ConnectionState::Offline {
-            reason: ConnectionFailure::AuthenticationRejected,
+    for revoked in [false, true] {
+        let data = TestDir::new();
+        let server = server(&data);
+        let code = server.new_pairing_code();
+        let mut host = pair(
+            &format!("http://127.0.0.1:{}", server.local_addr().port()),
+            &code.code,
+            &device("reject"),
+        )
+        .unwrap();
+        if revoked {
+            server.revoke_device(&server.devices()[0].id).unwrap();
+        } else {
+            // Keep the legitimate pin: a damaged local token must not prevent
+            // recognizing the host's authoritative rejection.
+            host.token = "invalid".into();
         }
-    });
-    // Closure proves the attempt owner exited, rather than merely waiting out backoff.
-    assert!(client.state.recv_blocking().is_err());
-    assert!(client.from_host.recv_blocking().is_err());
-    server.shutdown();
+        let client = connect(host, device("reject"), None);
+        wait(&client, Duration::from_secs(2), |s| {
+            *s == ConnectionState::Offline {
+                reason: ConnectionFailure::AuthenticationRejected,
+            }
+        });
+        // Closure proves the attempt owner exited, rather than merely waiting out backoff.
+        assert!(client.state.recv_blocking().is_err());
+        assert!(client.from_host.recv_blocking().is_err());
+        server.shutdown();
+    }
 }
 
 #[cfg(unix)]

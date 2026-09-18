@@ -57,12 +57,16 @@ pub struct PairedHost {
     pub host_id: String,
     pub name: String,
     pub origin: String,
-    /// Ordered, deduplicated and bounded: origins that completed hello most
-    /// recently first, then address hints reported by the machine or found on
-    /// the LAN. Never contains `origin`.
+    /// Deduplicated and bounded; newly learned hints replace the oldest hints.
+    /// Promotion keeps the previous successful origin first among alternatives.
+    /// Never contains `origin`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<String>,
     pub token: String,
+    /// Host signing key learned while pairing or through a token-authenticated
+    /// migration. A network address or a discovered host id is not proof of identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_unix: Option<u64>,
 }
@@ -81,20 +85,32 @@ impl PairedHost {
         true
     }
 
-    /// Append address hints that are not yet known. Origins that completed
-    /// hello keep their place ahead of hints. Returns whether any were new.
+    /// New hints must remain usable even after the history fills up. Keep a
+    /// bounded batch of new origins ahead of older hints; repeated observations
+    /// do not reorder the list or interrupt an in-flight connection attempt.
     pub fn add_candidates<'a>(&mut self, origins: impl IntoIterator<Item = &'a str>) -> bool {
-        let mut added = false;
+        let mut batch = Vec::new();
         for origin in origins {
-            if self.candidates.len() >= MAX_CANDIDATE_ORIGINS {
+            if batch.len() >= MAX_CANDIDATE_ORIGINS {
                 break;
             }
-            if origin != self.origin && !self.candidates.iter().any(|known| known == origin) {
-                self.candidates.push(origin.to_owned());
-                added = true;
+            let Ok(origin) = parse_origin(origin) else {
+                continue;
+            };
+            if origin != self.origin && !batch.contains(&origin) {
+                batch.push(origin);
             }
         }
-        added
+        // Bound the observed batch, not just its unseen portion: an oversized
+        // repeated advertisement must not alternate between disjoint cache pages.
+        if batch.iter().all(|origin| self.candidates.contains(origin)) {
+            return false;
+        }
+        self.candidates.retain(|origin| !batch.contains(origin));
+        batch.append(&mut self.candidates);
+        batch.truncate(MAX_CANDIDATE_ORIGINS);
+        self.candidates = batch;
+        true
     }
 }
 
@@ -117,6 +133,8 @@ struct SavedHost {
     addrs: Vec<String>,
     port: Option<u16>,
     token: String,
+    #[serde(default)]
+    identity_key: Option<String>,
     last_connected_unix: Option<u64>,
 }
 impl TryFrom<SavedHost> for PairedHost {
@@ -135,8 +153,16 @@ impl TryFrom<SavedHost> for PairedHost {
             origin,
             candidates: Vec::new(),
             token: saved.token,
+            identity_key: saved.identity_key.map(|key| key.to_ascii_lowercase()),
             last_connected_unix: saved.last_connected_unix,
         };
+        if host
+            .identity_key
+            .as_deref()
+            .is_some_and(|key| !valid_identity_key(key))
+        {
+            return Err("invalid machine identity key".into());
+        }
         // Older records listed every LAN address; the ones after the first are
         // the same hints a current host reports in hello.
         let legacy = saved.port.map_or(Vec::new(), |port| {
@@ -162,7 +188,13 @@ pub struct PairInvite {
     pub host_id: String,
     pub name: String,
     pub origin: String,
+    pub candidates: Vec<String>,
+    pub identity_key: Option<String>,
     pub code: String,
+}
+
+pub fn valid_identity_key(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
@@ -178,6 +210,29 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
         return None;
     }
     let origin = parse_origin(fields.get("origin")?).ok()?;
+    let identity_key = fields
+        .get("identity_key")
+        .map(|key| key.to_ascii_lowercase());
+    if identity_key
+        .as_deref()
+        .is_some_and(|key| !valid_identity_key(key))
+    {
+        return None;
+    }
+    let mut candidates = Vec::new();
+    for (_, value) in url.query_pairs().filter(|(key, _)| key == "candidate") {
+        let candidate = parse_origin(&value).ok()?;
+        // A secure invite never authorizes downgrading its code to HTTP.
+        if origin.starts_with("https:") && !candidate.starts_with("https:") {
+            return None;
+        }
+        if candidate != origin && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+        if candidates.len() > MAX_CANDIDATE_ORIGINS {
+            return None;
+        }
+    }
     let code = fields.get("code")?.clone();
     if !is_pairing_code(&code) {
         return None;
@@ -186,6 +241,8 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
         host_id: fields.get("host")?.clone(),
         name: fields.get("name")?.clone(),
         origin,
+        candidates,
+        identity_key,
         code,
     })
 }
@@ -197,6 +254,12 @@ pub fn pair_url(invite: &PairInvite) -> String {
         .append_pair("name", &invite.name)
         .append_pair("origin", &invite.origin)
         .append_pair("code", &invite.code);
+    for candidate in invite.candidates.iter().take(MAX_CANDIDATE_ORIGINS) {
+        url.query_pairs_mut().append_pair("candidate", candidate);
+    }
+    if let Some(key) = &invite.identity_key {
+        url.query_pairs_mut().append_pair("identity_key", key);
+    }
     url.into()
 }
 pub fn is_pairing_code(code: &str) -> bool {
@@ -275,6 +338,7 @@ mod tests {
             origin: "http://192.168.1.10:47420".into(),
             candidates: vec!["http://10.0.0.5:47420".into()],
             token: "t".into(),
+            identity_key: None,
             last_connected_unix: None,
         };
         assert!(!host.promote_origin("http://192.168.1.10:47420"));
@@ -285,14 +349,30 @@ mod tests {
         assert!(!host.add_candidates(["http://172.20.10.1:47420"]));
         assert_eq!(
             host.candidates,
-            vec!["http://192.168.1.10:47420", "http://172.20.10.1:47420"]
+            vec!["http://172.20.10.1:47420", "http://192.168.1.10:47420"]
         );
         let many: Vec<String> = (0..40)
             .map(|n| format!("http://10.1.0.{n}:47420"))
             .collect();
         host.add_candidates(many.iter().map(String::as_str));
         assert_eq!(host.candidates.len(), MAX_CANDIDATE_ORIGINS);
-        assert_eq!(host.candidates[0], "http://192.168.1.10:47420");
+        assert_eq!(host.candidates[0], "http://10.1.0.0:47420");
+        assert!(
+            !host.add_candidates(many.iter().map(String::as_str)),
+            "an oversized repeated discovery result must not rotate the cache and restart recovery"
+        );
+        let office = "http://192.168.1.161:47420";
+        assert!(
+            host.add_candidates([office]),
+            "a new network must replace stale hints"
+        );
+        assert_eq!(host.candidates[0], office);
+        assert_eq!(host.candidates.len(), MAX_CANDIDATE_ORIGINS);
+        assert!(!host.candidates.contains(&"http://10.1.0.15:47420".into()));
+        assert!(
+            !host.add_candidates([office]),
+            "the same hint must not restart discovery"
+        );
         assert!(host.promote_origin("http://10.1.0.13:47420"));
         assert_eq!(host.candidates.len(), MAX_CANDIDATE_ORIGINS);
         assert_eq!(host.candidates[0], "http://10.0.0.5:47420");
@@ -311,6 +391,7 @@ mod tests {
             origin: "http://192.168.1.2:47420".into(),
             candidates: Vec::new(),
             token: token.into(),
+            identity_key: None,
             last_connected_unix: None,
         };
         let mut hosts = vec![host("desk", "first"), host("laptop", "laptop")];
@@ -330,5 +411,17 @@ mod tests {
         assert_eq!(invite.origin, "https://tunnel.example.com");
         assert_eq!(parse_pair_url(&pair_url(&invite)), Some(invite));
         assert!(!is_pairing_code("12345"));
+    }
+
+    #[test]
+    fn signed_invites_preserve_alternatives_without_allowing_https_downgrade() {
+        let key = "11".repeat(32);
+        let invite = parse_pair_url(&format!(
+            "tcode://pair?v=1&host=desk&name=Desk&origin=http%3A%2F%2F192.168.31.42%3A47420&code=123456&candidate=http%3A%2F%2F192.168.139.3%3A47420&candidate=http%3A%2F%2F192.168.139.3%3A47420&identity_key={key}"
+        )).unwrap();
+        assert_eq!(invite.candidates, ["http://192.168.139.3:47420"]);
+        assert_eq!(invite.identity_key.as_deref(), Some(key.as_str()));
+        assert!(parse_pair_url("tcode://pair?v=1&host=desk&name=Desk&origin=https%3A%2F%2Fdesk.example&code=123456&candidate=http%3A%2F%2F192.168.1.2").is_none());
+        assert!(parse_pair_url("tcode://pair?v=1&host=desk&name=Desk&origin=http%3A%2F%2F192.168.1.2&code=123456&identity_key=broken").is_none());
     }
 }

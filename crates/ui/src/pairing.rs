@@ -10,6 +10,7 @@ pub use tcode_client::pairing::DEFAULT_REMOTE_PORT;
 
 pub struct PairForm {
     fixed_endpoint: Option<String>,
+    invite: Option<tcode_client::pairing::PairInvite>,
     pub discovered: Vec<DiscoveredHost>,
     pub browsing: bool,
     /// Paired but waiting for the user to connect.
@@ -48,6 +49,7 @@ impl PairForm {
             filled: false,
             generation: 0,
             fixed_endpoint: fixed,
+            invite: None,
             listening: false,
         }
     }
@@ -74,13 +76,26 @@ impl PairForm {
         if !is_pairing_code(&code) {
             return None;
         }
-        Some(PairRequest { origin, code })
+        let invite = self
+            .invite
+            .as_ref()
+            .filter(|invite| invite.origin == origin);
+        Some(PairRequest {
+            host_id: invite.map(|invite| invite.host_id.clone()),
+            identity_key: invite.and_then(|invite| invite.identity_key.clone()),
+            candidates: invite
+                .map(|invite| invite.candidates.clone())
+                .unwrap_or_default(),
+            origin,
+            code,
+        })
     }
 
     /// Reset for a fresh attempt and stamp it. Any in-flight browse or pair
     /// result from the previous generation is discarded when it lands.
     pub fn restart(&mut self) -> u64 {
         self.paired = None;
+        self.invite = None;
         self.error = None;
         self.filled = false;
         self.busy = false;
@@ -145,11 +160,14 @@ impl PairForm {
             return false;
         };
         if self.fixed_endpoint.is_none() {
-            self.address
-                .update(cx, |state, cx| state.set_value(invite.origin, window, cx));
+            self.address.update(cx, |state, cx| {
+                state.set_value(invite.origin.clone(), window, cx)
+            });
         }
-        self.code
-            .update(cx, |state, cx| state.set_value(invite.code, window, cx));
+        self.code.update(cx, |state, cx| {
+            state.set_value(invite.code.clone(), window, cx)
+        });
+        self.invite = Some(invite);
         self.filled = true;
         self.error = None;
         true
@@ -157,6 +175,7 @@ impl PairForm {
 
     /// Fill a discovered origin and focus the connection code.
     pub fn fill_discovered(&mut self, origin: String, window: &mut Window, cx: &mut App) {
+        self.invite = None;
         self.error = None;
         self.address
             .update(cx, |state, cx| state.set_value(origin, window, cx));
@@ -167,23 +186,42 @@ impl PairForm {
     }
 }
 
-/// Turn a transport failure into something the user can act on: a wrong or
-/// expired code, an unreachable endpoint, or the raw reason.
+/// Interpret known transport reasons here, where the recovery advice can be
+/// localized. A lost reply cannot establish whether a single-use code was used.
 pub fn pair_error(error: &str, address: &str) -> String {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("403")
-        || lower.contains("401")
-        || lower.contains("expired")
-        || lower.contains("invalid code")
-    {
-        crate::tr!("hosts.pair.bad_code").into_owned()
-    } else if ["timeout", "timed out", "refused", "connect", "dns"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-    {
-        crate::tr!("hosts.pair.network_error", address = address).into_owned()
-    } else {
-        crate::tr!("hosts.pair.failed", reason = error).into_owned()
+    match lower.trim() {
+        "could not authenticate the machine at any invited address"
+        | "pairing identity changed" => crate::tr!("hosts.pair.identity_error").into_owned(),
+        "invalid pairing invitation"
+        | "missing pairing identity"
+        | "invalid pairing identity"
+        | "invalid insecure pairing alternative"
+        | "invalid pairing request"
+        | "malformed pairing request" => crate::tr!("hosts.pair.bad_invite").into_owned(),
+        "incomplete pairing response"
+        | "pairing response timed out"
+        | "invalid pairing response"
+        | "incomplete http response"
+        | "invalid http response" => crate::tr!("hosts.pair.unconfirmed").into_owned(),
+        "pairing_disabled" | "pairing disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
+        "pairing rejected" => crate::tr!("hosts.pair.bad_code").into_owned(),
+        _ if lower.contains("403")
+            || lower.contains("401")
+            || lower.contains("expired")
+            || lower.contains("invalid code") =>
+        {
+            // Older HTTP clients retain only the status, so 403 cannot tell
+            // an expired code from a host that disabled new pairings.
+            crate::tr!("hosts.pair.bad_code").into_owned()
+        }
+        _ if ["timeout", "timed out", "refused", "connect", "dns"]
+            .iter()
+            .any(|needle| lower.contains(needle)) =>
+        {
+            crate::tr!("hosts.pair.network_error", address = address).into_owned()
+        }
+        _ => crate::tr!("hosts.pair.failed", reason = error).into_owned(),
     }
 }
 
@@ -193,6 +231,56 @@ mod tests {
     use tcode_client::host::DiscoveredHost;
 
     use super::*;
+
+    #[test]
+    fn pairing_failures_preserve_the_recovery_action_instead_of_exposing_transport_wording() {
+        for (errors, key) in [
+            (
+                &[
+                    "could not authenticate the machine at any invited address",
+                    "pairing identity changed",
+                ][..],
+                "hosts.pair.identity_error",
+            ),
+            (
+                &[
+                    "invalid pairing invitation",
+                    "missing pairing identity",
+                    "invalid pairing identity",
+                    "invalid insecure pairing alternative",
+                    "malformed pairing request",
+                ][..],
+                "hosts.pair.bad_invite",
+            ),
+            (
+                &[
+                    "incomplete pairing response",
+                    "pairing response timed out",
+                    "invalid pairing response",
+                    "incomplete HTTP response",
+                ][..],
+                "hosts.pair.unconfirmed",
+            ),
+            (&["pairing_disabled"][..], "hosts.pair.disabled"),
+            (
+                &[
+                    "HTTP/1.1 403 Forbidden",
+                    "HTTP 401",
+                    "invalid or expired pairing code",
+                    "pairing rejected",
+                ][..],
+                "hosts.pair.bad_code",
+            ),
+        ] {
+            for error in errors {
+                assert_eq!(
+                    pair_error(error, "192.168.1.161:47420"),
+                    crate::tr!(key).into_owned(),
+                    "wrong recovery advice for {error}",
+                );
+            }
+        }
+    }
 
     fn discovered(name: &str) -> DiscoveredHost {
         DiscoveredHost {
@@ -218,6 +306,8 @@ mod tests {
             host_id: "h".into(),
             name: "Host".into(),
             origin: "http://10.0.0.4:47420".into(),
+            candidates: Vec::new(),
+            identity_key: None,
             code: "123456".into(),
         });
         cx.update(|window, cx| {
@@ -270,7 +360,7 @@ mod tests {
             assert_eq!(
                 holder.0.error.as_deref(),
                 Some(crate::tr!("hosts.pair.bad_code").into_owned().as_str()),
-                "a rejected code must read as a code problem, not a network one"
+                "a status-only rejection cannot diagnose an expired or malformed code"
             );
         });
     }

@@ -132,6 +132,7 @@ pub struct BrowserLifecycle {
     active_identity: Option<(String, String)>,
     creator: Creator,
     proxy: Option<tcode_client::pairing::PairedHost>,
+    endpoint: Option<tcode_remote::preview::PreviewEndpoint>,
     #[cfg(any(target_os = "windows", target_os = "android"))]
     _native_proxy: Option<tcode_remote::preview::NativeProxy>,
 }
@@ -146,12 +147,19 @@ impl BrowserLifecycle {
         owner: Weak<()>,
         proxy: Result<Option<tcode_client::pairing::PairedHost>, String>,
     ) -> Self {
+        let mut endpoint = None;
+        let proxy = proxy.and_then(|host| {
+            if let Some(host) = &host {
+                endpoint = Some(tcode_remote::preview::PreviewEndpoint::new(host)?);
+            }
+            Ok(host)
+        });
         #[cfg(any(target_os = "windows", target_os = "android"))]
         let mut native_proxy = None;
         #[cfg(any(target_os = "windows", target_os = "android"))]
         let proxy = proxy.and_then(|host| {
             host.map(|mut host| {
-                let bridge = tcode_remote::preview::NativeProxy::new(&host)?;
+                let bridge = tcode_remote::preview::NativeProxy::new(endpoint.clone().unwrap())?;
                 host.origin = bridge.origin().to_owned();
                 native_proxy = Some(bridge);
                 Ok(host)
@@ -175,12 +183,21 @@ impl BrowserLifecycle {
         Self {
             owner,
             proxy: proxy.ok().flatten(),
+            endpoint,
             #[cfg(any(target_os = "windows", target_os = "android"))]
             _native_proxy: native_proxy,
             slots: HashMap::new(),
             warm: HashSet::new(),
             active_identity: None,
             creator,
+        }
+    }
+
+    pub(super) fn refresh_endpoint(&self, host: &tcode_client::pairing::PairedHost) {
+        if let Some(endpoint) = &self.endpoint
+            && let Err(error) = endpoint.update(host)
+        {
+            log::warn!("preview: could not refresh paired machine address: {error}");
         }
     }
 
@@ -700,9 +717,9 @@ mod platform {
         });
         #[cfg(target_os = "macos")]
         let remote = lifecycle
-            .proxy
+            .endpoint
             .clone()
-            .map(|host| super::super::remote::RemoteBrowser::install(&webview, host, cx));
+            .map(|endpoint| super::super::remote::RemoteBrowser::install(&webview, endpoint, cx));
         lifecycle.slots.insert(
             key.to_string(),
             WebViewSlot::Ready {

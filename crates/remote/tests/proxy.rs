@@ -13,6 +13,7 @@ struct Machine {
     server: Option<RemoteServer>,
     root: PathBuf,
     auth: String,
+    paired: tcode_remote::client::PairedHost,
 }
 impl Machine {
     fn new() -> Self {
@@ -34,15 +35,21 @@ impl Machine {
         )
         .unwrap();
         let origin = format!("http://{}", server.local_addr());
-        let token = if password {
+        let paired = if password {
             let body = serde_json::json!({"password":"proxy password","device_name":"browser"})
                 .to_string();
             tcode_remote::client::http(&origin, "POST", "/auth/setup", &body).unwrap();
             let bytes = tcode_remote::client::http(&origin, "POST", "/auth/login", &body).unwrap();
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["token"]
-                .as_str()
-                .unwrap()
-                .to_owned()
+            let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            tcode_remote::client::PairedHost {
+                host_id: reply["host_id"].as_str().unwrap().into(),
+                name: reply["host_name"].as_str().unwrap().into(),
+                origin: origin.clone(),
+                candidates: Vec::new(),
+                token: reply["token"].as_str().unwrap().into(),
+                identity_key: reply["identity_key"].as_str().map(str::to_owned),
+                last_connected_unix: None,
+            }
         } else {
             tcode_remote::client::pair(
                 &origin,
@@ -54,15 +61,15 @@ impl Machine {
                 },
             )
             .unwrap()
-            .token
         };
         Self {
             server: Some(server),
             root,
             auth: format!(
                 "Proxy-Authorization: Basic {}\r\n",
-                STANDARD.encode(format!("tcode:{}", token))
+                STANDARD.encode(format!("tcode:{}", paired.token))
             ),
+            paired,
         }
     }
     fn socket(&self) -> TcpStream {
@@ -321,21 +328,228 @@ fn connect_preserves_half_close_and_host_shutdown_closes_active_tunnels() {
     assert_eq!(socket.read(&mut [0; 1]).unwrap(), 0);
 }
 
+fn paired_host(machine: &Machine) -> tcode_remote::client::PairedHost {
+    machine.paired.clone()
+}
+
 fn paired_preview(machine: &Machine) -> tcode_remote::preview::PreviewRoutes {
-    let encoded = machine
-        .auth
-        .trim()
-        .strip_prefix("Proxy-Authorization: Basic ")
-        .unwrap();
-    let decoded = String::from_utf8(STANDARD.decode(encoded).unwrap()).unwrap();
-    tcode_remote::preview::PreviewRoutes::new(tcode_remote::client::PairedHost {
-        host_id: "fixture".into(),
-        name: "fixture".into(),
-        origin: format!("http://{}", machine.server.as_ref().unwrap().local_addr()),
-        candidates: Vec::new(),
-        token: decoded.strip_prefix("tcode:").unwrap().into(),
-        last_connected_unix: None,
-    })
+    tcode_remote::preview::PreviewRoutes::new(
+        tcode_remote::preview::PreviewEndpoint::new(&paired_host(machine)).unwrap(),
+    )
+}
+
+#[test]
+fn retained_browser_routes_follow_the_authenticated_machine_after_migration() {
+    for bridged in [false, true] {
+        let mut machine = Machine::new();
+        let mut host = paired_host(&machine);
+        let endpoint = tcode_remote::preview::PreviewEndpoint::new(&host).unwrap();
+        let mut unrelated = host.clone();
+        unrelated.origin = "http://127.0.0.1:1".into();
+        unrelated.token = "a replacement pairing".into();
+        assert!(endpoint.update(&unrelated).is_err());
+        unrelated.token = host.token.clone();
+        unrelated.host_id = "another machine".into();
+        assert!(endpoint.update(&unrelated).is_err());
+        let bridge =
+            bridged.then(|| tcode_remote::preview::NativeProxy::new(endpoint.clone()).unwrap());
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = target.local_addr().unwrap();
+        let mut routes = tcode_remote::preview::PreviewRoutes::new(endpoint.clone());
+        let logical = format!("http://{destination}/page");
+        let actual = routes.navigate(&logical).unwrap();
+        let browser_address = url::Url::parse(
+            bridge
+                .as_ref()
+                .map(|bridge| bridge.origin())
+                .unwrap_or(&actual),
+        )
+        .unwrap()
+        .socket_addrs(|| None)
+        .unwrap()[0];
+        for response in [b"before", b"after!"] {
+            let mut browser = TcpStream::connect(browser_address).unwrap();
+            browser
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            if bridged {
+                browser
+                    .write_all(
+                        format!("CONNECT {destination} HTTP/1.1\r\n{}\r\n", machine.auth)
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                assert!(head(&mut browser).starts_with("HTTP/1.1 200 "));
+            }
+            // Send before accepting so a stale/refused tunnel fails within the
+            // read timeout instead of blocking the fixture's target accept.
+            browser.write_all(b"request").unwrap();
+            let target = target.try_clone().unwrap();
+            let serving = std::thread::spawn(move || {
+                target.set_nonblocking(true).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut remote = loop {
+                    match target.accept() {
+                        Ok((remote, _)) => break remote,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(error) => panic!("preview did not reach its target: {error}"),
+                    }
+                };
+                remote.set_nonblocking(false).unwrap();
+                remote
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                remote.read_exact(&mut [0; 7]).unwrap();
+                remote.write_all(response).unwrap();
+                if response == b"before" {
+                    assert_eq!(
+                        remote.read(&mut [0]).unwrap(),
+                        0,
+                        "migration retires the old tunnel"
+                    );
+                }
+            });
+            let mut reply = [0; 6];
+            browser.read_exact(&mut reply).unwrap();
+            assert_eq!(&reply, response);
+            if response == b"before" {
+                // Keep the old entry alive during cutover to prove that origin
+                // migration itself closes retained browser connections.
+                let old = machine.server.take().unwrap();
+                let (to_host, _) = async_channel::unbounded();
+                let (_, from_host) = async_channel::unbounded();
+                machine.server = Some(
+                    serve(
+                        HostMux::new(to_host, from_host),
+                        RemoteConfig {
+                            listen: "127.0.0.1:0".parse().unwrap(),
+                            host_name: "proxy test".into(),
+                            data_dir: machine.root.clone(),
+                            static_bundle: None,
+                            browser_password: false,
+                        },
+                    )
+                    .unwrap(),
+                );
+                host.origin = format!("http://{}", machine.server.as_ref().unwrap().local_addr());
+                endpoint.update(&host).unwrap();
+                assert_eq!(
+                    routes.navigate(&logical).unwrap(),
+                    actual,
+                    "migration retains the browser's local URL"
+                );
+                assert_eq!(browser.read(&mut [0]).unwrap(), 0);
+                old.shutdown();
+            }
+            serving.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn preview_follows_live_recovery_when_the_saved_address_cannot_be_written() {
+    for bridged in [false, true] {
+        let machine = Machine::new();
+        // A reachable TCP listener that never speaks identity models the stale
+        // address. The authenticated candidate must win the actual dial race.
+        let stale = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut host = paired_host(&machine);
+        host.origin = format!("http://{}", stale.local_addr().unwrap());
+        host.add_candidates([machine.paired.origin.as_str()]);
+        let profile = machine.root.join("client");
+        tcode_remote::client::save_hosts(&profile, std::slice::from_ref(&host)).unwrap();
+        std::fs::create_dir(profile.join("hosts.json.tmp")).unwrap();
+
+        let endpoint = tcode_remote::preview::PreviewEndpoint::new(&host).unwrap();
+        let bridge =
+            bridged.then(|| tcode_remote::preview::NativeProxy::new(endpoint.clone()).unwrap());
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = destination.local_addr().unwrap();
+        let mut routes = tcode_remote::preview::PreviewRoutes::new(endpoint.clone());
+        let logical = format!("http://{address}/page");
+        let browser_url = routes.navigate(&logical).unwrap();
+
+        let client = tcode_remote::client::connect(
+            host.clone(),
+            tcode_client::host::DeviceIdentity {
+                id: "test-device".into(),
+                name: "test device".into(),
+                platform: None,
+            },
+            Some(profile.clone()),
+        );
+        smol::block_on(futures_lite::future::race(
+            async {
+                while client.state.recv().await.unwrap() != tcode_client::ConnectionState::Syncing {
+                }
+            },
+            async {
+                smol::Timer::after(Duration::from_secs(5)).await;
+                panic!("authenticated recovery did not complete");
+            },
+        ));
+        let recovered = client.current_host.snapshot();
+        assert_eq!(recovered.origin, machine.paired.origin);
+        assert_eq!(
+            tcode_remote::client::load_hosts(&profile).unwrap()[0].origin,
+            host.origin,
+            "write failure really retained the stale on-disk address"
+        );
+        endpoint.update(&recovered).unwrap();
+        assert_eq!(routes.navigate(&logical).unwrap(), browser_url);
+        let browser_address = url::Url::parse(
+            bridge
+                .as_ref()
+                .map(|bridge| bridge.origin())
+                .unwrap_or(&browser_url),
+        )
+        .unwrap()
+        .socket_addrs(|| None)
+        .unwrap()[0];
+        let serving = std::thread::spawn(move || {
+            destination.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match destination.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("recovered preview did not reach its target: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream.read_exact(&mut [0; 7]).unwrap();
+            stream.write_all(b"recovered").unwrap();
+        });
+        let mut browser = TcpStream::connect(browser_address).unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        if bridged {
+            browser
+                .write_all(format!("CONNECT {address} HTTP/1.1\r\n{}\r\n", machine.auth).as_bytes())
+                .unwrap();
+            assert!(head(&mut browser).starts_with("HTTP/1.1 200 "));
+        }
+        browser.write_all(b"request").unwrap();
+        let mut reply = [0; 9];
+        browser.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"recovered");
+        serving.join().unwrap();
+        client.to_host.close();
+    }
 }
 
 #[test]
@@ -575,15 +789,13 @@ fn native_bridge_preserves_reverse_half_close_auth_and_attachment_lifetime() {
     for bridged in [false, true] {
         let machine = Machine::new();
         let server = machine.server.as_ref().unwrap();
-        let host = tcode_remote::client::PairedHost {
-            origin: format!("http://{}", server.local_addr()),
-            host_id: String::new(),
-            name: String::new(),
-            candidates: Vec::new(),
-            token: String::new(),
-            last_connected_unix: None,
-        };
-        let bridge = bridged.then(|| tcode_remote::preview::NativeProxy::new(&host).unwrap());
+        let host = paired_host(&machine);
+        let bridge = bridged.then(|| {
+            tcode_remote::preview::NativeProxy::new(
+                tcode_remote::preview::PreviewEndpoint::new(&host).unwrap(),
+            )
+            .unwrap()
+        });
         let address = bridge
             .as_ref()
             .map(|bridge| bridge.origin().trim_start_matches("http://").to_owned())

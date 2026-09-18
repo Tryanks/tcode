@@ -23,9 +23,14 @@ members = [
 exclude = [
     "crates/platform/gpui-ios",
     "crates/platform/gpui-android",
+    "vendor/block",
 ]
 resolver = "3"
 default-members = ["crates/app"]
+
+[patch.crates-io]
+# The upstream extern class uses an uninhabited type; see vendor/block/PATCH.md.
+block = { path = "vendor/block" }
 
 [profile.release]
 opt-level = 3

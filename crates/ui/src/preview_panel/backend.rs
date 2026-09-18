@@ -59,6 +59,12 @@ impl Backend {
 }
 
 impl PreviewPanel {
+    pub(super) fn refresh_preview_endpoint(&self, cx: &mut Context<Self>) {
+        if let Ok(Some(host)) = self.store.read(cx).preview_proxy() {
+            self.lifecycle_entity().read(cx).refresh_endpoint(&host);
+        }
+    }
+
     /// The compact shell owns which panel segment is mounted, including Terminal
     /// (which does not change the stored right-panel tab).
     pub(crate) fn set_compact_panel_selected(&mut self, selected: bool, cx: &mut Context<Self>) {

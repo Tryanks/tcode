@@ -118,15 +118,11 @@ impl ClientAttachment {
     }
 
     pub fn save_host(&self, host: PairedHost) {
-        let mut hosts = self.hosts();
-        tcode_client::pairing::remember_host(&mut hosts, host);
-        self.host.save_hosts(&hosts);
+        self.host.remember_host(host);
     }
 
     pub fn remove_host(&self, host_id: &str) {
-        let mut hosts = self.hosts();
-        hosts.retain(|existing| existing.host_id != host_id);
-        self.host.save_hosts(&hosts);
+        self.host.remove_host(host_id);
     }
 }
 
@@ -281,15 +277,25 @@ impl RemotePanel {
         cx.spawn(async move |this, cx| {
             let result = client.pair(request).await;
             let _ = this.update(cx, |panel, cx| {
-                if let Ok(host) = &result {
-                    cx.global::<ClientAttachment>().save_host(host.clone());
-                }
-                if panel.form.finish_pair(generation, result, &address) {
-                    cx.notify();
-                }
+                panel.finish_pair(generation, result, &address, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_pair(
+        &mut self,
+        generation: u64,
+        result: Result<PairedHost, String>,
+        address: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.form.finish_pair(generation, result.clone(), address) {
+            if let Ok(host) = result {
+                cx.global::<ClientAttachment>().save_host(host);
+            }
+            cx.notify();
+        }
     }
 
     /// Start a fresh pairing attempt on the Pair page.
@@ -874,6 +880,43 @@ mod tests {
             "Xiaomi 15 · Android 15"
         );
         assert_eq!(device_label("older phone", None), "older phone");
+    }
+
+    #[cfg(feature = "remote-hosting")]
+    #[gpui::test]
+    fn superseded_pairing_does_not_overwrite_the_saved_machine(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "tcode-stale-pairing-{}",
+            tcode_services::store::now_millis()
+        ));
+        let client = Rc::new(tcode_remote::client_host::NativeClientHost::new(
+            root.clone(),
+            "phone",
+        ));
+        cx.update(|cx| cx.set_global(ClientAttachment::new(client.clone(), false, |_, _, _| {})));
+        let (probe, cx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|_| WindowState::new(false));
+            PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
+        });
+        let host = |token: &str| PairedHost {
+            host_id: "machine".into(),
+            name: "Machine".into(),
+            origin: "http://192.168.1.10:47420".into(),
+            candidates: Vec::new(),
+            token: token.into(),
+            identity_key: None,
+            last_connected_unix: None,
+        };
+        probe.update_in(cx, |probe, _, cx| {
+            probe.0.update(cx, |panel, cx| {
+                let old = panel.form.restart();
+                let current = panel.form.restart();
+                panel.finish_pair(current, Ok(host("current token")), "192.168.1.10:47420", cx);
+                panel.finish_pair(old, Ok(host("superseded token")), "192.168.1.10:47420", cx);
+            });
+        });
+        assert_eq!(client.load_hosts(), vec![host("current token")]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui::test]

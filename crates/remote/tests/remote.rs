@@ -280,8 +280,8 @@ fn wrong_token_gets_rejected_and_closed() {
             panic!("expected text rejection");
         };
         let reply: Value = serde_json::from_str(&reply).unwrap();
-        // The identity lets a client tell its own machine's refusal from a
-        // stranger that now answers at a stale address.
+        // Older direct-hello clients still receive the claimed host id.
+        // Native recovery verifies identity before sending this credential.
         assert_eq!(
             reply,
             json!({"type": "hello_rejected", "reason": "token", "host_id": server.new_pairing_code().host_id})
@@ -335,6 +335,7 @@ fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_
             json!({
                 "type": "hello_ok",
                 "host_id": code.host_id,
+                "identity_key": code.identity_key,
                 "host_name": "Test Host",
                 "protocol_version": 4,
                 "addrs": code.addrs,
@@ -352,16 +353,11 @@ fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_
     moved.last_connected_unix = Some(7);
     tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&moved)).unwrap();
     let client = connect(moved, device("phone"), Some(client_data.0.clone()));
-    let refused = smol::block_on(futures_lite::future::race(
+    smol::block_on(futures_lite::future::race(
         async {
-            let mut refused = false;
             loop {
                 match client.state.recv().await.unwrap() {
-                    ConnectionState::Reconnecting {
-                        reason: Some(ConnectionFailure::Unreachable),
-                        ..
-                    } => refused = true,
-                    ConnectionState::Syncing => return refused,
+                    ConnectionState::Syncing => return,
                     ConnectionState::Offline { reason } => {
                         panic!("a stranger's rejection ended the pairing: {reason:?}")
                     }
@@ -374,16 +370,15 @@ fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_
             panic!("candidate was never raced");
         },
     ));
-    assert!(
-        refused,
-        "the stranger's token rejection must be a plain miss"
-    );
+    // Candidates race on the first attempt: a healthy candidate can win
+    // without exposing a failed whole round to the UI.
     let saved = tcode_remote::client::load_hosts(&client_data.0)
         .unwrap()
         .remove(0);
     assert_eq!(saved.origin, origin);
-    assert_eq!(saved.candidates[0], stale);
+    assert!(saved.candidates.contains(&stale));
     assert_eq!(saved.token, paired.token);
+    assert_eq!(saved.identity_key, paired.identity_key);
     assert_eq!(saved.last_connected_unix, Some(7));
     client.to_host.close();
     server.shutdown();
@@ -613,6 +608,7 @@ fn browser_password_setup_login_lockout_and_native_pairing_share_device_tokens()
         origin: origin.clone(),
         candidates: Vec::new(),
         token: paired["token"].as_str().unwrap().into(),
+        identity_key: None,
         last_connected_unix: None,
     };
     let client = connect(host, device("Browser"), None);

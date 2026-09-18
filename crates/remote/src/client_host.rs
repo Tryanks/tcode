@@ -192,6 +192,32 @@ impl ClientHost for NativeClientHost {
         }
     }
 
+    fn remember_host(&self, host: PairedHost) {
+        if let Err(error) = crate::client::update_hosts(&self.data_dir, |hosts| {
+            tcode_client::pairing::remember_host(hosts, host);
+        }) {
+            log::error!("could not save paired machine: {error}");
+        }
+    }
+
+    fn remove_host(&self, host_id: &str) {
+        if let Err(error) = crate::client::update_hosts(&self.data_dir, |hosts| {
+            hosts.retain(|host| host.host_id != host_id);
+        }) {
+            log::error!("could not remove paired machine: {error}");
+        }
+    }
+
+    fn stamp_connected(&self, host_id: &str, timestamp: u64) {
+        if let Err(error) = crate::client::update_hosts(&self.data_dir, |hosts| {
+            if let Some(host) = hosts.iter_mut().find(|host| host.host_id == host_id) {
+                host.last_connected_unix = Some(timestamp);
+            }
+        }) {
+            log::error!("could not record machine connection: {error}");
+        }
+    }
+
     fn last_host_id(&self) -> Option<String> {
         self.prefs()
             .get("last_host_id")
@@ -210,9 +236,7 @@ impl ClientHost for NativeClientHost {
 
     fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>> {
         let device = self.device_identity();
-        Box::pin(
-            async move { crate::client::pair_async(&request.origin, &request.code, &device).await },
-        )
+        Box::pin(async move { crate::client::pair_request(request, &device).await })
     }
 
     fn open_in_editor(&self, path: &Path) -> Option<Result<(), String>> {
@@ -229,6 +253,7 @@ impl ClientHost for NativeClientHost {
             to_host: client.to_host,
             from_host: client.from_host,
             state: client.state,
+            current_host: Some(client.current_host),
         }
     }
 
@@ -583,6 +608,7 @@ mod tests {
             origin: "http://192.168.1.24:47420".into(),
             candidates: Vec::new(),
             token: "unchanged-token".into(),
+            identity_key: None,
             last_connected_unix: Some(42),
         };
         client.save_hosts(std::slice::from_ref(&saved));
@@ -596,6 +622,56 @@ mod tests {
         client.save_hosts(&[saved]);
         assert!(smol::block_on(client.discover_origins("right")).is_empty());
         assert_eq!(calls.get(), 1, "HTTPS must not browse");
+    }
+
+    #[test]
+    fn connection_stamp_preserves_an_address_update_already_in_progress() {
+        let dir = TestDir::new();
+        let client = NativeClientHost::new(dir.0.clone(), "phone");
+        client.remember_host(PairedHost {
+            host_id: "machine".into(),
+            name: "Machine".into(),
+            origin: "http://192.168.31.5:47420".into(),
+            candidates: Vec::new(),
+            token: "token".into(),
+            identity_key: None,
+            last_connected_unix: None,
+        });
+        let (locked, received) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let transport_dir = dir.0.clone();
+        let transport = std::thread::spawn(move || {
+            crate::client::update_hosts(&transport_dir, |hosts| {
+                hosts[0].promote_origin("http://192.168.1.161:47420");
+                locked.send(()).unwrap();
+                released.recv().unwrap();
+            })
+            .unwrap();
+        });
+        received.recv().unwrap();
+        let (started, starting) = std::sync::mpsc::channel();
+        let (finished, completion) = std::sync::mpsc::channel();
+        let stamp_dir = dir.0.clone();
+        let stamp = std::thread::spawn(move || {
+            let client = NativeClientHost::new(stamp_dir, "phone");
+            started.send(()).unwrap();
+            client.stamp_connected("machine", 1234);
+            finished.send(()).unwrap();
+        });
+        starting.recv().unwrap();
+        assert!(
+            completion
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "the connection stamp must wait for the address transaction"
+        );
+        release.send(()).unwrap();
+        transport.join().unwrap();
+        stamp.join().unwrap();
+        let saved = client.load_hosts().remove(0);
+        assert_eq!(saved.origin, "http://192.168.1.161:47420");
+        assert_eq!(saved.candidates, vec!["http://192.168.31.5:47420"]);
+        assert_eq!(saved.last_connected_unix, Some(1234));
     }
 
     #[test]
