@@ -210,6 +210,7 @@ async fn pair(code: &str, device: &DeviceIdentity) -> Result<PairedHost, String>
             host_id: field("host_id")?,
             name: field("host_name")?,
             token: field("token")?,
+            identity_key: value["identity_key"].as_str().map(str::to_owned),
             origin,
             candidates: Vec::new(),
             last_connected_unix: None,

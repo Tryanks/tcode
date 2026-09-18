@@ -224,6 +224,12 @@ fn print_pairing(pairing: &PairingCode, bound: SocketAddr) -> Result<(), String>
         host_id: pairing.host_id.clone(),
         name: pairing.host_name.clone(),
         origin: tcode_remote::client::lan_origin(&addrs[0], pairing.port),
+        candidates: addrs
+            .iter()
+            .skip(1)
+            .map(|addr| tcode_remote::client::lan_origin(addr, pairing.port))
+            .collect(),
+        identity_key: Some(pairing.identity_key.clone()),
         code: pairing.code.clone(),
     });
     let qr = QrCode::new(url.as_bytes()).map_err(|error| error.to_string())?;
@@ -321,6 +327,7 @@ mod tests {
             browser_url: "http://192.168.1.4:47420/#code=123456".into(),
             expires_in_secs: 300,
             host_id: "host".into(),
+            identity_key: "11".repeat(32),
             host_name: "Host".into(),
             port: 47_420,
             addrs: vec!["192.168.1.4".into()],

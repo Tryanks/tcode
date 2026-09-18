@@ -1028,7 +1028,10 @@ hosts:
     bad_invite: "That is not a Tcode connection link."
     filled: "Connection details filled in."
     connect_host: "Connect to %{name}"
-    bad_code: "A connection code is six digits."
+    bad_code: "The machine rejected this connection request. Check that Allow other devices is enabled and use a new connection code."
+    identity_error: "Could not verify this machine. Check that both devices can reach each other and run up-to-date Tcode, then scan a new QR code."
+    unconfirmed: "The pairing result could not be confirmed. Generate a new connection code on the machine and try again."
+    disabled: "This machine is not accepting new device pairings. Turn on Allow other devices there and try again."
     network_error: "Could not reach %{address}."
     failed: "Could not add the machine: %{reason}"
 

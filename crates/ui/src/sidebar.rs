@@ -4009,6 +4009,7 @@ mod tests {
                 link,
                 crate::store::WorkspaceAttachment::Local,
                 None,
+                None,
                 false,
                 cx,
             )
@@ -5132,6 +5133,7 @@ mod tests {
             WorkspaceStore::new_attached(
                 link,
                 crate::store::WorkspaceAttachment::Local,
+                None,
                 None,
                 false,
                 cx,

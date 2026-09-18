@@ -5,7 +5,7 @@ use std::rc::Rc;
 use gpui::{App, Context, Entity, EventEmitter, Subscription as GpuiSubscription, Task};
 use tcode_client::{
     ConnectionState, HostLink,
-    host::{ClientHost, ClientPreferences},
+    host::{ClientHost, ClientPreferences, LiveHost},
 };
 use tcode_core::{
     git::{GitFileEntry, MenuItem, QuickAction, menu_items, quick_action},
@@ -111,6 +111,11 @@ pub struct WorkspaceStore {
     host: HostLink,
     attachment: WorkspaceAttachment,
     client_host: Option<Rc<dyn ClientHost>>,
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    current_host: Option<LiveHost>,
     client_preferences: ClientPreferences,
     image_namespace: u64,
     attachment_tasks: Vec<Task<()>>,
@@ -258,7 +263,7 @@ impl WorkspaceStore {
     /// a phone or browser on a single-threaded executor — go through
     /// [`WorkspaceStore::new_attached`] directly.
     pub fn new(host: HostLink, cx: &mut Context<Self>) -> Self {
-        Self::new_attached(host, WorkspaceAttachment::Local, None, true, cx)
+        Self::new_attached(host, WorkspaceAttachment::Local, None, None, true, cx)
     }
 
     /// Construct the complete projection for exactly one client link.
@@ -272,6 +277,7 @@ impl WorkspaceStore {
         host: HostLink,
         attachment: WorkspaceAttachment,
         client_host: Option<Rc<dyn ClientHost>>,
+        _current_host: Option<LiveHost>,
         seed_blocking: bool,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -294,6 +300,11 @@ impl WorkspaceStore {
             host: host.clone(),
             attachment,
             client_host,
+            #[cfg(all(
+                feature = "native-preview",
+                any(target_os = "macos", target_os = "windows", target_os = "android")
+            ))]
+            current_host: _current_host,
             client_preferences,
             image_namespace,
             attachment_tasks: Vec::new(),
@@ -449,6 +460,7 @@ impl WorkspaceStore {
                     if this
                         .update(cx, |store, cx| {
                             store.refresh_address(&state, cx);
+                            cx.emit(state.clone());
                             store.apply_connection_state(state);
                             cx.emit(StoreChange {
                                 topic: TopicKind::Index,
@@ -483,6 +495,7 @@ impl WorkspaceStore {
                 if this
                     .update(cx, |store, cx| {
                         store.refresh_address(&state, cx);
+                        cx.emit(state.clone());
                         store.apply_connection_state(state);
                         cx.notify();
                     })
@@ -519,14 +532,10 @@ impl WorkspaceStore {
         if !self.is_remote() {
             return Ok(None);
         }
-        self.client_host
+        self.current_host
             .as_ref()
-            .and_then(|client| {
-                client
-                    .load_hosts()
-                    .into_iter()
-                    .find(|host| Some(host.host_id.as_str()) == self.remote_host_id())
-            })
+            .map(LiveHost::snapshot)
+            .filter(|host| Some(host.host_id.as_str()) == self.remote_host_id())
             .map(Some)
             .ok_or_else(|| "remote preview requires a paired machine credential".into())
     }
@@ -564,8 +573,9 @@ impl WorkspaceStore {
         }
     }
 
-    /// Feed LAN discovery hints to the transport once per unreachable retry.
-    /// The transport owns finding the machine again (saved candidates, gateway
+    /// Feed LAN hints after unreachable retries, letting each platform browse
+    /// finish even when connection retries advance faster than discovery.
+    /// The transport owns finding the machine again (saved candidates, LAN
     /// probes, interface watching, identity-verified racing); this only runs
     /// the platform browser, which iOS can drive solely from the UI thread.
     fn refresh_address(&mut self, state: &ConnectionState, cx: &mut Context<Self>) {
@@ -587,7 +597,7 @@ impl WorkspaceStore {
         else {
             return;
         };
-        if self.last_refresh_attempt == Some(*attempt) {
+        if self.address_refresh.is_some() || self.last_refresh_attempt == Some(*attempt) {
             return;
         }
         self.last_refresh_attempt = Some(*attempt);
@@ -599,13 +609,14 @@ impl WorkspaceStore {
         };
         self.address_refresh = Some(cx.spawn(async move |this, cx| {
             let origins = client.discover_origins(&host_id).await;
-            if !origins.is_empty() {
-                let _ = this.update(cx, |store, _| {
+            let _ = this.update(cx, |store, _| {
+                store.address_refresh.take();
+                if !origins.is_empty() {
                     store
                         .host
                         .wake(tcode_client::recovery::Wake::Candidates(origins));
-                });
-            }
+                }
+            });
         }));
     }
 
@@ -2770,6 +2781,7 @@ impl Drop for WorkspaceStore {
 
 impl EventEmitter<RuntimeEvent> for WorkspaceStore {}
 impl EventEmitter<StoreChange> for WorkspaceStore {}
+impl EventEmitter<ConnectionState> for WorkspaceStore {}
 
 #[cfg(test)]
 mod tests {
@@ -2790,6 +2802,149 @@ mod tests {
         ConversationDestination, WorkspaceAttachment, WorkspaceStore, effective_client_settings,
     };
 
+    #[cfg(all(
+        feature = "native-preview",
+        any(target_os = "macos", target_os = "windows", target_os = "android")
+    ))]
+    #[gpui::test]
+    fn preview_reads_the_attachment_route_when_saved_hosts_are_stale(cx: &mut TestAppContext) {
+        use std::rc::Rc;
+        use tcode_client::host::{ClientHost as _, LiveHost};
+        let root = std::env::temp_dir().join(format!(
+            "tcode-preview-route-{}-{}",
+            std::process::id(),
+            tcode_services::store::now_millis()
+        ));
+        let client = Rc::new(tcode_remote::client_host::NativeClientHost::new(
+            root.clone(),
+            "phone",
+        ));
+        let mut host = tcode_client::pairing::PairedHost {
+            host_id: "machine".into(),
+            name: "Machine".into(),
+            origin: "http://192.168.31.5:47420".into(),
+            candidates: Vec::new(),
+            token: "test token".into(),
+            identity_key: None,
+            last_connected_unix: None,
+        };
+        client.remember_host(host.clone());
+        let current_host = LiveHost::new(host.clone());
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                tcode_client::HostLink::new(to_host, from_host),
+                WorkspaceAttachment::Remote {
+                    host_id: host.host_id.clone(),
+                    host_name: host.name.clone(),
+                },
+                Some(client.clone()),
+                Some(current_host.clone()),
+                false,
+                cx,
+            )
+        });
+        host.origin = "http://192.168.1.161:47420".into();
+        current_host.authenticated(&host);
+        cx.update(|cx| assert_eq!(store.read(cx).preview_proxy().unwrap().unwrap(), host));
+        assert_eq!(client.load_hosts()[0].origin, "http://192.168.31.5:47420");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "remote-hosting")]
+    #[gpui::test]
+    fn discovery_completes_across_faster_retries_and_stops_when_connected(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        use tcode_client::{ConnectionFailure, ConnectionState, host::ClientHost as _};
+        let root = std::env::temp_dir().join(format!(
+            "tcode-discovery-{}",
+            tcode_services::store::now_millis()
+        ));
+        let (results, discovered) = async_channel::unbounded();
+        let calls = Rc::new(Cell::new(0));
+        let observed = calls.clone();
+        let client = tcode_remote::client_host::NativeClientHost::new(root.clone(), "phone")
+            .with_browser(move || {
+                observed.set(observed.get() + 1);
+                let discovered = discovered.clone();
+                Box::pin(async move { discovered.recv().await.unwrap() })
+            });
+        client.save_hosts(&[tcode_client::pairing::PairedHost {
+            host_id: "machine".into(),
+            name: "Machine".into(),
+            origin: "http://192.168.31.5:47420".into(),
+            candidates: Vec::new(),
+            token: "test token".into(),
+            identity_key: None,
+            last_connected_unix: None,
+        }]);
+        let (to_host, outgoing) = tcode_client::outgoing::channel();
+        let (_incoming, from_host) = async_channel::unbounded();
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                tcode_client::HostLink::new(to_host, from_host),
+                WorkspaceAttachment::Remote {
+                    host_id: "machine".into(),
+                    host_name: "Machine".into(),
+                },
+                Some(Rc::new(client)),
+                None,
+                false,
+                cx,
+            )
+        });
+        let retry = |attempt| ConnectionState::Reconnecting {
+            attempt,
+            reason: Some(ConnectionFailure::Unreachable),
+        };
+        store.update(cx, |store, cx| store.refresh_address(&retry(1), cx));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.refresh_address(&retry(2), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            calls.get(),
+            1,
+            "a faster retry must not cancel the in-flight browse"
+        );
+        let origin = "http://192.168.1.161:47420";
+        results
+            .send_blocking(vec![tcode_client::host::DiscoveredHost {
+                host_id: "machine".into(),
+                name: "Machine".into(),
+                origin: origin.into(),
+            }])
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            outgoing.wake.try_recv().unwrap(),
+            tcode_client::recovery::Wake::Candidates(vec![origin.into()])
+        );
+        store.update(cx, |store, cx| store.refresh_address(&retry(3), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            calls.get(),
+            2,
+            "a completed browse allows a later retry to browse again"
+        );
+        store.update(cx, |store, cx| {
+            store.refresh_address(&ConnectionState::Connected, cx)
+        });
+        results
+            .send_blocking(vec![tcode_client::host::DiscoveredHost {
+                host_id: "machine".into(),
+                name: "Machine".into(),
+                origin: origin.into(),
+            }])
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            outgoing.wake.try_recv().is_err(),
+            "a completed connection retires its browse"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[gpui::test]
     fn scripted_host_send_waits_for_ack_and_rejection_offers_retry(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
@@ -2798,7 +2953,14 @@ mod tests {
         let (replies, from_host) = async_channel::unbounded();
         let link = tcode_client::HostLink::new(to_host, from_host);
         let store = cx.new(|cx| {
-            WorkspaceStore::new_attached(link.clone(), WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(
+                link.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         store.update(cx, |store, _| {
             store.selected_session_id = Some("scripted".into());
@@ -2915,6 +3077,7 @@ mod tests {
                     host_id: "test".into(),
                     host_name: "Test".into(),
                 },
+                None,
                 None,
                 false,
                 cx,
@@ -3085,7 +3248,14 @@ mod tests {
         let (_incoming, from_host) = async_channel::unbounded();
         let host = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(
+                host.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         workspace.update(cx, |store, cx| {
             let task_count = store.attachment_tasks.len();
@@ -3143,7 +3313,14 @@ mod tests {
         let (_incoming, from_host) = async_channel::unbounded();
         let host = tcode_client::HostLink::new(to_host, from_host);
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(host.clone(), WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(
+                host.clone(),
+                WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
         });
         workspace.update(cx, |store, cx| {
             store.select_session("large".into());
@@ -3273,7 +3450,7 @@ mod tests {
                 .await;
         });
         let workspace = cx.new(|cx| {
-            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, false, cx)
+            WorkspaceStore::new_attached(link, WorkspaceAttachment::Local, None, None, false, cx)
         });
         workspace.update(cx, |store, cx| {
             store.selected_session_id = Some("large".into());

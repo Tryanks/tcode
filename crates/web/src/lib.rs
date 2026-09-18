@@ -153,7 +153,16 @@ async fn initial_target(
     let code = code.unwrap();
     let origin = host.fixed_pairing_endpoint().unwrap();
     let address = origin.clone();
-    match host.pair(PairRequest { origin, code }).await {
+    match host
+        .pair(PairRequest {
+            origin,
+            code,
+            host_id: None,
+            identity_key: None,
+            candidates: Vec::new(),
+        })
+        .await
+    {
         Ok(paired) => {
             save_host(host, &paired);
             host.set_last_host_id(Some(&paired.host_id));
@@ -167,9 +176,7 @@ async fn initial_target(
 }
 
 fn save_host(host: &WebHost, paired: &PairedHost) {
-    let mut hosts = host.load_hosts();
-    tcode_client::pairing::remember_host(&mut hosts, paired.clone());
-    host.save_hosts(&hosts);
+    host.remember_host(paired.clone());
 }
 
 #[cfg(feature = "debug-exports")]
@@ -189,7 +196,16 @@ pub async fn debug_pair_and_connect(code: String) -> String {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
     let origin = WebHost.fixed_pairing_endpoint().unwrap();
-    let paired = match WebHost.pair(PairRequest { origin, code }).await {
+    let paired = match WebHost
+        .pair(PairRequest {
+            origin,
+            code,
+            host_id: None,
+            identity_key: None,
+            candidates: Vec::new(),
+        })
+        .await
+    {
         Ok(host) => host,
         Err(error) => return serde_json::json!({"error":error}).to_string(),
     };
