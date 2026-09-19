@@ -67,7 +67,7 @@ jobs:
         # `--from/--to` plan below is authoritative for pull requests anyway,
         # so tolerate the failure and only fall back for the plan reader.
         continue-on-error: true
-        uses: loadingalias/cargo-rail-action@78ad385a85627484a5b634cf1bc3caa1de872c6a # v8.2.0
+        uses: loadingalias/cargo-rail-action@e706767c343acb6a2ab1917f243b1616ae9eb05b # v10.0.0
         with:
           version: 0.25.0
           since: ${{ steps.classify.outputs.base }}
