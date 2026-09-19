@@ -129,7 +129,7 @@ optional = true
 tempfile = { version = "3", optional = true }
 # Pinned to the version lb-wry resolves, so both drive the same WebView2 objects.
 webview2-com = { version = "0.38.2", optional = true }
-windows-core = { version = "0.61", optional = true }
+windows-core = { version = "0.62", optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
