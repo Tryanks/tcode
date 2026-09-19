@@ -25,7 +25,7 @@ base64 = { version = "0.23", optional = true }
 futures-lite = "2"
 futures-util = { version = "0.3", features = ["sink", "io"] }
 getrandom = { version = "0.4", optional = true }
-hmac = "0.12"
+hmac = "0.13"
 if-addrs = "0.15"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
