@@ -125,8 +125,9 @@ xcrun simctl install booted crates/ios/host/build/Build/Products/Debug-iphonesim
 xcrun simctl launch booted com.tryanks.tcode
 ```
 
-See [the design spec](../../../docs/DESIGN.md#compact-layout) for application behavior and
-platform verification, and [remote work mode](../../../docs/remote.md) for
+The layout rule the shell applies on this build is owned by
+[`tcode-ui::window_seam`](../../ui/src/window_seam.rs). See
+[remote work mode](../../../docs/remote.md) for
 pairing with a host.
 
 ## Current limitations
