@@ -183,7 +183,7 @@ class ScopeTests(unittest.TestCase):
                 self.fail("CI requires the pinned Cargo-Rail binary")
             self.skipTest("set CARGO_RAIL_BIN to run the Cargo-Rail integration tests")
         version = subprocess.run([rail, "--version"], check=True, text=True, stdout=subprocess.PIPE).stdout
-        self.assertIn("0.25.0", version)
+        self.assertIn("0.29.0", version)
         self.workspace = Workspace(rail)
 
     def tearDown(self) -> None:
@@ -333,23 +333,24 @@ class RailExecutorTests(unittest.TestCase):
         self.plan = self.root / "plan.json"
         self.plan.write_text("{}", encoding="utf-8")
         self.log = self.root / "cargo.json"
-        self.reader = self.root / "reader.py"
-        self.reader.write_text(
+        selector = self.root / "cargo-rail-action"
+        selector.write_text(
             """#!/usr/bin/env python3
 import os
 import sys
 mode = os.environ['READER_MODE']
 if mode == 'fail':
     raise SystemExit(2)
-if sys.argv[1] == 'cargo-scope':
+if sys.argv[1:3] == ['plan', 'cargo-scope']:
     print('packages' if mode == 'empty' else mode)
-elif sys.argv[1] == 'cargo-args' and mode == 'packages':
+elif sys.argv[1:3] == ['plan', 'cargo-args'] and mode == 'packages':
     sys.stdout.buffer.write(b'-p\\0tcode-core\\0')
-elif sys.argv[1] == 'cargo-args' and mode == 'empty':
+elif sys.argv[1:3] == ['plan', 'cargo-args'] and mode == 'empty':
     sys.stdout.buffer.write(b'\\0')
 """,
             encoding="utf-8",
         )
+        selector.chmod(0o755)
         cargo = self.root / "cargo"
         cargo.write_text(
             """#!/usr/bin/env python3
@@ -367,7 +368,7 @@ open(os.environ['CARGO_LOG'], 'w').write(json.dumps(sys.argv[1:]))
 
     def execute(self, mode: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(EXECUTOR), "--plan", str(self.plan), "--reader", str(self.reader),
+            ["python3", str(EXECUTOR), "--plan", str(self.plan),
              "--work", "cargo.test", "test", "--locked"],
             env={**os.environ, "PATH": f"{self.root}{os.pathsep}{os.environ['PATH']}",
                  "READER_MODE": mode, "CARGO_LOG": str(self.log)},
@@ -384,7 +385,7 @@ open(os.environ['CARGO_LOG'], 'w').write(json.dumps(sys.argv[1:]))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.log.read_text()), ["test", "-p", "tcode-core", "--locked"])
 
-    def test_reader_failure_never_starts_cargo(self) -> None:
+    def test_selector_failure_never_starts_cargo(self) -> None:
         result = self.execute("fail")
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.log.exists())

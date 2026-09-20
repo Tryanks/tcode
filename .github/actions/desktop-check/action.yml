@@ -2,8 +2,8 @@ name: Desktop check
 description: Run the existing desktop checks with Cargo-Rail's validated package scope.
 
 inputs:
-  artifact:
-    description: Name of the uploaded Cargo-Rail plan bundle.
+  base:
+    description: Exact base commit of the planned change, or empty to plan every work item.
     required: true
   host-full:
     description: Whether repository policy widened host checks to the workspace.
@@ -21,24 +21,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Download validated CI plan
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-      with:
-        name: ${{ inputs.artifact }}
-        path: ${{ runner.temp }}/ci-plan
-
-    - name: Install native Cargo-Rail 0.25.0
-      shell: bash
-      run: python3 .github/scripts/install_cargo_rail.py
-
-    - name: Verify CI plan
-      shell: bash
-      env:
-        PLAN_DIR: ${{ runner.temp }}/ci-plan
-      run: |
-        chmod +x "$PLAN_DIR/read.py"
-        python3 "$PLAN_DIR/read.py" verify-checkout "$PLAN_DIR/plan.json"
-
     - name: Enforce process helper boundaries
       if: runner.os == 'Linux'
       shell: bash
@@ -90,6 +72,18 @@ runs:
       with:
         shared-key: ci-${{ runner.os }}-${{ runner.arch }}
 
+    # Cargo-Rail 0.29 binds a saved plan to the planning host's Cargo
+    # executable and toolchain, so every platform plans its own scope after
+    # its toolchain is installed instead of reusing the Linux planning job's.
+    - name: Plan affected Cargo work
+      id: rail
+      if: inputs.host-full != 'true'
+      uses: loadingalias/cargo-rail-action@4a8df181e4f340a164190cf092c9f9239b20edab # v10.0.1
+      with:
+        version: 0.29.0
+        since: ${{ inputs.base }}
+        all: ${{ inputs.base == '' }}
+
     - name: Install Linux system dependencies
       if: runner.os == 'Linux'
       shell: bash
@@ -114,14 +108,14 @@ runs:
       shell: bash
       env:
         HOST_FULL: ${{ inputs.host-full }}
-        PLAN_DIR: ${{ runner.temp }}/ci-plan
+        PLAN_FILE: ${{ steps.rail.outputs.plan-file }}
       run: |
         full=()
         if [[ "$HOST_FULL" == true ]]; then
           full+=(--host-full)
         fi
         python3 .github/scripts/run_rail_cargo.py \
-          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --plan "$PLAN_FILE" \
           --work cargo.clippy "${full[@]}" clippy --all-targets --locked -- -D warnings
 
     - name: Build affected packages
@@ -129,14 +123,14 @@ runs:
       shell: bash
       env:
         HOST_FULL: ${{ inputs.host-full }}
-        PLAN_DIR: ${{ runner.temp }}/ci-plan
+        PLAN_FILE: ${{ steps.rail.outputs.plan-file }}
       run: |
         full=()
         if [[ "$HOST_FULL" == true ]]; then
           full+=(--host-full)
         fi
         python3 .github/scripts/run_rail_cargo.py \
-          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --plan "$PLAN_FILE" \
           --work cargo.build "${full[@]}" build --locked
 
     - name: Run affected package tests under Xvfb
@@ -144,14 +138,14 @@ runs:
       shell: bash
       env:
         HOST_FULL: ${{ inputs.host-full }}
-        PLAN_DIR: ${{ runner.temp }}/ci-plan
+        PLAN_FILE: ${{ steps.rail.outputs.plan-file }}
       run: |
         full=()
         if [[ "$HOST_FULL" == true ]]; then
           full+=(--host-full)
         fi
         python3 .github/scripts/run_rail_cargo.py \
-          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --plan "$PLAN_FILE" \
           --work cargo.test --xvfb "${full[@]}" test --locked
 
     - name: Run affected package tests
@@ -159,12 +153,12 @@ runs:
       shell: bash
       env:
         HOST_FULL: ${{ inputs.host-full }}
-        PLAN_DIR: ${{ runner.temp }}/ci-plan
+        PLAN_FILE: ${{ steps.rail.outputs.plan-file }}
       run: |
         full=()
         if [[ "$HOST_FULL" == true ]]; then
           full+=(--host-full)
         fi
         python3 .github/scripts/run_rail_cargo.py \
-          --plan "$PLAN_DIR/plan.json" --reader "$PLAN_DIR/read.py" \
+          --plan "$PLAN_FILE" \
           --work cargo.test "${full[@]}" test --locked
