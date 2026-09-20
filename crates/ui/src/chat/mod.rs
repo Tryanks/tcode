@@ -340,6 +340,10 @@ pub struct ChatView {
     terminal_drawer: Entity<TerminalDrawer>,
     terminal_was_open: bool,
     list_state: ListState,
+    /// The timeline changed since the list last mirrored it. GPUI's list
+    /// resolves wheel and pan packets against the row indices it painted, so
+    /// rows are only spliced during a frame, never between two frames.
+    timeline_stale: bool,
     history_placeholder_height: gpui::Pixels,
     /// Anchor and distance to scroll back once a page has filled the
     /// reservation the reader had scrolled into.
@@ -447,7 +451,7 @@ impl ChatView {
         let subscriptions =
             vec![
                 cx.observe_in(&workspace_store, window, |this, store, window, cx| {
-                    this.sync_markdown_states(cx);
+                    this.timeline_stale = true;
                     // Desktop can type immediately after opening the terminal.
                     // On software-keyboard devices this also runs during restore,
                     // so wait for a tap on the grid before raising the keyboard.
@@ -475,6 +479,7 @@ impl ChatView {
             terminal_drawer,
             terminal_was_open,
             list_state,
+            timeline_stale: false,
             history_placeholder_height: px(0.),
             reservation_scroll_back: None,
             turn_items: Vec::new(),
@@ -504,6 +509,7 @@ impl ChatView {
 
     /// Mirror timeline markdown text into synchronous [`MarkdownState`] entities.
     fn sync_markdown_states(&mut self, cx: &mut Context<Self>) {
+        self.timeline_stale = false;
         // ListState owns follow intent: user scrolling pauses Tail until the
         // bottom is reached again. Content updates must not override that pause.
         let session_key = self.workspace_store.read(cx).active_session_id();
@@ -968,9 +974,10 @@ impl ChatView {
     }
 
     fn remeasure_expanded(&mut self, turn: usize, cx: &mut Context<Self>) {
-        // Refresh the cached turn fingerprint immediately; the direct remeasure
-        // below covers collapsibles whose state is intentionally not fingerprinted.
-        self.sync_markdown_states(cx);
+        // The next frame refreshes the cached turn fingerprint; the direct
+        // remeasure covers collapsibles whose state is intentionally not
+        // fingerprinted.
+        self.timeline_stale = true;
         self.list_state.remeasure_items(turn..turn + 1);
         cx.notify();
     }
@@ -2581,6 +2588,9 @@ fn markdown_entries_for_residency(
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.timeline_stale {
+            self.sync_markdown_states(cx);
+        }
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
         self.sync_markdown_scroll_position(cx);
         if let Some((expected, distance)) = self.reservation_scroll_back.take() {
@@ -4109,6 +4119,92 @@ mod tests {
                 assert!(composer.bottom() <= px(852. - bottom));
             }
         }
+    }
+
+    #[gpui::test]
+    fn wheel_event_between_a_prepend_and_its_frame_keeps_the_reading_position(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Context, IntoElement, Render, VisualTestContext, Window, point, px};
+
+        struct TouchChat(Entity<ChatView>);
+        impl Render for TouchChat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        let draw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        let full = synthetic_markdown_timeline(120);
+        let mut tail = full.clone();
+        tail.turns.drain(..20);
+        tail.entries.retain(|entry| entry.turn >= 20);
+        for entry in &mut tail.entries {
+            Arc::make_mut(entry).turn -= 20;
+        }
+        let (store, window_state, session_id) = seed_chat(cx, tail);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            TouchChat(cx.new(|cx| ChatView::new(store.clone(), window_state, window, cx)))
+        });
+        let view = root.read_with(cx, |root, _| root.0.clone());
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        draw(cx);
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        let height = list.viewport_bounds().size.height;
+        let scroll = |distance, cx: &mut VisualTestContext| {
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: list.viewport_bounds().center(),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), distance)),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+        };
+        for _ in 0..12 {
+            scroll(height / 4., cx);
+            draw(cx);
+        }
+        assert!(!list.is_following_tail());
+        let before = list.logical_scroll_top();
+        let before_px = list.scroll_px_offset_for_scrollbar().y;
+
+        // An earlier history page arrives from the host between two frames,
+        // while a trackpad pan is still delivering packets. The test app
+        // redraws dirty windows whenever effects flush, so the store update,
+        // its observers and the packet share one flush: the deferred packet
+        // runs after the observers and before the frame, as on a display link.
+        let wheel = gpui::ScrollWheelEvent {
+            position: list.viewport_bounds().center(),
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
+            touch_phase: gpui::TouchPhase::Moved,
+            ..Default::default()
+        };
+        cx.update(|window, cx| {
+            store.update(cx, |store, cx| {
+                store.set_session_replica_for_test(session_id, full, cx);
+                cx.notify();
+            });
+            window.defer(cx, move |window, cx| {
+                window.dispatch_event(gpui::InputEvent::to_platform_input(wheel), cx);
+            });
+        });
+        draw(cx);
+
+        let after = list.logical_scroll_top();
+        assert_eq!(
+            after.item_ix,
+            before.item_ix + 20,
+            "a 40px pan moved the reader off turn {} to turn {} (offset {:?} -> {:?})",
+            before.item_ix + 20,
+            after.item_ix,
+            before.offset_in_item,
+            after.offset_in_item
+        );
+        assert_eq!(after.offset_in_item, before.offset_in_item - px(40.));
+        assert_eq!(list.scroll_px_offset_for_scrollbar().y, before_px + px(40.));
     }
 
     #[gpui::test]
