@@ -215,7 +215,7 @@ impl TerminalKeyBar {
             .hover(|style| style.bg(cx.theme().accent))
             .on_click(cx.listener(move |_, _, window, cx| {
                 focus.focus(window, cx);
-                crate::window_seam::WindowSeam::request_soft_keyboard(cx);
+                window.request_virtual_keyboard();
                 cx.emit(TerminalKeyBarEvent(key));
             }))
             .child(label)
@@ -258,7 +258,7 @@ impl TerminalKeyBar {
                     this.encoder.modifiers.alt = !this.encoder.modifiers.alt;
                 }
                 focus.focus(window, cx);
-                crate::window_seam::WindowSeam::request_soft_keyboard(cx);
+                window.request_virtual_keyboard();
                 cx.notify();
             }))
             .child(label)
@@ -397,7 +397,7 @@ impl Render for TerminalKeyBar {
 }
 
 pub(crate) fn should_show_terminal_key_bar(terminal_focused: bool, cx: &App) -> bool {
-    crate::window_seam::uses_soft_keyboard(cx) && terminal_focused
+    crate::window_seam::is_mobile(cx) && terminal_focused
 }
 
 #[cfg(test)]
@@ -530,14 +530,6 @@ mod tests {
     fn phone_bar_scrolls_without_losing_pinned_keys_or_vertical_motion(cx: &mut TestAppContext) {
         use gpui::{PlatformInput, TouchEvent, TouchId, TouchPhase, point};
         cx.update(crate::theme::init);
-        let requests = std::rc::Rc::new(std::cell::Cell::new(0));
-        let observed = requests.clone();
-        cx.update(|cx| {
-            cx.set_global(
-                crate::window_seam::WindowSeam::new(Default::default)
-                    .with_soft_keyboard(move || observed.set(observed.get() + 1)),
-            )
-        });
         for width in [360., 393.] {
             let (_, cx) = cx.add_window_view(|_, cx| NarrowBarProbe {
                 width,
@@ -587,9 +579,6 @@ mod tests {
             send(TouchPhase::Moved, width + 300., 20., cx);
             send(TouchPhase::Cancelled, width + 300., 20., cx);
             assert_eq!(cx.debug_bounds("terminal-key-left").unwrap(), first);
-            let before = requests.get();
-            cx.simulate_click(pinned.center(), gpui::Modifiers::default());
-            assert_eq!(requests.get(), before + 1, "key-bar taps reopen the IME");
         }
     }
 
@@ -625,14 +614,14 @@ mod tests {
             });
         };
 
-        cx.update(|_, cx| crate::window_seam::override_soft_keyboard_for_test(cx, false));
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         probe.update(cx, |probe, cx| {
             probe.terminal_focused = true;
             cx.notify();
         });
         draw(cx);
         assert!(cx.debug_bounds("terminal-key-bar").is_none());
-        cx.update(|_, cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
         probe.update(cx, |probe, cx| {
             probe.terminal_focused = false;
             cx.notify();

@@ -141,7 +141,7 @@ impl Render for HostPermissions {
                 }));
             }
         }
-        let compact = crate::window_seam::window_is_compact(window, cx);
+        let compact = crate::window_seam::window_is_compact(window);
         let mut button = Button::new("host-permissions-recheck")
             .outline()
             .small()

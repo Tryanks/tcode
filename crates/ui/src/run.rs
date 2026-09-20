@@ -1,9 +1,10 @@
 //! One bootstrap for every client.
 //!
-//! A platform entry point does three things and then hands over: build its
-//! `ClientHost`, describe its window seam, and call [`run_shell`]. Everything
-//! after that — fonts, theme, markdown, keybindings, the window state seed, the
-//! overlay host and the shell itself — is the same code everywhere.
+//! A platform entry point does two things and then hands over: build its
+//! `ClientHost` and call [`run_shell`]. Everything after that — fonts, theme,
+//! markdown, keybindings, the window state seed, the overlay host and the shell
+//! itself — is the same code everywhere. The window's seam (system insets, the
+//! software keyboard) is GPUI's own: see `crate::window_seam`.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -16,7 +17,6 @@ use crate::overlay::OverlayHost;
 use crate::remote::{AttachmentTarget, ClientAttachment};
 use crate::shell::{AppShell, ShellSetup, TogglePalette};
 use crate::theme;
-use crate::window_seam::WindowSeam;
 use crate::window_state::WindowState;
 
 /// The embedded palette every client renders with.
@@ -56,6 +56,10 @@ pub struct ShellOptions {
     /// The user's first OS-configured language when the platform has a more
     /// authoritative API than `sys_locale`. Desktop leaves this as `None`.
     pub system_locale: Option<String>,
+    /// The platform whose application lifecycle can suspend this client. Its
+    /// foreground transitions wake the connection (see [`lifecycle_wake`]);
+    /// a desktop window is never suspended and leaves this as `None`.
+    pub lifecycle: Option<Rc<dyn gpui::Platform>>,
     pub setup: ShellSetup,
 }
 
@@ -68,6 +72,7 @@ impl Default for ShellOptions {
             theme_json: Cow::Borrowed(THEME_JSON),
             activate: false,
             system_locale: None,
+            lifecycle: None,
             setup: ShellSetup::default(),
         }
     }
@@ -100,7 +105,6 @@ impl ShellOptions {
 pub fn run_shell(
     cx: &mut App,
     host: Rc<dyn ClientHost>,
-    seam: WindowSeam,
     options: ShellOptions,
 ) -> (WindowHandle<OverlayHost>, Entity<AppShell>) {
     // Browser bootstrap supplies its Fetch client; native image URLs need an HTTP client too.
@@ -121,7 +125,6 @@ pub fn run_shell(
         Some("system") | None => None,
         override_locale => override_locale,
     });
-    cx.set_global(seam);
     cx.text_system()
         .add_fonts(options.fonts)
         .expect("failed to register bundled application fonts");
@@ -142,7 +145,7 @@ pub fn run_shell(
     let title = options.title;
     let has_local = options.setup.local.is_some();
     let mut setup = options.setup;
-    setup.restore_navigation |= cfg!(any(target_os = "ios", target_os = "android"));
+    setup.restore_navigation |= gpui_base::is_mobile();
     let setup = Rc::new(RefCell::new(Some(setup)));
     let mounted: Rc<RefCell<Option<Entity<AppShell>>>> = Rc::new(RefCell::new(None));
     // Who this client is, and how it re-points at another host. Installed
@@ -193,7 +196,7 @@ pub fn run_shell(
         .take()
         .expect("the shell is built while the window opens");
     crate::shell::set_back_target(window.into(), &shell, cx);
-    if let Some(wakes) = WindowSeam::current(cx).lifecycle_wakes() {
+    if let Some(wakes) = options.lifecycle.as_deref().map(lifecycle_wakes) {
         let shell = shell.downgrade();
         cx.spawn(async move |cx| {
             while let Ok(wake) = wakes.recv().await {
@@ -213,4 +216,69 @@ pub fn run_shell(
         }
     });
     (window, shell)
+}
+
+/// Application recovery policy for a client the OS can suspend: every
+/// foreground transition probes or reconnects the attachment once, depending
+/// on how long the client was away.
+fn lifecycle_wakes(
+    platform: &dyn gpui::Platform,
+) -> async_channel::Receiver<tcode_client::recovery::Wake> {
+    let (sender, receiver) = async_channel::unbounded();
+    let mut lifecycle = tcode_client::recovery::Lifecycle::default();
+    platform.on_app_lifecycle(Box::new(move |phase| {
+        // Wall time includes device sleep. A backward clock correction
+        // saturates to a short absence and still gets a bounded probe.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if let Some(wake) = lifecycle_wake(&mut lifecycle, phase, now) {
+            let _ = sender.try_send(wake);
+        }
+    }));
+    receiver
+}
+
+fn lifecycle_wake(
+    lifecycle: &mut tcode_client::recovery::Lifecycle,
+    phase: gpui::AppLifecyclePhase,
+    now_ms: u64,
+) -> Option<tcode_client::recovery::Wake> {
+    match phase {
+        gpui::AppLifecyclePhase::Background => {
+            lifecycle.background(now_ms);
+            None
+        }
+        gpui::AppLifecyclePhase::Foreground | gpui::AppLifecyclePhase::Active => {
+            lifecycle.foreground(now_ms)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_lifecycle_phase_hook_probes_or_reconnects_once() {
+        use gpui::AppLifecyclePhase as Phase;
+        use tcode_client::recovery::{Lifecycle, Wake};
+        let mut lifecycle = Lifecycle::default();
+        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Background, 0), None);
+        assert_eq!(
+            lifecycle_wake(&mut lifecycle, Phase::Foreground, 9_999),
+            Some(Wake::Probe)
+        );
+        assert_eq!(lifecycle_wake(&mut lifecycle, Phase::Active, 10_000), None);
+        assert_eq!(
+            lifecycle_wake(&mut lifecycle, Phase::Background, 20_000),
+            None
+        );
+        assert_eq!(
+            lifecycle_wake(&mut lifecycle, Phase::Active, 30_000),
+            Some(Wake::Reconnect)
+        );
+    }
 }

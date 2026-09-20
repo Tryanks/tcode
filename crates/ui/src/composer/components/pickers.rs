@@ -487,7 +487,7 @@ impl Composer {
             })
             .trigger(trigger)
             .content(move |_, window, cx| {
-                let compact = crate::window_seam::window_is_compact(window, cx);
+                let compact = crate::window_seam::window_is_compact(window);
                 render_context_meter_pane(usage, account_usage.clone(), provider, pct, compact, cx)
             })
             .into_any_element()
@@ -1634,7 +1634,7 @@ fn render_overflow_pane(
     let interaction_popover = popover.clone();
     v_flex()
         .w_full()
-        .when(!crate::window_seam::window_is_compact(window, cx), |pane| {
+        .when(!crate::window_seam::window_is_compact(window), |pane| {
             pane.w(px(220.))
         })
         .p_1()
@@ -1885,7 +1885,7 @@ fn render_context_meter_pane(
 #[cfg(test)]
 mod sheet_tests {
     use super::*;
-    use gpui::{Render, TestAppContext, WindowInsets, size};
+    use gpui::{Render, TestAppContext, size};
 
     struct PickerHarness {
         store: Entity<WorkspaceStore>,
@@ -1893,8 +1893,8 @@ mod sheet_tests {
     }
 
     impl Render for PickerHarness {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let compact = crate::window_seam::window_is_compact(window, cx);
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let compact = crate::window_seam::window_is_compact(window);
             let store = self.store.clone();
             let context = self.context;
             div().size_full().p_4().child(
@@ -1943,16 +1943,15 @@ mod sheet_tests {
                     context,
                 });
                 cx.simulate_resize(size(px(width), px(852.)));
-                cx.update(|window, cx| {
-                    cx.set_global(crate::window_seam::WindowSeam::new(move || {
-                        let mut insets = WindowInsets::default();
-                        insets.safe_area.top = px(47.);
-                        insets.safe_area.bottom = px(34.);
-                        insets.ime.bottom = px(bottom);
-                        insets
-                    }));
-                    window.draw(cx).clear(cx);
-                });
+                crate::window_seam::occlude_for_test(
+                    cx,
+                    gpui::Edges {
+                        top: px(47.),
+                        bottom: px(bottom),
+                        ..Default::default()
+                    },
+                );
+                cx.update(|window, cx| window.draw(cx).clear(cx));
                 let trigger = cx.debug_bounds("picker-open").unwrap().center();
                 cx.simulate_click(trigger, Default::default());
                 cx.update(|window, cx| window.draw(cx).clear(cx));

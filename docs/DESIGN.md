@@ -14,9 +14,10 @@ URLs, file names and data directories retain lowercase `tcode`.
 Desktop, iOS, Android and the browser run the same shell. It has exactly one
 layout rule:
 
-> **Compact iff the available logical content width — the viewport width minus
-> whatever the system occludes on its left and right — is under 900px.** At
-> exactly 900 the layout is wide.
+> **Compact iff the available logical content width — the width of the
+> window's fully visible bounds, that is the viewport minus whatever the system
+> occludes on its left and right — is under 900px.** At exactly 900 the layout
+> is wide.
 
 Nothing else decides it. Not the operating system, not the input device, not a
 saved preference: a desktop window dragged narrow is compact, an iPad in
@@ -444,7 +445,11 @@ running. Resizing never detaches and keeps the page the window is on.
 
 A window is not always the rectangle it reports: a status bar, a notch, a home
 indicator or a software keyboard can cover part of it. Those edges belong to the
-*window*, not to the host the workspace is attached to.
+*window*, not to the host the workspace is attached to, and the window owns
+them: GPUI's fully visible bounds — the viewport intersected with the
+platform's visual viewport and inset by the effective system insets — are read
+from the window wherever they are needed, at render time. Nothing caches,
+polls or installs them.
 
 There is one safe content rectangle, shared by pages, the palette, dialogs and
 toasts. Bottom avoidance is **max(safe area, keyboard)**, never their sum — a
@@ -453,7 +458,8 @@ Backgrounds paint edge to edge: safe-area bands use the opaque T0 theme canvas,
 not the near-white T1 reading surface. Only interactive content is constrained, and
 only once. The browser canvas is already resized around its on-screen keyboard,
 so the client adds no inset of its own there and takes its size from the actual
-canvas.
+canvas; a browser that keeps its layout viewport and shrinks only the visual
+viewport reaches the same rule through the window's fully visible bounds.
 
 On iOS and Android the native host observes the resolved application theme,
 including an explicit light/dark choice that differs from the system. Status-bar
@@ -462,8 +468,10 @@ choice at startup and during live theme changes. System bars remain transparent
 over the shared shell's edge-to-edge background; native hosts do not add content
 padding or resize it again for the keyboard.
 
-Insets change without a timer: the platform schedules a frame when they move, so
-the layout follows the keyboard immediately.
+Insets change without a timer: the platform reports a moved inset or visual
+viewport to GPUI, which refreshes the window, so the layout follows the keyboard
+immediately. Explicit taps that must reopen a dismissed keyboard ask the window
+for it; the platform decides whether to show one.
 
 ### Bottom sheets
 

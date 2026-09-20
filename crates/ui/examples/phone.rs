@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use gpui::{Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, point, px, size};
 use tcode_client::host::ClientHost;
-use tcode_ui::{ShellOptions, ShellSetup, WindowSeam};
+use tcode_ui::{ShellOptions, ShellSetup};
 
 fn main() {
     let android = std::env::args().any(|arg| arg == "--android");
@@ -30,9 +30,6 @@ fn main() {
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
-                // A desktop window stands in for the device: no notch, no
-                // software keyboard.
-                WindowSeam::flush(),
                 ShellOptions {
                     window: WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(Bounds::new(

@@ -281,7 +281,7 @@ impl Render for PlanPanel {
 
         // A compact page is inset from the window edges; the right column keeps
         // its denser padding.
-        let inset = if crate::window_seam::window_is_compact(window, cx) {
+        let inset = if crate::window_seam::window_is_compact(window) {
             material::COMPACT_PAGE_INSET
         } else {
             material::CARD_INSET

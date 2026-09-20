@@ -155,7 +155,7 @@ impl HostedPanel {
                         cx.listener(|panel, _, _, cx| panel.request(HostingAction::NewCode, cx)),
                     ),
             );
-            let mut row = if crate::window_seam::window_is_compact(window, cx) {
+            let mut row = if crate::window_seam::window_is_compact(window) {
                 v_flex()
             } else {
                 h_flex()

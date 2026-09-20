@@ -542,7 +542,7 @@ impl Render for CommandPalette {
         let muted = cx.theme().muted_foreground;
         let compact = self.window_state.read(cx).compact;
         let viewport = window.viewport_size();
-        let insets = crate::window_seam::WindowSeam::current(cx).content_insets();
+        let insets = crate::window_seam::content_insets(window);
         let available =
             (viewport.height - insets.top - insets.bottom - px(if compact { 52. } else { 120. }))
                 .max(px(0.));

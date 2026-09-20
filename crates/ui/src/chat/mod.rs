@@ -455,7 +455,7 @@ impl ChatView {
                     if open && !this.terminal_was_open {
                         let drawer = this.terminal_drawer.clone();
                         window.defer(cx, move |window, cx| {
-                            if !crate::window_seam::uses_soft_keyboard(cx) {
+                            if !crate::window_seam::is_mobile(cx) {
                                 gpui::Focusable::focus_handle(drawer.read(cx), cx)
                                     .focus(window, cx);
                             }
