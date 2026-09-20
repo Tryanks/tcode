@@ -591,8 +591,10 @@ selectable Markdown body behaves the same.
   drag on from there.
 - **Lifetime.** There is one touch selection at a time: a long press
   elsewhere takes it over, and a field's controls go with its focus. Typing,
-  moving the caret, or a press anywhere but a handle or the menu ends it; the
-  handles and the menu go with it. While a finger scrolls a message or a
+  moving the caret, or a press on the text anywhere but a handle or the menu
+  ends it; the handles and the menu go with it. A tap on inert page space
+  outside a field leaves the field focused and its selection in place, as
+  gpui-base does; a tap on a message's text clears the window selection. While a finger scrolls a message or a
   text field the menu steps aside and returns over the handles when the
   finger lifts; an end that scrolls out of view keeps no handle, and a
   selection wholly out of view has no menu until it scrolls back. The
