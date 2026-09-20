@@ -15,8 +15,9 @@ use android_activity::AndroidApp;
 use futures::{StreamExt as _, channel::mpsc};
 use gpui::App;
 use jni::{
-    JNIEnv, JavaVM,
-    objects::{GlobalRef, JObject, JString, JValue},
+    Env, JavaVM, jni_sig, jni_str,
+    objects::{JObject, JString, JValue},
+    refs::Global,
 };
 use tcode_client::host::HostFuture;
 use tcode_remote::NativeClientHost;
@@ -36,38 +37,40 @@ struct BridgeEvent {
 
 #[derive(Clone)]
 struct JniObject {
-    vm: Arc<JavaVM>,
-    activity: GlobalRef,
+    vm: JavaVM,
+    activity: Arc<Global<JObject<'static>>>,
 }
 
 impl JniObject {
-    fn call_string(&self, method: &str) -> Result<Option<String>, String> {
+    fn call_string(&self, method: &'static jni::strings::JNIStr) -> Result<Option<String>, String> {
         self.with_env(|env, activity| {
             let object = env
-                .call_method(activity, method, "()Ljava/lang/String;", &[])?
+                .call_method(activity, method, jni_sig!("()Ljava/lang/String;"), &[])?
                 .l()?;
             if object.is_null() {
                 return Ok(None);
             }
-            Ok(Some(env.get_string(&JString::from(object))?.into()))
+            JString::cast_local(env, object)?
+                .try_to_string(env)
+                .map(Some)
         })
     }
 
     fn with_env<T>(
         &self,
-        callback: impl FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
+        callback: impl FnOnce(&mut Env<'_>, &JObject<'_>) -> jni::errors::Result<T>,
     ) -> Result<T, String> {
-        let mut env = self
-            .vm
-            .attach_current_thread()
-            .map_err(|error| format!("failed attaching Android JVM thread: {error}"))?;
-        callback(&mut env, self.activity.as_obj()).map_err(|error| {
-            if env.exception_check().unwrap_or(false) {
-                let _ = env.exception_describe();
-                let _ = env.exception_clear();
-            }
-            error.to_string()
-        })
+        // A permanent attachment is a no-op on threads the JVM already owns.
+        self.vm
+            .attach_current_thread(|env| {
+                callback(env, self.activity.as_obj()).inspect_err(|_| {
+                    if env.exception_check() {
+                        env.exception_describe();
+                        env.exception_clear();
+                    }
+                })
+            })
+            .map_err(|error: jni::errors::Error| error.to_string())
     }
 }
 
@@ -80,22 +83,22 @@ struct JavaBridge {
 impl JavaBridge {
     fn new(app: AndroidApp) -> Result<Self, String> {
         // SAFETY: Android owns the VM and activity for the NativeActivity process lifetime.
-        let vm = Arc::new(
-            unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }
-                .map_err(|error| format!("failed accessing Android VM: {error}"))?,
-        );
-        let env = vm
-            .attach_current_thread()
-            .map_err(|error| format!("failed attaching Android host thread: {error}"))?;
-        // SAFETY: `activity_as_ptr` is the live GpuiActivity local reference.
-        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-        let activity = env
-            .new_global_ref(activity)
-            .map_err(|error| format!("failed retaining GpuiActivity: {error}"))?;
-        drop(env);
+        let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+        let activity = vm
+            .attach_current_thread(|env| {
+                // SAFETY: `activity_as_ptr` is the live GpuiActivity reference.
+                let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+                env.new_global_ref(&activity)
+            })
+            .map_err(|error: jni::errors::Error| {
+                format!("failed retaining GpuiActivity: {error}")
+            })?;
         Ok(Self {
             app,
-            object: JniObject { vm, activity },
+            object: JniObject {
+                vm,
+                activity: Arc::new(activity),
+            },
         })
     }
 
@@ -105,9 +108,9 @@ impl JavaBridge {
             if let Err(error) = object.with_env(|env, activity| {
                 env.call_method(
                     activity,
-                    "gpuiSetAppBackgroundDark",
-                    "(Z)V",
-                    &[JValue::Bool(u8::from(dark))],
+                    jni_str!("gpuiSetAppBackgroundDark"),
+                    jni_sig!("(Z)V"),
+                    &[JValue::Bool(dark)],
                 )?;
                 Ok(())
             }) {
@@ -122,8 +125,8 @@ impl JavaBridge {
             if let Err(error) = object.with_env(|env, activity| {
                 env.call_method(
                     activity,
-                    "gpuiStartCameraScan",
-                    "(J)V",
+                    jni_str!("gpuiStartCameraScan"),
+                    jni_sig!("(J)V"),
                     &[JValue::Long(request_id as i64)],
                 )?;
                 Ok(())
@@ -149,22 +152,22 @@ pub(crate) fn native_host(
     .detach();
     let data_dir = bridge
         .object
-        .call_string("gpuiDataDir")?
+        .call_string(jni_str!("gpuiDataDir"))?
         .map(PathBuf::from)
         .ok_or_else(|| "Android filesDir is unavailable".to_string())?;
     let device_name = bridge
         .object
-        .call_string("gpuiDeviceModel")?
+        .call_string(jni_str!("gpuiDeviceModel"))?
         .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| "Android".into());
     let platform = bridge
         .object
-        .call_string("gpuiDevicePlatform")?
+        .call_string(jni_str!("gpuiDevicePlatform"))?
         .filter(|platform| !platform.trim().is_empty())
         .unwrap_or_else(|| "Android".into());
     let system_locale = bridge
         .object
-        .call_string("gpuiSystemLocale")?
+        .call_string(jni_str!("gpuiSystemLocale"))?
         .filter(|locale| !locale.trim().is_empty());
 
     let callbacks = Rc::new(RefCell::new(HashMap::<
@@ -206,9 +209,9 @@ pub(crate) fn native_host(
                 .with_env(|env, activity| {
                     env.call_method(
                         activity,
-                        "gpuiMulticastLock",
-                        "(Z)V",
-                        &[JValue::Bool(acquire.into())],
+                        jni_str!("gpuiMulticastLock"),
+                        jni_sig!("(Z)V"),
+                        &[JValue::Bool(acquire)],
                     )?;
                     Ok(())
                 })
