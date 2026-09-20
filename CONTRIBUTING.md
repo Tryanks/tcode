@@ -103,23 +103,20 @@ can be overridden in **Settings → Providers**.
 
 ### Before you open a pull request
 
-CI checks formatting, Clippy, workspace builds and tests on macOS, Windows and
-Linux. Run the same checks locally:
+CI checks formatting, Clippy and the workspace tests on macOS, Windows and
+Linux, on every push, with no change-scoped shortcuts. Run the same checks
+locally:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --workspace --locked
-cargo test --workspace --locked
+cargo nextest run --workspace --locked   # or: cargo test --workspace --locked
 ```
 
-The CI workflow always starts so its required check names are reported, but it
-plans the affected scope before allocating build runners. Documentation-only
-changes and wording-only edits to bundled Orchestrate prompts skip heavyweight
-checks; Rust changes run the Cargo checks for affected packages and their
-dependents. Cargo, build, workflow and unclassified input changes fall back to
-the full workspace. When reporting local evidence, run the full commands above
-unless you are reproducing the narrower scope printed by the CI planning job.
+Clippy also enforces the process boundaries in [`clippy.toml`](clippy.toml):
+child processes go through the `process` helpers in `services` and `agent`,
+and blocking work goes through `Host::unblock`. A new approved site carries an
+`allow(clippy::disallowed_methods)` with its reason.
 
 CI also runs `cargo machete` to catch unused dependencies, and checks iOS, Android
 and Web with `RUSTFLAGS='-D warnings'`. Use the commands and tool version in

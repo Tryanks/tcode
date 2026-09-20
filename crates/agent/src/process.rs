@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use smol::channel::Receiver;
-pub(crate) use smol::unblock;
 
 use crate::AgentError;
 
@@ -21,6 +20,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// A blocking `std::process::Command` with the console suppressed.
 pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
     #[cfg_attr(not(windows), allow(unused_mut))]
+    // Approved constructor: this is the helper every other site must use.
+    #[allow(clippy::disallowed_methods)]
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
     {
@@ -34,6 +35,17 @@ pub(crate) fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Co
 /// exposes no `creation_flags`, so the flag rides in through the `From` impl.
 pub(crate) fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
     smol::process::Command::from(command(program))
+}
+
+/// Runs blocking work on `smol`'s blocking pool. The one approved
+/// `smol::unblock` site in this crate, so callers are easy to audit.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn unblock<T, F>(f: F) -> smol::Task<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    smol::unblock(f)
 }
 
 pub(crate) async fn probe_version(

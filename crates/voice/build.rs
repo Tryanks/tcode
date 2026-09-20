@@ -1,3 +1,7 @@
+// Build scripts run at compile time on the developer's machine, never inside
+// the GUI app, so the console-suppressing process helpers do not apply.
+#![allow(clippy::disallowed_methods)]
+
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn command_output(program: &str, args: &[&str]) -> Option<String> {
