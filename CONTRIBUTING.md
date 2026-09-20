@@ -1,21 +1,85 @@
 # Contributing to Tcode
 
 Thanks for taking the time. Tcode is a small project — bug reports, UI polish and
-new provider work are all welcome.
+provider work are all welcome. By participating you agree to the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
-By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+This file has two parts. **Principles** is the one text the maintainer has
+personally reviewed; every other document, comment and issue in this repository
+is derived from it. **Process** is how to build, check and submit work.
 
-## Reporting bugs and asking for features
+## Principles
 
-Open an [issue](https://github.com/Tryanks/tcode/issues). For a bug, the useful
-things to include are: your OS, which agent (Claude Code / Codex / which ACP
-agent), what you did, what happened, and what you expected. A screenshot beats a
-paragraph for anything visual.
+1. **Tcode is a native GUI proxy for TUI coding agents.** When a native harness
+   already has a capability, Tcode surfaces it as it is instead of building its
+   own equivalent. Tcode never hides, alters or replaces what the model would
+   see or do through the native CLI. Anything Tcode injects into a model — MCP
+   tools, prompts, transcripts — is visible to the user. Capabilities a harness
+   does not have (for example rewind outside Claude Code) are not synthesized.
 
-If you're unsure whether something is a bug or intended, open an issue anyway —
-the answer is worth writing down either way.
+2. **Host and client.** One Tcode host owns all state: providers, threads,
+   terminals, projects. Every client — the desktop window, a phone, a tablet, a
+   browser tab — is a screen for that host and speaks the same protocol whether
+   it runs on the same machine or across a network. Layers depend strictly
+   downward: `app → ui/runtime/services`, `ui → runtime/core`,
+   `runtime → services/core` and lower adapters, `services → core`.
 
-## Building
+3. **Six native providers, then ACP.** Claude Code, Codex, pi, OpenCode, Cursor
+   and Grok are maintained natively, permanently, over each CLI's own protocol.
+   No seventh native integration is planned; every other agent connects over
+   ACP, and ACP registry entries that duplicate a native integration are hidden.
+
+4. **One canonical event stream.** Every provider normalizes into one
+   `AgentEvent` stream and accepts one `SessionCommand` set
+   (`crates/agent/src/lib.rs`). The stream is the union of what all providers
+   can emit: an event only one provider produces still enters the union and is
+   handled uniformly, so a provider that never emits it simply appears not to
+   have it. The UI never branches on the provider kind.
+
+5. **Remote access.** The target transport is iroh, end to end encrypted, as the
+   only transport for native clients; the browser client uses iroh's browser
+   support over a relay. An official service, **Traverse**, provides discovery
+   and relay fallback: no accounts, on by default, self-hostable, sees only
+   ciphertext, and never required — on a LAN, direct connections give the full
+   product without it. Abuse is limited without accounts: the relay only carries
+   traffic between paired peers, discovery, pairing and relay bandwidth are
+   rate-limited per node and per IP, a pairing code dies after five failures on
+   the service as it does locally, and no SLA is promised. Current status and
+   plan: [#376](https://github.com/Tryanks/tcode/issues/376).
+
+6. **Orchestrate is core.** Multi-agent orchestration is a core capability and
+   keeps iterating. The long-term plan is a WASM plugin framework with
+   Orchestrate as its first plugin; the plugin API is designed first, and until
+   it exists nothing is restructured toward plugins.
+
+7. **No house UI principles.** Tcode follows the recommendations and defaults of
+   gpui-base and gpui-kit. There is no separate design contract to keep in sync
+   with the code.
+
+8. **Code and tests are the only source of truth.** This section is the only
+   maintainer-authored text; comments, issues and other documents are derived
+   from it and are corrected when they disagree with it or with the code. A
+   comment is kept only when it states a constraint the code cannot express or
+   the reason an obvious alternative was rejected; narrated steps, history and
+   "mirrors X" notes are deleted when touched. A constraint drafted by an AI is
+   not a requirement until it appears here.
+
+9. **Adopt upstream early, never fork it.** Prefer an upstream's experimental
+   feature and feed findings back over waiting for it to mature. Do not maintain
+   a fork of a dependency: when upstream declines a fix, Tcode carries the bug
+   and waits.
+
+## Process
+
+### Reporting bugs and asking for features
+
+Open an [issue](https://github.com/Tryanks/tcode/issues). For a bug, include
+your OS, which agent (Claude Code / Codex / which ACP agent), what you did, what
+happened and what you expected. A screenshot beats a paragraph for anything
+visual. If you are unsure whether something is a bug or intended, open an issue
+anyway — the answer is worth writing down either way.
+
+### Building
 
 You need a recent Rust toolchain (edition 2024). The first build compiles GPUI
 from source and takes 10–20 minutes; later builds are fast.
@@ -34,10 +98,10 @@ Platform prerequisites:
   `libwayland-dev`, `libxcb*`, `libssl-dev`, `libasound2-dev`, `libfontconfig-dev`).
   The embedded preview browser is compiled out on Linux.
 
-Provider CLIs are resolved from `PATH` (`claude`, `codex`) and can be overridden
-in **Settings → Providers**.
+Provider CLIs are resolved from `PATH` (`claude`, `codex`, `pi`, `opencode`) and
+can be overridden in **Settings → Providers**.
 
-## Before you open a pull request
+### Before you open a pull request
 
 CI checks formatting, Clippy, workspace builds and tests on macOS, Windows and
 Linux. Run the same checks locally:
@@ -69,12 +133,14 @@ implicit use it cannot detect.
 New user-facing strings must be added to **both** `locales/en.yml` and
 `locales/zh-CN.yml` — a parity test enforces it.
 
-If you changed the UI, also update [`docs/DESIGN.md`](docs/DESIGN.md). It is the
-visual contract: when the code and the doc disagree, one of them is a bug.
+If you changed something visual, launch the surface and look at it in both
+themes and at a wide and a narrow width; compile and unit checks alone do not
+establish visual correctness. `cargo run -p tcode-ui --example phone` opens the
+shared shell at phone geometry without a device.
 
-## Verifying real behaviour
+### Verifying real behaviour
 
-**Provider-layer probes** (no GUI — print the raw canonical event trace):
+**Provider-layer probes** (no GUI — print the raw canonical event trace).
 Use an existing working directory and image path in these examples.
 
 ```sh
@@ -92,101 +158,99 @@ without touching your real threads.
 **Launch flags**: `--open-latest` reopens the most recent thread,
 `--connect <host_id>` starts attached to a paired host, `--pair <addr> <port> <code>`
 pairs from the command line, and `--preview-smoke` / `--cu-smoke` run the
-preview and computer-use smoke phases.
+preview and computer-use smoke phases against the live desktop.
 
-## Code layout
+Native platform behaviour — macOS permission grants, input delivery, camera
+pairing on a phone — is only established by exercising it on that platform.
+Ignored tests that need a desktop slot or credentials say so in their reason;
+run them deliberately, never report an early return as a pass.
+
+### Code layout
 
 ```
-crates/core              pure domain types and semantics
-crates/services          persistence, filesystem, process, git, import, and probes
+crates/core              pure domain types and folds (the event → timeline fold
+                         is shared by live streams and replay)
+crates/protocol          serializable client ↔ host contract, PROTOCOL_VERSION
+crates/client            transport-agnostic client endpoint; ClientHost is the
+                         platform-capability contract
+crates/services          persistence, filesystem, process, git, import, probes
 crates/runtime           session and provider lifecycle, queues, orchestration,
-                         terminals, and semantic events
-crates/ui/src/i18n.rs     translation backend
-crates/ui                GPUI views, assets, presentation, and localized rendering;
-                         `run_shell` is the one bootstrap every client opens
-crates/app/src/main.rs   desktop binary and composition root
+                         terminals, semantic events; AppState is reached only
+                         through serialized protocol messages
+crates/remote            remote transport, pairing, discovery, multi-client mux,
+                         preview proxy
+crates/ui                the one GPUI shell every client opens via `run_shell`;
+                         owns localization (crates/ui/src/i18n.rs) and presentation
+crates/app/src/main.rs   desktop binary and composition root (default `cargo run`)
+crates/headless          headless host binary
 crates/ios, crates/android, crates/web
                          platform bootstrap only: a ClientHost and a call into
                          `tcode_ui::run_shell`
-crates/headless          headless host binary
-crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
-crates/term              terminal implementation (PTY)
+crates/platform/*        GPUI platform backends for iOS and Android
+crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, pi.rs,
+                         opencode.rs, acp.rs
+crates/term              terminal implementation (PTY, host-side emulator)
+crates/mcp-host          shared authenticated loopback host for in-process MCP servers
 crates/preview-mcp       MCP server exposing the preview browser to the agent
 crates/orchestrate-mcp   MCP server for orchestration tools
+crates/computer-use-mcp  MCP server for desktop automation (macOS, Windows)
+crates/voice             macOS dictation; explicit unsupported elsewhere
 ```
 
-The dependency direction is strictly downward: `app -> ui/runtime/services`;
-`ui -> runtime/core`; `runtime -> services/core` and lower adapters such as
-`agent` and `term`; and `services -> core`. No lower layer depends upward.
 Runtime emits semantic events; UI owns their localization and presentation.
-`crates/app/src/main.rs` composes the desktop app. It is the default workspace
-binary, so the normal source command remains `cargo run`.
 
-`crates/agent/src/lib.rs` is the contract between the two halves: every provider
-normalizes into one `AgentEvent` stream and accepts one `SessionCommand` enum, so
-the UI never learns anything provider-shaped. When changing it, verify every
-client with the workspace checks above, including the full-workspace build.
-
-**Adding a provider** usually means writing one client in `crates/agent` that
-translates its wire protocol into `AgentEvent`, and nothing else. If you find
-yourself special-casing a provider inside `crates/ui/src`, that's a sign the
-contract is missing something — say so in the PR.
+**Adding a provider** means writing one client in `crates/agent` that translates
+its wire protocol into `AgentEvent`, and nothing else. If you find yourself
+special-casing a provider inside `crates/ui/src`, the contract is missing
+something — say so in the PR. Changing `crates/agent/src/lib.rs` requires the
+full-workspace build, because every client consumes it.
 
 Never spawn a child process with `std::process::Command::new` directly: use the
-process helpers in `crates/services/src/process.rs` and `crates/agent/src/process.rs`,
-which suppress the console window on Windows and resolve binaries
-against `PATH`/`PATHEXT`. A guard rejects direct `Command::new` usage.
+process helpers in `crates/services/src/process.rs` and
+`crates/agent/src/process.rs`, which suppress the console window on Windows and
+resolve binaries against `PATH`/`PATHEXT`. A guard rejects direct
+`Command::new` usage.
 
-## Review
+### Review
 
-### Keep one owner for each behaviour
+**One owner per behaviour.** Before adding a type, state field, helper or
+dependency, find its current owner and callers, and extend that owner when it
+already represents the same concept. An abstraction should hide a real policy,
+platform boundary or lifecycle; a forwarder or fallible signature needs a
+responsibility beyond passing values through. Compute derived state where it is
+consumed unless caching has a measured benefit and an explicit invalidation
+path. Remove obsolete callers, conversions, fixtures and dependencies with the
+code they supported. Keep documentation with the behaviour it describes and
+link to the owner instead of copying values.
 
-Before adding a type, state field, helper or dependency, find its current owner
-and callers. Extend that owner when it already represents the same concept.
-An abstraction should hide a real policy, platform boundary or lifecycle; a
-forwarder or fallible signature needs a responsibility beyond passing values
-through. Compute derived state where it is consumed unless caching has a
-measured benefit and an explicit invalidation path. Remove obsolete callers,
-conversions, fixtures and dependencies with the code they supported.
+**Tests earn their maintenance.** Each test identifies an observable contract
+or a realistic failure it would catch, with expected values derived from that
+contract, a recorded fixture or a known regression — not from the
+implementation. A serialization round trip alone cannot establish wire
+compatibility: assert literal messages or older persisted inputs. Use the
+smallest production entry point that exercises the behaviour; assertions
+exercise production logic, not an algorithm recreated in the test. Library and
+upstream behaviour, constant/getter wiring and repeated happy paths need a
+project-specific reason to be tested. When removing or merging tests, say which
+coverage was redundant and where any remaining contract is still covered. For a
+bug fix, show the regression test fails without the fix when practical. Test
+counts and deleted line counts are not quality targets.
 
-Keep documentation with the behaviour it describes: update or retire plans,
-reference assets and development scripts when their work is complete. Link to
-the owner instead of copying API lists or values. Comments should explain a
-constraint or a reason the code cannot express; remove narrated steps, empty
-section headings and historical progress notes. Verify old comments and tests
-against the intended contract before preserving their claims.
+**Evidence in the pull request.** Describe the changed behaviour, why added
+abstractions are needed or removed ones redundant, and the contract protected
+by changed tests. Report the checks actually run, including platform or
+live-service gaps. The same criteria apply to human and AI contributions;
+passing CI cannot decide whether an abstraction or a test is useful. Merge only
+after all checks on the final commit pass, including dependency hygiene and the
+mobile and Web checks.
 
-### Make tests earn their maintenance
+### Release signing
 
-Each test should identify an observable contract or realistic failure that it
-would catch. Derive expected values from that contract, a recorded external
-fixture or a known regression, independently of the implementation. In
-particular, a serialization round trip alone cannot establish wire
-compatibility: assert literal messages or older persisted inputs.
-
-Use the smallest production entry point that exercises the behaviour. Keep
-fixtures limited to setup; assertions should exercise production logic rather
-than an algorithm recreated inside the test. Group inputs that protect the
-same behaviour when that removes repeated setup, while keeping distinct
-failure modes readable. Library behaviour, constant/getter wiring and repeated
-happy paths need a project-specific reason to be tested.
-
-Unavailable credentials or platform facilities must appear as explicit ignored
-tests with a reason, rather than an early return reported as a pass. Keep
-deterministic local integration tests running in CI where supported.
-
-When removing or merging tests, identify the redundant coverage or retired
-contract, and where any remaining contract is covered. Preserve checks for
-permissions, malformed or older data, cancellation, ordering and recovery when
-those behaviours are still supported. For a bug fix, demonstrate that the
-regression test fails without the fix when practical. Test counts and deleted
-line counts are not quality targets.
-
-### Evidence in the pull request
-
-Describe the changed behaviour, why added abstractions are needed or removed
-ones are redundant, and the contract protected by changed tests. Report the
-checks actually run, including any platform or live-service gaps. Review these
-criteria for both human and AI contributions; passing CI cannot decide whether
-an abstraction or a test is useful. Merge only after all checks on the final
-commit pass, including dependency hygiene and mobile/Web checks.
+The [release workflow](.github/workflows/release.yml) signs and notarizes the
+macOS app and DMG when all six `MACOS_*` secrets are configured, publishes
+unsigned builds when none are, and fails naming the missing ones when the set is
+partial. The credentials must come from the maintainer's Apple Developer
+account; the secret names, how to obtain each value and how to verify a signed
+build are documented in the workflow next to the signing step. Windows builds
+ship unsigned. The Android APK is a release build signed with Gradle's debug
+keystore until a release key exists.

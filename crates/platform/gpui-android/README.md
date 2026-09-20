@@ -156,11 +156,9 @@ CARGO_PROFILE_ANDROID_RELEASE_OPT_LEVEL=s crates/android/host/build.sh --release
 CARGO_PROFILE_ANDROID_RELEASE_OPT_LEVEL=z crates/android/host/build.sh --release
 ```
 
-See [APK size measurements](../../../docs/android-apk-size.md) for the byte-level
-comparison with the stripped desktop binary and emulator evidence.
-
-See [the design spec](../../../docs/DESIGN.md#compact-layout) for application behavior and
-platform verification, and [remote work mode](../../../docs/remote.md) for
+The layout rule the shell applies on this build is owned by
+[`tcode-ui::window_seam`](../../ui/src/window_seam.rs). See
+[remote work mode](../../../docs/remote.md) for
 pairing with a host. Android emulator loopback is the emulator itself; use a
 host address reachable from the device.
 

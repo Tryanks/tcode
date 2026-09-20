@@ -32,6 +32,10 @@ default-members = ["crates/app"]
 # The upstream extern class uses an uninhabited type; see vendor/block/PATCH.md.
 block = { path = "vendor/block" }
 
+# opt-level 3 stays the shipping default on every platform, including the
+# Android APK, although `s`/`z` produce a smaller library: `z` worsened tail
+# frame pacing on a phone and neither was measured on markdown, highlighting or
+# large conversation replay.
 [profile.release]
 opt-level = 3
 lto = "fat"

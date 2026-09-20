@@ -1,6 +1,6 @@
 //! The floating composer card: input, control row (model picker + context +
 //! permission/mode chips + send/stop), the below-card checkout/branch row, and
-//! the pending-approval panel (see docs/DESIGN.md "Composer").
+//! the pending-approval panel.
 
 mod components;
 pub(crate) mod model;

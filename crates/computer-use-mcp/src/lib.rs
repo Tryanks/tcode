@@ -1,10 +1,61 @@
-//! In-process `tcode_computer_use` MCP server: pi-computer-use-style desktop
-//! automation for every provider (accessibility-tree observation, state-scoped
-//! refs, transactional actions). See `docs/computer-use.md` for the design.
+//! In-process `tcode_computer_use` MCP server: desktop automation for every
+//! MCP-capable provider (accessibility-tree observation, state-scoped refs,
+//! transactional actions). The tool design was informed by
+//! <https://github.com/injaneity/pi-computer-use>.
 //!
 //! Served over the shared loopback streamable-HTTP host with a distinct bearer
-//! token. macOS uses AX/CGEvent and Windows adapts the `uiautomation` crate;
-//! other platforms report that computer use is unsupported.
+//! token, registered per session when computer use is enabled. It runs inside
+//! Tcode so macOS permissions apply to the running app; there is no helper
+//! app. macOS uses AX/CGEvent and Windows adapts the `uiautomation` crate;
+//! other platforms report that computer use is unsupported rather than timing
+//! out. Browser automation is the separate `tcode_preview` server: this one
+//! exposes desktop windows, not CDP browser roots.
+//!
+//! # Tool surface
+//!
+//! `find_roots` (ranked window roots `@rN`), `observe_ui` (folded outline with
+//! element refs `@eN`, a `state_id` and, per image mode, a screenshot),
+//! `search_ui` / `expand_ui` / `inspect_ui` (queries over the stored outline
+//! that never touch the live UI), `act_ui` (a transaction of `press`, `click`,
+//! `set_text`, `type_text`, `keypress`, `scroll`, `drag`, `move_mouse` against a
+//! `state_id`, optionally with an `expect` postcondition), `read_text` (page
+//! through long text) and `wait_for` (a text/role condition).
+//!
+//! # Contract
+//!
+//! - Every `@e` ref belongs to the `state_id` that produced it. Observations
+//!   are immutable and kept in a bounded LRU (default 8); acting from an
+//!   evicted or stale state is rejected and the model must observe again.
+//! - `act_ui` reports `worked` / `didnt` / `unknown` per step, stops at the
+//!   first failure, and never treats event delivery alone as semantic success
+//!   when an `expect` was given. Each step reports its `delivery` (`ax`,
+//!   `background_pid`, `foreground_hid`, `none`) and the transaction its
+//!   `activation` (`none`, `background`, `foreground`).
+//! - Model-visible text is capped; oversized results return a preview plus a
+//!   continuation ref for `read_text`.
+//! - A window of at least 20,000 square points whose outline exposes fewer
+//!   than three titled, valued or described descendants (the root title does
+//!   not count) is reported `text_sparse`. Image mode `auto` then attaches one
+//!   downscaled window screenshot when capture permission exists; `always` and
+//!   `never` do what they say. The fallback is OCR-free and synthesizes no
+//!   nodes.
+//! - macOS tries AX actions before synthesizing input, posts events to the
+//!   target process without stealing focus, and relies on optional private
+//!   routing APIs, so delivery never implies the application changed.
+//!   `allow_foreground_fallback` (default off) lets only `type_text` and
+//!   `keypress` retry through foreground activation; pointer actions never do.
+//!   `show_agent_cursor` (default on) drives the action overlay in
+//!   `backend::macos::overlay`, visible only while the target is frontmost.
+//! - macOS needs Accessibility (`AXIsProcessTrusted`) and, for screenshots,
+//!   Screen Recording (`CGPreflightScreenCaptureAccess`); `permissions`
+//!   checks and requests them, and Screen Recording grants that need a
+//!   relaunch are carried across it by `tcode_services::relaunch`. Windows has
+//!   no such gate and reports both as available.
+//!
+//! Compilation establishes none of the native permission or input-delivery
+//! behaviour: exercise backend changes on the target platform, and run the
+//! ignored `macos_overlay` test (`cargo test -p computer-use-mcp --test
+//! macos_overlay -- --ignored`) only when a desktop slot is free.
 
 pub mod backend;
 pub mod config;
