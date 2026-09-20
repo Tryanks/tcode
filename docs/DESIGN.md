@@ -12,29 +12,43 @@ URLs, file names and data directories retain lowercase `tcode`.
 ## One shell, one layout rule
 
 Desktop, iOS, Android and the browser run the same shell. It has exactly one
-layout rule:
+layout rule, and the rule asks two things — what kind of build this is, then
+how wide the window is:
 
-> **Compact iff the available logical content width — the width of the
+> **A desktop build — macOS, Windows, Linux, the browser — is always the wide
+> layout, however narrow its window.** A mobile build — iOS or Android — is
+> **compact iff the available logical content width — the width of the
 > window's fully visible bounds, that is the viewport minus whatever the system
-> occludes on its left and right — is under 900px.** At exactly 900 the layout
-> is wide.
+> occludes on its left and right — is under 900px**, and wide at or above it.
+> At exactly 900 the layout is wide.
 
-Nothing else decides it. Not the operating system, not the input device, not a
-saved preference: a desktop window dragged narrow is compact, an iPad in
-landscape is wide, and rotating a phone changes the layout the same way
-dragging a window edge does. The rule is never persisted, because a window
-width is not a setting.
+So a phone is compact, an iPad in landscape is wide, and rotating a phone
+changes the layout the same way rotating a tablet across 900px does. A desktop
+window tiled to half a screen or dragged narrow is *not* compact: it is the
+whole product at a squeeze, never a phone shell it cannot leave. Nothing else
+decides it — not the input device, not a saved preference — and the rule is
+never persisted, because a window width is not a setting. The one exception
+is a preview-only affordance: the desktop `phone` example forces the mobile
+layout so the compact shell can be reviewed without a device.
+
+**Wide and unattached.** A wide window with no attachment — a tablet in
+landscape before it connects, or a desktop that disconnected — is the Machines
+page and nothing else, wearing the same navigation bar as its compact self: its
+title, and on **Add a machine** the Back that returns to Machines. There is no
+sidebar to switch routes with and nothing else to reach; attaching leaves the
+page for the new machine's threads and the wide workspace, and **Disconnect**
+returns to it.
 
 Input-device behavior is a separate question with a separate answer. Whether
 Enter submits follows the *keyboard*, not the width: a wide tablet still types
-on glass, and a narrow desktop window still has a hardware Enter key.
+on glass, and a desktop window still has a hardware Enter key.
 
-Crossing the breakpoint is a layout change and nothing else. It never detaches
-from the host, never reconnects, and never rebuilds a view that holds user
-state. The selected thread, the composer draft and its selection, pending
-attachments, approvals, scroll position and focus all survive in both
-directions, and the sidebar and right-panel widths come back as they were left
-when the window widens again.
+Crossing the breakpoint — a tablet rotating, a split-screen resize — is a
+layout change and nothing else. It never detaches from the host, never
+reconnects, and never rebuilds a view that holds user state. The selected
+thread, the composer draft and its selection, pending attachments, approvals,
+scroll position and focus all survive in both directions, and the sidebar and
+right-panel widths come back as they were left when the window widens again.
 
 ## Capability-appropriate UI
 
@@ -351,6 +365,10 @@ positioned off-centre.
 
 ## Compact layout
 
+The compact layout is the mobile build's answer to a window under 900px of
+usable width — a phone, or a tablet in a narrow split — as **One shell, one
+layout rule** defines it. A desktop window never enters it.
+
 ### Destinations
 
 Compact replaces the split with a navigation stack over one history:
@@ -613,9 +631,9 @@ One inset, applied once, at the page:
   denser padding when it becomes a page.
 - **Card inset 12pt.** A card, notice, chip or row *inside* that content pads a
   further 12pt; it never re-applies the page inset.
-- **Timeline-to-composer gap 8pt** on a narrow desktop window, as in wide
-  layout, and **0** on iOS and Android. No additional separator spacer or
-  composer top padding is added to the timeline's bottom inset.
+- **Timeline-to-composer gap 8pt** on desktop, at every width, and **0** on
+  iOS and Android. No additional separator spacer or composer top padding is
+  added to the timeline's bottom inset.
 - **Terminal exception.** The terminal grid stays edge to edge horizontally —
   it is measured in columns, and narrowing it drops columns — but it still sits
   inside the window's safe rect and keeps 8pt of air below the segmented control.
