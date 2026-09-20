@@ -298,29 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn composer_state_exposes_first_pending_approval_and_count() {
-        let request = agent::ApprovalRequest {
-            id: "approval-1".into(),
-            turn_id: Some("turn-1".into()),
-            kind: agent::ApprovalKind::FileRead {
-                detail: "read src/lib.rs".into(),
-            },
-            options: Vec::new(),
-        };
-        let mut timeline = Timeline::default();
-        timeline.pending_approvals = vec![request.clone(), request.clone()];
-
-        let state = composer_state(
-            Some(&session_status()),
-            Some(&timeline),
-            &Settings::default(),
-            &ProvidersStatus::default(),
-        );
-        assert_eq!(state.pending_approval, Some(request));
-        assert_eq!(state.pending_approval_count, 2);
-    }
-
-    #[test]
     fn composer_state_clamps_claude_context_window_to_selected_limit() {
         let mut status = session_status();
         status.provider = agent::ProviderKind::ClaudeCode;

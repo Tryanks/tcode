@@ -213,17 +213,25 @@ mod tests {
     }
 
     #[test]
-    fn subscriptions_coalesce_even_when_command_queue_is_full() {
+    fn subscriptions_coalesce_per_topic_and_unsubscribe_survives_a_full_queue() {
         let (sender, receiver) = channel();
         sender.try_send("x".repeat(MAX_BYTES)).unwrap();
         for id in 0..1000 {
-            sender.try_send(format!(r#"{{"id":{id},"payload":{{"type":"subscribe","content":{{"topic":"Index","after":null}}}}}}"#)).unwrap();
+            sender.try_send(format!(r#"{{"id":{id},"payload":{{"type":"subscribe","content":{{"topic":{{"type":"index"}},"after":null}}}}}}"#)).unwrap();
         }
+        sender.try_send(r#"{"id":1000,"payload":{"type":"unsubscribe","content":{"topic":{"type":"index"}}}}"#.into()).unwrap();
+        sender.try_send(r#"{"id":1001,"payload":{"type":"subscribe","content":{"topic":{"type":"settings"}}}}"#.into()).unwrap();
         let line = smol::block_on(receiver.recv()).unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
-            999
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            serde_json::json!({"id":1000,"payload":{"type":"unsubscribe","content":{"topic":{"type":"index"}}}})
+        );
+        let other = smol::block_on(receiver.recv()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&other).unwrap()["id"],
+            1001
         );
         assert_eq!(sender.queued(), 1);
+        assert_eq!(smol::block_on(receiver.recv()).unwrap().len(), MAX_BYTES);
     }
 }

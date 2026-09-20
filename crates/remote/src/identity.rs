@@ -227,6 +227,15 @@ mod tests {
                 .verify(TOKEN, Some(&"ab".repeat(32)), &proof)
                 .is_none()
         );
+        let mut without_mac = proof.clone();
+        without_mac.as_object_mut().unwrap().remove("mac");
+        assert!(challenge.verify(TOKEN, None, &without_mac).is_none());
+        assert_eq!(
+            challenge
+                .verify("revoked-token", Some(PUBLIC_KEY), &without_mac)
+                .as_deref(),
+            Some(PUBLIC_KEY)
+        );
         let next_connection = IdentityChallenge::new(HOST, TOKEN).unwrap();
         assert!(
             next_connection
@@ -235,17 +244,6 @@ mod tests {
         );
         let next_pairing = IdentityChallenge::for_pairing(HOST).unwrap();
         assert!(next_pairing.verify("", Some(PUBLIC_KEY), &proof).is_none());
-    }
-
-    #[test]
-    fn a_pin_recognizes_the_host_after_token_revocation_without_unauthenticated_bootstrap() {
-        let (challenge, mut proof) = fixture();
-        proof.as_object_mut().unwrap().remove("mac");
-        assert!(challenge.verify(TOKEN, None, &proof).is_none());
-        assert_eq!(
-            challenge.verify(TOKEN, Some(PUBLIC_KEY), &proof).as_deref(),
-            Some(PUBLIC_KEY)
-        );
     }
 
     #[cfg(feature = "server")]

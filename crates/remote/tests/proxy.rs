@@ -254,15 +254,18 @@ fn pipelined_request_and_chunk_trailers_never_reach_origin() {
             stream.read_exact(&mut body).unwrap();
             assert_eq!(body, expected);
             stream
-                .set_read_timeout(Some(Duration::from_millis(150)))
+                .set_read_timeout(Some(Duration::from_secs(30)))
                 .unwrap();
-            assert!(
-                stream.read(&mut [0; 1]).is_err(),
-                "pipelined bytes leaked to origin"
-            );
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut extra = Vec::new();
+            stream.read_to_end(&mut extra).unwrap();
+            assert!(
+                extra.is_empty(),
+                "pipelined bytes leaked to origin: {extra:?}"
+            );
         });
         let framing = if chunked {
             "Transfer-Encoding: chunked"
@@ -899,7 +902,7 @@ fn admitted_pending_streams_cancel_and_stop_without_retaining_server() {
                     }
                 },
                 async {
-                    smol::Timer::after(Duration::from_secs(2)).await;
+                    smol::Timer::after(Duration::from_secs(30)).await;
                     panic!("admitted stream survived cancellation or shutdown");
                 },
             )

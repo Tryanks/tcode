@@ -1603,38 +1603,31 @@ mod launch_env_tests {
     use super::*;
 
     #[test]
-    fn home_maps_to_the_providers_own_variable() {
-        let env = LaunchEnv {
-            env: vec![("FOO".into(), "bar".into())],
-            home: Some(PathBuf::from("/tmp/home")),
-        };
-        assert_eq!(
-            env.pairs(ProviderKind::ClaudeCode),
-            vec![
-                ("FOO".to_string(), "bar".to_string()),
-                ("HOME".to_string(), "/tmp/home".to_string()),
-            ]
-        );
-        assert_eq!(
-            env.pairs(ProviderKind::Codex),
-            vec![
-                ("FOO".to_string(), "bar".to_string()),
-                ("CODEX_HOME".to_string(), "/tmp/home".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn no_home_override_leaves_only_the_configured_pairs() {
-        let env = LaunchEnv {
-            env: vec![("ANTHROPIC_BASE_URL".into(), "https://x".into())],
-            home: None,
-        };
-        assert_eq!(
-            env.pairs(ProviderKind::ClaudeCode),
-            vec![("ANTHROPIC_BASE_URL".to_string(), "https://x".to_string())]
-        );
-        assert!(LaunchEnv::default().pairs(ProviderKind::Codex).is_empty());
+    fn home_override_is_provider_specific_and_wins_over_configured_pairs() {
+        for (provider, variable) in [
+            (ProviderKind::ClaudeCode, Some("HOME")),
+            (ProviderKind::Codex, Some("CODEX_HOME")),
+            (ProviderKind::Pi, Some("PI_CODING_AGENT_DIR")),
+            (ProviderKind::OpenCode, None),
+            (ProviderKind::Acp, None),
+        ] {
+            let configured = vec![("FOO".to_owned(), "bar".to_owned())];
+            let mut env = LaunchEnv {
+                env: configured.clone(),
+                home: None,
+            };
+            assert_eq!(env.pairs(provider), configured);
+            assert!(LaunchEnv::default().pairs(provider).is_empty());
+            if let Some(variable) = variable {
+                env.env.push((variable.into(), "previous".into()));
+            }
+            let mut expected = env.env.clone();
+            env.home = Some(PathBuf::from("/tmp/provider-profile"));
+            if let Some(variable) = variable {
+                expected.push((variable.into(), "/tmp/provider-profile".into()));
+            }
+            assert_eq!(env.pairs(provider), expected, "{provider:?}");
+        }
     }
 }
 
@@ -1664,28 +1657,20 @@ mod resolve_binary_tests {
     }
 
     #[test]
-    fn explicit_path_is_used_as_given() {
-        let explicit = std::path::Path::new("/opt/custom/claude");
-        let resolved = resolve_binary(Some(explicit), "claude").unwrap();
-        assert_eq!(resolved, explicit);
-    }
-
-    /// A `default_name` that carries a path component is passed through — with
-    /// either separator, since Windows accepts `/` as well as `\`.
-    #[test]
-    fn a_name_with_any_separator_skips_the_path_search() {
-        assert_eq!(
-            resolve_binary(None, "/opt/custom/claude").unwrap(),
-            PathBuf::from("/opt/custom/claude")
-        );
-        assert_eq!(
-            resolve_binary(None, r"C:\tools\claude.cmd").unwrap(),
-            PathBuf::from(r"C:\tools\claude.cmd")
-        );
-        assert_eq!(
-            resolve_binary(None, "C:/tools/claude.cmd").unwrap(),
-            PathBuf::from("C:/tools/claude.cmd")
-        );
+    fn explicit_paths_bypass_the_environment_path_search() {
+        for path in [
+            "/opt/custom/claude",
+            r"C:\tools\claude.cmd",
+            "C:/tools/claude.cmd",
+            "relative/claude",
+        ] {
+            let explicit = std::path::Path::new(path);
+            assert_eq!(
+                resolve_binary(Some(explicit), "unrelated-name").unwrap(),
+                explicit
+            );
+            assert_eq!(resolve_binary(None, path).unwrap(), explicit);
+        }
     }
 
     #[test]
@@ -1696,40 +1681,45 @@ mod resolve_binary_tests {
 
     #[cfg(unix)]
     #[test]
-    fn unix_resolves_an_extensionless_file_with_the_exec_bit() {
+    fn unix_path_search_requires_executable_files_and_absolute_directories() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = temp_dir("unix");
         let bin = dir.join("foo");
         std::fs::write(&bin, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // A same-named non-executable file must not win.
         std::fs::write(dir.join("bar"), "not executable").unwrap();
-
+        std::fs::set_permissions(dir.join("bar"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let suffixed = dir.join("shim.exe");
+        std::fs::write(&suffixed, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&suffixed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let extensions = path_extensions();
         assert_eq!(
-            find_in_dirs([dir.clone()], "foo", &[], is_executable),
+            find_in_dirs([dir.clone()], "foo", &extensions, is_executable),
             Some(bin)
         );
-        assert_eq!(find_in_dirs([dir], "bar", &[], is_executable), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_bare_name_resolves_to_an_absolute_path_on_path() {
-        // `sh` is on PATH everywhere we run; the point is that the result is
-        // absolute, so a child that sets its own cwd can still exec it.
-        let resolved = resolve_binary(None, "sh").expect("sh must resolve");
-        assert!(
-            resolved.is_absolute(),
-            "resolved {resolved:?} is not absolute"
+        assert_eq!(
+            find_in_dirs([dir.clone()], "bar", &extensions, is_executable),
+            None
         );
-        assert!(is_executable(&resolved));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_tries_only_the_bare_name() {
-        assert_eq!(path_extensions(), Vec::<String>::new());
-        assert_eq!(candidate_names("claude", &[]), vec!["claude".to_string()]);
+        assert_eq!(
+            find_in_dirs([dir.clone()], "shim", &extensions, is_executable),
+            None
+        );
+        assert_eq!(
+            find_in_dirs([dir.clone()], "shim.exe", &extensions, is_executable),
+            Some(suffixed)
+        );
+        assert_eq!(
+            find_in_dirs([dir.clone()], ".", &extensions, is_executable),
+            None
+        );
+        assert_eq!(
+            find_in_dirs([PathBuf::from("relative")], "foo", &extensions, |_| panic!(
+                "relative PATH entries must not be probed"
+            )),
+            None
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The resolved file name, lowercased: the extension comes from `PATHEXT`
@@ -1791,23 +1781,6 @@ mod resolve_binary_tests {
                 "npm.CMD".to_string(),
                 "npm".to_string(),
             ]
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_pathext_defaults_when_unset() {
-        // On a real Windows host PATHEXT is always set, but the default must be
-        // the documented one when it is not.
-        assert!(
-            path_extensions()
-                .iter()
-                .any(|ext| ext.eq_ignore_ascii_case(".EXE"))
-        );
-        assert!(
-            path_extensions()
-                .iter()
-                .any(|ext| ext.eq_ignore_ascii_case(".CMD"))
         );
     }
 }

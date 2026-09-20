@@ -775,7 +775,16 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         let root = temp.join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        run(&root, &["init", "-b", "main"]);
+        run(&root, &["-c", "init.templateDir=", "init", "-b", "main"]);
+        run(&root, &["config", "commit.gpgSign", "false"]);
+        run(
+            &root,
+            &[
+                "config",
+                "core.hooksPath",
+                temp.join("no-hooks").to_str().unwrap(),
+            ],
+        );
         run(&root, &["config", "core.autocrlf", "false"]);
         run(&root, &["config", "user.name", "tcode"]);
         run(&root, &["config", "user.email", "tcode@localhost"]);
@@ -803,88 +812,97 @@ mod tests {
     }
 
     #[test]
-    fn provision_returns_derived_identity_without_caller_computation() {
-        let (temp, root) = scratch_repo("tcode-worktree-provision-test");
-        let worktrees = temp.join("owned-worktrees");
-        let created = provision_for_test(&root, "session-identity", &worktrees);
-
-        assert_eq!(created.path, worktrees.join("session-identity"));
-        assert_eq!(created.branch, "tcode/session-identity");
+    fn provision_recovers_stale_paths_and_branch_collisions_and_removal_is_idempotent() {
+        let (temp, root) = scratch_repo("tcode-worktree-lifecycle");
+        let worktrees = temp.join("worktrees");
+        std::fs::create_dir_all(worktrees.join("session")).unwrap();
+        run(&root, &["branch", "tcode/session"]);
+        let created = provision_for_test(&root, "session", &worktrees);
+        assert_eq!(created.path, worktrees.join("session"));
+        assert_eq!(created.branch, "tcode/session-2");
         assert_eq!(created.base, "main");
         assert_eq!(created.seed_summary, WorktreeSeedSummary::default());
+        assert_eq!(
+            std::fs::read_to_string(created.path.join("tracked.txt")).unwrap(),
+            "initial\n"
+        );
 
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn worktree_create_and_remove_round_trip() {
-        let (temp, root) = scratch_repo("tcode-worktree-round-trip-test");
-        let created = provision_for_test(&root, "round-trip", &temp.join("worktrees"));
+        std::fs::create_dir(created.path.join("nested")).unwrap();
         std::fs::write(created.path.join("untracked.txt"), "force removal\n").unwrap();
-        assert_eq!(remove(&root, &created.path), Ok(()));
+        assert_eq!(remove(&root, &created.path.join("nested/..")), Ok(()));
         assert!(!created.path.exists());
-        let _ = std::fs::remove_dir_all(temp);
+        assert_eq!(remove(&root, &created.path), Ok(()));
+
+        let external = provision_for_test(&root, "external", &worktrees);
+        std::fs::remove_dir_all(&external.path).unwrap();
+        assert_eq!(remove(&root, &external.path), Ok(()));
+        assert_eq!(remove(&root, &external.path), Ok(()));
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
-    fn merge_back_fast_forwards_descendant() {
-        let (temp, root) = scratch_repo("tcode-merge-back-ff-test");
-        let created = provision_for_test(&root, "ff", &temp.join("worktrees"));
-        commit_file(&created.path, "feature.txt", "feature\n", "feature");
-
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Ok(MergeBackOutcome::FastForward)
-        );
-        assert_eq!(
-            run_git(&root, &["rev-parse", "HEAD"]).unwrap(),
-            run_git(&created.path, &["rev-parse", "HEAD"]).unwrap()
-        );
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
+    fn merge_back_integrates_clean_descendant_or_divergent_branches() {
+        for diverged in [false, true] {
+            let (temp, root) = scratch_repo("tcode-merge-back");
+            let created = provision_for_test(&root, "feature", &temp.join("worktrees"));
+            commit_file(&created.path, "feature.txt", "feature\n", "feature");
+            if diverged {
+                commit_file(&root, "destination.txt", "destination\n", "destination");
+            }
+            let expected = if diverged {
+                MergeBackOutcome::MergeCommit
+            } else {
+                MergeBackOutcome::FastForward
+            };
+            assert_eq!(
+                merge_back(&root, &created.path, &created.branch),
+                Ok(expected)
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("feature.txt")).unwrap(),
+                "feature\n"
+            );
+            if diverged {
+                assert_eq!(
+                    std::fs::read_to_string(root.join("destination.txt")).unwrap(),
+                    "destination\n"
+                );
+                let parents = run_git(&root, &["show", "-s", "--format=%P", "HEAD"]).unwrap();
+                assert_eq!(parents.split_whitespace().count(), 2);
+            } else {
+                assert_eq!(
+                    run_git(&root, &["rev-parse", "HEAD"]).unwrap(),
+                    run_git(&created.path, &["rev-parse", "HEAD"]).unwrap()
+                );
+            }
+            remove(&root, &created.path).unwrap();
+            std::fs::remove_dir_all(temp).unwrap();
+        }
     }
 
     #[test]
-    fn merge_back_creates_merge_commit_for_clean_divergence() {
-        let (temp, root) = scratch_repo("tcode-merge-back-diverged-test");
-        let created = provision_for_test(&root, "diverged", &temp.join("worktrees"));
-        commit_file(&created.path, "feature.txt", "feature\n", "feature");
-        commit_file(&root, "destination.txt", "destination\n", "destination");
-
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Ok(MergeBackOutcome::MergeCommit)
-        );
-        let parents = run_git(&root, &["show", "-s", "--format=%P", "HEAD"]).unwrap();
-        assert_eq!(parents.split_whitespace().count(), 2);
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn merge_back_refuses_dirty_worktree() {
-        let (temp, root) = scratch_repo("tcode-merge-back-dirty-worktree-test");
-        let created = provision_for_test(&root, "dirty-worktree", &temp.join("worktrees"));
-        std::fs::write(created.path.join("tracked.txt"), "dirty\n").unwrap();
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Err(MergeBackError::DirtyWorktree)
-        );
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn merge_back_refuses_dirty_destination() {
-        let (temp, root) = scratch_repo("tcode-merge-back-dirty-destination-test");
-        let created = provision_for_test(&root, "dirty-destination", &temp.join("worktrees"));
-        commit_file(&created.path, "feature.txt", "feature\n", "feature");
-        std::fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Err(MergeBackError::DirtyDestination)
-        );
-        let _ = std::fs::remove_dir_all(temp);
+    fn merge_back_refuses_either_dirty_side_without_changing_files() {
+        for dirty_destination in [false, true] {
+            let (temp, root) = scratch_repo("tcode-merge-dirty");
+            let created = provision_for_test(&root, "dirty", &temp.join("worktrees"));
+            commit_file(&created.path, "feature.txt", "feature\n", "feature");
+            let (dirty, expected) = if dirty_destination {
+                (&root, MergeBackError::DirtyDestination)
+            } else {
+                (&created.path, MergeBackError::DirtyWorktree)
+            };
+            std::fs::write(dirty.join("tracked.txt"), "uncommitted\n").unwrap();
+            assert_eq!(
+                merge_back(&root, &created.path, &created.branch),
+                Err(expected)
+            );
+            assert_eq!(
+                std::fs::read_to_string(dirty.join("tracked.txt")).unwrap(),
+                "uncommitted\n"
+            );
+            assert!(!root.join("feature.txt").exists());
+            std::fs::remove_dir_all(temp).unwrap();
+        }
     }
 
     #[test]
@@ -905,18 +923,6 @@ mod tests {
         );
         assert!(!root.join(".git/MERGE_HEAD").exists());
         remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn removal_accepts_a_canonical_equivalent_path_spelling() {
-        let (temp, root) = scratch_repo("tcode-worktree-equivalent-path-test");
-        let created = provision_for_test(&root, "equivalent", &temp.join("worktrees"));
-        std::fs::create_dir(created.path.join("nested")).unwrap();
-        let alternate = created.path.join("nested").join("..");
-        assert!(same_existing_path(&alternate, &created.path));
-        assert_eq!(remove(&root, &alternate), Ok(()));
-        assert!(!created.path.exists());
         let _ = std::fs::remove_dir_all(temp);
     }
 
@@ -950,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_rejects_traversal_and_rolls_back() {
+    fn seed_rejects_traversal_before_creating_a_worktree() {
         let (temp, root) = scratch_repo("tcode-worktree-seed-traversal-test");
         std::fs::write(root.join(".worktreeinclude"), "../outside\n").unwrap();
         let worktrees = temp.join("worktrees");
@@ -982,12 +988,13 @@ mod tests {
     }
 
     #[test]
-    fn orphan_cleanup_preserves_fresh_and_removes_old_unknown_worktree() {
+    fn orphan_cleanup_uses_age_and_ownership_and_leaves_unregistered_directories() {
         let (temp, root) = scratch_repo("tcode-worktree-orphan-age-test");
         let worktrees = temp.join("worktrees");
         let orphan = provision_for_test(&root, "orphan", &worktrees).path;
         let modified = std::fs::metadata(&orphan).unwrap().modified().unwrap();
-        let known = HashSet::new();
+        let kept = provision_for_test(&root, "kept", &worktrees).path;
+        let known = HashSet::from(["kept".to_string()]);
 
         let fresh = cleanup_orphans_at(&worktrees, &known, modified, ORPHAN_MIN_AGE);
         assert!(fresh.removed.is_empty());
@@ -1003,55 +1010,19 @@ mod tests {
         assert_eq!(old.removed.as_slice(), std::slice::from_ref(&orphan));
         assert!(old.skipped.is_empty());
         assert!(!orphan.exists());
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn orphan_cleanup_keeps_known_worktree() {
-        let (temp, root) = scratch_repo("tcode-worktree-known-test");
-        let worktrees = temp.join("worktrees");
-        let kept = provision_for_test(&root, "kept", &worktrees).path;
-        let modified = std::fs::metadata(&kept).unwrap().modified().unwrap();
-        let known = HashSet::from(["kept".to_string()]);
+        assert!(kept.join("tracked.txt").exists());
+        let unrelated = worktrees.join("unregistered");
+        std::fs::create_dir(&unrelated).unwrap();
+        let modified = std::fs::metadata(&unrelated).unwrap().modified().unwrap();
         let summary = cleanup_orphans_at(
             &worktrees,
             &known,
             modified + ORPHAN_MIN_AGE + Duration::from_secs(1),
             ORPHAN_MIN_AGE,
         );
-        assert_eq!(summary, CleanupSummary::default());
-        remove(&root, &kept).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn provision_recovers_an_unregistered_stale_path() {
-        let (temp, root) = scratch_repo("tcode-worktree-stale-path-test");
-        let worktrees = temp.join("worktrees");
-        std::fs::create_dir_all(worktrees.join("stale")).unwrap();
-        let created = provision_for_test(&root, "stale", &worktrees);
-        assert!(created.path.join("tracked.txt").exists());
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn branch_collision_uses_numeric_suffix() {
-        let (temp, root) = scratch_repo("tcode-worktree-branch-collision-test");
-        run(&root, &["branch", "tcode/collision"]);
-        let created = provision_for_test(&root, "collision", &temp.join("worktrees"));
-        assert_eq!(created.branch, "tcode/collision-2");
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn removal_is_idempotent_after_external_deletion() {
-        let (temp, root) = scratch_repo("tcode-worktree-remove-idempotent-test");
-        let created = provision_for_test(&root, "remove", &temp.join("worktrees"));
-        std::fs::remove_dir_all(&created.path).unwrap();
-        assert_eq!(remove(&root, &created.path), Ok(()));
-        assert_eq!(remove(&root, &created.path), Ok(()));
+        assert!(summary.removed.is_empty());
+        assert_eq!(summary.skipped.as_slice(), std::slice::from_ref(&unrelated));
+        assert!(unrelated.exists());
         let _ = std::fs::remove_dir_all(temp);
     }
 }

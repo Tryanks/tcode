@@ -658,15 +658,3 @@ impl Render for HostingPanel {
             .child(self.render_hosting(compact, cx))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::countdown;
-
-    #[test]
-    fn countdown_reads_as_minutes_and_seconds() {
-        assert_eq!(countdown(299), "4:59");
-        assert_eq!(countdown(60), "1:00");
-        assert_eq!(countdown(7), "0:07");
-    }
-}

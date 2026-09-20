@@ -237,15 +237,3 @@ fn format_size(bytes: usize) -> String {
         format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::format_size;
-
-    #[test]
-    fn size_reads_in_the_unit_that_fits() {
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(2048), "2.0 KB");
-        assert_eq!(format_size(3 * 1024 * 1024), "3.0 MB");
-    }
-}

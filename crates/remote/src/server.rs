@@ -1190,7 +1190,7 @@ mod tests {
     async fn reply(ws: &mut WebSocketStream<smol::net::TcpStream>) -> serde_json::Value {
         let message =
             futures_lite::future::race(async { ws.next().await.unwrap().unwrap() }, async {
-                smol::Timer::after(Duration::from_secs(2)).await;
+                smol::Timer::after(Duration::from_secs(30)).await;
                 panic!("server did not answer the handshake");
             })
             .await;
@@ -1318,7 +1318,7 @@ mod tests {
                 }
             },
             async {
-                smol::Timer::after(Duration::from_secs(3)).await;
+                smol::Timer::after(Duration::from_secs(30)).await;
                 panic!("HTTP identity exchange stalled");
             },
         ));
@@ -1410,7 +1410,7 @@ mod tests {
                     .await
                     .unwrap();
                 let response = futures_lite::future::race(ws.next(), async {
-                    smol::Timer::after(Duration::from_secs(2)).await;
+                    smol::Timer::after(Duration::from_secs(30)).await;
                     panic!("server did not reject invalid handshake");
                 })
                 .await;

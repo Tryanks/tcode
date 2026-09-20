@@ -337,6 +337,13 @@ mod tests {
             browser_urls(&pairing, "0.0.0.0:47420".parse().unwrap()),
             ["http://192.168.1.4:47420/", "http://127.0.0.1:47420/",]
         );
+        for (bound, expected) in [
+            ("127.0.0.1:1234", "http://127.0.0.1:1234/"),
+            ("[::1]:1234", "http://[::1]:1234/"),
+            ("[::]:1234", "http://[::1]:1234/"),
+        ] {
+            assert_eq!(browser_urls(&pairing, bound.parse().unwrap()), [expected]);
+        }
         assert_eq!(
             serde_json::to_value(pairing).unwrap()["browser_url"],
             "http://192.168.1.4:47420/#code=123456"

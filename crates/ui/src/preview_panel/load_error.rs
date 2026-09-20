@@ -351,16 +351,12 @@ mod tests {
     }
 
     #[test]
-    fn load_error_reports_the_platform_error_verbatim() {
+    fn load_error_preserves_platform_diagnostics_in_text_and_json() {
         assert_eq!(
             certificate_failure().describe(),
             "navigation to https://localhost:8443/ failed: \
              The certificate for this server is invalid. (NSURLErrorDomain -1202)"
         );
-    }
-
-    #[test]
-    fn load_error_json_is_url_code_message() {
         assert_eq!(
             certificate_failure().to_json(),
             serde_json::json!({

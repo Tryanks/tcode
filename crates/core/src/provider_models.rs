@@ -209,79 +209,47 @@ mod tests {
     }
 
     #[test]
-    fn resolves_catalog_order_by_default() {
-        let rows = resolve_models(&catalog(), &ProviderSettings::default(), &[]);
-        assert_eq!(
-            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["opus", "sonnet", "haiku"]
-        );
-        assert!(rows.iter().all(|r| !r.hidden && !r.custom && !r.favorite));
-    }
-
-    #[test]
-    fn favorites_float_to_the_top_and_keep_relative_order() {
-        let favorites = vec!["haiku".to_string(), "sonnet".to_string()];
-        let rows = resolve_models(&catalog(), &ProviderSettings::default(), &favorites);
-        assert_eq!(
-            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["sonnet", "haiku", "opus"]
-        );
-        assert!(rows[0].favorite && rows[1].favorite && !rows[2].favorite);
-    }
-
-    #[test]
-    fn hidden_models_stay_in_settings_but_leave_the_picker() {
+    fn model_preferences_keep_catalog_order_and_hidden_rows_out_of_the_picker() {
         let settings = ProviderSettings {
-            hidden_models: vec!["sonnet".into()],
+            custom_models: vec!["custom".into(), "hidden-custom".into()],
+            hidden_models: vec!["opus".into(), "hidden-custom".into()],
             ..Default::default()
         };
-        let all = resolve_models(&catalog(), &settings, &[]);
-        assert_eq!(all.len(), 3);
-        assert!(all.iter().find(|row| row.id == "sonnet").unwrap().hidden);
-        assert_eq!(
-            picker_models(&catalog(), &settings, &[])
-                .iter()
-                .map(|r| r.id.as_str())
-                .collect::<Vec<_>>(),
-            ["opus", "haiku"]
-        );
-    }
-
-    #[test]
-    fn custom_models_appear_flagged_and_are_pickable() {
-        let settings = ProviderSettings {
-            custom_models: vec!["claude-sonnet-5".into()],
-            ..Default::default()
-        };
-        let picker = picker_models(&catalog(), &settings, &[]);
-        let custom = picker.iter().find(|r| r.id == "claude-sonnet-5").unwrap();
-        assert!(custom.custom);
-        assert_eq!(custom.name, "claude-sonnet-5");
-        let settings = ProviderSettings {
-            hidden_models: vec!["claude-sonnet-5".into()],
-            ..settings
-        };
-        assert!(
-            !picker_models(&catalog(), &settings, &[])
-                .iter()
-                .any(|row| row.id == "claude-sonnet-5")
-        );
-    }
-
-    #[test]
-    fn hidden_custom_and_favorites_compose() {
-        let settings = ProviderSettings {
-            custom_models: vec!["claude-sonnet-5".into()],
-            hidden_models: vec!["opus".into()],
-            ..Default::default()
-        };
-        let rows = picker_models(&catalog(), &settings, &["haiku".into()]);
-        // Favorite floats up; the rest keep catalog order (custom slugs last);
-        // hidden `opus` is filtered from the picker.
-        assert_eq!(
-            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["haiku", "sonnet", "claude-sonnet-5"]
-        );
+        for (favorites, expected) in [
+            (vec![], vec!["sonnet", "haiku", "custom"]),
+            (
+                vec!["haiku".into(), "sonnet".into()],
+                vec!["sonnet", "haiku", "custom"],
+            ),
+            (
+                vec![
+                    "custom".into(),
+                    "haiku".into(),
+                    "opus".into(),
+                    "missing".into(),
+                ],
+                vec!["haiku", "custom", "sonnet"],
+            ),
+        ] {
+            let all = resolve_models(&catalog(), &settings, &favorites);
+            assert_eq!(all.len(), 5);
+            for row in &all {
+                assert_eq!(row.hidden, settings.hidden_models.contains(&row.id));
+                assert_eq!(row.favorite, favorites.contains(&row.id));
+                assert_eq!(
+                    row.custom,
+                    matches!(row.id.as_str(), "custom" | "hidden-custom")
+                );
+                if row.custom {
+                    assert_eq!(row.name, row.id);
+                }
+            }
+            let picker = picker_models(&catalog(), &settings, &favorites);
+            assert_eq!(
+                picker.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+                expected
+            );
+        }
     }
 
     #[test]

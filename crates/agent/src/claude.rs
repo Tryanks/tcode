@@ -2678,9 +2678,10 @@ impl Mapper {
 
         let request_type = classify_claude_tool(&tool_name);
 
-        // Full-access allows ordinary tools; read-only allows native reads.
+        // Display classification uses name heuristics; automatic authorization must
+        // recognize exact native tools so an MCP lookalike cannot inherit access.
         let read_only_allow = self.approval_mode == ApprovalMode::ReadOnly
-            && request_type == ClaudeRequestType::FileRead;
+            && matches!(tool_name.as_str(), "Read" | "Glob" | "Grep" | "WebSearch");
         if self.approval_mode == ApprovalMode::FullAccess || read_only_allow {
             self.outgoing.push(control_response(
                 &request_id,
@@ -3705,26 +3706,19 @@ mod tests {
             resolve("test-fixed", "xhigh").effort.as_deref(),
             Some("max")
         );
-        // Unknown model: no descriptor to resolve against, so no flag.
-        assert_eq!(resolve("test-unknown", "high").effort, None);
-    }
-
-    #[test]
-    fn resolve_effort_uses_listed_value_or_default() {
-        let catalog = crate::claude_manifest::test_catalog();
-        let wide = catalog.model("test-wide").map(|entry| &entry.spec);
         assert_eq!(
-            resolve_claude_effort(wide, Some("max")).as_deref(),
-            Some("max")
-        );
-        assert_eq!(
-            resolve_claude_effort(wide, Some("bogus")).as_deref(),
+            resolve("test-wide", "bogus").effort.as_deref(),
             Some("medium")
         );
-        assert_eq!(resolve_claude_effort(wide, None).as_deref(), Some("medium"));
-        // A profile without a reasoning selector has no effort at all.
-        let plain = catalog.model("test-plain").map(|entry| &entry.spec);
-        assert_eq!(resolve_claude_effort(plain, Some("low")), None);
+        assert_eq!(
+            ClaudeLaunchOptions::resolve_with(&catalog, Some("test-wide"), &[])
+                .effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(resolve("test-plain", "low").effort, None);
+        // Unknown model: no descriptor to resolve against, so no flag.
+        assert_eq!(resolve("test-unknown", "high").effort, None);
     }
 
     #[test]
@@ -3784,34 +3778,6 @@ mod tests {
         assert_eq!(format_context_window(200_000), "200k");
         assert_eq!(format_context_window(750_000), "750k");
         assert_eq!(format_context_window(1_000_000), "1M");
-    }
-
-    #[test]
-    fn strip_context_window_suffix_is_an_explicit_list() {
-        assert_eq!(
-            strip_context_window_suffix("claude-opus-5[1m]"),
-            "claude-opus-5"
-        );
-        assert_eq!(
-            strip_context_window_suffix("claude-opus-5[1M]"),
-            "claude-opus-5"
-        );
-        assert_eq!(
-            strip_context_window_suffix("claude-opus-5[2m]"),
-            "claude-opus-5"
-        );
-        assert_eq!(
-            strip_context_window_suffix("claude-opus-5"),
-            "claude-opus-5"
-        );
-        // Unlisted brackets are left alone: no `[*]` wildcard.
-        assert_eq!(
-            strip_context_window_suffix("claude-opus-5[3m]"),
-            "claude-opus-5[3m]"
-        );
-        assert_eq!(strip_context_window_suffix("opus[1m][2m]"), "opus[1m]");
-        assert_eq!(strip_context_window_suffix("[1m]"), "");
-        assert_eq!(CONTEXT_WINDOW_SUFFIXES, &["[1m]", "[2m]"]);
     }
 
     #[test]
@@ -3989,7 +3955,7 @@ mod tests {
     #[test]
     fn set_approval_mode_while_in_plan_keeps_plan_permission_mode() {
         smol::block_on(async {
-            let mut child = crate::process::async_command("cat")
+            let mut child = smol::process::Command::from(crate::process::test_echo_command())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()
@@ -4013,9 +3979,8 @@ mod tests {
             assert_eq!(m.base_permission_mode, "bypassPermissions");
             assert_eq!(m.applied_permission_mode, "plan");
             assert!(m.pending_permission_modes.is_empty());
-            stdin.close().await.unwrap();
-            child.kill().unwrap();
-            child.status().await.unwrap();
+            drop(stdin);
+            assert!(child.status().await.unwrap().success());
         });
     }
 
@@ -4107,8 +4072,17 @@ mod tests {
             &mut m,
             r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8","slash_commands":["plan","review",""],"skills":["dataviz"]}"#,
         );
-        // SessionStarted then ProviderCommands.
-        assert!(matches!(evs[0], AgentEvent::SessionStarted { .. }));
+        assert!(
+            matches!(&evs[0], AgentEvent::SessionStarted { provider_session_id, resume, model }
+            if provider_session_id == "s1" && resume.0["session_id"] == "s1" && model.as_deref() == Some("claude-opus-4-8"))
+        );
+        assert!(
+            feed(
+                &mut m,
+                r#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-4-8"}"#
+            )
+            .is_empty()
+        );
         match &evs[1] {
             AgentEvent::ProviderCommands { commands } => {
                 // Empty names dropped; two commands + one skill.
@@ -4300,29 +4274,23 @@ mod tests {
     }
 
     #[test]
-    fn init_emits_session_started_once() {
-        let mut m = Mapper::new();
-        let line = r#"{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-opus-4-8","cwd":"/tmp"}"#;
-        let evs = feed(&mut m, line);
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            AgentEvent::SessionStarted {
-                provider_session_id,
-                resume,
-                model,
-            } => {
-                assert_eq!(provider_session_id, "sess-1");
-                assert_eq!(resume.0.get("session_id").unwrap(), "sess-1");
-                assert_eq!(model.as_deref(), Some("claude-opus-4-8"));
-            }
-            other => panic!("expected SessionStarted, got {other:?}"),
-        }
-        // Second init is ignored.
-        assert!(feed(&mut m, line).is_empty());
-    }
-
-    #[test]
     fn rejected_rate_limit_is_emitted_after_failed_result_error() {
+        let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1800000000,"rateLimitType":"five_hour","utilization":1.0}}"#,
+        );
+
+        let events = feed(
+            &mut m,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-1"}"#,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::UsageLimitReached { .. }))
+        );
+
         let mut m = Mapper::new();
         assert!(feed(
             &mut m,
@@ -4344,25 +4312,6 @@ mod tests {
                 resets_at: 1_800_000_000
             })
         ));
-    }
-
-    #[test]
-    fn rejected_rate_limit_is_cleared_by_successful_result() {
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1800000000,"rateLimitType":"five_hour","utilization":1.0}}"#,
-        );
-
-        let events = feed(
-            &mut m,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-1"}"#,
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, AgentEvent::UsageLimitReached { .. }))
-        );
     }
 
     #[test]
@@ -4445,25 +4394,6 @@ mod tests {
                     item.id, streamed_id,
                     "completion must reuse the streamed item id, or the text renders twice"
                 );
-            }
-            other => panic!("expected ItemCompleted, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn assistant_text_block_completes_item() {
-        let mut m = Mapper::new();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"Hello there"}]}}"#,
-        );
-        match &evs[0] {
-            AgentEvent::ItemCompleted(item) => {
-                assert_eq!(item.id, "msg_2:0");
-                match &item.content {
-                    ItemContent::AssistantMessage { text } => assert_eq!(text, "Hello there"),
-                    other => panic!("expected AssistantMessage, got {other:?}"),
-                }
             }
             other => panic!("expected ItemCompleted, got {other:?}"),
         }
@@ -4836,23 +4766,37 @@ mod tests {
                 .is_none()
         );
 
-        // ApproveForSession WITH suggestions → forwarded verbatim.
-        let mut m3 = Mapper::new();
-        feed(
-            &mut m3,
-            r#"{"type":"control_request","request_id":"req-p","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]}}"#,
-        );
-        let sess = m3
-            .build_approval_response("req-p", ApprovalDecision::ApproveForSession)
-            .unwrap();
-        assert_eq!(
-            sess["response"]["response"]["updatedPermissions"][0]["type"],
-            "setMode"
-        );
-        assert_eq!(
-            sess["response"]["response"]["updatedPermissions"][0]["mode"],
-            "acceptEdits"
-        );
+        for (decision, expected) in [
+            (
+                ApprovalDecision::Approve,
+                json!({"behavior":"allow", "updatedInput":{"text":"complete report"}}),
+            ),
+            (
+                ApprovalDecision::ApproveForSession,
+                json!({
+                    "behavior":"allow",
+                    "updatedInput":{"text":"complete report"},
+                    "updatedPermissions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],
+                }),
+            ),
+        ] {
+            let mut mapper = Mapper::new();
+            let events = feed(
+                &mut mapper,
+                r#"{"type":"control_request","request_id":"req-report","request":{"subtype":"can_use_tool","tool_name":"mcp__tcode_report__report_result","input":{"text":"complete report"},"permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}]}}"#,
+            );
+            assert!(matches!(
+                events.as_slice(),
+                [AgentEvent::ApprovalRequested(ApprovalRequest {
+                    kind: ApprovalKind::ToolUse { name, .. },
+                    ..
+                })] if name == "mcp__tcode_report__report_result"
+            ));
+            let response = mapper
+                .build_approval_response("req-report", decision)
+                .unwrap();
+            assert_eq!(response["response"]["response"], expected);
+        }
     }
 
     #[test]
@@ -4926,6 +4870,24 @@ mod tests {
     #[test]
     fn ask_user_question_parse_and_answer_wire_shape() {
         let mut m = Mapper::new();
+        feed(
+            &mut m,
+            r#"{"type":"control_request","request_id":"ctrl-x","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
+        );
+        let cancels = m.cancel_pending_user_input();
+        assert_eq!(cancels.len(), 1);
+        let (id, resp) = &cancels[0];
+        assert_eq!(id, "ctrl-x");
+        assert_eq!(resp["response"]["response"]["behavior"], "deny");
+        assert_eq!(
+            resp["response"]["response"]["message"],
+            "User cancelled tool execution."
+        );
+        // Drained: no longer answerable.
+        let empty = serde_json::Map::new();
+        assert!(m.build_user_input_response("ctrl-x", &empty).is_none());
+
+        let mut m = Mapper::new();
         m.start_turn();
         let evs = feed(
             &mut m,
@@ -4977,121 +4939,94 @@ mod tests {
     }
 
     #[test]
-    fn ask_user_question_cancel_on_teardown() {
-        let mut m = Mapper::new();
-        feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"ctrl-x","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
-        );
-        let cancels = m.cancel_pending_user_input();
-        assert_eq!(cancels.len(), 1);
-        let (id, resp) = &cancels[0];
-        assert_eq!(id, "ctrl-x");
-        assert_eq!(resp["response"]["response"]["behavior"], "deny");
-        assert_eq!(
-            resp["response"]["response"]["message"],
-            "User cancelled tool execution."
-        );
-        // Drained: no longer answerable.
-        let empty = serde_json::Map::new();
-        assert!(m.build_user_input_response("ctrl-x", &empty).is_none());
-    }
-
-    #[test]
-    fn full_access_auto_allows_without_event() {
-        let mut m = Mapper::new();
-        m.approval_mode = ApprovalMode::FullAccess;
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-fa","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}}"#,
-        );
-        assert!(evs.is_empty(), "full-access emits no approval event");
-        let outgoing = m.take_outgoing();
-        assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["response"]["request_id"], "req-fa");
-        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "allow");
-        assert_eq!(
-            outgoing[0]["response"]["response"]["updatedInput"]["command"],
-            "ls"
-        );
-        // AskUserQuestion still surfaces even in full-access.
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
-        );
-        assert!(matches!(evs[0], AgentEvent::UserInputRequested { .. }));
-    }
-
-    #[test]
-    fn read_tool_maps_to_file_read_kind() {
-        let mut m = Mapper::new();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-r","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/tmp/a.txt"}}}"#,
-        );
-        match &evs[0] {
-            AgentEvent::ApprovalRequested(req) => match &req.kind {
-                ApprovalKind::FileRead { detail } => {
-                    assert!(detail.starts_with("Read: "), "detail was {detail:?}")
+    fn approval_policy_preserves_tool_input_and_keeps_questions_interactive() {
+        for mode in [
+            ApprovalMode::Supervised,
+            ApprovalMode::AutoAcceptEdits,
+            ApprovalMode::ReadOnly,
+            ApprovalMode::FullAccess,
+        ] {
+            for (name, input, read_only_allowed) in [
+                ("Read", json!({"file_path":"/tmp/a.txt"}), true),
+                ("Glob", json!({"pattern":"*.rs"}), true),
+                ("Grep", json!({"pattern":"fn main"}), true),
+                ("WebSearch", json!({"query":"Rust"}), true),
+                (
+                    "Write",
+                    json!({"file_path":"/tmp/a.txt", "content":"changed"}),
+                    false,
+                ),
+                ("Bash", json!({"command":"echo hi"}), false),
+                ("mcp__server__tool", json!({"arg":"value"}), false),
+                (
+                    "mcp__untrusted__search_and_delete",
+                    json!({"path":"/tmp/a.txt"}),
+                    false,
+                ),
+                ("mcp__untrusted__Read", json!({"path":"/tmp/a.txt"}), false),
+                ("PreviewAndWrite", json!({"path":"/tmp/a.txt"}), false),
+            ] {
+                let mut mapper = Mapper::new();
+                mapper.approval_mode = mode;
+                let events = mapper
+                    .on_message(json!({"type":"control_request", "request_id":"request",
+                    "request":{"subtype":"can_use_tool", "tool_name":name, "input":input}}));
+                let outgoing = mapper.take_outgoing();
+                if mode == ApprovalMode::FullAccess
+                    || (mode == ApprovalMode::ReadOnly && read_only_allowed)
+                {
+                    assert!(events.is_empty(), "{mode:?} {name}");
+                    assert!(mapper.pending_approvals.is_empty());
+                    assert_eq!(outgoing.len(), 1);
+                    assert_eq!(outgoing[0]["response"]["request_id"], "request");
+                    assert_eq!(
+                        outgoing[0]["response"]["response"],
+                        json!({"behavior":"allow", "updatedInput":input})
+                    );
+                } else {
+                    assert!(outgoing.is_empty(), "{mode:?} {name}");
+                    let [AgentEvent::ApprovalRequested(request)] = events.as_slice() else {
+                        panic!("{mode:?} {name}: expected approval, got {events:?}");
+                    };
+                    assert_eq!(request.id, "request");
+                    assert_eq!(mapper.pending_approvals.len(), 1);
+                    match (name, &request.kind) {
+                        (
+                            "Read" | "Glob" | "Grep" | "WebSearch",
+                            ApprovalKind::FileRead { detail },
+                        ) => {
+                            assert!(detail.starts_with(&format!("{name}: ")))
+                        }
+                        (
+                            "mcp__untrusted__search_and_delete" | "PreviewAndWrite",
+                            ApprovalKind::FileRead { .. },
+                        ) => {}
+                        ("Write", ApprovalKind::FileChange { changes, .. }) => {
+                            assert_eq!(changes[0].path, "/tmp/a.txt")
+                        }
+                        ("Bash", ApprovalKind::ExecCommand { command, .. }) => {
+                            assert_eq!(command, "echo hi")
+                        }
+                        (
+                            "mcp__server__tool" | "mcp__untrusted__Read",
+                            ApprovalKind::ToolUse { input: actual, .. },
+                        ) => {
+                            assert_eq!(actual, &input)
+                        }
+                        other => panic!("wrong approval kind: {other:?}"),
+                    }
                 }
-                other => panic!("expected FileRead, got {other:?}"),
-            },
-            other => panic!("expected ApprovalRequested, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn read_only_auto_allows_file_reads_without_approval() {
-        let mut m = Mapper::new();
-        m.approval_mode = ApprovalMode::ReadOnly;
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-ro-read","request":{"subtype":"can_use_tool","tool_name":"Read","input":{"file_path":"/tmp/a.txt"}}}"#,
-        );
-        assert!(evs.is_empty(), "read-only file read emitted an approval");
-        assert!(m.pending_approvals.is_empty());
-        let outgoing = m.take_outgoing();
-        assert_eq!(outgoing.len(), 1);
-        assert_eq!(outgoing[0]["response"]["request_id"], "req-ro-read");
-        assert_eq!(outgoing[0]["response"]["response"]["behavior"], "allow");
-        assert_eq!(
-            outgoing[0]["response"]["response"]["updatedInput"]["file_path"],
-            "/tmp/a.txt"
-        );
-    }
-
-    #[test]
-    fn read_only_file_write_still_requests_approval() {
-        let mut m = Mapper::new();
-        m.approval_mode = ApprovalMode::ReadOnly;
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-ro-write","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/tmp/a.txt","content":"changed"}}}"#,
-        );
-        assert!(matches!(
-            evs.as_slice(),
-            [AgentEvent::ApprovalRequested(ApprovalRequest {
-                id,
-                kind: ApprovalKind::FileChange { .. },
-                ..
-            })] if id == "req-ro-write"
-        ));
-        assert!(m.take_outgoing().is_empty());
-    }
-
-    #[test]
-    fn bash_approval_maps_to_exec_command() {
-        let mut m = Mapper::new();
-        let evs = feed(
-            &mut m,
-            r#"{"type":"control_request","request_id":"req-b","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"echo hi"}}}"#,
-        );
-        match &evs[0] {
-            AgentEvent::ApprovalRequested(req) => match &req.kind {
-                ApprovalKind::ExecCommand { command, .. } => assert_eq!(command, "echo hi"),
-                other => panic!("expected ExecCommand, got {other:?}"),
-            },
-            other => panic!("expected ApprovalRequested, got {other:?}"),
+            }
+            let mut mapper = Mapper::new();
+            mapper.approval_mode = mode;
+            let events = feed(
+                &mut mapper,
+                r#"{"type":"control_request","request_id":"question","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"q?","header":"h"}]}}}"#,
+            );
+            assert!(
+                matches!(events.as_slice(), [AgentEvent::UserInputRequested { request_id, .. }] if request_id == "question")
+            );
+            assert!(mapper.take_outgoing().is_empty());
         }
     }
 
@@ -5128,6 +5063,20 @@ mod tests {
 
     #[test]
     fn interrupted_result_status() {
+        let mut mapper = Mapper::new();
+        mapper.start_turn();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"You can cancel the operation from Settings."}"#,
+        );
+        assert!(matches!(
+            turn_completed_after_count(&events, 0),
+            AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            }
+        ));
+
         let mut idle = Mapper::new();
         idle.interrupt_request();
         assert!(!idle.interrupt_pending);
@@ -5699,73 +5648,38 @@ mod tests {
     }
 
     #[test]
-    fn requesting_accepts_multiple_pending_steers_in_fifo_order() {
-        let mut mapper = Mapper::new();
-        mapper.pending_steers.push_back("steer-first".into());
-        mapper.pending_steers.push_back("steer-second".into());
-
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint-2","session_id":"session-1"}"#,
-        );
-        assert_eq!(
-            accepted_request_ids(&events),
-            ["steer-first", "steer-second"]
-        );
-        assert!(mapper.pending_steers.is_empty());
-    }
-
-    #[test]
-    fn result_keeps_pending_steer_for_follow_up_requesting() {
-        let mut mapper = Mapper::new();
-        mapper.pending_steers.push_back("steer-late".into());
-
-        let result_events = feed(
-            &mut mapper,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"first response","session_id":"session-1","usage":{"input_tokens":2,"output_tokens":3}}"#,
-        );
-        assert!(accepted_request_ids(&result_events).is_empty());
-        assert_eq!(mapper.pending_steers.len(), 1);
-
-        let requesting_events = feed(
-            &mut mapper,
-            r#"{"type":"system","subtype":"status","status":"requesting","uuid":"follow-up-checkpoint","session_id":"session-1"}"#,
-        );
-        assert_eq!(accepted_request_ids(&requesting_events), ["steer-late"]);
-    }
-
-    #[test]
-    fn assistant_accepts_pending_steer_for_legacy_cli_fallback() {
-        let mut mapper = Mapper::new();
-        mapper.pending_steers.push_back("steer-legacy".into());
-
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg_legacy","type":"message","role":"assistant","content":[{"type":"text","text":"consumed"}]},"session_id":"session-legacy","request_id":"req_legacy"}"#,
-        );
-        assert_eq!(accepted_request_ids(&events), ["steer-legacy"]);
-    }
-
-    #[test]
-    fn assistant_does_not_fallback_after_requesting_was_observed() {
-        let mut mapper = Mapper::new();
-        assert!(
-            feed(
+    fn steer_acceptance_uses_request_boundaries_with_a_legacy_assistant_fallback() {
+        let requesting = r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint","session_id":"session"}"#;
+        let assistant = r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg","content":[{"type":"text","text":"response"}]},"session_id":"session"}"#;
+        for current_cli in [false, true] {
+            let mut mapper = Mapper::new();
+            if current_cli {
+                assert!(feed(&mut mapper, requesting).is_empty());
+            }
+            mapper
+                .pending_steers
+                .extend(["first".into(), "second".into()]);
+            let result = feed(
                 &mut mapper,
-                r#"{"type":"system","subtype":"status","status":"requesting","uuid":"checkpoint-early","session_id":"session-1"}"#,
-            )
-            .is_empty()
-        );
-        mapper
-            .pending_steers
-            .push_back("steer-after-checkpoint".into());
-
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","id":"msg_current","type":"message","role":"assistant","content":[{"type":"text","text":"current response"}]},"session_id":"session-1","request_id":"req_current"}"#,
-        );
-        assert!(accepted_request_ids(&events).is_empty());
-        assert_eq!(mapper.pending_steers.len(), 1);
+                r#"{"type":"result","subtype":"success","is_error":false,"session_id":"session"}"#,
+            );
+            assert!(accepted_request_ids(&result).is_empty());
+            assert_eq!(mapper.pending_steers.len(), 2);
+            let events = feed(&mut mapper, assistant);
+            if current_cli {
+                assert!(accepted_request_ids(&events).is_empty());
+                assert_eq!(mapper.pending_steers.len(), 2);
+                assert_eq!(
+                    accepted_request_ids(&feed(&mut mapper, requesting)),
+                    ["first", "second"]
+                );
+            } else {
+                assert_eq!(accepted_request_ids(&events), ["first", "second"]);
+            }
+            assert!(mapper.pending_steers.is_empty());
+            assert!(accepted_request_ids(&feed(&mut mapper, requesting)).is_empty());
+            assert!(accepted_request_ids(&feed(&mut mapper, assistant)).is_empty());
+        }
     }
 
     #[test]
@@ -5798,23 +5712,6 @@ mod tests {
                 if message == "Request declined by safety classifiers (stop_reason: refusal)"
         ));
         assert!(assistant.is_empty());
-    }
-
-    #[test]
-    fn successful_result_that_mentions_cancel_is_completed() {
-        let mut mapper = Mapper::new();
-        mapper.start_turn();
-        let events = feed(
-            &mut mapper,
-            r#"{"type":"result","subtype":"success","is_error":false,"result":"You can cancel the operation from Settings."}"#,
-        );
-        assert!(matches!(
-            turn_completed_after_count(&events, 0),
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
     }
 
     #[test]

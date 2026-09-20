@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn index_roundtrip_and_sort() {
+    fn session_index_upserts_orders_and_removes_only_the_selected_session() {
         let store = SessionStore::open_at(temp_root()).unwrap();
         let mut a = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/a"), None);
         a.updated_at = 100;
@@ -471,6 +471,31 @@ mod tests {
             index.iter().find(|m| m.id == a.id).unwrap().title,
             "renamed"
         );
+        store
+            .append_event(
+                &a.id,
+                1,
+                &AgentEvent::TurnStarted {
+                    turn_id: "turn-a".into(),
+                },
+            )
+            .unwrap();
+        store
+            .append_event(
+                &b.id,
+                2,
+                &AgentEvent::TurnStarted {
+                    turn_id: "turn-b".into(),
+                },
+            )
+            .unwrap();
+        store.remove_session(&a.id).unwrap();
+        store.remove_session(&a.id).unwrap();
+        let remaining = store.load_index();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, b.id);
+        assert!(!store.events_path(&a.id).exists());
+        assert!(store.events_path(&b.id).exists());
         let _ = fs::remove_dir_all(store.root());
     }
 
@@ -519,115 +544,45 @@ mod tests {
     }
 
     #[test]
-    fn append_and_read_events() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let id = "sess-1";
-        store
-            .append_event(
-                id,
-                1_000,
-                &AgentEvent::TurnStarted {
-                    turn_id: "t1".into(),
-                },
-            )
-            .unwrap();
-        store
-            .append_event(
-                id,
-                2_000,
-                &AgentEvent::TurnCompleted {
-                    turn_id: "t1".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-            )
-            .unwrap();
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].ts, Some(1_000));
-        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
-        assert_eq!(events[1].ts, Some(2_000));
-        assert!(matches!(
-            events[1].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        let raw = fs::read_to_string(store.events_path(id)).unwrap();
-        let first: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
-        assert_eq!(
-            first,
-            serde_json::json!({
-                "ts": 1_000,
-                "event": {"type": "turn_started", "turn_id": "t1"},
-            })
-        );
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn reader_tolerates_legacy_bare_events_and_envelopes() {
+    fn append_recovers_a_mixed_legacy_log_and_writes_the_current_envelope() {
         let store = SessionStore::open_at(temp_root()).unwrap();
         let id = "mixed";
-        // A legacy bare event, a timestamped envelope, a blank line, and a corrupt line.
-        let contents = concat!(
-            r#"{"type":"turn_started","turn_id":"legacy"}"#,
-            "\n",
-            r#"{"ts":1730000000000,"event":{"type":"turn_completed","turn_id":"new","status":"completed","usage":null}}"#,
-            "\n",
-            "\n",
-            "{not valid json}\n",
-        );
-        fs::write(store.events_path(id), contents).unwrap();
-
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 2);
-        // Legacy bare event replays with no timestamp.
-        assert_eq!(events[0].ts, None);
-        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
-        // Envelope carries the recorded timestamp.
-        assert_eq!(events[1].ts, Some(1_730_000_000_000));
-        assert!(matches!(
-            events[1].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn append_separates_event_from_truncated_last_line() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let id = "truncated";
-        fs::write(store.events_path(id), br#"{"type":"turn_started"#).unwrap();
-
+        fs::write(store.events_path(id), concat!(
+            "{\"type\":\"turn_started\",\"turn_id\":\"legacy\"}\n",
+            "{\"ts\":2000,\"event\":{\"type\":\"turn_completed\",\"turn_id\":\"legacy\",\"status\":\"completed\",\"usage\":null}}\n",
+            "\n{not valid json}\n{\"type\":\"turn_started"
+        )).unwrap();
         store
             .append_event(
                 id,
-                7,
-                &AgentEvent::TurnCompleted {
-                    turn_id: "turn-1".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
+                3000,
+                &AgentEvent::TurnStarted {
+                    turn_id: "next".into(),
                 },
             )
             .unwrap();
-
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        let bytes = fs::read(store.events_path(id)).unwrap();
-        assert!(bytes.starts_with(b"{\"type\":\"turn_started\n"));
-        let _ = fs::remove_dir_all(store.root());
+        let reopened = SessionStore::open_at(store.root().clone()).unwrap();
+        let events = reopened.read_events(id);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.iter().map(|event| event.ts).collect::<Vec<_>>(),
+            [None, Some(2000), Some(3000)]
+        );
+        assert!(
+            matches!(&events[0].event, AgentEvent::TurnStarted { turn_id } if turn_id == "legacy")
+        );
+        assert!(
+            matches!(&events[1].event, AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Completed, .. } if turn_id == "legacy")
+        );
+        assert!(
+            matches!(&events[2].event, AgentEvent::TurnStarted { turn_id } if turn_id == "next")
+        );
+        let raw = fs::read_to_string(store.events_path(id)).unwrap();
+        assert_eq!(
+            raw.lines().last().unwrap(),
+            r#"{"ts":3000,"event":{"type":"turn_started","turn_id":"next"}}"#
+        );
+        fs::remove_dir_all(store.root()).unwrap();
     }
 
     #[test]
@@ -692,29 +647,6 @@ mod tests {
         let migrated_again = migrate_index(file.clone());
         assert_eq!(migrated_again.projects, file.projects);
         assert_eq!(migrated_again.sessions, file.sessions);
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn remove_session_deletes_meta_and_event_log() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
-        store.upsert_meta(&meta).unwrap();
-        store
-            .append_event(
-                &meta.id,
-                1,
-                &AgentEvent::TurnStarted {
-                    turn_id: "turn-1".into(),
-                },
-            )
-            .unwrap();
-        assert!(store.events_path(&meta.id).is_file());
-
-        store.remove_session(&meta.id).unwrap();
-
-        assert!(store.load_index().is_empty());
-        assert!(!store.events_path(&meta.id).exists());
         let _ = fs::remove_dir_all(store.root());
     }
 

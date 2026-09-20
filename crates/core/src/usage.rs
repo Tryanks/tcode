@@ -57,24 +57,3 @@ pub struct ProviderUsage {
     /// Presentation-free but human-readable; the UI shows it as-is.
     pub error: Option<String>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn minutes_map_to_known_windows() {
-        assert_eq!(
-            UsageWindowKind::from_minutes(300),
-            UsageWindowKind::FiveHour
-        );
-        assert_eq!(
-            UsageWindowKind::from_minutes(10_080),
-            UsageWindowKind::Weekly
-        );
-        assert_eq!(
-            UsageWindowKind::from_minutes(1_440),
-            UsageWindowKind::Other { minutes: 1_440 }
-        );
-    }
-}

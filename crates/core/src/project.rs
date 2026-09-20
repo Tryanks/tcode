@@ -699,102 +699,135 @@ mod tests {
     }
 
     #[test]
-    fn auto_archive_keeps_settled_threads_and_ancestors_of_settled_children() {
-        let mut settled = archive_session("settled", 1, Some("parent"));
+    fn auto_archive_respects_idle_rank_exemptions_and_descendant_cascades() {
+        let make = |id: &str, updated, parent: Option<&str>| archive_session(id, updated, parent);
+        let mut settled = make("settled", 1, Some("parent"));
         settled.settled_at = Some(2);
-        let sessions = [
-            archive_session("newest", 1000, None),
-            archive_session("parent", 2, None),
-            settled,
-            archive_session("old", 1, None),
+        let mut archived = make("already-archived", 900, None);
+        archived.archived_at = Some(950);
+        let cases = [
+            (
+                "settled descendant",
+                vec![
+                    make("newest", 1000, None),
+                    make("parent", 2, None),
+                    settled,
+                    make("old", 1, None),
+                ],
+                1,
+                AutoArchiveExemptions::default(),
+                vec!["old"],
+            ),
+            (
+                "idle boundary and future clock",
+                vec![
+                    make("future", 1100, None),
+                    make("at-boundary", 900, None),
+                    make("old", 899, None),
+                ],
+                1,
+                AutoArchiveExemptions::default(),
+                vec!["old"],
+            ),
+            (
+                "keep at least one",
+                vec![make("only", 1, None)],
+                0,
+                AutoArchiveExemptions::default(),
+                vec![],
+            ),
+            (
+                "archived does not consume rank",
+                vec![archived, make("keep", 2, None), make("old", 1, None)],
+                1,
+                AutoArchiveExemptions::default(),
+                vec!["old"],
+            ),
+            (
+                "exemptions consume rank",
+                vec![
+                    make("working", 40, None),
+                    make("active", 30, None),
+                    make("unread", 20, None),
+                    make("old", 10, None),
+                ],
+                3,
+                AutoArchiveExemptions {
+                    working: HashSet::from(["working".into()]),
+                    active: HashSet::from(["active".into()]),
+                    unread: HashSet::from(["unread".into()]),
+                },
+                vec!["old"],
+            ),
+            (
+                "working descendant",
+                vec![
+                    make("new-root", 900, None),
+                    make("root", 100, None),
+                    make("child", 90, Some("root")),
+                    make("worker", 80, Some("child")),
+                ],
+                1,
+                AutoArchiveExemptions {
+                    working: HashSet::from(["worker".into()]),
+                    ..Default::default()
+                },
+                vec![],
+            ),
+            (
+                "working parent",
+                vec![
+                    make("parent", 900, None),
+                    make("new-child", 80, Some("parent")),
+                    make("old-child", 70, Some("parent")),
+                ],
+                1,
+                AutoArchiveExemptions {
+                    working: HashSet::from(["parent".into()]),
+                    ..Default::default()
+                },
+                vec![],
+            ),
+            (
+                "children rank among siblings",
+                vec![
+                    make("parent", 1, None),
+                    make("new-child", 90, Some("parent")),
+                    make("old-child", 80, Some("parent")),
+                ],
+                1,
+                AutoArchiveExemptions::default(),
+                vec!["old-child"],
+            ),
+            (
+                "parent cascades even to recent descendants",
+                vec![
+                    make("new-root", 900, None),
+                    make("root", 100, None),
+                    make("child", 999, Some("root")),
+                    make("grandchild", 999, Some("child")),
+                ],
+                1,
+                AutoArchiveExemptions::default(),
+                vec!["root", "child", "grandchild"],
+            ),
+            (
+                "orphan ranks as root",
+                vec![
+                    make("new-root", 900, None),
+                    make("orphan", 10, Some("missing")),
+                ],
+                1,
+                AutoArchiveExemptions::default(),
+                vec!["orphan"],
+            ),
         ];
-        assert_eq!(
-            candidates(&sessions, 10000, 100, 1, &AutoArchiveExemptions::default()),
-            HashSet::from(["old".into()])
-        );
-    }
-
-    #[test]
-    fn auto_archive_requires_idle_and_beyond_keep_window() {
-        let day = 86_400;
-        let now = 20 * day;
-        let idle = vec![archive_session("idle-in-window", now - 8 * day, None)];
-        assert!(candidates(&idle, now, 7 * day, 1, &AutoArchiveExemptions::default(),).is_empty());
-
-        let beyond = vec![
-            archive_session("newer", now - day, None),
-            archive_session("recent-beyond-window", now - 2 * day, None),
-            archive_session("idle-beyond-window", now - 9 * day, None),
-        ];
-        let found = candidates(&beyond, now, 7 * day, 1, &AutoArchiveExemptions::default());
-        assert!(!found.contains("recent-beyond-window"));
-        assert!(found.contains("idle-beyond-window"));
-    }
-
-    #[test]
-    fn auto_archive_exemptions_keep_threads_and_consume_rank_slots() {
-        let sessions = vec![
-            archive_session("working", 40, None),
-            archive_session("active", 30, None),
-            archive_session("unread", 20, None),
-            archive_session("candidate", 10, None),
-        ];
-        let exempt = AutoArchiveExemptions {
-            working: HashSet::from(["working".into()]),
-            active: HashSet::from(["active".into()]),
-            unread: HashSet::from(["unread".into()]),
-        };
-        let found = candidates(&sessions, 1_000, 100, 3, &exempt);
-        assert_eq!(found, HashSet::from(["candidate".into()]));
-    }
-
-    #[test]
-    fn auto_archive_working_descendant_keeps_its_whole_subtree() {
-        let sessions = vec![
-            archive_session("new-root", 900, None),
-            archive_session("root", 100, None),
-            archive_session("child", 90, Some("root")),
-            archive_session("worker", 80, Some("child")),
-        ];
-        let exempt = AutoArchiveExemptions {
-            working: HashSet::from(["worker".into()]),
-            ..Default::default()
-        };
-        let found = candidates(&sessions, 1_000, 100, 1, &exempt);
-        assert!(found.is_empty());
-    }
-
-    #[test]
-    fn auto_archive_ranks_children_only_with_their_siblings() {
-        let mut sessions = vec![archive_session("parent", 1, None)];
-        sessions.extend(
-            (0..31).map(|index| {
-                archive_session(&format!("child-{index}"), 100 - index, Some("parent"))
-            }),
-        );
-        let found = candidates(
-            &sessions,
-            10_000,
-            100,
-            30,
-            &AutoArchiveExemptions::default(),
-        );
-        assert!(!found.contains("parent"));
-        assert_eq!(found, HashSet::from(["child-30".into()]));
-    }
-
-    #[test]
-    fn auto_archive_parent_candidate_cascades_to_all_descendants() {
-        let sessions = vec![
-            archive_session("new-root", 900, None),
-            archive_session("root", 100, None),
-            archive_session("child", 999, Some("root")),
-            archive_session("grandchild", 999, Some("child")),
-        ];
-        let found = candidates(&sessions, 1_000, 100, 1, &AutoArchiveExemptions::default());
-        assert_eq!(
-            found,
-            HashSet::from(["root".into(), "child".into(), "grandchild".into()])
-        );
+        for (label, sessions, keep, exempt, expected) in cases {
+            assert_eq!(
+                candidates(&sessions, 1000, 100, keep, &exempt),
+                expected.into_iter().map(str::to_string).collect(),
+                "{label}"
+            );
+        }
     }
 }

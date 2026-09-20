@@ -405,113 +405,82 @@ mod tests {
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 
     #[test]
-    fn sticky_control_encodes_one_character_then_clears() {
-        let mut state = TerminalKeyEncoder {
-            modifiers: StickyModifiers {
-                control: true,
-                alt: false,
-            },
-        };
-        assert_eq!(
-            state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
-            vec![0x03]
-        );
-        assert_eq!(state.modifiers, StickyModifiers::default());
-        assert_eq!(
-            state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
-            b"c"
-        );
-    }
-
-    #[test]
-    fn arrows_use_the_replicated_application_cursor_mode() {
-        let mut state = TerminalKeyEncoder {
-            modifiers: StickyModifiers::default(),
-        };
-        assert_eq!(
-            state.encode_key(
-                TerminalKey::Up,
-                TerminalMode::empty(),
-                KeyboardModes::NO_MODE,
-                None
-            ),
-            b"\x1b[A"
-        );
-        assert_eq!(
-            state.encode_key(
-                TerminalKey::Up,
-                TerminalMode::APP_CURSOR,
-                KeyboardModes::NO_MODE,
-                None,
-            ),
-            b"\x1bOA"
-        );
-    }
-
-    /// A combo is one tap: it encodes through the same `key_bytes` path a
-    /// hardware Ctrl+C takes, and it consumes any sticky Ctrl rather than
-    /// doubling it or leaving it armed for the next key.
-    #[test]
-    fn control_combos_encode_once_and_clear_the_sticky_modifiers() {
-        let mut state = TerminalKeyEncoder {
-            modifiers: StickyModifiers::default(),
-        };
-        for (key, byte) in [
-            (TerminalKey::Control('c'), 0x03),
-            (TerminalKey::Control('d'), 0x04),
-        ] {
+    fn sticky_terminal_modifiers_encode_once_using_replicated_modes() {
+        {
+            let mut state = TerminalKeyEncoder {
+                modifiers: StickyModifiers {
+                    control: true,
+                    alt: false,
+                },
+            };
             assert_eq!(
-                state.encode_key(key, TerminalMode::empty(), KeyboardModes::NO_MODE, None),
-                vec![byte]
+                state.encode_text("ca", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+                vec![0x03, b'a']
+            );
+            assert_eq!(state.modifiers, StickyModifiers::default());
+            assert_eq!(
+                state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+                b"c"
             );
         }
+        {
+            let mut state = TerminalKeyEncoder {
+                modifiers: StickyModifiers::default(),
+            };
+            assert_eq!(
+                state.encode_key(
+                    TerminalKey::Up,
+                    TerminalMode::empty(),
+                    KeyboardModes::NO_MODE,
+                    None
+                ),
+                b"\x1b[A"
+            );
+            assert_eq!(
+                state.encode_key(
+                    TerminalKey::Up,
+                    TerminalMode::APP_CURSOR,
+                    KeyboardModes::NO_MODE,
+                    None,
+                ),
+                b"\x1bOA"
+            );
+        }
+        {
+            let mut state = TerminalKeyEncoder {
+                modifiers: StickyModifiers::default(),
+            };
+            for (key, byte) in [
+                (TerminalKey::Control('c'), 0x03),
+                (TerminalKey::Control('d'), 0x04),
+            ] {
+                assert_eq!(
+                    state.encode_key(key, TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+                    vec![byte]
+                );
+            }
 
-        state.modifiers = StickyModifiers {
-            control: true,
-            alt: false,
-        };
-        assert_eq!(
-            state.encode_key(
-                TerminalKey::Control('c'),
-                TerminalMode::empty(),
-                KeyboardModes::NO_MODE,
-                None,
-            ),
-            vec![0x03],
-            "a sticky Ctrl on top of the combo is still one Control-C"
-        );
-        assert_eq!(state.modifiers, StickyModifiers::default());
-        assert_eq!(
-            state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
-            b"c",
-            "the combo must not leave Ctrl armed for the next key"
-        );
-    }
-
-    /// The tail is ordered by how often a shell line needs the character, so
-    /// what scrolls off the edge is what is reached for least.
-    #[test]
-    fn the_symbol_tail_is_ordered_by_shell_frequency() {
-        assert_eq!(
-            SYMBOL_KEYS.map(|(_, symbol)| symbol),
-            ['-', '/', '|', '~', ':', '.', '_']
-        );
-    }
-
-    #[test]
-    fn escape_is_the_terminal_escape_byte() {
-        let mut state = TerminalKeyEncoder {
-            modifiers: StickyModifiers::default(),
-        };
-        assert_eq!(
-            state.encode_key(
-                TerminalKey::Escape,
-                TerminalMode::empty(),
-                KeyboardModes::NO_MODE,
-                None,
-            ),
-            vec![0x1b]
-        );
+            state.modifiers = StickyModifiers {
+                control: true,
+                alt: false,
+            };
+            assert_eq!(
+                state.encode_key(
+                    TerminalKey::Control('c'),
+                    TerminalMode::empty(),
+                    KeyboardModes::NO_MODE,
+                    None,
+                ),
+                vec![0x03],
+                "a sticky Ctrl on top of the combo is still one Control-C"
+            );
+            assert_eq!(state.modifiers, StickyModifiers::default());
+            assert_eq!(
+                state.encode_text("c", TerminalMode::empty(), KeyboardModes::NO_MODE, None),
+                b"c",
+                "the combo must not leave Ctrl armed for the next key"
+            );
+        }
     }
 
     struct NarrowBarProbe {

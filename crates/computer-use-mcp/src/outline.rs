@@ -750,6 +750,17 @@ mod tests {
         let diff = diff_trees(&old, &new);
         assert!(diff.text.contains("+1 ~1 -0"));
         assert!(!diff.use_full_view);
+        new.children.swap(0, 1);
+        assign_refs_from_previous(&old, &mut new);
+        assert_eq!(new.children[1].ref_id, old.children[0].ref_id);
+        let reordered = new.clone();
+        new.children.remove(0);
+        assign_refs_from_previous(&reordered, &mut new);
+        assert_eq!(new.children[0].ref_id, old.children[0].ref_id);
+        assert!(diff_trees(&reordered, &new).text.contains("+0 ~0 -1"));
+        assert!(diff_trees(&new, &new).text.contains("+0 ~0 -0"));
+        new.title = "Different window".into();
+        assert!(diff_trees(&old, &new).use_full_view);
     }
 
     #[test]

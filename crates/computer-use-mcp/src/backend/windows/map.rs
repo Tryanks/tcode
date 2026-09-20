@@ -274,35 +274,41 @@ mod tests {
     use crate::backend::KeyModifiers;
 
     #[test]
-    fn control_types_map_to_macos_role_vocabulary() {
-        assert_eq!(role_for_control_type(UIA_BUTTON), "button");
-        assert_eq!(role_for_control_type(UIA_EDIT), "text_field");
-        assert_eq!(role_for_control_type(UIA_DOCUMENT), "text_area");
-        assert_eq!(role_for_control_type(UIA_HYPERLINK), "link");
-        assert_eq!(role_for_control_type(UIA_TAB_ITEM), "tab");
-        assert_eq!(role_for_control_type(UIA_WINDOW), "window");
-        assert_eq!(role_for_control_type(-1), "unknown");
-    }
-
-    #[test]
-    fn top_level_control_types_and_hints_map_to_root_kinds() {
-        assert_eq!(
-            root_kind_for_control_type(UIA_WINDOW, "window", "Chrome_WidgetWin_1"),
-            Some(RootKind::Window)
-        );
-        assert_eq!(
-            root_kind_for_control_type(UIA_WINDOW, "dialog", "#32770"),
-            Some(RootKind::Dialog)
-        );
-        assert_eq!(
-            root_kind_for_control_type(UIA_MENU, "menu", "#32768"),
-            Some(RootKind::Menu)
-        );
-        assert_eq!(
-            root_kind_for_control_type(UIA_PANE, "flyout", "Popup"),
-            Some(RootKind::Popover)
-        );
-        assert_eq!(root_kind_for_control_type(UIA_BUTTON, "button", ""), None);
+    fn uia_controls_and_hints_translate_to_shared_roles_and_root_kinds() {
+        for (control, localized, class, role, kind) in [
+            (UIA_BUTTON, "button", "", "button", None),
+            (UIA_EDIT, "edit", "", "text_field", None),
+            (UIA_DOCUMENT, "document", "", "text_area", None),
+            (UIA_HYPERLINK, "link", "", "link", None),
+            (UIA_TAB_ITEM, "tab", "", "tab", None),
+            (
+                UIA_WINDOW,
+                "window",
+                "Chrome_WidgetWin_1",
+                "window",
+                Some(RootKind::Window),
+            ),
+            (
+                UIA_WINDOW,
+                "dialog",
+                "#32770",
+                "window",
+                Some(RootKind::Dialog),
+            ),
+            (UIA_WINDOW, "SHEET", "", "window", Some(RootKind::Sheet)),
+            (UIA_MENU, "menu", "#32768", "menu", Some(RootKind::Menu)),
+            (
+                UIA_PANE,
+                "flyout",
+                "Popup",
+                "group",
+                Some(RootKind::Popover),
+            ),
+            (-1, "", "", "unknown", None),
+        ] {
+            assert_eq!(role_for_control_type(control), role);
+            assert_eq!(root_kind_for_control_type(control, localized, class), kind);
+        }
     }
 
     #[test]
@@ -329,6 +335,33 @@ mod tests {
 
     #[test]
     fn supported_patterns_produce_shared_action_names() {
+        for (support, expected) in [
+            (PatternSupport::default(), vec![]),
+            (
+                PatternSupport {
+                    invoke: true,
+                    ..Default::default()
+                },
+                vec!["press"],
+            ),
+            (
+                PatternSupport {
+                    value_writable: true,
+                    ..Default::default()
+                },
+                vec!["set_text"],
+            ),
+            (
+                PatternSupport {
+                    selection_item: true,
+                    scroll_item: true,
+                    ..Default::default()
+                },
+                vec!["press", "scroll_to_visible", "select"],
+            ),
+        ] {
+            assert_eq!(actions_for_patterns(support), expected);
+        }
         let actions = actions_for_patterns(PatternSupport {
             invoke: true,
             value_writable: true,
@@ -354,6 +387,23 @@ mod tests {
 
     #[test]
     fn virtual_key_chords_map_to_uiautomation_keyboard_expressions() {
+        assert!(
+            key_expression_for_chord(KeyChord {
+                keycode: 0x53,
+                modifiers: KeyModifiers {
+                    function: true,
+                    ..Default::default()
+                }
+            })
+            .is_err()
+        );
+        assert!(
+            key_expression_for_chord(KeyChord {
+                keycode: 0xffff,
+                modifiers: KeyModifiers::default()
+            })
+            .is_err()
+        );
         assert_eq!(
             key_expression_for_chord(KeyChord {
                 keycode: 0x53,

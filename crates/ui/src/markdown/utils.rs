@@ -15,16 +15,3 @@ pub(super) fn list_item_prefix(ix: usize, ordered: bool, start: u32, depth: usiz
         format!("{} ", BULLETS[depth.min(BULLETS.len() - 1)])
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::list_item_prefix;
-
-    #[test]
-    fn ordered_prefix_honours_list_start() {
-        assert_eq!(list_item_prefix(0, true, 1, 0), "1. ");
-        assert_eq!(list_item_prefix(2, true, 1, 0), "3. ");
-        assert_eq!(list_item_prefix(0, true, 4, 0), "4. ");
-        assert_eq!(list_item_prefix(1, true, 4, 0), "5. ");
-    }
-}

@@ -29,6 +29,7 @@ use rio_vt::{
 use std::{
     collections::VecDeque,
     io::{Read as _, Write as _},
+    os::unix::process::ExitStatusExt as _,
 };
 
 use crate::{
@@ -400,6 +401,9 @@ impl RawPtyEventLoop {
                 if token == self.pty.child_event_token() {
                     if let Some(ChildEvent::Exited(exit_code)) = self.pty.next_child_event() {
                         let _ = self.read_output(&mut buffer);
+                        // teletypewriter reports the raw waitpid status, including signal bits.
+                        let exit_code = exit_code
+                            .and_then(|status| std::process::ExitStatus::from_raw(status).code());
                         record_exit(&self.shared, &self.notifications, exit_code);
                         break 'event_loop;
                     }

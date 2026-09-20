@@ -2573,6 +2573,7 @@ mod tests {
 
     #[gpui::test]
     fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         struct SavedOutbox;
         impl tcode_client::outbox::Storage for SavedOutbox {
             fn load(
@@ -2732,6 +2733,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         assert!(
             cx.debug_bounds("baseline-loading").is_some(),
@@ -2840,73 +2842,71 @@ mod tests {
     }
 
     #[gpui::test]
-    fn cold_start_discards_settings_above_the_restored_thread(cx: &mut TestAppContext) {
-        let (shell, _, _, cx) = mount_restored(
-            cx,
-            &["hosts", "threads", "thread", "settings", "settings_section"],
-            true,
-        );
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(
-                shell.window_state.read(cx).history(),
-                [
+    fn cold_start_discards_transient_settings_and_pair_pages(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for (saved, expected) in [
+            (
+                vec!["hosts", "threads", "thread", "settings", "settings_section"],
+                vec![
                     Destination::Hosts,
                     Destination::Threads,
-                    Destination::Thread
-                ]
-            )
-        });
+                    Destination::Thread,
+                ],
+            ),
+            (
+                vec!["hosts", "threads", "hosts", "pair"],
+                vec![Destination::Hosts, Destination::Threads, Destination::Hosts],
+            ),
+        ] {
+            let (shell, _, _, cx) = mount_restored(cx, &saved, true);
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(shell.window_state.read(cx).history(), expected);
+            });
+        }
     }
 
     #[gpui::test]
-    fn cold_start_waits_for_index_before_popping_a_missing_session(cx: &mut TestAppContext) {
-        let (shell, host, client, cx) =
-            mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
-        assert!(
-            cx.debug_bounds("baseline-loading").is_some(),
-            "the restored Panel also waits behind a skeleton"
-        );
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(
-                shell.window_state.read(cx).history().last(),
-                Some(&Destination::Panel)
-            )
-        });
-        restore_index(&shell, &host, false, cx);
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(
-                shell.window_state.read(cx).history(),
-                [Destination::Hosts, Destination::Threads]
-            );
-            assert_eq!(shell.store().unwrap().read(cx).active_session_id(), None);
-        });
-        cx.executor().advance_clock(Duration::from_millis(151));
-        draw(cx);
-        let preferences = client.load_preferences();
-        assert_eq!(
-            preferences.navigation.unwrap()["history"],
-            serde_json::json!(["hosts", "threads"])
-        );
-    }
-
-    #[gpui::test]
-    fn cold_start_missing_session_pops_even_if_status_arrives_before_index(
+    fn cold_start_discards_a_missing_session_after_index_in_either_delivery_order(
         cx: &mut TestAppContext,
     ) {
-        let (shell, host, _, cx) =
-            mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
-        restore_status(&shell, &host, cx);
-        restore_index(&shell, &host, false, cx);
-        shell.read_with(cx, |shell, cx| {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for status_first in [false, true] {
+            let (shell, host, client, cx) =
+                mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
+            assert!(
+                cx.debug_bounds("baseline-loading").is_some(),
+                "the restored Panel also waits behind a skeleton"
+            );
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell.window_state.read(cx).history().last(),
+                    Some(&Destination::Panel)
+                )
+            });
+            if status_first {
+                restore_status(&shell, &host, cx);
+            }
+            restore_index(&shell, &host, false, cx);
+            shell.read_with(cx, |shell, cx| {
+                assert_eq!(
+                    shell.window_state.read(cx).history(),
+                    [Destination::Hosts, Destination::Threads]
+                );
+                assert_eq!(shell.store().unwrap().read(cx).active_session_id(), None);
+            });
+            cx.executor().advance_clock(Duration::from_millis(151));
+            draw(cx);
+            let preferences = client.load_preferences();
             assert_eq!(
-                shell.window_state.read(cx).history(),
-                [Destination::Hosts, Destination::Threads]
-            )
-        });
+                preferences.navigation.unwrap()["history"],
+                serde_json::json!(["hosts", "threads"])
+            );
+        }
     }
 
     #[gpui::test]
     fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, client, cx) =
             mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
         restore_index(&shell, &host, true, cx);
@@ -2971,6 +2971,7 @@ mod tests {
     fn same_page_thread_selection_is_checkpointed_without_waiting_for_host(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         store_of(&shell, cx).update(cx, |store, _| store.select_session("thread-b".into()));
         shell
@@ -2991,6 +2992,7 @@ mod tests {
     fn navigation_checkpoint_debounces_selection_and_history_without_losing_preferences(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
@@ -3025,6 +3027,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_with_a_missing_machine_restores_hosts(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], false);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
@@ -3040,6 +3043,7 @@ mod tests {
     /// to it.
     #[gpui::test]
     fn a_wide_mobile_window_stays_on_hosts_until_it_attaches(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, _host, client, cx) =
             mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
@@ -3117,63 +3121,42 @@ mod tests {
         assert_locked_on_hosts(cx);
     }
 
-    #[gpui::test]
-    fn cold_start_does_not_restore_the_pair_form(cx: &mut TestAppContext) {
-        let (shell, _, _, cx) = mount_restored(cx, &["hosts", "threads", "hosts", "pair"], true);
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(
-                shell.window_state.read(cx).history(),
-                [Destination::Hosts, Destination::Threads, Destination::Hosts]
-            )
-        });
-    }
-
     /// Navigation never raises a software keyboard: on a phone every route
     /// leaves the composer unfocused, and a desktop window opening a thread
     /// focuses it.
     #[gpui::test]
-    fn conversation_navigation_only_focuses_the_wide_composer(cx: &mut TestAppContext) {
+    fn navigation_dismisses_mobile_keyboards_but_preserves_explicit_editing_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
-        cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
+        resize(cx, 393.);
         let store = store_of(&shell, cx);
         let composer = shell.read_with(cx, |shell, cx| {
             shell.attachment.as_ref().unwrap().chat.read(cx).composer()
         });
         let focus = composer.read_with(cx, |composer, cx| composer.input_focus_handle(cx));
-        for id in ["thread-1", "thread-2"] {
-            cx.update(|window, cx| {
-                if id == "thread-2" {
+        for width in [1024., 393., 1024.] {
+            resize(cx, width);
+            for id in ["thread-1", "thread-2"] {
+                cx.update(|window, cx| {
+                    if id == "thread-2" {
+                        focus.focus(window, cx);
+                    }
+                    store.update(cx, |store, _| store.select_session(id.into()));
+                    let state = shell.read(cx).window_state();
+                    state.update(cx, |_, cx| cx.emit(OpenThread));
+                });
+                draw(cx);
+                cx.update(|window, _| assert!(!focus.is_focused(window)));
+            }
+            if shell.read_with(cx, |shell, cx| shell.compact(cx)) {
+                cx.update(|window, cx| {
                     focus.focus(window, cx);
-                }
-                store.update(cx, |store, _| store.select_session(id.into()));
-                let state = shell.read(cx).window_state();
-                state.update(cx, |_, cx| cx.emit(OpenThread));
-            });
-            draw(cx);
-            cx.update(|window, _| assert!(!focus.is_focused(window)));
-        }
-        cx.update(|window, cx| {
-            focus.focus(window, cx);
-            shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
-        });
-        draw(cx);
-        cx.update(|window, cx| {
-            assert!(!focus.is_focused(window));
-            shell.update(cx, |shell, cx| shell.open_thread(window, cx));
-        });
-        draw(cx);
-        cx.update(|window, _| assert!(!focus.is_focused(window)));
-        for destination in [
-            Destination::Panel,
-            Destination::Hosts,
-            Destination::Settings,
-        ] {
-            cx.update(|window, cx| {
-                focus.focus(window, cx);
-                shell.update(cx, |shell, cx| shell.go(destination, cx));
-            });
+                    shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
+                });
+            }
             draw(cx);
             cx.update(|window, cx| {
                 assert!(!focus.is_focused(window));
@@ -3181,6 +3164,29 @@ mod tests {
             });
             draw(cx);
             cx.update(|window, _| assert!(!focus.is_focused(window)));
+            for destination in [
+                Destination::Panel,
+                Destination::Hosts,
+                Destination::Settings,
+            ] {
+                cx.update(|window, cx| {
+                    focus.focus(window, cx);
+                    shell.update(cx, |shell, cx| shell.go(destination, cx));
+                });
+                draw(cx);
+                cx.update(|window, cx| {
+                    assert!(!focus.is_focused(window));
+                    shell.update(cx, |shell, cx| shell.open_thread(window, cx));
+                });
+                draw(cx);
+                cx.update(|window, _| assert!(!focus.is_focused(window)));
+            }
+        }
+        cx.update(|window, cx| focus.focus(window, cx));
+        for width in [393., 1024., 393.] {
+            resize(cx, width);
+            draw(cx);
+            cx.update(|window, _| assert!(focus.is_focused(window)));
         }
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         resize(cx, 1024.);
@@ -3196,6 +3202,7 @@ mod tests {
     fn native_subagent_composer_is_visible_inert_and_restores_parent_draft(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) =
@@ -3333,6 +3340,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) = mount_restored_at_width(
             cx,
@@ -3399,6 +3407,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_wide_cold_restore_stays_unfocused(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
@@ -3422,54 +3431,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn software_keyboard_navigation_stays_unfocused_at_both_widths(cx: &mut TestAppContext) {
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        let (shell, _host, cx) = mount(cx);
-        let store = store_of(&shell, cx);
-        let focus = shell.read_with(cx, |shell, cx| {
-            shell
-                .attachment
-                .as_ref()
-                .unwrap()
-                .chat
-                .read(cx)
-                .composer()
-                .read(cx)
-                .input_focus_handle(cx)
-        });
-        for width in [1024., 393., 1024.] {
-            resize(cx, width);
-            for id in ["thread-1", "thread-2"] {
-                cx.update(|window, cx| {
-                    focus.focus(window, cx);
-                    store.update(cx, |store, _| store.select_session(id.into()));
-                    shell
-                        .read(cx)
-                        .window_state()
-                        .update(cx, |_, cx| cx.emit(OpenThread));
-                });
-                draw(cx);
-                cx.update(|window, _| {
-                    assert!(
-                        !focus.is_focused(window),
-                        "navigation must dismiss the software keyboard at width {width}"
-                    )
-                });
-            }
+    fn project_choice_reuses_drafts_and_focuses_only_on_desktop(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for (mobile, compact, projects) in [
+            (false, false, 2),
+            (true, false, 2),
+            (true, true, 2),
+            (true, true, 1),
+        ] {
+            cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, mobile));
+            new_thread_from_projects(cx, projects, compact);
         }
-        // A user who is editing keeps focus through reflows and ordinary frames.
-        cx.update(|window, cx| focus.focus(window, cx));
-        for width in [393., 1024., 393.] {
-            resize(cx, width);
-            draw(cx);
-            cx.update(|window, _| assert!(focus.is_focused(window)));
-        }
-    }
-
-    #[gpui::test]
-    fn software_keyboard_wide_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
-        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
-        new_thread_from_projects(cx, 2, false);
     }
 
     fn new_thread_from_projects(cx: &mut TestAppContext, project_count: usize, compact: bool) {
@@ -3479,7 +3451,8 @@ mod tests {
 
         cx.update(crate::theme::init);
         let root = std::env::temp_dir().join(format!(
-            "tcode-new-thread-{project_count}-{compact}-{}",
+            "tcode-new-thread-{}-{project_count}-{compact}-{}",
+            std::process::id(),
             tcode_services::store::now_millis()
         ));
         let disk = SessionStore::open_at(root.clone()).unwrap();
@@ -3572,15 +3545,17 @@ mod tests {
             loop {
                 store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 draw(cx);
-                if store
-                    .read_with(cx, |store, _| store.chat_active_session())
-                    .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
-                {
+                if store.read_with(cx, |store, _| {
+                    !store.chat_loading()
+                        && store
+                            .chat_active_session()
+                            .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
+                }) {
                     break;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "selected project's draft reaches chat"
+                    "selected project's draft and event baseline reach chat"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -3632,22 +3607,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn compact_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
-        new_thread_from_projects(cx, 2, true);
-    }
-
-    #[gpui::test]
-    fn compact_single_project_skips_the_chooser(cx: &mut TestAppContext) {
-        new_thread_from_projects(cx, 1, true);
-    }
-
-    #[gpui::test]
-    fn wide_project_choice_opens_a_focused_draft(cx: &mut TestAppContext) {
-        new_thread_from_projects(cx, 2, false);
-    }
-
-    #[gpui::test]
     fn header_controls_activate_after_pointer_jitter_without_dragging(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         for (topic, event) in [
             (
@@ -3745,6 +3706,7 @@ mod tests {
     fn connecting_from_the_hosts_panel_releases_its_entity_before_attachment(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_initial(cx, None);
         resize(cx, 393.);
         let hosts = shell.read_with(cx, |shell, _| shell.hosts.clone());
@@ -3768,6 +3730,7 @@ mod tests {
 
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
@@ -3869,6 +3832,7 @@ mod tests {
 
     #[gpui::test]
     fn compact_tap_push_and_back_pop_slide(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -3926,6 +3890,7 @@ mod tests {
     fn thread_shortcuts_follow_list_order_and_leave_model_picker_numbers_alone(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         cx.update(crate::shortcut::init);
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4047,6 +4012,7 @@ mod tests {
     /// rule belongs to mobile builds, so no desktop width is compact.
     #[gpui::test]
     fn a_narrow_desktop_window_keeps_the_wide_workspace(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         for width in [1024., 899., 400.] {
@@ -4068,6 +4034,7 @@ mod tests {
     /// the draft or the split.
     #[gpui::test]
     fn the_breakpoint_flips_at_nine_hundred_and_disturbs_nothing_else(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         as_mobile(cx);
         let store = store_of(&shell, cx);
@@ -4208,6 +4175,7 @@ mod tests {
     ))]
     #[gpui::test]
     fn compact_preview_release_and_navigation(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         let store = store_of(&shell, cx);
         restore_index(&shell, &host, true, cx);
@@ -4286,6 +4254,7 @@ mod tests {
 
     #[gpui::test]
     fn back_unwinds_overlays_then_the_history_and_stops_at_the_root(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
@@ -4332,6 +4301,13 @@ mod tests {
             );
         });
 
+        window_state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        draw(cx);
+        assert!(back(cx));
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.destination(cx)),
+            Destination::Hosts
+        );
         assert!(!back(cx), "the root belongs to the platform");
     }
 
@@ -4339,6 +4315,7 @@ mod tests {
     /// of its own: detail → root → whatever Settings was opened from.
     #[gpui::test]
     fn back_leaves_a_settings_section_then_settings_then_the_page_below(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -4380,31 +4357,12 @@ mod tests {
         });
     }
 
-    /// Pair is pushed from Hosts and comes back to it.
-    #[gpui::test]
-    fn back_leaves_the_pair_page_for_the_hosts_page_that_pushed_it(cx: &mut TestAppContext) {
-        let (shell, _host, cx) = mount(cx);
-        as_mobile(cx);
-        resize(cx, 393.);
-        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
-        window_state.update(cx, |state, cx| {
-            state.go(Destination::Hosts, cx);
-            state.go(Destination::Pair, cx);
-        });
-        draw(cx);
-        let consumed = cx.update(|window, cx| shell.update(cx, |shell, cx| shell.back(window, cx)));
-        draw(cx);
-        assert!(consumed);
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.destination(cx), Destination::Hosts)
-        });
-    }
-
     /// Hosts answers "which host am I talking to" and nothing else. Hosting
     /// this machine is a setting of this machine, and stays in Settings even
     /// where the build can actually host.
     #[gpui::test]
     fn the_hosts_page_never_shows_hosting_settings(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -4424,52 +4382,36 @@ mod tests {
         );
     }
 
-    /// Wide keeps the workspace sidebar beside the Hosts route: the feature
-    /// area that leads there is meant to be persistent, so Hosts is a page in
-    /// the content column, not a window of its own.
-    #[gpui::test]
-    fn the_wide_hosts_route_keeps_the_sidebar_and_its_feature_area(cx: &mut TestAppContext) {
-        let (shell, _host, cx) = mount(cx);
-        resize(cx, 1024.);
-        let window_state = shell.read_with(cx, |shell, _| shell.window_state());
-        window_state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
-        draw(cx);
-        draw(cx);
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.window_state.read(cx).route(), Route::Hosts);
-        });
-        assert!(
-            cx.debug_bounds("hosts-route").is_some(),
-            "hosts fills the content column"
-        );
-        assert!(
-            cx.debug_bounds("sidebar-feature-hosts").is_some(),
-            "and the sidebar it was opened from is still beside it"
-        );
-    }
-
     /// A store selection can come from the sidebar or palette. In wide layout
     /// it switches the content column away from Hosts without requiring Back.
     #[gpui::test]
-    fn a_wide_store_thread_selection_leaves_the_hosts_route(cx: &mut TestAppContext) {
+    fn wide_hosts_route_keeps_its_sidebar_until_a_thread_selection(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         draw(cx);
-        let feature = cx
-            .debug_bounds("sidebar-feature-hosts")
-            .expect("the Machines feature row is visible");
-        cx.simulate_mouse_down(
-            feature.center(),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::default(),
-        );
-        cx.simulate_mouse_up(
-            feature.center(),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::default(),
-        );
-        draw(cx);
-        assert!(cx.debug_bounds("hosts-route").is_some());
+        for _ in 0..2 {
+            let feature = cx
+                .debug_bounds("sidebar-feature-hosts")
+                .expect("the Machines feature row is visible");
+            cx.simulate_mouse_down(
+                feature.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                feature.center(),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            draw(cx);
+            assert!(cx.debug_bounds("hosts-route").is_some());
+            assert!(cx.debug_bounds("sidebar-feature-hosts").is_some());
+            assert_eq!(
+                shell.read_with(cx, |shell, cx| shell.window_state.read(cx).route()),
+                Route::Hosts
+            );
+        }
 
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
@@ -4487,42 +4429,12 @@ mod tests {
         );
     }
 
-    /// The selected Machines row is idempotent: clicking it again does not
-    /// turn the active wide route into a page-stack entry or leave the route.
-    #[gpui::test]
-    fn a_second_wide_hosts_feature_click_stays_on_hosts(cx: &mut TestAppContext) {
-        let (shell, _host, cx) = mount(cx);
-        resize(cx, 1024.);
-        draw(cx);
-
-        for _ in 0..2 {
-            let feature = cx
-                .debug_bounds("sidebar-feature-hosts")
-                .expect("the Machines feature row stays visible");
-            cx.simulate_mouse_down(
-                feature.center(),
-                gpui::MouseButton::Left,
-                gpui::Modifiers::default(),
-            );
-            cx.simulate_mouse_up(
-                feature.center(),
-                gpui::MouseButton::Left,
-                gpui::Modifiers::default(),
-            );
-            draw(cx);
-        }
-
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.window_state.read(cx).route(), Route::Hosts);
-        });
-        assert!(cx.debug_bounds("hosts-route").is_some());
-    }
-
     /// Settings replaces the whole window, unlike the Hosts route: the left
     /// column is the settings rail, so the workspace sidebar — and the feature
     /// area in it — is gone while the route is showing.
     #[gpui::test]
     fn the_wide_settings_route_replaces_the_sidebar_with_its_own_rail(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -4551,6 +4463,7 @@ mod tests {
     /// Back returns to exactly where the visit started.
     #[gpui::test]
     fn a_hosts_visit_keeps_the_link_and_returns_to_the_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
@@ -4764,14 +4677,21 @@ mod tests {
     /// controls are not built at all — and the page holds its 16pt inset even
     /// when the diff line is far wider than the window.
     #[gpui::test]
-    fn the_compact_panel_page_drops_the_right_panel_chrome_and_stays_inset(
+    fn diff_panel_controls_follow_layout_and_long_lines_stay_inside_the_compact_page(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         seed_wide_diff(&shell, &host, cx);
+        resize(cx, 1024.);
+        store_of(&shell, cx).update(cx, |store, cx| store.toggle_diff_panel(cx));
+        draw_until(&shell, cx, &host, "diff-body");
+        assert!(cx.debug_bounds("right-panel-tabs").is_some());
+        assert!(cx.debug_bounds("diff-close").is_some());
         as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.open_panels(cx));
+        cx.executor().advance_clock(Duration::from_millis(250));
         draw_until(&shell, cx, &host, "diff-body");
 
         assert!(
@@ -4799,75 +4719,34 @@ mod tests {
         );
     }
 
-    /// The wide right panel keeps every control the compact page hides.
-    #[gpui::test]
-    fn the_wide_diff_panel_keeps_its_tab_row_and_close(cx: &mut TestAppContext) {
-        let (shell, host, cx) = mount(cx);
-        seed_wide_diff(&shell, &host, cx);
-        resize(cx, 1024.);
-        let store = store_of(&shell, cx);
-        store.update(cx, |store, cx| store.toggle_diff_panel(cx));
-        draw_until(&shell, cx, &host, "diff-body");
-
-        assert!(cx.debug_bounds("right-panel-tabs").is_some());
-        assert!(cx.debug_bounds("diff-close").is_some());
-    }
-
     #[test]
-    fn hover_transitions_open_preserve_and_close_the_overlay() {
-        for (current, transition, visible) in [
-            (false, SidebarHoverTransition::Trigger(true), true),
-            (false, SidebarHoverTransition::Trigger(false), false),
-            (true, SidebarHoverTransition::Trigger(false), true),
-            (false, SidebarHoverTransition::Overlay(true), true),
-            (true, SidebarHoverTransition::Overlay(true), true),
-            (true, SidebarHoverTransition::Overlay(false), false),
+    fn sidebar_overlay_follows_hover_only_on_collapsed_workspace_routes() {
+        for (current, transition, popover, visible) in [
+            (false, SidebarHoverTransition::Trigger(true), false, true),
+            (false, SidebarHoverTransition::Trigger(false), false, false),
+            (true, SidebarHoverTransition::Trigger(false), false, true),
+            (false, SidebarHoverTransition::Overlay(true), false, true),
+            (true, SidebarHoverTransition::Overlay(true), false, true),
+            (true, SidebarHoverTransition::Overlay(false), false, false),
+            (true, SidebarHoverTransition::Overlay(false), true, true),
+            (false, SidebarHoverTransition::Overlay(false), true, false),
         ] {
             assert_eq!(
-                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false),
+                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, popover),
                 visible
             );
+            assert!(!next_sidebar_overlay_visibility(
+                current,
+                transition,
+                false,
+                Route::Chat,
+                popover
+            ));
+            for route in [Route::Settings, Route::Hosts] {
+                assert!(!next_sidebar_overlay_visibility(
+                    current, transition, true, route, popover
+                ));
+            }
         }
-    }
-
-    #[test]
-    fn open_popover_keeps_overlay_through_occluded_hover_loss() {
-        assert!(next_sidebar_overlay_visibility(
-            true,
-            SidebarHoverTransition::Overlay(false),
-            true,
-            Route::Chat,
-            true,
-        ));
-        // But a popover cannot conjure an overlay that is already closed.
-        assert!(!next_sidebar_overlay_visibility(
-            false,
-            SidebarHoverTransition::Overlay(false),
-            true,
-            Route::Chat,
-            true,
-        ));
-    }
-
-    #[test]
-    fn expanded_sidebar_forces_overlay_closed() {
-        assert!(!next_sidebar_overlay_visibility(
-            true,
-            SidebarHoverTransition::Overlay(true),
-            false,
-            Route::Chat,
-            false,
-        ));
-    }
-
-    #[test]
-    fn non_workspace_route_forces_overlay_closed() {
-        assert!(!next_sidebar_overlay_visibility(
-            true,
-            SidebarHoverTransition::Overlay(true),
-            true,
-            Route::Settings,
-            false,
-        ));
     }
 }

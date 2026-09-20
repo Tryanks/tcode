@@ -2571,23 +2571,6 @@ mod tests {
     }
 
     #[test]
-    fn backspace_keystroke_emits_delete_to_the_terminal_pipe() {
-        assert_eq!(
-            terminal_key_bytes(
-                &gpui::Keystroke {
-                    key: "backspace".into(),
-                    key_char: None,
-                    modifiers: Default::default()
-                },
-                Mode::empty(),
-                tcode_protocol::terminal::KeyboardModes::NO_MODE,
-                None,
-            ),
-            Some(vec![0x7f])
-        );
-    }
-
-    #[test]
     fn grid_point_maps_cell_halves_and_clamps_past_the_last_column() {
         for (x, col, side) in [
             (2., 0, SelectionSide::Left),
@@ -2599,115 +2582,103 @@ mod tests {
     }
 
     #[test]
-    fn simple_selection_waits_until_drag_crosses_threshold() {
-        assert!(!selection_drag_started(0., 0.));
-        assert!(!selection_drag_started(SELECTION_DRAG_THRESHOLD, 0.));
-        assert!(selection_drag_started(SELECTION_DRAG_THRESHOLD + 0.01, 0.));
-        assert!(selection_drag_started(2., 2.));
-    }
-
-    #[test]
-    fn selection_drag_distinguishes_click_from_drag_threshold() {
+    fn selection_drag_honors_click_kind_threshold_and_terminal_ownership() {
         let mut drag = SelectionDrag::default();
-        assert!(matches!(
+        assert_eq!(
             drag.on_down(
                 7,
                 ScreenPoint { x: 10., y: 10. },
                 (0, 1),
                 SelectionSide::Left,
                 1,
-                false,
+                false
             ),
             SelectionDragAction::ClearAndWait
-        ));
-        assert!(matches!(
-            drag.on_move(
-                7,
-                ScreenPoint { x: 12., y: 10. },
-                (0, 1),
-                SelectionSide::Right,
-                true,
-            ),
-            SelectionDragAction::None
-        ));
-        assert!(matches!(
+        );
+        for (terminal, x, pressed) in [(7, 12., true), (8, 20., true), (7, 20., false)] {
+            assert_eq!(
+                drag.on_move(
+                    terminal,
+                    ScreenPoint { x, y: 10. },
+                    (0, 2),
+                    SelectionSide::Right,
+                    pressed
+                ),
+                SelectionDragAction::None
+            );
+        }
+        assert_eq!(
             drag.on_move(
                 7,
                 ScreenPoint { x: 12.1, y: 10. },
                 (0, 2),
-                SelectionSide::Left,
-                true,
+                SelectionSide::Right,
+                true
             ),
             SelectionDragAction::StartSimpleAndUpdate {
                 anchor: (0, 1),
+                anchor_side: SelectionSide::Left,
                 point: (0, 2),
-                ..
+                side: SelectionSide::Right
             }
-        ));
-    }
-
-    #[test]
-    fn selection_drag_preserves_word_and_line_click_kinds() {
-        let mut drag = SelectionDrag::default();
-        assert!(matches!(
+        );
+        assert_eq!(
+            drag.on_move(
+                7,
+                ScreenPoint { x: 20., y: 40. },
+                (3, 2),
+                SelectionSide::Right,
+                true
+            ),
+            SelectionDragAction::Update {
+                point: (3, 2),
+                side: SelectionSide::Right
+            }
+        );
+        assert!(!drag.on_up(8));
+        assert!(drag.on_up(7));
+        assert_eq!(
+            drag.on_move(
+                7,
+                ScreenPoint { x: 30., y: 40. },
+                (3, 3),
+                SelectionSide::Right,
+                true
+            ),
+            SelectionDragAction::None
+        );
+        for (clicks, kind) in [(2, SelectionKind::Semantic), (3, SelectionKind::Lines)] {
+            assert_eq!(
+                drag.on_down(
+                    7,
+                    ScreenPoint { x: 0., y: 0. },
+                    (2, 3),
+                    SelectionSide::Left,
+                    clicks,
+                    false
+                ),
+                SelectionDragAction::Start {
+                    kind,
+                    point: (2, 3),
+                    side: SelectionSide::Left
+                }
+            );
+            drag.on_up(7);
+        }
+        assert_eq!(
             drag.on_down(
-                1,
+                7,
                 ScreenPoint { x: 0., y: 0. },
                 (2, 3),
                 SelectionSide::Left,
-                2,
-                false,
-            ),
-            SelectionDragAction::Start {
-                kind: SelectionKind::Semantic,
-                point: (2, 3),
-                ..
-            }
-        ));
-        assert!(matches!(
-            drag.on_down(
                 1,
-                ScreenPoint { x: 0., y: 0. },
-                (4, 0),
-                SelectionSide::Left,
-                3,
-                false,
+                true
             ),
-            SelectionDragAction::Start {
-                kind: SelectionKind::Lines,
-                point: (4, 0),
-                ..
+            SelectionDragAction::Update {
+                point: (2, 3),
+                side: SelectionSide::Left
             }
-        ));
-    }
-
-    #[test]
-    fn selection_drag_updates_across_rows_after_starting() {
-        let mut drag = SelectionDrag::default();
-        drag.on_down(
-            3,
-            ScreenPoint { x: 4., y: 4. },
-            (1, 4),
-            SelectionSide::Left,
-            1,
-            false,
         );
-        let action = drag.on_move(
-            3,
-            ScreenPoint { x: 20., y: 40. },
-            (3, 2),
-            SelectionSide::Right,
-            true,
-        );
-        assert!(matches!(
-            action,
-            SelectionDragAction::StartSimpleAndUpdate {
-                anchor: (1, 4),
-                point: (3, 2),
-                ..
-            }
-        ));
-        assert!(drag.on_up(3));
     }
 
     #[test]
@@ -2897,21 +2868,23 @@ mod tests {
     }
 
     #[test]
-    fn printable_keys_defer_to_input_handler_but_control_keys_stay_raw() {
-        let mode = Mode::empty();
-        let encode = |key: &str| {
-            let key = gpui::Keystroke::parse(key).unwrap();
-            mappings::key_bytes(
-                &key.key,
-                term_modifiers(key.modifiers),
-                mode,
-                tcode_protocol::terminal::KeyboardModes::NO_MODE,
-                None,
-                true,
-            )
-        };
-        assert_eq!(encode("a"), None);
-        assert_eq!(encode("ctrl-space"), Some(vec![0]));
-        assert_eq!(encode("ctrl-c"), Some(vec![3]));
+    fn native_key_routing_leaves_text_to_ime_and_encodes_terminal_controls() {
+        for (key, expected) in [
+            ("a", None),
+            ("ctrl-space", Some(vec![0])),
+            ("ctrl-c", Some(vec![3])),
+            ("backspace", Some(vec![0x7f])),
+        ] {
+            assert_eq!(
+                terminal_key_bytes(
+                    &gpui::Keystroke::parse(key).unwrap(),
+                    Mode::empty(),
+                    tcode_protocol::terminal::KeyboardModes::NO_MODE,
+                    None
+                ),
+                expected,
+                "{key}"
+            );
+        }
     }
 }

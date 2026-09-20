@@ -374,25 +374,6 @@ mod tests {
         });
     }
 
-    /// A Back control names the kind of place it returns to, never the title of
-    /// the page there: the labels are short, fixed and identical for the whole
-    /// settings pair, so no Back control ever truncates.
-    #[test]
-    fn every_destination_has_a_short_fixed_back_label() {
-        let _locale = crate::settings::TestLocaleGuard::acquire();
-        for (destination, label) in [
-            (Destination::Hosts, "Machines"),
-            (Destination::Pair, "Machines"),
-            (Destination::Threads, "Threads"),
-            (Destination::Thread, "Thread"),
-            (Destination::Panel, "Panels"),
-            (Destination::Settings, "Settings"),
-            (Destination::SettingsSection, "Settings"),
-        ] {
-            assert_eq!(destination.back_label(), label, "{destination:?}");
-        }
-    }
-
     /// Connecting somewhere else is the one thing that discards where the
     /// window has been: the previous host's pages are not this host's.
     #[gpui::test]

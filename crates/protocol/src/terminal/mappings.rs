@@ -542,311 +542,250 @@ fn legacy_key_bytes(
 mod tests {
     use super::*;
 
-    fn sgr() -> Mode {
-        Mode::MOUSE_REPORT_CLICK | Mode::SGR_MOUSE
-    }
     #[test]
-    fn sgr_press_release_move_and_modifiers() {
-        let point = GridPoint { row: 2, column: 4 };
-        assert_eq!(
-            mouse_button_report(point, MouseButton::Left, Modifiers::default(), true, sgr()),
-            Some(b"\x1b[<0;5;3M".to_vec())
-        );
-        assert_eq!(
-            mouse_button_report(point, MouseButton::Left, Modifiers::default(), false, sgr()),
-            Some(b"\x1b[<0;5;3m".to_vec())
-        );
-        let mode = Mode::MOUSE_MOTION | Mode::SGR_MOUSE;
-        assert_eq!(
-            mouse_move_report(
-                point,
-                None,
-                Modifiers {
-                    shift: true,
-                    alt: true,
-                    control: true,
-                    ..Default::default()
-                },
-                mode
-            ),
-            Some(b"\x1b[<63;5;3M".to_vec())
-        );
-    }
-    #[test]
-    fn normal_utf8_scroll_and_alt_scroll() {
-        let mode = Mode::MOUSE_REPORT_CLICK;
-        assert_eq!(
-            mouse_button_report(
-                GridPoint { row: 0, column: 0 },
-                MouseButton::Left,
-                Modifiers::default(),
+    fn mouse_reports_follow_negotiated_modes_coordinates_and_drag_state() {
+        let plain = Modifiers::default();
+        let modified = Modifiers {
+            shift: true,
+            alt: true,
+            control: true,
+            ..plain
+        };
+        let click = Mode::MOUSE_REPORT_CLICK;
+        let sgr = click | Mode::SGR_MOUSE;
+        let origin = GridPoint { row: 0, column: 0 };
+        for (mode, point, modifiers, pressed, expected) in [
+            (Mode::empty(), origin, plain, true, None),
+            (click, origin, plain, true, Some(b"\x1b[M !!".as_slice())),
+            (click, origin, plain, false, Some(b"\x1b[M#!!".as_slice())),
+            (
+                sgr,
+                GridPoint { row: 2, column: 4 },
+                plain,
                 true,
-                mode
+                Some(b"\x1b[<0;5;3M".as_slice()),
             ),
-            Some(vec![27, 91, 77, 32, 33, 33])
-        );
-        assert_eq!(
-            mouse_button_report(
-                GridPoint { row: 0, column: 0 },
-                MouseButton::Left,
-                Modifiers::default(),
+            (
+                sgr,
+                GridPoint { row: 2, column: 4 },
+                plain,
                 false,
-                mode
+                Some(b"\x1b[<0;5;3m".as_slice()),
             ),
-            Some(vec![27, 91, 77, 35, 33, 33])
-        );
-        let utf8 = Mode::MOUSE_REPORT_CLICK | Mode::UTF8_MOUSE;
-        assert_eq!(
-            mouse_button_report(
+            (
+                sgr,
+                origin,
+                modified,
+                true,
+                Some(b"\x1b[<28;1;1M".as_slice()),
+            ),
+            (
+                click | Mode::UTF8_MOUSE,
                 GridPoint {
                     row: 95,
-                    column: 95
+                    column: 95,
                 },
-                MouseButton::Left,
-                Modifiers::default(),
+                plain,
                 true,
-                utf8
+                Some(b"\x1b[M \xc2\x80\xc2\x80".as_slice()),
             ),
-            Some(vec![27, 91, 77, 32, 0xc2, 0x80, 0xc2, 0x80])
-        );
-        assert_eq!(
-            scroll_report(
-                GridPoint { row: 0, column: 0 },
-                -2,
-                Modifiers::default(),
-                sgr()
-            ),
-            Some(b"\x1b[<65;1;1M\x1b[<65;1;1M".to_vec())
-        );
-        assert_eq!(alt_scroll(2), b"\x1bOA\x1bOA");
-        assert_eq!(alt_scroll(-1), b"\x1bOB");
-    }
-    #[test]
-    fn key_ctrl_caret_and_application_cursor() {
-        let none = Mode::empty();
-        assert_eq!(
-            key_bytes(
-                "c",
-                Modifiers {
-                    control: true,
-                    ..Default::default()
+            (
+                click,
+                GridPoint {
+                    row: 222,
+                    column: 222,
                 },
-                none,
-                KeyboardModes::NO_MODE,
-                None,
-                true
+                plain,
+                true,
+                Some(b"\x1b[M \xff\xff".as_slice()),
             ),
-            Some(vec![3])
-        );
-        assert_eq!(
-            key_bytes(
-                "?",
-                Modifiers {
-                    control: true,
-                    ..Default::default()
+            (
+                click,
+                GridPoint {
+                    row: 223,
+                    column: 0,
                 },
-                none,
-                KeyboardModes::NO_MODE,
-                None,
-                true
-            ),
-            Some(vec![127])
-        );
-        assert_eq!(
-            key_bytes(
-                "up",
-                Modifiers::default(),
-                none,
-                KeyboardModes::NO_MODE,
-                None,
+                plain,
                 true,
-            ),
-            Some(b"\x1b[A".to_vec())
-        );
-        assert_eq!(
-            key_bytes(
-                "up",
-                Modifiers::default(),
-                Mode::APP_CURSOR,
-                KeyboardModes::NO_MODE,
                 None,
-                true,
             ),
-            Some(b"\x1bOA".to_vec())
-        );
-    }
-    #[test]
-    fn key_function_keys_and_modifiers() {
-        let none = Mode::empty();
-        assert_eq!(
-            key_bytes(
-                "f1",
-                Modifiers::default(),
-                none,
-                KeyboardModes::NO_MODE,
-                None,
-                true,
-            ),
-            Some(b"\x1bOP".to_vec())
-        );
-        assert_eq!(
-            key_bytes(
-                "f20",
-                Modifiers::default(),
-                none,
-                KeyboardModes::NO_MODE,
-                None,
-                true,
-            ),
-            Some(b"\x1b[34~".to_vec())
-        );
-        assert_eq!(
-            key_bytes(
-                "up",
-                Modifiers {
-                    shift: true,
-                    control: true,
-                    ..Default::default()
+            (
+                click | Mode::UTF8_MOUSE,
+                GridPoint {
+                    row: 0,
+                    column: 2015,
                 },
-                none,
-                KeyboardModes::NO_MODE,
-                None,
-                true
-            ),
-            Some(b"\x1b[1;6A".to_vec())
-        );
-        assert_eq!(
-            key_bytes(
-                "f5",
-                Modifiers {
-                    alt: true,
-                    ..Default::default()
-                },
-                none,
-                KeyboardModes::NO_MODE,
-                None,
-                true
-            ),
-            Some(b"\x1b[15;3~".to_vec())
-        );
-    }
-
-    #[test]
-    fn kitty_csi_u_press_encoding() {
-        let disambiguate = KeyboardModes::DISAMBIGUATE_ESC_CODES;
-        assert_eq!(
-            key_bytes(
-                "a",
-                Modifiers::default(),
-                Mode::empty(),
-                KeyboardModes::NO_MODE,
-                None,
+                plain,
                 true,
-            ),
-            None,
-            "legacy printable input remains delegated to GPUI's text handler"
-        );
-        assert_eq!(
-            key_bytes(
-                "escape",
-                Modifiers::default(),
-                Mode::empty(),
-                disambiguate,
                 None,
-                true,
             ),
-            Some(b"\x1b[27u".to_vec())
-        );
-        assert_eq!(
-            key_bytes(
-                "a",
-                Modifiers {
-                    shift: true,
-                    control: true,
-                    ..Default::default()
-                },
-                Mode::empty(),
-                disambiguate,
-                None,
-                true,
-            ),
-            Some(b"\x1b[97;6u".to_vec())
-        );
-        assert_eq!(
-            key_bytes(
-                "up",
-                Modifiers {
-                    alt: true,
-                    ..Default::default()
-                },
-                Mode::empty(),
-                disambiguate,
-                None,
-                true,
-            ),
-            Some(b"\x1b[1;3A".to_vec())
-        );
-        for (key, expected) in [("enter", b"\x1b[13u".as_slice()), ("tab", b"\x1b[9u")] {
-            assert_eq!(
-                key_bytes(
-                    key,
-                    Modifiers::default(),
-                    Mode::empty(),
-                    disambiguate,
-                    None,
-                    true,
-                ),
-                Some(expected.to_vec())
-            );
-        }
-    }
-
-    #[test]
-    fn kitty_alternate_keys_associated_text_and_function_keys() {
-        let mode = KeyboardModes::DISAMBIGUATE_ESC_CODES
-            | KeyboardModes::REPORT_ALTERNATE_KEYS
-            | KeyboardModes::REPORT_ASSOCIATED_TEXT;
-        assert_eq!(
-            key_bytes(
-                "a",
-                Modifiers {
-                    shift: true,
-                    ..Default::default()
-                },
-                Mode::empty(),
-                mode,
-                None,
-                true,
-            ),
-            Some(b"\x1b[97:65;2;65u".to_vec())
-        );
-        assert_eq!(
-            key_bytes("f13", Modifiers::default(), Mode::empty(), mode, None, true,),
-            Some(b"\x1b[57376u".to_vec())
-        );
-    }
-
-    #[test]
-    fn modify_other_keys_level_two_encodes_supported_modified_keys() {
-        let control = Modifiers {
-            control: true,
-            ..Default::default()
-        };
-        for (key, expected) in [
-            ("a", b"\x1b[27;5;97~".as_slice()),
-            ("enter", b"\x1b[27;5;13~"),
         ] {
             assert_eq!(
-                key_bytes(
-                    key,
-                    control,
-                    Mode::empty(),
-                    KeyboardModes::NO_MODE,
-                    Some(2),
-                    true,
-                ),
-                Some(expected.to_vec())
+                mouse_button_report(point, MouseButton::Left, modifiers, pressed, mode),
+                expected.map(<[u8]>::to_vec),
+                "{mode:?} {point:?} {pressed}"
             );
         }
+        for (mode, button, expected) in [
+            (click, Some(MouseButton::Left), None),
+            (Mode::MOUSE_DRAG | Mode::SGR_MOUSE, None, None),
+            (
+                Mode::MOUSE_DRAG | Mode::SGR_MOUSE,
+                Some(MouseButton::Right),
+                Some(b"\x1b[<62;1;1M".as_slice()),
+            ),
+            (
+                Mode::MOUSE_MOTION | Mode::SGR_MOUSE,
+                None,
+                Some(b"\x1b[<63;1;1M".as_slice()),
+            ),
+        ] {
+            assert_eq!(
+                mouse_move_report(origin, button, modified, mode),
+                expected.map(<[u8]>::to_vec)
+            );
+        }
+        assert!(routes_mouse(sgr, false));
+        assert!(!routes_mouse(sgr, true));
+        assert!(!routes_mouse(Mode::empty(), false));
+        assert_eq!(
+            scroll_report(origin, -2, plain, sgr),
+            Some(b"\x1b[<65;1;1M\x1b[<65;1;1M".to_vec())
+        );
+        assert_eq!(
+            scroll_report(origin, 1, plain, sgr),
+            Some(b"\x1b[<64;1;1M".to_vec())
+        );
+        assert_eq!(scroll_report(origin, 0, plain, sgr), None);
+        assert_eq!(scroll_report(origin, 1, plain, Mode::empty()), None);
+        assert_eq!(alt_scroll(2), b"\x1bOA\x1bOA");
+        assert_eq!(alt_scroll(-1), b"\x1bOB");
+        assert!(alt_scroll(0).is_empty());
+    }
+
+    #[test]
+    fn key_encoding_negotiates_legacy_kitty_and_modify_other_keys() {
+        let plain = Modifiers::default();
+        let ctrl = Modifiers {
+            control: true,
+            ..plain
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..plain
+        };
+        let alt = Modifiers { alt: true, ..plain };
+        let shift_ctrl = Modifiers {
+            shift: true,
+            control: true,
+            ..plain
+        };
+        let legacy = KeyboardModes::NO_MODE;
+        let kitty = KeyboardModes::DISAMBIGUATE_ESC_CODES;
+        let text =
+            kitty | KeyboardModes::REPORT_ALTERNATE_KEYS | KeyboardModes::REPORT_ASSOCIATED_TEXT;
+        for (key, modifiers, mode, keyboard, other_keys, expected) in [
+            ("a", plain, Mode::empty(), legacy, None, None),
+            ("c", ctrl, Mode::empty(), legacy, None, Some("\x03")),
+            ("?", ctrl, Mode::empty(), legacy, None, Some("\x7f")),
+            ("up", plain, Mode::empty(), legacy, None, Some("\x1b[A")),
+            ("up", plain, Mode::APP_CURSOR, legacy, None, Some("\x1bOA")),
+            (
+                "up",
+                shift_ctrl,
+                Mode::APP_CURSOR,
+                legacy,
+                None,
+                Some("\x1b[1;6A"),
+            ),
+            ("f1", plain, Mode::empty(), legacy, None, Some("\x1bOP")),
+            ("f20", plain, Mode::empty(), legacy, None, Some("\x1b[34~")),
+            ("f5", alt, Mode::empty(), legacy, None, Some("\x1b[15;3~")),
+            ("enter", shift, Mode::empty(), legacy, None, Some("\n")),
+            ("tab", shift, Mode::empty(), legacy, None, Some("\x1b[Z")),
+            (
+                "escape",
+                plain,
+                Mode::empty(),
+                kitty,
+                None,
+                Some("\x1b[27u"),
+            ),
+            ("enter", plain, Mode::empty(), kitty, None, Some("\x1b[13u")),
+            ("tab", plain, Mode::empty(), kitty, None, Some("\x1b[9u")),
+            (
+                "a",
+                shift_ctrl,
+                Mode::empty(),
+                kitty,
+                None,
+                Some("\x1b[97;6u"),
+            ),
+            ("up", alt, Mode::APP_CURSOR, kitty, None, Some("\x1b[1;3A")),
+            (
+                "a",
+                shift,
+                Mode::empty(),
+                text,
+                None,
+                Some("\x1b[97:65;2;65u"),
+            ),
+            (
+                "!",
+                shift,
+                Mode::empty(),
+                text,
+                None,
+                Some("\x1b[49:33;2;33u"),
+            ),
+            (
+                "中",
+                plain,
+                Mode::empty(),
+                text,
+                None,
+                Some("\x1b[20013;1;20013u"),
+            ),
+            ("f13", plain, Mode::empty(), text, None, Some("\x1b[57376u")),
+            ("f3", plain, Mode::empty(), kitty, None, Some("\x1b[13~")),
+            (
+                "a",
+                ctrl,
+                Mode::empty(),
+                legacy,
+                Some(2),
+                Some("\x1b[27;5;97~"),
+            ),
+            (
+                "enter",
+                ctrl,
+                Mode::empty(),
+                legacy,
+                Some(2),
+                Some("\x1b[27;5;13~"),
+            ),
+            ("a", ctrl, Mode::empty(), legacy, Some(1), Some("\x01")),
+            ("a", plain, Mode::empty(), legacy, Some(2), None),
+            ("a", ctrl, Mode::empty(), kitty, Some(2), Some("\x1b[97;5u")),
+            ("ab", plain, Mode::empty(), kitty, None, None),
+        ] {
+            assert_eq!(
+                key_bytes(key, modifiers, mode, keyboard, other_keys, true),
+                expected.map(|text| text.as_bytes().to_vec()),
+                "{key} {modifiers:?} {keyboard:?} {other_keys:?}"
+            );
+        }
+        assert_eq!(
+            key_bytes("a", alt, Mode::empty(), legacy, None, true),
+            Some(b"\x1ba".to_vec())
+        );
+        assert_eq!(
+            key_bytes("a", alt, Mode::empty(), legacy, None, false),
+            if cfg!(target_os = "macos") {
+                None
+            } else {
+                Some(b"\x1ba".to_vec())
+            }
+        );
     }
 }

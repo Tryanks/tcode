@@ -147,41 +147,7 @@ fn push_merged(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tokens(text: &str) -> Vec<&str> {
-        word_token_ranges(text)
-            .into_iter()
-            .map(|range| &text[range])
-            .collect()
-    }
-
-    #[test]
-    fn tokenizer_splits_word_whitespace_and_distinct_punctuation() {
-        assert_eq!(
-            tokens("one.two(three)"),
-            vec!["one", ".", "two", "(", "three", ")"]
-        );
-        assert_eq!(tokens("hello  world"), vec!["hello", "  ", "world"]);
-        assert_eq!(tokens("a_1 += b"), vec!["a_1", " ", "+", "=", " ", "b"]);
-    }
-
-    #[test]
-    fn line_diff_reports_basic_hunks() {
-        let hunks = line_diff("one\ntwo\nthree\n", "one\nTWO\nthree\nfour\n", false);
-        assert_eq!(
-            hunks,
-            vec![
-                LineHunk {
-                    old: 1..2,
-                    new: 1..2
-                },
-                LineHunk {
-                    old: 3..3,
-                    new: 3..4
-                }
-            ]
-        );
-    }
+    use std::iter::once;
 
     #[test]
     fn line_diff_can_ignore_all_whitespace() {
@@ -190,17 +156,44 @@ mod tests {
     }
 
     #[test]
-    fn word_diff_flags_changed_number() {
-        let old = "let x = 1;";
-        let new = "let x = 2;";
-        let (old_ranges, new_ranges) = word_diff_ranges(old, new).unwrap();
-        assert_eq!(old_ranges, vec![8..9]);
-        assert_eq!(new_ranges, vec![8..9]);
-    }
-
-    #[test]
-    fn word_diff_is_gated_by_input_size() {
-        assert!(word_diff_ranges(&"a".repeat(513), "b").is_none());
-        assert!(word_diff_ranges("a", &"b".repeat(513)).is_none());
+    fn word_highlights_preserve_utf8_token_boundaries_and_skip_unbounded_inputs() {
+        for (old, new, old_ranges, new_ranges) in [
+            (
+                "let x = 1;",
+                "let x = 2;",
+                once(8..9).collect(),
+                once(8..9).collect(),
+            ),
+            (
+                "let 中 = 1;",
+                "let 中 = 2;",
+                once(10..11).collect(),
+                once(10..11).collect(),
+            ),
+            ("foo(x)", "foo(x, y)", vec![], once(5..8).collect()),
+            (
+                "a += b",
+                "a -= b",
+                once(2..3).collect(),
+                once(2..3).collect(),
+            ),
+            ("unchanged", "unchanged", vec![], vec![]),
+        ] {
+            assert_eq!(
+                word_diff_ranges(old, new),
+                Some((old_ranges, new_ranges)),
+                "{old:?} → {new:?}"
+            );
+        }
+        for (input, eligible) in [
+            (String::new(), false),
+            ("a".repeat(512), true),
+            ("a".repeat(513), false),
+            ("a\n".repeat(8), true),
+            ("a\n".repeat(9), false),
+        ] {
+            assert_eq!(word_diff_ranges(&input, "b").is_some(), eligible);
+            assert_eq!(word_diff_ranges("b", &input).is_some(), eligible);
+        }
     }
 }

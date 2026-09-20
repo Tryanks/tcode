@@ -241,7 +241,7 @@ mod tests {
     /// The wire carries rio's raw bits, so the two definitions must not drift.
     /// Every flag a client acts on is listed by name here, not derived.
     #[test]
-    fn wire_mode_bits_match_rio() {
+    fn projected_mode_keyboard_and_style_bits_match_the_wire() {
         for (rio, wire) in [
             (Mode::SHOW_CURSOR, TerminalMode::SHOW_CURSOR),
             (Mode::APP_CURSOR, TerminalMode::APP_CURSOR),
@@ -284,10 +284,6 @@ mod tests {
         ] {
             assert_eq!(rio.bits(), wire.bits(), "{rio:?} moved");
         }
-    }
-
-    #[test]
-    fn wire_keyboard_and_style_bits_match_rio() {
         for (rio, wire) in [
             (
                 KeyboardModes::DISAMBIGUATE_ESC_CODES,

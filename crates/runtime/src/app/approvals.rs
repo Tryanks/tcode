@@ -109,93 +109,85 @@ mod tests {
     }
 
     #[test]
-    fn live_session_pending_approval_sets_and_clears() {
-        let (_store, mut state) = state("approval-live-test");
-        let (commands, _receiver) = smol::channel::unbounded();
-        state
-            .residents
-            .live
-            .insert("live".into(), live_session("live", commands));
+    fn approvals_are_session_scoped_deduplicated_and_cleared_only_after_delivery() {
+        for parked in [false, true] {
+            let (_store, mut state) = state("approval-authority");
+            let (commands, receiver) = smol::channel::unbounded();
+            let mut child = live_session("child", commands);
+            child.meta.parent_session_id = Some("parent".into());
+            state.sessions.push(child.meta.clone());
+            if parked {
+                state.residents.parked.insert("child".into(), child);
+            } else {
+                state.residents.live.insert("child".into(), child);
+            }
+            let first = request("first");
+            for (session, pending) in [("child", &first), ("child", &first), ("parent", &first)] {
+                state.record_approval_event(
+                    session,
+                    &AgentEvent::ApprovalRequested(pending.clone()),
+                );
+            }
+            state.record_approval_event("child", &AgentEvent::ApprovalRequested(request("second")));
+            assert_eq!(state.approval_requests("child").len(), 2);
+            assert_eq!(state.first_approval("child"), Some(&first));
+            let status = state.child_status_json(&state.sessions[0], &Timeline::default());
+            assert_eq!(status["approval_request_id"], "first");
+            assert_eq!(status["waiting_approval"], "command `cargo test`");
+            assert!(
+                state
+                    .session_status_snapshot("child")
+                    .unwrap()
+                    .pending_approval
+            );
 
-        let request = request("approval-live");
-        state.record_approval_event("live", &AgentEvent::ApprovalRequested(request.clone()));
-        assert_eq!(state.first_approval("live"), Some(&request));
-        assert!(state.has_approval("live"));
-
-        state.record_approval_event(
-            "live",
-            &AgentEvent::ApprovalResolved {
-                request_id: request.id,
-                decision: ApprovalDecision::Approve,
-            },
-        );
-        assert!(!state.has_approval("live"));
-    }
-
-    #[test]
-    fn orchestrated_child_reads_pending_from_the_same_authority() {
-        let (_store, mut state) = state("approval-child-test");
-        let mut child = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp"), None);
-        child.id = "child".into();
-        child.parent_session_id = Some("parent".into());
-        state.sessions.push(child.clone());
-        state.record_approval_event(
-            "child",
-            &AgentEvent::ApprovalRequested(request("approval-child")),
-        );
-
-        let status = state.child_status_json(&child, &Timeline::default());
-        assert_eq!(status["approval_request_id"], "approval-child");
-        assert_eq!(status["waiting_approval"], "command `cargo test`");
-    }
-
-    #[test]
-    fn responding_clears_all_host_views_at_once() {
-        let (_store, mut state) = state("approval-response-test");
-        let (commands, receiver) = smol::channel::unbounded();
-        let mut child = live_session("child", commands);
-        child.meta.parent_session_id = Some("parent".into());
-        state.sessions.push(child.meta.clone());
-        state.residents.parked.insert("child".into(), child);
-        state.record_approval_event(
-            "child",
-            &AgentEvent::ApprovalRequested(request("approval-response")),
-        );
-
-        assert!(
             state
-                .session_status_snapshot("child")
-                .unwrap()
-                .pending_approval
-        );
-        assert_ne!(
-            state.child_status_json(&state.sessions[0], &Timeline::default())["approval_request_id"],
-            serde_json::Value::Null
-        );
+                .respond_session_approval("child", "first".into(), ApprovalDecision::Deny)
+                .unwrap();
+            assert!(
+                matches!(receiver.try_recv(), Ok(SessionCommand::RespondApproval { request_id, decision: ApprovalDecision::Deny }) if request_id == "first")
+            );
+            assert_eq!(state.first_approval("child").unwrap().id, "second");
+            assert!(state.has_approval("parent"));
 
-        state
-            .respond_session_approval(
+            drop(receiver);
+            assert!(
+                state
+                    .respond_session_approval("child", "second".into(), ApprovalDecision::Approve)
+                    .is_err()
+            );
+            assert_eq!(
+                state.first_approval("child").unwrap().id,
+                "second",
+                "failed delivery must remain visible"
+            );
+            state.record_approval_event(
                 "child",
-                "approval-response".into(),
-                ApprovalDecision::Approve,
-            )
-            .unwrap();
-
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(SessionCommand::RespondApproval { request_id, .. })
-                if request_id == "approval-response"
-        ));
-        assert!(!state.has_approval("child"));
-        assert!(
-            !state
-                .session_status_snapshot("child")
-                .unwrap()
-                .pending_approval
-        );
-        assert_eq!(
-            state.child_status_json(&state.sessions[0], &Timeline::default())["approval_request_id"],
-            serde_json::Value::Null
-        );
+                &AgentEvent::ApprovalResolved {
+                    request_id: "second".into(),
+                    decision: ApprovalDecision::Approve,
+                },
+            );
+            assert!(
+                !state
+                    .session_status_snapshot("child")
+                    .unwrap()
+                    .pending_approval
+            );
+            assert_eq!(
+                state.child_status_json(&state.sessions[0], &Timeline::default())["approval_request_id"],
+                serde_json::Value::Null
+            );
+            assert!(state.has_approval("parent"));
+            state.record_approval_event(
+                "parent",
+                &AgentEvent::TurnCompleted {
+                    turn_id: "turn".into(),
+                    status: TurnStatus::Completed,
+                    usage: None,
+                },
+            );
+            assert!(!state.has_approval("parent"));
+        }
     }
 }

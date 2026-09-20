@@ -831,28 +831,28 @@ mod tests {
     }
 
     #[test]
-    fn empty_query_matches_everything() {
-        assert_eq!(fuzzy_score("", "anything"), Some(0));
-    }
-
-    #[test]
-    fn non_subsequence_does_not_match() {
-        assert_eq!(fuzzy_score("xyz", "New thread"), None);
-        assert_eq!(fuzzy_score("ttt", "cat"), None);
-    }
-
-    #[test]
-    fn subsequence_matches_case_insensitively() {
-        assert!(fuzzy_score("nt", "New thread").is_some());
-        assert!(fuzzy_score("NEW", "new thread").is_some());
-    }
-
-    #[test]
-    fn consecutive_scores_higher_than_scattered() {
-        // "set" contiguous in "settings" beats the scattered hit in "s...e...t".
+    fn fuzzy_search_matches_subsequences_and_prefers_early_contiguous_hits() {
+        for (query, text, matches) in [
+            ("", "", true),
+            ("", "anything", true),
+            ("x", "", false),
+            ("xyz", "New thread", false),
+            ("ttt", "cat", false),
+            ("nt", "New thread", true),
+            ("NEW", "new thread", true),
+            ("é文", "Éditer 文档", true),
+            ("文é", "Éditer 文档", false),
+        ] {
+            assert_eq!(
+                fuzzy_score(query, text).is_some(),
+                matches,
+                "{query:?} in {text:?}"
+            );
+        }
         let contiguous = fuzzy_score("set", "settings").unwrap();
         let scattered = fuzzy_score("set", "some effort table").unwrap();
         assert!(contiguous > scattered, "{contiguous} !> {scattered}");
+        assert!(contiguous > fuzzy_score("set", "reset").unwrap());
     }
 
     #[gpui::test]

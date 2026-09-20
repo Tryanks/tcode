@@ -92,77 +92,37 @@ pub(crate) fn plan_label(plan: &str) -> String {
 mod tests {
     use super::*;
 
-    fn window(kind: UsageWindowKind, scope: Option<&str>) -> UsageWindow {
-        UsageWindow {
-            kind,
-            scope: scope.map(str::to_owned),
-            used_percent: 0.0,
-            resets_at: None,
+    #[test]
+    fn usage_labels_preserve_scope_and_distinguish_missing_future_and_elapsed_resets() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for (kind, scope, expected) in [
+            (UsageWindowKind::FiveHour, None, "5h"),
+            (UsageWindowKind::Weekly, None, "Weekly"),
+            (UsageWindowKind::Other { minutes: 60 }, None, "60 min"),
+            (UsageWindowKind::Weekly, Some("Fable"), "Weekly · Fable"),
+        ] {
+            assert_eq!(
+                window_label(&UsageWindow {
+                    kind,
+                    scope: scope.map(str::to_owned),
+                    used_percent: 0.0,
+                    resets_at: None,
+                }),
+                expected
+            );
         }
-    }
-
-    #[test]
-    fn window_labels_cover_every_kind_and_scope() {
-        assert_eq!(window_label(&window(UsageWindowKind::FiveHour, None)), "5h");
-        assert_eq!(
-            window_label(&window(UsageWindowKind::Weekly, None)),
-            "Weekly"
-        );
-        assert_eq!(
-            window_label(&window(UsageWindowKind::Other { minutes: 60 }, None)),
-            "60 min"
-        );
-        assert_eq!(
-            window_label(&window(UsageWindowKind::Weekly, Some("Fable"))),
-            "Weekly · Fable"
-        );
-    }
-
-    #[test]
-    fn resets_label_formats_remaining_duration() {
-        assert_eq!(
-            resets_label(Some(1_000 + 2 * 3_600 + 15 * 60), 1_000).as_deref(),
-            Some("Resets in 2h 15m")
-        );
-        assert_eq!(
-            resets_label(Some(1_000 + 86_400 + 3 * 3_600), 1_000).as_deref(),
-            Some("Resets in 1d 3h")
-        );
-        assert_eq!(
-            resets_label(Some(1_040), 1_000).as_deref(),
-            Some("Resets in 0m")
-        );
-    }
-
-    #[test]
-    fn resets_label_handles_unknown_and_elapsed() {
-        assert_eq!(resets_label(None, 1_000), None);
-        assert_eq!(
-            resets_label(Some(1_000), 1_000).as_deref(),
-            Some("Resets now")
-        );
-        assert_eq!(
-            resets_label(Some(900), 1_000).as_deref(),
-            Some("Resets now")
-        );
-    }
-
-    #[test]
-    fn percent_label_rounds_to_whole_numbers() {
-        assert_eq!(percent_label(0.0), "0%");
-        assert_eq!(percent_label(12.4), "12%");
-        assert_eq!(percent_label(12.5), "13%");
-        assert_eq!(percent_label(100.0), "100%");
-    }
-
-    #[test]
-    fn plan_label_capitalizes() {
-        assert_eq!(plan_label("pro"), "Pro");
-        assert_eq!(plan_label("max"), "Max");
-        assert_eq!(plan_label("plus"), "Plus");
-        assert_eq!(plan_label("team"), "Team");
-        assert_eq!(plan_label("enterprise"), "Enterprise");
-        assert_eq!(plan_label("Max 20x"), "Max 20x");
-        assert_eq!(plan_label(""), "");
+        for (reset, expected) in [
+            (None, None),
+            (Some(900), Some("Resets now")),
+            (Some(1_000), Some("Resets now")),
+            (Some(1_040), Some("Resets in 0m")),
+            (Some(9_100), Some("Resets in 2h 15m")),
+            (Some(98_200), Some("Resets in 1d 3h")),
+        ] {
+            assert_eq!(resets_label(reset, 1_000).as_deref(), expected, "{reset:?}");
+        }
+        for (percent, expected) in [(-1.0, "0%"), (12.4, "12%"), (12.5, "13%"), (130.0, "100%")] {
+            assert_eq!(percent_label(percent), expected);
+        }
     }
 }

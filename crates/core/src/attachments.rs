@@ -69,51 +69,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_a_normal_image() {
-        assert!(validate_attachment("a.png", "image/png", 1_000, 0).is_ok());
-    }
-
-    #[test]
-    fn rejects_non_image_type() {
-        assert_eq!(
-            validate_attachment("notes.txt", "text/plain", 10, 0),
-            Err(AttachError::UnsupportedType {
-                name: "notes.txt".into()
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_image_type() {
-        assert_eq!(
-            validate_attachment("drawing.svg", "image/svg+xml", 10, 0),
-            Err(AttachError::UnsupportedType {
-                name: "drawing.svg".into()
-            })
-        );
-    }
-
-    #[test]
-    fn accepts_tiff_for_transcoding() {
-        assert!(validate_attachment("scan.tiff", "image/tiff", 1_000, 0).is_ok());
-    }
-
-    #[test]
-    fn rejects_oversized() {
-        assert_eq!(
-            validate_attachment("big.png", "image/png", MAX_BYTES + 1, 0),
-            Err(AttachError::TooLarge {
-                name: "big.png".into()
-            })
-        );
-        assert!(validate_attachment("edge.png", "image/png", MAX_BYTES, 0).is_ok());
-    }
-
-    #[test]
-    fn rejects_over_count() {
-        assert_eq!(
-            validate_attachment("x.png", "image/png", 1, MAX_IMAGES),
-            Err(AttachError::TooMany)
-        );
+    fn attachment_admission_checks_supported_formats_and_both_limits() {
+        for (name, mime) in [
+            ("photo.PNG", "image/png"),
+            ("photo.jpg", "image/jpeg"),
+            ("photo.jpeg", "image/jpeg"),
+            ("animation.gif", "image/gif"),
+            ("photo.webp", "image/webp"),
+            ("scan.tif", "image/tiff"),
+            ("scan.tiff", "image/tiff"),
+            ("photo.bmp", "image/bmp"),
+        ] {
+            assert_eq!(mime_from_path(Path::new(name)), mime, "{name}");
+            for size in [0, MAX_BYTES] {
+                assert_eq!(
+                    validate_attachment(name, mime, size, MAX_IMAGES - 1),
+                    Ok(()),
+                    "{name}"
+                );
+            }
+            assert_eq!(
+                validate_attachment(name, mime, MAX_BYTES + 1, 0),
+                Err(AttachError::TooLarge { name: name.into() })
+            );
+            assert_eq!(
+                validate_attachment(name, mime, 1, MAX_IMAGES),
+                Err(AttachError::TooMany)
+            );
+        }
+        for name in ["drawing.svg", "notes.txt", "no-extension"] {
+            assert_eq!(
+                validate_attachment(name, &mime_from_path(Path::new(name)), 10, 0),
+                Err(AttachError::UnsupportedType { name: name.into() })
+            );
+        }
     }
 }

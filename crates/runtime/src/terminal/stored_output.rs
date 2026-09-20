@@ -62,32 +62,41 @@ mod tests {
     use tcode_protocol::terminal::{CellFlags, TerminalColor};
 
     #[test]
-    fn output_rewraps_at_the_requested_width_and_keeps_resolved_styles() {
-        let output = "\x1b[1;31mabcdefghijklmnopqrstuvwxy\x1b[0m";
-
-        let narrow = super::render(output, 20);
-        assert_eq!(narrow.rows, 2);
-        assert_eq!(narrow.visible[1].cells[0].text, "u");
-
-        let wide = super::render(output, 40);
-        assert_eq!(wide.rows, 1);
-        assert_eq!(wide.visible[0].cells[20].text, "u");
-
-        let style = wide.style(&wide.visible[0].cells[0]);
-        assert_eq!(style.fg, TerminalColor::Indexed(1));
-        assert!(style.flags().contains(CellFlags::BOLD));
-    }
-
-    #[test]
-    fn bare_line_feeds_return_to_the_first_column() {
-        let frame = super::render("a\nb", 40);
-        assert_eq!(frame.rows, 2);
-        assert_eq!(frame.visible[1].cells[0].text, "b");
-    }
-
-    #[test]
-    fn requested_width_is_clamped_into_the_supported_range() {
-        assert_eq!(super::render("x", 1).cols, 20);
-        assert_eq!(super::render("x", 4000).cols, 400);
+    fn captured_output_normalizes_lines_wraps_within_supported_widths_and_keeps_styles() {
+        for (requested, cols, first_line_rows) in
+            [(0, 20, 2), (20, 20, 2), (40, 40, 1), (4000, 400, 1)]
+        {
+            let frame = super::render(
+                "\x1b[1;31mabcdefghijklmnopqrstuvwxy\x1b[0m\nplain\r\nend\n",
+                requested,
+            );
+            assert_eq!(frame.cols, cols);
+            assert_eq!(usize::from(frame.rows), first_line_rows + 2);
+            let text = |row: usize| {
+                frame.visible[row]
+                    .cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            };
+            let first = (0..first_line_rows).map(text).collect::<String>();
+            assert_eq!(first, "abcdefghijklmnopqrstuvwxy");
+            assert_eq!(text(first_line_rows), "plain");
+            assert_eq!(text(first_line_rows + 1), "end");
+            for row in &frame.visible[..first_line_rows] {
+                for cell in &row.cells {
+                    let style = frame.style(cell);
+                    assert_eq!(style.fg, TerminalColor::Indexed(1));
+                    assert!(style.flags().contains(CellFlags::BOLD));
+                }
+            }
+            assert!(
+                !frame
+                    .style(&frame.visible[first_line_rows].cells[0])
+                    .flags()
+                    .contains(CellFlags::BOLD)
+            );
+        }
+        assert_eq!(super::render("", 40).rows, 0);
     }
 }

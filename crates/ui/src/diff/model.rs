@@ -1058,41 +1058,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unified_patch_when_current_text_is_stale() {
-        let patch = "@@ -1,3 +1,3 @@\n one\n-old\n+new\n three\n";
-        assert_eq!(
-            reconstruct_from_text("one\nchanged again\nthree\n".into(), patch),
-            None
-        );
-    }
-
-    #[test]
-    fn reconstructs_matching_bare_write() {
-        let content = "alpha\nbeta\n";
-        assert_eq!(
-            reconstruct_from_text(content.into(), "+alpha\n+beta"),
-            Some((String::new(), content.to_string()))
-        );
-    }
-
-    #[test]
-    fn reconstructs_bare_edit_with_unique_added_block() {
-        let new = "before\nnew one\nnew two\nafter\n";
-        let old = "before\nold one\nold two\nafter\n";
-        let patch = "-old one\n-old two\n+new one\n+new two";
-        assert_eq!(
-            reconstruct_from_text(new.into(), patch),
-            Some((old.to_string(), new.to_string()))
-        );
-    }
-
-    #[test]
-    fn rejects_bare_edit_with_ambiguous_added_block() {
-        assert_eq!(
-            reconstruct_from_text("new\nbetween\nnew\n".into(), "-old\n+new"),
-            None,
-            "the added block must occur exactly once"
-        );
+    fn reconstruction_requires_matching_unambiguous_current_text() {
+        for (current, patch, old) in [
+            ("alpha\nbeta\n", "+alpha\n+beta", Some("")),
+            (
+                "before\nnew one\nnew two\nafter\n",
+                "-old one\n-old two\n+new one\n+new two",
+                Some("before\nold one\nold two\nafter\n"),
+            ),
+            ("new\nbetween\nnew\n", "-old\n+new", None),
+            ("unrelated\n", "-old\n+new", None),
+            (
+                "one\nchanged again\nthree\n",
+                "@@ -1,3 +1,3 @@\n one\n-old\n+new\n three\n",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                reconstruct_from_text(current.into(), patch),
+                old.map(|old| (old.into(), current.into())),
+                "{patch:?} against {current:?}"
+            );
+        }
     }
 
     #[test]

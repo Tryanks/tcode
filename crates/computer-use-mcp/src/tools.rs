@@ -1144,46 +1144,64 @@ mod observation_tests {
     }
 
     #[test]
-    fn auto_with_permission_returns_sparse_flag_and_image() {
-        let permissions = crate::permissions::PermissionStatus {
-            accessibility: true,
-            screen_recording: true,
-        };
-        let policy = capture_policy(
-            crate::config::ImageMode::Auto,
-            Some(ObserveMode::Semantic),
-            &permissions,
-        );
-        assert_eq!(policy, CapturePolicy::IfSparse);
-        assert!(policy.should_capture(true));
-
-        let result = save_observation(sparse_observation(Some(vec![0xff, 0xd8, 0xff])), None);
-        assert!(matches!(
-            result.content.as_slice(),
-            [ContentBlock::Text(text), ContentBlock::Image(image)]
-                if text.text.contains("text_sparse: true")
-                    && image.mime_type == "image/jpeg" && image.data == "/9j/"
-        ));
-    }
-
-    #[test]
-    fn never_returns_sparse_flag_without_image() {
-        let permissions = crate::permissions::PermissionStatus {
-            accessibility: true,
-            screen_recording: true,
-        };
-        let policy = capture_policy(
-            crate::config::ImageMode::Never,
-            Some(ObserveMode::Visual),
-            &permissions,
-        );
-        assert_eq!(policy, CapturePolicy::Never);
-        assert!(!policy.should_capture(true));
-
-        let result = save_observation(sparse_observation(None), None);
-        assert!(matches!(
-            result.content.as_slice(),
-            [ContentBlock::Text(text)] if text.text.contains("text_sparse: true")
-        ));
+    fn observations_apply_image_policy_permissions_and_preserve_sparse_diagnostics() {
+        use crate::config::ImageMode;
+        for (configured, requested, granted, expected) in [
+            (
+                ImageMode::Auto,
+                ObserveMode::Semantic,
+                true,
+                CapturePolicy::IfSparse,
+            ),
+            (
+                ImageMode::Auto,
+                ObserveMode::Semantic,
+                false,
+                CapturePolicy::Never,
+            ),
+            (
+                ImageMode::Never,
+                ObserveMode::Visual,
+                true,
+                CapturePolicy::Never,
+            ),
+            (
+                ImageMode::Always,
+                ObserveMode::Semantic,
+                true,
+                CapturePolicy::Always,
+            ),
+            (
+                ImageMode::Auto,
+                ObserveMode::Visual,
+                true,
+                CapturePolicy::Always,
+            ),
+        ] {
+            let permissions = crate::permissions::PermissionStatus {
+                accessibility: true,
+                screen_recording: granted,
+            };
+            let policy = capture_policy(configured, Some(requested), &permissions);
+            assert_eq!(policy, expected);
+            let screenshot = policy.should_capture(true).then(|| vec![0xff, 0xd8, 0xff]);
+            let warning = capture_warning(configured, &permissions);
+            let result = save_observation(sparse_observation(screenshot), warning);
+            assert!(
+                matches!(&result.content[0], ContentBlock::Text(text) if text.text.contains("text_sparse: true"))
+            );
+            if policy.should_capture(true) {
+                assert!(
+                    matches!(result.content.as_slice(), [ContentBlock::Text(_), ContentBlock::Image(image)] if image.mime_type == "image/jpeg" && image.data == "/9j/")
+                );
+            } else {
+                assert_eq!(result.content.len(), 1);
+            }
+            if !granted {
+                assert!(
+                    matches!(&result.content[0], ContentBlock::Text(text) if text.text.contains("Screen Recording permission is missing"))
+                );
+            }
+        }
     }
 }

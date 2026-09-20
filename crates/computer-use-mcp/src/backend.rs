@@ -586,28 +586,45 @@ mod tests {
     }
 
     #[test]
-    fn key_names_and_chords_map_to_macos_virtual_codes() {
-        assert_eq!(macos_keycode_for_name("enter"), Some(0x24));
-        assert_eq!(macos_keycode_for_name("left_arrow"), Some(0x7B));
-        assert_eq!(macos_keycode_for_name("F12"), Some(0x6F));
-        assert_eq!(macos_keycode_for_name("definitely-not-a-key"), None);
-    }
-
-    #[test]
-    fn key_chord_parser_tracks_modifiers() {
-        let chord = parse_key_chord(&["cmd+shift+s".into()]).unwrap();
-        assert_eq!(chord.keycode, keycode_for_name("s").unwrap());
-        assert!(chord.modifiers.command);
-        assert!(chord.modifiers.shift);
-    }
-
-    #[test]
-    fn key_names_map_to_windows_virtual_keys() {
-        assert_eq!(windows_keycode_for_name("enter"), Some(0x0D));
-        assert_eq!(windows_keycode_for_name("left_arrow"), Some(0x25));
-        assert_eq!(windows_keycode_for_name("F12"), Some(0x7B));
-        assert_eq!(windows_keycode_for_name("s"), Some(0x53));
-        assert_eq!(windows_keycode_for_name("definitely-not-a-key"), None);
+    fn key_chords_resolve_platform_codes_and_reject_ambiguous_input() {
+        for (name, macos, windows) in [
+            ("enter", 0x24, 0x0D),
+            ("left_arrow", 0x7B, 0x25),
+            ("F12", 0x6F, 0x7B),
+        ] {
+            assert_eq!(macos_keycode_for_name(name), Some(macos));
+            assert_eq!(windows_keycode_for_name(name), Some(windows));
+        }
+        for parts in [
+            vec!["cmd+shift+s".into()],
+            vec![" Command ".into(), "SHIFT".into(), "s".into()],
+        ] {
+            let chord = parse_key_chord(&parts).unwrap();
+            assert_eq!(
+                chord.keycode,
+                if cfg!(target_os = "windows") {
+                    0x53
+                } else {
+                    0x01
+                }
+            );
+            assert_eq!(
+                chord.modifiers,
+                KeyModifiers {
+                    command: true,
+                    shift: true,
+                    ..KeyModifiers::default()
+                }
+            );
+        }
+        for parts in [
+            vec![],
+            vec!["cmd".into()],
+            vec!["a+b".into()],
+            vec!["unknown-key".into()],
+        ] {
+            assert!(parse_key_chord(&parts).is_err(), "{parts:?}");
+        }
     }
 
     #[test]

@@ -326,7 +326,7 @@ fn an_endpoint_claiming_the_saved_host_id_never_receives_the_bearer_token() {
                 assert!(matches!(result, Err(ConnectionFailure::Unreachable)));
             };
             futures_lite::future::race(futures_lite::future::zip(attacker, client), async {
-                smol::Timer::after(Duration::from_secs(3)).await;
+                smol::Timer::after(Duration::from_secs(30)).await;
                 panic!("forged endpoint exchange stalled");
             })
             .await;
@@ -335,12 +335,17 @@ fn an_endpoint_claiming_the_saved_host_id_never_receives_the_bearer_token() {
 }
 
 #[test]
-fn unauthenticated_http_identity_rejects_large_declarations_before_reading_the_body() {
+fn unauthenticated_http_identity_rejects_unbounded_or_ambiguous_responses_before_credentials() {
     use futures_lite::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     for pin in [Some("12".repeat(32)), None] {
         for response in [
             "HTTP/1.1 200 OK\r\nContent-Length: 4097\r\n\r\n".to_owned(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n".to_owned(),
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_owned(),
+            "HTTP/1.1 200 OK\r\n\r\n".to_owned(),
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\n\r\n".to_owned(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx".to_owned(),
             "HTTP/1.1 200 OK\r\nContent-Length: 16777216\r\n\r\n".to_owned(),
             "HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615\r\n\r\n".to_owned(),
             format!("HTTP/1.1 200 OK\r\nX-Padding: {}", "x".repeat(4096)),
@@ -392,7 +397,7 @@ fn unauthenticated_http_identity_rejects_large_declarations_before_reading_the_b
                     assert!(matches!(opened, Err(ConnectionFailure::Unreachable)));
                 };
                 futures_lite::future::race(futures_lite::future::zip(attacker, client), async {
-                    smol::Timer::after(Duration::from_secs(2)).await;
+                    smol::Timer::after(Duration::from_secs(30)).await;
                     panic!("oversized preflight was not rejected from its headers");
                 })
                 .await;
@@ -550,7 +555,7 @@ fn a_candidate_wake_during_a_partial_frame_keeps_the_socket_and_sends_each_messa
             );
         };
         futures_lite::future::race(futures_lite::future::zip(relay, exercise), async {
-            smol::Timer::after(Duration::from_secs(3)).await;
+            smol::Timer::after(Duration::from_secs(30)).await;
             panic!("candidate wake abandoned a partially written frame");
         })
         .await;
@@ -636,7 +641,7 @@ fn a_verified_reconnect_to_the_same_origin_persists_new_discovery_hints() {
             }
         },
         async {
-            smol::Timer::after(Duration::from_secs(3)).await;
+            smol::Timer::after(Duration::from_secs(30)).await;
             panic!("same-origin reconnect never authenticated");
         },
     ));

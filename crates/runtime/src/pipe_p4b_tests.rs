@@ -249,8 +249,8 @@ fn import_status(event: &ServerEvent) -> Option<&ExternalImportStatus> {
 }
 
 #[test]
-fn empty_import_completes_without_a_client_and_stays_readable_from_a_late_snapshot() {
-    let (_host, mux, link, _root, project_id) = project_fixture();
+fn import_status_survives_clients_and_gates_new_runs_by_lifecycle() {
+    let (host, mux, link, _root, project_id) = project_fixture();
     let events = link.events();
     link.subscribe(Subscription {
         after: None,
@@ -267,6 +267,37 @@ fn empty_import_completes_without_a_client_and_stays_readable_from_a_late_snapsh
         )))
         .is_none()
     );
+
+    let live = project_id.clone();
+    smol::block_on(host.update_state_for_test(move |state, cx| {
+        state.replace_external_import_status(
+            &live,
+            Some(ExternalImportStatus {
+                run_id: 7,
+                state: ExternalImportState::Progress {
+                    done: 1,
+                    total: 9,
+                    tool: "Claude Code".into(),
+                },
+            }),
+            cx,
+        );
+    }))
+    .unwrap();
+    assert_eq!(
+        link.command_blocking(Command::StartExternalImport {
+            project_id: project_id.clone(),
+            threads: Vec::new(),
+        })
+        .unwrap_err()
+        .code,
+        "import_in_progress"
+    );
+    let reset = project_id.clone();
+    smol::block_on(host.update_state_for_test(move |state, cx| {
+        state.replace_external_import_status(&reset, None, cx);
+    }))
+    .unwrap();
 
     assert_eq!(
         link.command_blocking(Command::StartExternalImport {
@@ -335,35 +366,6 @@ fn empty_import_completes_without_a_client_and_stays_readable_from_a_late_snapsh
 }
 
 #[test]
-fn a_second_start_while_a_run_is_live_is_rejected() {
-    let (host, _mux, link, _root, project_id) = project_fixture();
-    let live = project_id.clone();
-    smol::block_on(host.update_state_for_test(move |state, cx| {
-        state.replace_external_import_status(
-            &live,
-            Some(ExternalImportStatus {
-                run_id: 7,
-                state: ExternalImportState::Progress {
-                    done: 1,
-                    total: 9,
-                    tool: "Claude Code".into(),
-                },
-            }),
-            cx,
-        );
-    }))
-    .unwrap();
-    let error = link
-        .command_blocking(Command::StartExternalImport {
-            project_id,
-            threads: Vec::new(),
-        })
-        .unwrap_err();
-    assert_eq!(error.code, "import_in_progress");
-    link.command_blocking(Command::ShutdownAllAndFlush).unwrap();
-}
-
-#[test]
 fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnects() {
     let (_host, mux, watcher, root, project_id) = project_fixture();
     let history = root.join("history");
@@ -425,9 +427,7 @@ fn import_finalizes_the_index_before_finished_even_after_the_initiator_disconnec
             std::time::Instant::now() < deadline,
             "import never finished"
         );
-        let Ok(envelope) = events.recv_blocking() else {
-            panic!("event stream closed before the import finished")
-        };
+        let envelope = super::tests::next_event(&events, |_| true);
         match &envelope.event {
             ServerEvent::IndexSnapshot(snapshot) => {
                 index_ready = snapshot

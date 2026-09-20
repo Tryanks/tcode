@@ -456,7 +456,6 @@ fn clamp_command(command: &str, cols: u16) -> String {
 #[cfg(test)]
 mod tests {
     use gpui::rgb;
-    use tcode_protocol::terminal::TerminalColor;
 
     use super::*;
 
@@ -500,167 +499,144 @@ mod tests {
     /// The panel adopts the frame it is currently asking for, ignores one for a
     /// width it has already left, and asks again after the width moves.
     #[test]
-    fn frames_are_adopted_for_the_current_width_only() {
-        let mut cache = CommandPanelCache::new();
-        cache.entries.insert("item".into(), Panel::default());
+    fn command_frame_cache_deduplicates_requests_and_rejects_stale_widths_or_output() {
+        {
+            let mut cache = CommandPanelCache::new();
+            cache.entries.insert("item".into(), Panel::default());
 
-        let first = cache.claim("item", 40).expect("first request");
-        assert_eq!(cache.claim("item", 40), None, "the width is already asked");
+            let first = cache.claim("item", 40).expect("first request");
+            assert_eq!(cache.claim("item", 40), None, "the width is already asked");
 
-        let second = cache.claim("item", 120).expect("the width moved");
-        assert_ne!(first, second);
-        assert!(!cache.adopt("item", first, Some(frame(40, &["stale"]))));
-        assert!(cache.adopt("item", second, Some(frame(120, &["fresh"]))));
+            let second = cache.claim("item", 120).expect("the width moved");
+            assert_ne!(first, second);
+            assert!(!cache.adopt("item", first, Some(frame(40, &["stale"]))));
+            assert!(cache.adopt("item", second, Some(frame(120, &["fresh"]))));
 
-        let panel = &cache.entries["item"];
-        assert!(!panel.frames.contains_key(&40));
-        assert!(panel.frames.contains_key(&120));
-        // A width with a frame on hand is never re-requested.
-        assert_eq!(cache.claim("item", 120), None);
-    }
+            let panel = &cache.entries["item"];
+            assert!(!panel.frames.contains_key(&40));
+            assert!(panel.frames.contains_key(&120));
+            // A width with a frame on hand is never re-requested.
+            assert_eq!(cache.claim("item", 120), None);
+        }
+        {
+            let mut cache = CommandPanelCache::new();
+            for index in 0..MAX_IN_FLIGHT + 1 {
+                cache
+                    .entries
+                    .insert(format!("item-{index}"), Panel::default());
+            }
+            let claimed = (0..MAX_IN_FLIGHT + 1)
+                .filter(|index| cache.claim(&format!("item-{index}"), 40).is_some())
+                .count();
+            assert_eq!(claimed, MAX_IN_FLIGHT);
 
-    #[test]
-    fn concurrent_requests_are_bounded() {
-        let mut cache = CommandPanelCache::new();
-        for index in 0..MAX_IN_FLIGHT + 1 {
+            // An answer frees the slot the next panel was waiting for.
+            cache.adopt("item-0", 0, None);
+            assert!(cache.claim(&format!("item-{MAX_IN_FLIGHT}"), 40).is_some());
+        }
+        {
+            let mut cache = CommandPanelCache::new();
+            cache.entries.insert("item".into(), Panel::default());
+            let generation = cache.claim("item", 40).expect("request");
+            assert!(cache.adopt("item", generation, Some(frame(40, &["one"]))));
+
             cache
                 .entries
-                .insert(format!("item-{index}"), Panel::default());
+                .get_mut("item")
+                .expect("panel")
+                .update("cmd", "one\ntwo\n");
+            assert!(
+                cache.claim("item", 40).is_some(),
+                "longer output must be re-rendered"
+            );
         }
-        let claimed = (0..MAX_IN_FLIGHT + 1)
-            .filter(|index| cache.claim(&format!("item-{index}"), 40).is_some())
-            .count();
-        assert_eq!(claimed, MAX_IN_FLIGHT);
-
-        // An answer frees the slot the next panel was waiting for.
-        cache.adopt("item-0", 0, None);
-        assert!(cache.claim(&format!("item-{MAX_IN_FLIGHT}"), 40).is_some());
     }
 
     #[test]
-    fn growing_output_retires_the_cached_frames() {
-        let mut cache = CommandPanelCache::new();
-        cache.entries.insert("item".into(), Panel::default());
-        let generation = cache.claim("item", 40).expect("request");
-        assert!(cache.adopt("item", generation, Some(frame(40, &["one"]))));
-
-        cache
-            .entries
-            .get_mut("item")
-            .expect("panel")
-            .update("cmd", "one\ntwo\n");
-        assert!(
-            cache.claim("item", 40).is_some(),
-            "longer output must be re-rendered"
-        );
-    }
-
-    #[test]
-    fn command_is_clamped_to_four_rows() {
-        let command = "x".repeat(usize::from(DEFAULT_COLS) * MAX_COMMAND_ROWS + 1);
-        let (model, rows) = command_model(&command, DEFAULT_COLS, Some(&dark_command_theme()));
-        assert_eq!(rows, MAX_COMMAND_ROWS);
-        assert!(
-            model
-                .cell(MAX_COMMAND_ROWS - 1, usize::from(DEFAULT_COLS) - 1)
-                .is_some_and(|cell| cell.text == "…")
-        );
-    }
-
-    #[test]
-    fn command_highlight_is_faded_truecolor_in_terminal_cells() {
-        let command = "if true; then echo yes; fi";
-        let command_theme = dark_command_theme();
-        let clamped = clamp_command(command, DEFAULT_COLS);
-        let raw_keyword_color =
-            highlight::highlight_source(&clamped, "bash", &command_theme.highlight_theme)
-                .into_iter()
-                .find_map(|(range, style)| {
-                    clamped[range]
-                        .contains("if")
-                        .then_some(style.color)
-                        .flatten()
-                })
-                .expect("bash keyword highlight color");
-        let expected = faded_command_rgb(raw_keyword_color, command_theme.background);
-
-        let (model, rows) = command_model(command, DEFAULT_COLS, Some(&command_theme));
-        let paint = layout_grid(&model, palette(), false, None, false, false);
-        assert_eq!(rows, 1);
-        let run = paint
-            .text_runs
-            .iter()
-            .find(|run| run.text.contains("if"))
-            .expect("highlighted command run");
-        let TerminalColor::Rgb { r, g, b } = run.style.fg else {
-            panic!("command keyword should use truecolor foreground");
-        };
-        assert_eq!((r, g, b), expected);
-    }
-
-    #[test]
-    fn command_cjk_uses_two_columns_without_overlapping_following_text() {
-        let (model, rows) = command_model("a中文b", 8, Some(&dark_command_theme()));
-        assert_eq!(rows, 1);
-        for (col, text, width) in [
-            (0, "a", CellWidth::Narrow),
-            (1, "中", CellWidth::Wide),
-            (2, "", CellWidth::Spacer),
-            (3, "文", CellWidth::Wide),
-            (4, "", CellWidth::Spacer),
-            (5, "b", CellWidth::Narrow),
-        ] {
-            let cell = model.cell(0, col).expect("command cell");
-            assert_eq!((cell.text.as_str(), cell.width), (text, width));
-        }
-        let paint = layout_grid(&model, palette(), false, None, false, false);
-        assert!(paint.text_runs.iter().any(|run| run.start_col == 3));
-        assert!(paint.text_runs.iter().any(|run| run.start_col == 5));
-    }
-
-    #[test]
-    fn command_wraps_whole_graphemes_and_keeps_ellipsis_in_four_rows() {
-        let (model, rows) = command_model("abc中文e\u{301}👩‍💻z", 4, None);
-        assert_eq!(rows, 3);
-        for (row, col, text) in [
-            (0, 2, "c"),
-            (1, 0, "中"),
-            (1, 2, "文"),
-            (2, 0, "e\u{301}"),
-            (2, 1, "👩‍💻"),
-            (2, 3, "z"),
-        ] {
-            assert_eq!(model.cell(row, col).unwrap().text, text);
-        }
-
-        for command in ["中文".repeat(5), "中文\n".repeat(5)] {
-            let (model, rows) = command_model(&command, 4, None);
+    fn command_cells_preserve_graphemes_and_cell_width_with_bounded_wrapping() {
+        {
+            let command = "x".repeat(usize::from(DEFAULT_COLS) * MAX_COMMAND_ROWS + 1);
+            let (model, rows) = command_model(&command, DEFAULT_COLS, Some(&dark_command_theme()));
             assert_eq!(rows, MAX_COMMAND_ROWS);
-            assert_eq!(model.cell(3, 0).unwrap().text, "中");
-            assert_eq!(model.cell(3, 2).unwrap().text, "…");
-            assert!(model.cell(3, 3).is_none_or(|cell| cell.text.is_empty()));
+            assert!(
+                model
+                    .cell(MAX_COMMAND_ROWS - 1, usize::from(DEFAULT_COLS) - 1)
+                    .is_some_and(|cell| cell.text == "…")
+            );
         }
-    }
+        {
+            let (model, rows) = command_model("a中文b", 8, Some(&dark_command_theme()));
+            assert_eq!(rows, 1);
+            for (col, text, width) in [
+                (0, "a", CellWidth::Narrow),
+                (1, "中", CellWidth::Wide),
+                (2, "", CellWidth::Spacer),
+                (3, "文", CellWidth::Wide),
+                (4, "", CellWidth::Spacer),
+                (5, "b", CellWidth::Narrow),
+            ] {
+                let cell = model.cell(0, col).expect("command cell");
+                assert_eq!((cell.text.as_str(), cell.width), (text, width));
+            }
+            let paint = layout_grid(&model, palette(), false, None, false, false);
+            assert!(paint.text_runs.iter().any(|run| run.start_col == 3));
+            assert!(paint.text_runs.iter().any(|run| run.start_col == 5));
+        }
+        {
+            let (model, rows) = command_model("abc中文e\u{301}👩‍💻z", 4, None);
+            assert_eq!(rows, 3);
+            for (row, col, text) in [
+                (0, 2, "c"),
+                (1, 0, "中"),
+                (1, 2, "文"),
+                (2, 0, "e\u{301}"),
+                (2, 1, "👩‍💻"),
+                (2, 3, "z"),
+            ] {
+                assert_eq!(model.cell(row, col).unwrap().text, text);
+            }
 
-    #[test]
-    fn command_wraps_at_the_measured_width() {
-        let (model, rows) = command_model("abcdefghij", 5, None);
-        assert_eq!(rows, 2);
-        assert_eq!(
-            model.cell(1, 0).map(|cell| cell.text.clone()),
-            Some("f".into())
-        );
+            for command in ["中文".repeat(5), "中文\n".repeat(5)] {
+                let (model, rows) = command_model(&command, 4, None);
+                assert_eq!(rows, MAX_COMMAND_ROWS);
+                assert_eq!(model.cell(3, 0).unwrap().text, "中");
+                assert_eq!(model.cell(3, 2).unwrap().text, "…");
+                assert!(model.cell(3, 3).is_none_or(|cell| cell.text.is_empty()));
+            }
+        }
+        {
+            let (model, rows) = command_model("abcdefghij", 5, None);
+            assert_eq!(rows, 2);
+            assert_eq!(
+                model.cell(1, 0).map(|cell| cell.text.clone()),
+                Some("f".into())
+            );
+        }
     }
 
     /// Long output keeps its tail: the panel is a window onto the end of a run.
     #[test]
     fn output_shows_the_last_rows_that_fit() {
         let lines = ["one", "two", "three", "four"];
-        let (model, rows) = output_model(&frame(40, &lines), 2);
-        assert_eq!(rows, 2);
-        assert_eq!(
-            model.cell(0, 0).map(|cell| cell.text.clone()),
-            Some("t".into())
-        );
+        for (budget, expected) in [
+            (0, vec![]),
+            (1, vec!["four"]),
+            (2, vec!["three", "four"]),
+            (8, vec!["one", "two", "three", "four"]),
+        ] {
+            let (model, rows) = output_model(&frame(40, &lines), budget);
+            let actual = (0..rows)
+                .map(|row| {
+                    model
+                        .row(row)
+                        .unwrap()
+                        .cells
+                        .iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "budget {budget}");
+        }
     }
 }

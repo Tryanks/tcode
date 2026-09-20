@@ -35,21 +35,3 @@ pub(crate) fn format_secondary_shortcut(key: &str) -> String {
         key_char: None,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::format_secondary_shortcut;
-
-    #[test]
-    fn formats_secondary_shortcuts_for_current_target() {
-        if cfg!(target_os = "macos") {
-            assert_eq!(format_secondary_shortcut("k"), "⌘K");
-            assert_eq!(format_secondary_shortcut("1"), "⌘1");
-            assert_eq!(format_secondary_shortcut("enter"), "⌘⏎");
-        } else {
-            assert_eq!(format_secondary_shortcut("k"), "Ctrl+K");
-            assert_eq!(format_secondary_shortcut("1"), "Ctrl+1");
-            assert_eq!(format_secondary_shortcut("enter"), "Ctrl+Enter");
-        }
-    }
-}

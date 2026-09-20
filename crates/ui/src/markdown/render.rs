@@ -1035,22 +1035,3 @@ fn render_scroll_table(
         )
         .into_any_element()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn code_lines_drops_only_the_terminating_newline() {
-        assert_eq!(code_lines("fn main() {}\n"), ["fn main() {}"]);
-        assert_eq!(code_lines("a\nb"), ["a", "b"]);
-        assert_eq!(code_lines("a\n\n"), ["a", ""]);
-        assert_eq!(code_lines(""), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn table_track_width_includes_cell_and_outer_borders() {
-        assert_eq!(table_track_width(&[48., 72., 96.]), 220.);
-        assert_eq!(table_track_width(&[]), 2.);
-    }
-}

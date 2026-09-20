@@ -270,11 +270,6 @@ impl TestClientState {
             self.host.park_active(&id, cx);
         }
     }
-    pub(super) fn shutdown_active(&mut self, cx: &mut HostCx) {
-        if let Some(id) = self.selected.take() {
-            self.host.shutdown_active(&id, cx);
-        }
-    }
     pub(super) fn select_session(&mut self, id: &str, cx: &mut HostCx) {
         if self.selected.as_deref() == Some(id) {
             return;

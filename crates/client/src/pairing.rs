@@ -403,18 +403,35 @@ mod tests {
     }
 
     #[test]
-    fn invitations_carry_an_origin_and_code() {
-        let invite = parse_pair_url(
-            "tcode://pair?v=1&host=h&name=Desk&origin=https%3A%2F%2Ftunnel.example.com&code=123456",
-        )
-        .unwrap();
-        assert_eq!(invite.origin, "https://tunnel.example.com");
-        assert_eq!(parse_pair_url(&pair_url(&invite)), Some(invite));
-        assert!(!is_pairing_code("12345"));
-    }
-
-    #[test]
-    fn signed_invites_preserve_alternatives_without_allowing_https_downgrade() {
+    fn invitations_preserve_identity_and_reject_invalid_or_downgraded_routes() {
+        let wire =
+            "tcode://pair?v=1&host=h&name=Desk&origin=https%3A%2F%2Ftunnel.example.com&code=123456";
+        let invite = parse_pair_url(wire).unwrap();
+        assert_eq!(
+            invite,
+            PairInvite {
+                host_id: "h".into(),
+                name: "Desk".into(),
+                origin: "https://tunnel.example.com".into(),
+                candidates: vec![],
+                identity_key: None,
+                code: "123456".into(),
+            }
+        );
+        assert_eq!(pair_url(&invite), wire);
+        for (field, replacement) in [
+            ("v=1", "v=2"),
+            ("tcode://", "https://"),
+            ("code=123456", "code=12345"),
+            ("code=123456", "code=1234567"),
+            ("code=123456", "code=12x456"),
+        ] {
+            assert!(
+                parse_pair_url(&wire.replace(field, replacement)).is_none(),
+                "{replacement}"
+            );
+        }
+        assert!(parse_pair_url(&format!("{wire}&padding={}", "x".repeat(4096))).is_none());
         let key = "11".repeat(32);
         let invite = parse_pair_url(&format!(
             "tcode://pair?v=1&host=desk&name=Desk&origin=http%3A%2F%2F192.168.31.42%3A47420&code=123456&candidate=http%3A%2F%2F192.168.139.3%3A47420&candidate=http%3A%2F%2F192.168.139.3%3A47420&identity_key={key}"

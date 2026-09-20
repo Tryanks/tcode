@@ -209,61 +209,43 @@ fn caption_button(button: CaptionButton, maximized: bool, cx: &App) -> impl Into
 mod tests {
     use super::*;
 
-    const ROUTES: [Route; 3] = [Route::Chat, Route::Settings, Route::Hosts];
-    const TABS: [RightTab; 3] = [RightTab::Diff, RightTab::Plan, RightTab::Preview];
-
     #[test]
-    fn chat_hosts_the_cluster_when_no_right_panel_is_open() {
-        for tab in TABS {
-            assert_eq!(
-                caption_host(true, Route::Chat, false, tab),
-                Some(CaptionSurface::Chat),
-                "closed right panel leaves chat rightmost (remembered tab {tab:?})"
-            );
+    fn caption_cluster_belongs_to_the_rightmost_visible_surface_only_with_client_decorations() {
+        for (route, open, tab, surface) in [
+            (Route::Chat, false, RightTab::Diff, CaptionSurface::Chat),
+            (Route::Chat, false, RightTab::Plan, CaptionSurface::Chat),
+            (Route::Chat, false, RightTab::Preview, CaptionSurface::Chat),
+            (
+                Route::Chat,
+                true,
+                RightTab::Diff,
+                CaptionSurface::RightPanel,
+            ),
+            (
+                Route::Chat,
+                true,
+                RightTab::Plan,
+                CaptionSurface::RightPanel,
+            ),
+            (
+                Route::Chat,
+                true,
+                RightTab::Preview,
+                CaptionSurface::Preview,
+            ),
+        ] {
+            assert_eq!(caption_host(true, route, open, tab), Some(surface));
         }
-    }
-
-    #[test]
-    fn the_right_panel_hosts_the_cluster_for_diff_and_plan() {
-        for tab in [RightTab::Diff, RightTab::Plan] {
-            assert_eq!(
-                caption_host(true, Route::Chat, true, tab),
-                Some(CaptionSurface::RightPanel),
-                "{tab:?} shares the diff container"
-            );
-        }
-    }
-
-    #[test]
-    fn preview_hosts_the_cluster_when_it_is_the_open_tab() {
-        assert_eq!(
-            caption_host(true, Route::Chat, true, RightTab::Preview),
-            Some(CaptionSurface::Preview)
-        );
-    }
-
-    #[test]
-    fn the_settings_header_hosts_the_cluster_on_the_settings_route() {
         for open in [false, true] {
-            for tab in TABS {
-                assert_eq!(
-                    caption_host(true, Route::Settings, open, tab),
-                    Some(CaptionSurface::Settings)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn no_surface_hosts_the_cluster_without_client_decorations() {
-        for route in ROUTES {
-            for open in [false, true] {
-                for tab in TABS {
-                    assert_eq!(
-                        caption_host(false, route, open, tab),
-                        None,
-                        "macOS and Linux keep their platform chrome"
-                    );
+            for tab in [RightTab::Diff, RightTab::Plan, RightTab::Preview] {
+                for route in [Route::Chat, Route::Settings, Route::Hosts] {
+                    assert_eq!(caption_host(false, route, open, tab), None);
+                }
+                for (route, surface) in [
+                    (Route::Settings, CaptionSurface::Settings),
+                    (Route::Hosts, CaptionSurface::Hosts),
+                ] {
+                    assert_eq!(caption_host(true, route, open, tab), Some(surface));
                 }
             }
         }

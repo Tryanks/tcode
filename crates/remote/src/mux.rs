@@ -221,46 +221,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_round_trip_and_route_to_owner() {
-        let (to_host, host_rx) = async_channel::unbounded();
-        let (host_tx, from_host) = async_channel::unbounded();
-        let mux = HostMux::new(to_host, from_host);
-        let one = mux.attach();
-        let two = mux.attach();
-        // Each connection forwards on its own thread, so the two lines can
-        // reach the mux in either order. Tag them by topic and resolve
-        // ownership from the payload rather than from arrival order.
-        one.to_host
-            .send_blocking("{\"id\":7,\"payload\":{\"type\":\"subscribe\",\"content\":{\"topic\":{\"type\":\"index\"}}}}\n".into())
-            .unwrap();
-        two.to_host
-            .send_blocking("{\"id\":7,\"payload\":{\"type\":\"subscribe\",\"content\":{\"topic\":{\"type\":\"providers\"}}}}\n".into())
-            .unwrap();
-        let mut ids = HashMap::<String, u64>::new();
-        for _ in 0..2 {
-            let line: serde_json::Value =
-                serde_json::from_str(host_rx.recv_blocking().unwrap().trim_end()).unwrap();
-            let topic = line["payload"]["content"]["topic"]["type"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            ids.insert(topic, line["id"].as_u64().unwrap());
-        }
-        let first_id = ids["index"];
-        let second_id = ids["providers"];
-        assert_ne!(first_id, second_id);
-        host_tx
-            .send_blocking(format!(
-                "{{\"type\":\"ack\",\"content\":{{\"id\":{second_id},\"result\":{{\"Ok\":\"unit\"}}}}}}\n"
-            ))
-            .unwrap();
-        let reply: serde_json::Value =
-            serde_json::from_str(two.from_host.recv_blocking().unwrap().trim_end()).unwrap();
-        assert_eq!(reply["content"]["id"], 7);
-        assert!(one.from_host.try_recv().is_err());
-    }
-
-    #[test]
     fn only_subscribers_receive_events_and_last_unsubscribe_releases_topic() {
         let (to_host, host_rx) = async_channel::unbounded();
         let (host_tx, from_host) = async_channel::unbounded();
@@ -295,49 +255,63 @@ mod tests {
     }
 
     #[test]
-    fn routing_changes_only_correlation_ids() {
-        let (to_host, host_rx) = async_channel::unbounded();
-        let (host_tx, from_host) = async_channel::unbounded();
-        let mux = HostMux::new(to_host, from_host);
-        let client = mux.attach();
-        let request = serde_json::json!({
-            "id": u64::MAX,
-            "payload": {
-                "type": "subscribe",
-                "content": {"topic": {"type": "index"}},
-                "extension": {"id": 17, "text": "escapes: \" } ] \\"},
-            },
-        });
-        client
-            .to_host
-            .send_blocking(encode_line(&request).unwrap())
-            .unwrap();
-        let forwarded = host_rx.recv_blocking().unwrap();
-        assert!(forwarded.ends_with('\n'));
-        let mut forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
-        let global_id = forwarded["id"].as_u64().unwrap();
-        assert_ne!(global_id, u64::MAX);
-        forwarded["id"] = request["id"].clone();
-        assert_eq!(forwarded, request);
-
-        for (kind, id_field) in [("event", "request_id"), ("ack", "id")] {
-            let message = serde_json::json!({
-                "type": kind,
-                "content": {
-                    id_field: global_id,
-                    "topic": {"type": "index"},
-                    "nested": {"id": 123, "request_id": 456, "value": [null, true, "文本"]},
-                },
+    fn colliding_client_ids_route_to_the_owner_without_rewriting_nested_payloads() {
+        for local_id in [7, u64::MAX] {
+            let (to_host, host_rx) = async_channel::unbounded();
+            let (host_tx, from_host) = async_channel::unbounded();
+            let mux = HostMux::new(to_host, from_host);
+            let clients = [mux.attach(), mux.attach()];
+            let requests = ["index", "providers"].map(|topic| {
+                serde_json::json!({
+                    "id": local_id,
+                    "payload": {
+                        "type": "subscribe", "content": {"topic": {"type": topic}},
+                        "extension": {"id": 17, "request_id": 23, "text": "nested 文本"},
+                    },
+                })
             });
-            host_tx
-                .send_blocking(encode_line(&message).unwrap())
-                .unwrap();
-            let reply = client.from_host.recv_blocking().unwrap();
-            assert!(reply.ends_with('\n'));
-            let mut reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-            assert_eq!(reply["content"][id_field], u64::MAX);
-            reply["content"][id_field] = global_id.into();
-            assert_eq!(reply, message);
+            for (client, request) in clients.iter().zip(&requests) {
+                client
+                    .to_host
+                    .send_blocking(encode_line(request).unwrap())
+                    .unwrap();
+            }
+            let mut ids = HashMap::new();
+            for _ in 0..2 {
+                let forwarded = host_rx.recv_blocking().unwrap();
+                assert!(forwarded.ends_with('\n'));
+                let mut forwarded: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+                let topic = forwarded["payload"]["content"]["topic"]["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                ids.insert(topic.clone(), forwarded["id"].as_u64().unwrap());
+                forwarded["id"] = local_id.into();
+                let index = usize::from(topic == "providers");
+                assert_eq!(forwarded, requests[index]);
+            }
+            assert_ne!(ids["index"], ids["providers"]);
+            for (index, topic) in ["index", "providers"].into_iter().enumerate().rev() {
+                for (kind, id_field) in [("event", "request_id"), ("ack", "id")] {
+                    let message = serde_json::json!({
+                        "type": kind,
+                        "content": {
+                            id_field: ids[topic], "topic": {"type": topic},
+                            "nested": {"id": 123, "request_id": 456, "value": [null, true, "文本"]},
+                        },
+                    });
+                    host_tx
+                        .send_blocking(encode_line(&message).unwrap())
+                        .unwrap();
+                    let reply = clients[index].from_host.recv_blocking().unwrap();
+                    assert!(reply.ends_with('\n'));
+                    let mut reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                    assert_eq!(reply["content"][id_field], local_id);
+                    reply["content"][id_field] = ids[topic].into();
+                    assert_eq!(reply, message);
+                    assert!(clients[1 - index].from_host.try_recv().is_err());
+                }
+            }
         }
     }
 }

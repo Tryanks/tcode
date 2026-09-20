@@ -138,33 +138,19 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn tail_residency_is_bounded() {
+    fn residency_stays_bounded_across_small_scrolls_and_distant_jumps() {
         let entries = entries(240);
-        let decisions = decisions(&entries, tail_turn_window(240), None, &HashSet::new());
-
-        assert_eq!(decisions.build.len(), 48);
-        assert!(decisions.evict.is_empty());
-    }
-
-    #[test]
-    fn small_scrolls_keep_the_hysteresis_band_warm() {
-        let entries = entries(240);
-        let mut residents = decisions(&entries, tail_turn_window(240), None, &HashSet::new()).build;
+        let initial = decisions(&entries, tail_turn_window(240), None, &HashSet::new());
+        assert_eq!(initial.build.len(), 48);
+        assert!(initial.evict.is_empty());
+        let mut residents = initial.build;
         let shifted = decisions(&entries, 230..238, None, &residents);
         apply(&mut residents, shifted);
         let back_to_tail = decisions(&entries, tail_turn_window(240), None, &residents);
-
         assert!(back_to_tail.build.is_subset(&residents));
         assert!(back_to_tail.evict.is_empty());
-    }
-
-    #[test]
-    fn jump_rebuilds_an_evicted_region() {
-        let entries = entries(240);
-        let mut residents = decisions(&entries, tail_turn_window(240), None, &HashSet::new()).build;
         let jump = decisions(&entries, tail_turn_window(240), Some(40), &residents);
         apply(&mut residents, jump);
-
         assert_eq!(residents.len(), 78);
         assert!(residents.contains("assistant-40"));
         assert!(!residents.contains("assistant-230"));

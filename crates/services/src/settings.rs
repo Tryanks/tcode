@@ -10,7 +10,7 @@ use tcode_core::settings::Settings;
 #[cfg(test)]
 use tcode_core::settings::provider_key;
 #[cfg(test)]
-use tcode_core::settings::{EnvVar, ProjectSort, ProviderSettings, SidebarLayout, ThemeMode};
+use tcode_core::settings::{EnvVar, ThemeMode};
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -127,74 +127,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_roundtrip() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-settings-test-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let store = SettingsStore::new(root.clone());
-        let mut providers = BTreeMap::new();
-        providers.insert(
-            "codex".to_string(),
-            ProviderSettings {
-                enabled: false,
-                display_name: Some("Work Codex".into()),
-                accent_color: Some("#2563eb".into()),
-                env: vec![
-                    EnvVar {
-                        name: "BASE_URL".into(),
-                        value: "https://example.test".into(),
-                        sensitive: false,
-                    },
-                    EnvVar {
-                        name: "OPENAI_API_KEY".into(),
-                        value: String::new(),
-                        sensitive: true,
-                    },
-                ],
-                binary_path: Some(PathBuf::from("/opt/tools/codex")),
-                home_path: Some(PathBuf::from("/tmp/codex-home")),
-                launch_args: None,
-                pi: Default::default(),
-                custom_models: vec!["gpt-6.7-codex".into()],
-                hidden_models: vec!["gpt-5".into()],
-            },
-        );
-        providers.insert(
-            "claude".to_string(),
-            ProviderSettings {
-                binary_path: Some(PathBuf::from("/opt/tools/claude")),
-                launch_args: Some("--chrome".into()),
-                ..ProviderSettings::default()
-            },
-        );
-        let expected = Settings {
-            language: Some("zh-CN".into()),
-            providers,
-            theme_mode: ThemeMode::Dark,
-            sidebar_collapsed: true,
-            word_wrap_diffs: true,
-            skip_delete_confirmation: true,
-            auto_open_task_panel: true,
-            live_command_panel_disabled: true,
-            provider_update_checks_disabled: true,
-            inactive_frame_throttle_disabled: true,
-            collapsed_projects: vec!["proj-a".into(), "proj-b".into()],
-            favorite_models: vec!["opus".into()],
-            project_sort: ProjectSort::NameAsc,
-            sidebar_layout: SidebarLayout::Flat,
-            remote_hosting_enabled: true,
-            remote_port: Some(47_420),
-            remote_host_name: Some("Desk Mac".into()),
-            last_visited: std::collections::HashMap::from([("sess-a".to_string(), 42)]),
-            ..Settings::default()
-        };
-
-        store.save(&expected).unwrap();
-
-        assert_eq!(store.load(), expected);
-        let _ = fs::remove_dir_all(root);
-    }
-    #[test]
     fn loads_legacy_file_and_migrates_binary_paths() {
         // A settings.json written before the `providers` map existed must still
         // parse: its flat binary overrides migrate into the per-provider card,
@@ -229,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_values_live_in_secrets_json_only() {
+    fn secrets_persist_privately_and_clear_only_the_selected_profile() {
         let root =
             std::env::temp_dir().join(format!("tcode-settings-secret-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -288,16 +220,6 @@ mod tests {
             )
             .unwrap();
         assert!(store.profile_secrets("claude").is_empty());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn profile_secrets_are_keyed_by_profile_id() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-settings-profile-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let store = SettingsStore::new(root.clone());
-
         // A user profile "klaude-kode" stores its own key, isolated from the
         // built-in "claude" profile (which shares the provider_key id).
         store

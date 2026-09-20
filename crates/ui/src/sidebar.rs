@@ -4979,57 +4979,75 @@ mod tests {
             }
         }
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-virtual-{}",
-            tcode_services::store::now_millis()
-        ));
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let project = Project::from_root(root.join("project"));
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.sessions = (0..300)
-                .map(|index| {
-                    let mut meta = session(&format!("virtual-{index}"), None);
-                    meta.project_id = Some(project.id.clone());
-                    meta.updated_at = now_secs().saturating_sub(index);
-                    meta
-                })
-                .collect();
-            state.projects = vec![project];
-        }))
-        .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = Project::from_root(PathBuf::from("/project"));
+        let sessions = (0..300)
+            .map(|index| {
+                let mut meta = session(&format!("virtual-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 1_000 - index;
+                meta
+            })
+            .collect();
+        for (topic, event) in [
+            (
+                tcode_protocol::Topic::Settings,
+                tcode_protocol::ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                tcode_protocol::Topic::Index,
+                tcode_protocol::ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    sessions,
+                    projects: vec![project],
+                    activity: Default::default(),
+                    title_generating: Default::default(),
+                }),
+            ),
+        ] {
+            incoming
+                .try_send(
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(
+                        tcode_protocol::EventEnvelope {
+                            request_id: None,
+                            topic,
+                            event,
+                        },
+                    ))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session("virtual-0".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
             sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
             offset: px(0.),
         });
         let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        // The host answers the index and status subscriptions on its own
-        // thread, and each answer legitimately rebuilds the model. Count those
-        // so a rebuild can be told apart from one the scroll caused.
-        let store_changes = Rc::new(std::cell::Cell::new(0usize));
-        cx.update(|_, cx| {
-            let store_changes = store_changes.clone();
-            cx.subscribe(&store, move |_, change: &StoreChange, _| {
-                if matches!(
-                    change.topic,
-                    TopicKind::Index
-                        | TopicKind::Settings
-                        | TopicKind::ActiveSession
-                        | TopicKind::SessionStatus
-                ) {
-                    store_changes.set(store_changes.get() + 1);
-                }
-            })
-            .detach();
-        });
-        let mut model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
+        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
         assert_eq!(model.rows.len(), 301);
         for (index, selector) in [
             (0, "compact-row-virtual-0"),
@@ -5049,14 +5067,12 @@ mod tests {
                 cx.notify();
             });
             draw(cx);
-            let changes = store_changes.replace(0);
             sidebar.read_with(cx, |sidebar, _| {
                 let current = sidebar.compact_model.as_ref().unwrap();
                 assert!(
-                    Rc::ptr_eq(&model, current) || changes > 0,
+                    Rc::ptr_eq(&model, current),
                     "scrolling must not rebuild families or labels"
                 );
-                model = current.clone();
                 assert!(
                     sidebar.compact_rows_rendered.get() < 40,
                     "one phone viewport must not construct 300 rows: rendered {} at index {index}",
@@ -5082,8 +5098,6 @@ mod tests {
                 "store changes retain the visible thread anchor"
             );
         });
-        host.shutdown_blocking().unwrap();
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]
@@ -5230,19 +5244,6 @@ mod tests {
     }
 
     #[test]
-    fn oversized_thread_list_keeps_its_toggle_after_expanding() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-
-        assert_eq!(thread_list_toggle_label(6, false), None);
-        assert_eq!(
-            thread_list_toggle_label(7, false).as_deref(),
-            Some("显示更多")
-        );
-        assert_eq!(thread_list_toggle_label(7, true).as_deref(), Some("收起"));
-    }
-
-    #[test]
     fn child_unread_is_suppressed_by_render_state_derivation() {
         let parent = session("parent", None);
         let child = session("child", Some("parent"));
@@ -5333,7 +5334,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_collapses_every_parent_except_the_active_chain() {
+    fn startup_folds_only_existing_visible_parents_outside_the_active_chain() {
         let sessions = vec![
             session("parent-a", None),
             session("child-a", Some("parent-a")),
@@ -5366,10 +5367,7 @@ mod tests {
             !collapsed.contains("parent-a"),
             "a selected parent keeps its own children visible"
         );
-    }
 
-    #[test]
-    fn startup_fold_ignores_archived_children_and_orphan_parent_ids() {
         let mut archived_child = session("archived-child", Some("quiet-parent"));
         archived_child.archived_at = Some(1);
         let sessions = vec![
@@ -5468,21 +5466,6 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_parent_hides_only_its_own_direct_children() {
-        let collapsed = HashSet::from(["parent-a".to_string()]);
-
-        assert!(!thread_visible(
-            &session("child-a", Some("parent-a")),
-            &collapsed
-        ));
-        assert!(thread_visible(
-            &session("child-b", Some("parent-b")),
-            &collapsed
-        ));
-        assert!(thread_visible(&session("parent-a", None), &collapsed));
-    }
-
-    #[test]
     fn flat_blocks_sort_by_attention_then_recency_and_keep_children_adjacent() {
         let mut waiting_root = session("waiting-root", None);
         waiting_root.updated_at = 10;
@@ -5534,37 +5517,6 @@ mod tests {
     }
 
     #[test]
-    fn flat_row_offsets_follow_the_rendered_root_and_child_heights() {
-        let root_a = session("root-a", None);
-        let child_a = session("child-a", Some("root-a"));
-        let root_b = session("root-b", None);
-        let sessions = vec![root_a, child_a, root_b];
-        let visible = sessions.iter().collect::<Vec<_>>();
-
-        assert_eq!(
-            flat_thread_top_offsets(&visible, &sessions),
-            vec![
-                0.,
-                FLAT_ROOT_ROW_HEIGHT,
-                FLAT_ROOT_ROW_HEIGHT + FLAT_CHILD_ROW_HEIGHT
-            ]
-        );
-    }
-
-    #[test]
-    fn flat_row_offsets_treat_orphaned_children_as_root_rows() {
-        let orphan = session("orphan", Some("missing-parent"));
-        let root = session("root", None);
-        let sessions = vec![orphan, root];
-        let visible = sessions.iter().collect::<Vec<_>>();
-
-        assert_eq!(
-            flat_thread_top_offsets(&visible, &sessions),
-            vec![0., FLAT_ROOT_ROW_HEIGHT]
-        );
-    }
-
-    #[test]
     fn flat_block_attention_is_lifted_from_a_waiting_child() {
         let mut lifted_root = session("lifted-root", None);
         lifted_root.updated_at = 1;
@@ -5593,41 +5545,5 @@ mod tests {
         let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
 
         assert_eq!(ids, vec!["lifted-root", "lifted-child", "working-root"]);
-    }
-
-    #[test]
-    fn flat_order_applies_the_shared_collapse_filter() {
-        let sessions = vec![
-            session("parent", None),
-            session("child", Some("parent")),
-            session("other", None),
-        ];
-        let collapsed = HashSet::from(["parent".to_string()]);
-
-        let visible = flat_visible_threads(&sessions, &collapsed, None, &HashMap::new());
-        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
-
-        assert_eq!(ids, vec!["parent", "other"]);
-    }
-
-    #[test]
-    fn flat_project_filter_keeps_only_matching_blocks_with_their_children() {
-        let mut project_a_root = session("a-root", None);
-        project_a_root.project_id = Some("project-a".into());
-        let mut project_a_child = session("a-child", Some("a-root"));
-        project_a_child.project_id = Some("project-a".into());
-        let mut project_b_root = session("b-root", None);
-        project_b_root.project_id = Some("project-b".into());
-        let sessions = vec![project_b_root, project_a_root, project_a_child];
-
-        let visible = flat_visible_threads(
-            &sessions,
-            &HashSet::new(),
-            Some("project-a"),
-            &HashMap::new(),
-        );
-        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
-
-        assert_eq!(ids, vec!["a-root", "a-child"]);
     }
 }

@@ -69,60 +69,116 @@ pub fn format_tokens(value: Option<u64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent::ContextFreshness;
 
-    fn usage(used: Option<u64>, window: Option<u64>) -> TokenUsage {
-        TokenUsage {
-            freshness: agent::ContextFreshness::Current,
-            used_tokens: used,
-            context_window: window,
-            ..Default::default()
+    #[test]
+    fn meter_uses_only_observed_usage_and_caps_a_known_nonzero_window() {
+        for (freshness, used, input, window, expected_used, expected_percent) in [
+            (
+                ContextFreshness::Current,
+                Some(100_000),
+                Some(3),
+                Some(200_000),
+                Some(100_000),
+                Some(50.0),
+            ),
+            (
+                ContextFreshness::Current,
+                None,
+                Some(50),
+                Some(200),
+                Some(50),
+                Some(25.0),
+            ),
+            (
+                ContextFreshness::Current,
+                Some(300),
+                None,
+                Some(200),
+                Some(300),
+                Some(100.0),
+            ),
+            (
+                ContextFreshness::Current,
+                Some(0),
+                Some(50),
+                Some(200),
+                Some(0),
+                Some(0.0),
+            ),
+            (
+                ContextFreshness::Current,
+                Some(50),
+                None,
+                None,
+                Some(50),
+                None,
+            ),
+            (
+                ContextFreshness::Current,
+                Some(50),
+                None,
+                Some(0),
+                Some(50),
+                None,
+            ),
+            (ContextFreshness::Current, None, None, Some(200), None, None),
+            (
+                ContextFreshness::Unknown,
+                Some(50),
+                Some(10),
+                Some(200),
+                None,
+                None,
+            ),
+            (
+                ContextFreshness::AwaitingObservation,
+                Some(50),
+                Some(10),
+                Some(200),
+                None,
+                None,
+            ),
+        ] {
+            let usage = TokenUsage {
+                freshness,
+                used_tokens: used,
+                input_tokens: input,
+                context_window: window,
+                ..Default::default()
+            };
+            assert_eq!(used_tokens(&usage), expected_used, "{usage:?}");
+            assert_eq!(used_percentage(&usage), expected_percent, "{usage:?}");
         }
-    }
-
-    #[test]
-    fn percentage_and_overload() {
-        assert_eq!(
-            used_percentage(&usage(Some(100_000), Some(200_000))),
-            Some(50.0)
-        );
-        assert_eq!(
-            used_percentage(&usage(Some(300_000), Some(200_000))),
-            Some(100.0)
-        );
-        assert_eq!(used_percentage(&usage(Some(100), None)), None);
-        assert!(is_overloaded(95.0));
         assert!(!is_overloaded(90.0));
+        assert!(is_overloaded(90.1));
     }
 
     #[test]
-    fn used_falls_back_to_input_tokens() {
-        let u = TokenUsage {
-            freshness: agent::ContextFreshness::Current,
-            input_tokens: Some(1_234),
-            ..Default::default()
-        };
-        assert_eq!(used_tokens(&u), Some(1_234));
-    }
-
-    #[test]
-    fn percentage_label_format() {
-        assert_eq!(format_percentage(Some(5.0)), Some("5%".to_string()));
-        assert_eq!(format_percentage(Some(5.5)), Some("5.5%".to_string()));
-        assert_eq!(format_percentage(Some(42.4)), Some("42%".to_string()));
-        assert_eq!(format_percentage(Some(90.6)), Some("91%".to_string()));
-        assert_eq!(format_percentage(None), None);
-    }
-
-    #[test]
-    fn token_format_uses_compact_suffixes() {
-        assert_eq!(format_tokens(Some(0)), "0");
-        assert_eq!(format_tokens(Some(999)), "999");
-        assert_eq!(format_tokens(Some(1_500)), "1.5k");
-        assert_eq!(format_tokens(Some(4_000)), "4k");
-        assert_eq!(format_tokens(Some(42_000)), "42k");
-        assert_eq!(format_tokens(Some(200_000)), "200k");
-        assert_eq!(format_tokens(Some(1_000_000)), "1m");
-        assert_eq!(format_tokens(Some(1_250_000)), "1.2m");
-        assert_eq!(format_tokens(None), crate::tr!("composer.context_unknown"));
+    fn compact_labels_keep_small_values_precise_and_unknown_values_explicit() {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
+        for (value, expected) in [
+            (Some(5.0), Some("5%")),
+            (Some(5.5), Some("5.5%")),
+            (Some(42.4), Some("42%")),
+            (Some(90.6), Some("91%")),
+            (None, None),
+            (Some(f32::NAN), None),
+            (Some(f32::INFINITY), None),
+        ] {
+            assert_eq!(format_percentage(value).as_deref(), expected);
+        }
+        for (value, expected) in [
+            (Some(0), "0"),
+            (Some(999), "999"),
+            (Some(1_500), "1.5k"),
+            (Some(4_000), "4k"),
+            (Some(42_000), "42k"),
+            (Some(1_000_000), "1m"),
+            (Some(1_250_000), "1.2m"),
+            (None, "Unknown"),
+        ] {
+            assert_eq!(format_tokens(value), expected);
+        }
     }
 }

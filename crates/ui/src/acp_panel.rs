@@ -869,34 +869,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_shorthand_round_trips() {
-        let pairs = parse_env("  API_KEY=abc  BASE_URL=https://x/y  bogus ");
+    fn env_shorthand_preserves_values_and_ignores_entries_without_keys() {
+        let pairs = parse_env("  API_KEY=abc=def  BASE_URL=https://x/y  EMPTY= =ignored bogus ");
         assert_eq!(
             pairs,
             vec![
-                ("API_KEY".to_string(), "abc".to_string()),
+                ("API_KEY".to_string(), "abc=def".to_string()),
                 ("BASE_URL".to_string(), "https://x/y".to_string()),
+                ("EMPTY".to_string(), String::new()),
             ]
         );
-        assert_eq!(format_env(&pairs), "API_KEY=abc BASE_URL=https://x/y");
-    }
-
-    #[test]
-    fn launch_summary_shows_the_real_command() {
-        let npx = InstalledAcpAgent {
-            id: "gemini".into(),
-            name: "Gemini".into(),
-            version: "1".into(),
-            icon: None,
-            launch: agent::AcpLaunch::Npx {
-                package: "@google/gemini-cli@0.50.0".into(),
-                args: vec!["--acp".into()],
-                env: Vec::new(),
-            },
-            enabled: true,
-            env: Vec::new(),
-            launch_args: None,
-        };
-        assert_eq!(launch_summary(&npx), "npx @google/gemini-cli@0.50.0 --acp");
+        assert_eq!(
+            format_env(&pairs),
+            "API_KEY=abc=def BASE_URL=https://x/y EMPTY="
+        );
     }
 }
