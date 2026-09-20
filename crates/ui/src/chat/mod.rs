@@ -3792,7 +3792,176 @@ mod tests {
                 "dragging the visible scrollbar must scroll the conversation at width {width}"
             );
             assert!(!list.is_following_tail());
+
+            // A finger on the thumb drags the scrollbar too, instead of
+            // panning the conversation underneath it.
+            list.set_follow_mode(gpui::FollowMode::Tail);
+            list.scroll_to_end();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert!(list.is_following_tail());
+            cx.simulate_mouse_move(thumb, None, Modifiers::default());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            for (phase, position) in [
+                (gpui::TouchPhase::Started, thumb),
+                (gpui::TouchPhase::Moved, target),
+                (gpui::TouchPhase::Ended, target),
+            ] {
+                cx.simulate_event(gpui::TouchDragEvent {
+                    phase,
+                    start_position: thumb,
+                    position,
+                });
+            }
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert!(
+                list.scroll_px_offset_for_scrollbar().y > tail + viewport.size.height,
+                "touch-dragging the scrollbar must scroll the conversation at width {width}"
+            );
+            assert!(!list.is_following_tail());
         }
+    }
+
+    #[gpui::test]
+    fn touch_pan_pauses_tail_following_and_shows_the_pill(cx: &mut TestAppContext) {
+        use gpui::{
+            Context, IntoElement, PlatformInput, Render, TouchEvent, TouchId, TouchPhase, Window,
+            point, px,
+        };
+        struct TouchChat(Entity<ChatView>);
+        impl Render for TouchChat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
+        window_state.update(cx, |state, _| state.compact = true);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            TouchChat(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
+        let viewport = list.viewport_bounds();
+        let height = viewport.size.height;
+        assert!(list.is_following_tail());
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+        let touch = |phase, y: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(1),
+                        phase,
+                        position: point(viewport.center().x, y),
+                        predicted_position: None,
+                        force: None,
+                    }),
+                    cx,
+                );
+                let _ = window.draw(cx);
+            });
+        };
+
+        // The finger moves down: earlier content comes into view and following
+        // pauses on the first step. Cancel avoids release momentum.
+        let top = viewport.top() + px(10.);
+        touch(TouchPhase::Started, top, cx);
+        touch(TouchPhase::Moved, top + px(40.), cx);
+        assert!(!list.is_following_tail(), "the first step pauses following");
+        touch(TouchPhase::Moved, top + height * 3., cx);
+        touch(TouchPhase::Cancelled, top + height * 3., cx);
+        assert!(!list.is_following_tail());
+        assert!(
+            cx.debug_bounds("scroll-to-end").is_some(),
+            "the pill follows the list geometry after a touch pan"
+        );
+
+        // Panning back to the end resumes following and hides the pill.
+        let bottom = viewport.bottom() - px(10.);
+        touch(TouchPhase::Started, bottom, cx);
+        touch(TouchPhase::Moved, bottom - height * 4., cx);
+        touch(TouchPhase::Cancelled, bottom - height * 4., cx);
+        assert!(list.is_following_tail());
+        assert!(cx.debug_bounds("scroll-to-end").is_none());
+    }
+
+    #[gpui::test]
+    fn timeline_bounces_at_its_edges_without_moving_the_list(cx: &mut TestAppContext) {
+        use gpui::{
+            Context, IntoElement, PlatformInput, Render, TouchEvent, TouchId, TouchPhase, Window,
+            point, px,
+        };
+        struct TouchChat(Entity<ChatView>);
+        impl Render for TouchChat {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.clone()
+            }
+        }
+        // One turn fits the viewport, so every pan is at an edge.
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(1));
+        window_state.update(cx, |state, _| state.compact = true);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            TouchChat(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+        });
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let list = root.read_with(cx, |root, cx| root.0.read(cx).list_state.clone());
+        let resting = list.viewport_bounds();
+        assert_eq!(list.max_offset_for_scrollbar().y, px(0.));
+        let row = cx.debug_bounds("timeline-row-0").expect("the only row");
+        let composer = cx.debug_bounds("chat-composer").expect("composer");
+        let touch = |phase, y: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.dispatch_event(
+                    PlatformInput::Touch(TouchEvent {
+                        id: TouchId(1),
+                        phase,
+                        position: point(resting.center().x, y),
+                        predicted_position: None,
+                        force: None,
+                    }),
+                    cx,
+                );
+                let _ = window.draw(cx);
+            });
+        };
+        let start = resting.top() + px(20.);
+        touch(TouchPhase::Started, start, cx);
+        touch(TouchPhase::Moved, start + px(200.), cx);
+        let stretched = list.viewport_bounds();
+        assert!(
+            stretched.top() > resting.top(),
+            "a pan past the top stretches the timeline: {stretched:?} vs {resting:?}"
+        );
+        assert_eq!(stretched.size, resting.size);
+        assert_eq!(
+            list.scroll_px_offset_for_scrollbar().y,
+            px(0.),
+            "the stretch is a displacement, not a scroll"
+        );
+        let stretched_row = cx.debug_bounds("timeline-row-0").expect("the only row");
+        assert_eq!(
+            stretched_row.top() - row.top(),
+            stretched.top() - resting.top()
+        );
+        assert_eq!(
+            cx.debug_bounds("chat-composer").expect("composer"),
+            composer,
+            "fixed chrome stays outside the stretch"
+        );
+        touch(TouchPhase::Cancelled, start + px(200.), cx);
+        assert_eq!(list.scroll_px_offset_for_scrollbar().y, px(0.));
     }
 
     #[gpui::test]
@@ -4112,7 +4281,7 @@ mod tests {
         scroll(height * 3., gpui::TouchPhase::Started, cx);
         assert!(
             cx.debug_bounds("scroll-to-end").is_some(),
-            "touch capture hides jump"
+            "a touch pan hides jump"
         );
         assert!(!list.is_following_tail());
         let before = list.logical_scroll_top();

@@ -124,7 +124,9 @@ fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
         .w_full()
         .rounded(crate::material::radius_card())
         .bg(cx.theme().muted)
-        .occlude()
+        // The card keeps clicks to itself, but a pan that its body cannot use
+        // must still reach the timeline behind it.
+        .block_mouse_except_scroll()
         .p_3()
         .child(
             div()

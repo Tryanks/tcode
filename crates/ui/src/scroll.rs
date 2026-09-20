@@ -304,3 +304,152 @@ fn root_style_from<E: Styled>(element: &mut E) -> StyleRefinement {
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{
+        Context, ListAlignment, ListOffset, ListState, PlatformInput, Render, TestAppContext,
+        TouchEvent, TouchId, TouchPhase, VisualTestContext, list, point, px,
+    };
+
+    /// A timeline-shaped nesting: a horizontal strip and a bounded vertical
+    /// area inside `gpui::list` rows.
+    struct NestedAreas(ListState);
+
+    impl Render for NestedAreas {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(200.)).h(px(300.)).child(
+                list(self.0.clone(), |ix, _, _| match ix {
+                    0 => div()
+                        .id("strip")
+                        .debug_selector(|| "strip".into())
+                        .w_full()
+                        .h(px(60.))
+                        .overflow_x_scroll_area()
+                        .child(
+                            div()
+                                .debug_selector(|| "strip-content".into())
+                                .w(px(800.))
+                                .h(px(60.))
+                                .flex_none(),
+                        )
+                        .into_any_element(),
+                    1 => div()
+                        .id("inner")
+                        .debug_selector(|| "inner".into())
+                        .w_full()
+                        .max_h(px(100.))
+                        .overflow_y_scroll_area()
+                        .child(
+                            div()
+                                .debug_selector(|| "inner-content".into())
+                                .w_full()
+                                .h(px(400.))
+                                .flex_none(),
+                        )
+                        .into_any_element(),
+                    _ => div().w_full().h(px(80.)).into_any_element(),
+                })
+                .w_full()
+                .h_full(),
+            )
+        }
+    }
+
+    fn touch(cx: &mut VisualTestContext, phase: TouchPhase, x: f32, y: f32) {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::Touch(TouchEvent {
+                    id: TouchId(1),
+                    phase,
+                    position: point(px(x), px(y)),
+                    predicted_position: None,
+                    force: None,
+                }),
+                cx,
+            );
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// One finger pan without release momentum.
+    fn pan(cx: &mut VisualTestContext, from: (f32, f32), to: (f32, f32)) {
+        touch(cx, TouchPhase::Started, from.0, from.1);
+        touch(cx, TouchPhase::Moved, to.0, to.1);
+        touch(cx, TouchPhase::Cancelled, to.0, to.1);
+    }
+
+    fn top(state: &ListState) -> (usize, gpui::Pixels) {
+        let top = state.logical_scroll_top();
+        (top.item_ix, top.offset_in_item)
+    }
+
+    #[gpui::test]
+    fn strips_and_bounded_areas_inside_a_list_own_only_their_axis(cx: &mut TestAppContext) {
+        let state = ListState::new(20, ListAlignment::Top, px(0.)).measure_all();
+        let (_, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| NestedAreas(state)
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let strip = cx.debug_bounds("strip").expect("strip viewport");
+        let content = cx.debug_bounds("strip-content").expect("strip content");
+        assert_eq!(strip.size.width, px(200.));
+
+        // A horizontal pan over the strip moves the strip alone, and keeps
+        // moving it at its edge rather than handing the rest to the list.
+        pan(cx, (150., 30.), (30., 34.));
+        let moved = cx.debug_bounds("strip-content").expect("strip content");
+        assert!(moved.left() < content.left(), "strip scrolls sideways");
+        assert_eq!(top(&state), (0, px(0.)));
+        assert_eq!(cx.debug_bounds("strip").unwrap(), strip);
+        pan(cx, (190., 30.), (10., 30.));
+        pan(cx, (190., 30.), (10., 30.));
+        pan(cx, (190., 30.), (10., 30.));
+        pan(cx, (190., 30.), (10., 30.));
+        assert_eq!(
+            cx.debug_bounds("strip-content").unwrap().right(),
+            strip.right(),
+            "the strip clamps at its end"
+        );
+        assert_eq!(top(&state), (0, px(0.)));
+
+        // A vertical pan over the strip scrolls the list.
+        pan(cx, (100., 30.), (104., -100.));
+        assert_ne!(top(&state), (0, px(0.)));
+        state.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // A vertical pan over the bounded area moves it alone while it can
+        // scroll, then chains to the list at its edge.
+        let inner = cx.debug_bounds("inner").expect("inner viewport");
+        let content = cx.debug_bounds("inner-content").expect("inner content");
+        assert_eq!(inner.size.height, px(100.));
+        let y = f32::from(inner.center().y);
+        pan(cx, (100., y), (100., y - 50.));
+        assert!(cx.debug_bounds("inner-content").unwrap().top() < content.top());
+        assert_eq!(top(&state), (0, px(0.)));
+        assert_eq!(cx.debug_bounds("inner").unwrap(), inner);
+        pan(cx, (100., y), (100., y - 1000.));
+        assert_eq!(top(&state), (0, px(0.)), "one gesture stays with the area");
+        assert_eq!(
+            cx.debug_bounds("inner-content").unwrap().bottom(),
+            inner.bottom(),
+            "the area clamps at its end"
+        );
+        pan(cx, (100., y), (100., y - 50.));
+        assert_ne!(
+            top(&state),
+            (0, px(0.)),
+            "the next gesture reaches the list"
+        );
+    }
+}
