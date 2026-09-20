@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::theme::ActiveTheme as _;
+use crate::touch_selection::WindowTouchSelectionOverlay;
 use dialog::ActiveDialog;
 use notification::NotificationList;
 
@@ -54,11 +55,13 @@ impl OutsideDismissal {
     }
 }
 
-/// Window root that owns tcode's modal and toast layers.
+/// Window root that owns tcode's modal and toast layers, and the window text
+/// selection with the touch surfaces it leaves behind.
 pub struct OverlayHost {
     view: AnyView,
     dialogs: Vec<ActiveDialog>,
     notifications: Entity<NotificationList>,
+    touch_selection: Entity<WindowTouchSelectionOverlay>,
 }
 
 struct DetachedView;
@@ -78,6 +81,7 @@ impl OverlayHost {
             view: view.into(),
             dialogs: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
+            touch_selection: cx.new(|cx| WindowTouchSelectionOverlay::new(window, cx)),
         }
     }
 
@@ -179,7 +183,15 @@ impl Render for OverlayHost {
             .bg(crate::material::canvas(cx))
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
+            // The window selection layer is the first child of the window: its
+            // bubble-phase handlers then run after every control's, owning a
+            // press only when it propagates, and its capture-phase scroll
+            // handler runs before the touch pan capture below it, so the edit
+            // menu steps aside while a finger scrolls.
+            .child(gpui_base::TextSelectionLayer)
             .child(self.view.clone())
+            // After the content, so the edit menu floats above what was selected.
+            .child(self.touch_selection.clone())
             .when(!dialogs.is_empty(), |root| {
                 root.child(
                     div()

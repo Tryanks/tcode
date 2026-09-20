@@ -59,6 +59,7 @@ pub mod theme;
 mod thread_export;
 pub mod time;
 pub(crate) mod toast;
+mod touch_selection;
 pub(crate) mod usage;
 mod wheel_easing;
 pub mod widgets;
