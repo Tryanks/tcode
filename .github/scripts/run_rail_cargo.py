@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-"""Run one Cargo command with scope lowered by Cargo-Rail's strict reader."""
+"""Run one Cargo command with scope lowered by Cargo-Rail Action's plan selectors."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 import subprocess
-import sys
 
 
-def reader(reader: Path, *arguments: str) -> bytes:
+def select(*arguments: str) -> bytes:
     return subprocess.run(
-        [sys.executable, str(reader), *arguments], check=True, stdout=subprocess.PIPE
+        ["cargo-rail-action", "plan", *arguments], check=True, stdout=subprocess.PIPE
     ).stdout
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plan", type=Path, required=True)
-    parser.add_argument("--reader", type=Path, required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--host-full", action="store_true")
     parser.add_argument("--xvfb", action="store_true")
@@ -29,11 +27,11 @@ def main() -> int:
     if args.host_full:
         cargo_scope = ["--workspace"]
     else:
-        scope = reader(args.reader, "cargo-scope", str(args.plan), args.work).decode().strip()
+        scope = select("cargo-scope", str(args.plan), args.work).decode().strip()
         if scope == "workspace":
             cargo_scope = ["--workspace"]
         elif scope == "packages":
-            raw = reader(args.reader, "cargo-args", str(args.plan), args.work)
+            raw = select("cargo-args", str(args.plan), args.work)
             if not raw.endswith(b"\0"):
                 raise RuntimeError("Cargo-Rail package arguments are not NUL terminated")
             cargo_scope = [part.decode() for part in raw[:-1].split(b"\0")]
