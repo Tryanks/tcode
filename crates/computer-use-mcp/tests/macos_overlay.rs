@@ -12,7 +12,19 @@ mod ax {
 mod overlay;
 
 fn main() {
-    let requested = std::env::args().any(|arg| arg == "--ignored" || arg == "--include-ignored");
+    let args: Vec<String> = std::env::args().collect();
+    let requested = args
+        .iter()
+        .any(|arg| arg == "--ignored" || arg == "--include-ignored");
+    // cargo-nextest enumerates custom harnesses with `--list --format terse`
+    // and expects one `<name>: test` line per test; the ignored listing
+    // (`--list --ignored`) is the only one this opt-in test belongs in.
+    if args.iter().any(|arg| arg == "--list") {
+        if requested {
+            println!("macos_overlay: test");
+        }
+        return;
+    }
     if !requested || !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         println!(
             "test macos_overlay ... ignored (requires macOS arm64 desktop and explicit --ignored; opens a passthrough test panel)"

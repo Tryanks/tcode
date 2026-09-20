@@ -44,6 +44,8 @@ pub fn resolve_program<S: AsRef<std::ffi::OsStr>>(program: S) -> std::ffi::OsStr
 /// A `std::process::Command` that never flashes a console window, with its
 /// program resolved through [`resolve_program`].
 pub fn command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    // Approved constructor: this is the helper every other site must use.
+    #[allow(clippy::disallowed_methods)]
     let mut cmd = std::process::Command::new(resolve_program(program));
     hide_console(&mut cmd);
     cmd
