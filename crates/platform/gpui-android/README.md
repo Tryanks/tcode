@@ -1,6 +1,6 @@
 # gpui-android
 
-Android platform backend for the `gpui-pre` 0.3.3 snapshot used by tcode. The
+Android platform backend for the `gpui-pre` 0.3.5 snapshot used by tcode. The
 crate is an ordinary Rust dependency on every target, but its implementation is
 compiled only for Android. Calling `platform()` elsewhere fails with a clear
 panic instead of pulling Android libraries into host builds.
@@ -18,7 +18,9 @@ The platform exposes one full-screen `PlatformWindow`. It owns the current
 `ANativeWindow`, a `gpui-pre-wgpu::WgpuRenderer`, and the shared `WgpuContext`.
 `InitWindow` creates or replaces the Vulkan surface. `TerminateWindow`
 unconfigures it before Android invalidates the native window, while preserving
-the device, pipelines, and sprite atlas for resume. Density converts Android
+the device, pipelines, and sprite atlas for resume. The surface's presence is
+also the window's `WindowVisibility`: `InitWindow` and `TerminateWindow`
+report the transition through `on_visibility_change`. Density converts Android
 device pixels into GPUI logical pixels. `uiMode` supplies light/dark appearance.
 
 `CosmicTextSystem` is populated from `/system/fonts` because fontdb does not
@@ -62,9 +64,13 @@ state back after app edits, cursor moves and draft clears. Revision and edit
 serial checks prevent delayed updates from restoring stale text. Terminal
 handlers keep the committed-text and control-key path because they expose no
 editable buffer. Hardware/IME key events become GPUI `KeyDown`/`KeyUp` events.
-System-bar, display-cutout, and IME geometry becomes `WindowInsets`. A GPUI
-window back handler takes precedence; `set_back_callback` exposes otherwise
-unhandled system back actions to the host application.
+System-bar, display-cutout, and IME geometry becomes `WindowInsets`, and the
+IME inset also shrinks the window's visual viewport; GPUI refreshes the window
+from those callbacks and wakes the frame source itself. Applications reach the
+keyboard through `Window::request_virtual_keyboard` and
+`dismiss_virtual_keyboard`, which call the same activity methods as text focus.
+A GPUI window back handler takes precedence; `set_back_callback` exposes
+otherwise unhandled system back actions to the host application.
 
 ## Pointer mapping
 
@@ -175,7 +181,7 @@ host address reachable from the device.
 The architecture and Android integration patterns were studied from
 `gpui-toolkit/crates/gpui-android` and its showcase host, copyright 2025 Pierre
 F. Aubert, licensed under the ISC license. This backend was written for the
-different `gpui-pre` 0.3.3 interfaces rather than vendoring that source. The
+different `gpui-pre` 0.3.5 interfaces rather than vendoring that source. The
 reference's ISC permission and warranty notice remain applicable to ideas and
 adapted integration patterns: use, copying, modification, and distribution are
 permitted with the copyright and permission notice retained; the software is
@@ -183,7 +189,7 @@ provided “AS IS” without warranty.
 
 ## Scroll target ownership
 
-The platform forwards actual touch coordinates unchanged. GPUI 0.3.3 owns the
+The platform forwards actual touch coordinates unchanged. GPUI 0.3.5 owns the
 private `TouchGestureRecognizer`, including slop, pan deltas, long presses,
 selection drags, velocity, and frame-driven momentum. Its `gestures.rs` emits
 pan start/move/end/cancel scroll positions at `ActiveTouch::start_position` and
@@ -197,11 +203,13 @@ uses that hit-test list, not pointer capture; the `div` overflow listener also
 allows propagation after changing its offset. This does not implement exclusive
 child scrolling with ancestor takeover only at a limit.
 
-tcode implements element capture in
-[`tcode-ui::touch_scroll`](../../ui/src/touch_scroll.rs). The shell observes
-GPUI's unclaimed touch-down offer, selects a registered viewport, and intercepts
-recognized scroll events in the capture phase. It applies their deltas directly
-to the retained handle, including GPUI's existing momentum, and stops propagation
-before the default position-based listeners run. Native touch coordinates and
-GPUI's tap, long-press, and selection recognition remain unchanged. The UI
-registry owns the viewport identity; no second platform recognizer is needed.
+tcode does not add capture. Nesting is resolved per event by gpui-base's
+scrollable mask, composed in [`tcode-ui::scroll`](../../ui/src/scroll.rs): a
+bounded vertical area consumes the scroll events it can use in the capture
+phase and lets the rest bubble to its ancestor, so it chains to the ancestor
+at an edge; a horizontal strip owns horizontal movement even at its edges and
+leaves vertical movement to the view behind it. Page-level viewports scroll
+through GPUI's own handlers and stretch at their edges through gpui-base's
+`ScrollBounce`. Native touch coordinates and GPUI's tap, long-press, and
+selection recognition remain unchanged; no second platform recognizer is
+needed.

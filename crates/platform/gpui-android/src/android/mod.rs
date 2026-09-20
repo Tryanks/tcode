@@ -56,15 +56,3 @@ pub fn set_back_callback(callback: impl FnMut() + 'static) {
             .set_process_back_callback(Box::new(callback));
     });
 }
-
-/// Current system-bar, display-cutout, and software-keyboard insets.
-pub fn insets() -> gpui::WindowInsets {
-    PLATFORM.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(|platform| platform.insets())
-            .unwrap_or_default()
-    })
-}
-
-pub(crate) use host::show_keyboard;

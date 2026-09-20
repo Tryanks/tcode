@@ -106,8 +106,8 @@ crates/ui                GPUI views, assets, presentation, and localized renderi
                          `run_shell` is the one bootstrap every client opens
 crates/app/src/main.rs   desktop binary and composition root
 crates/ios, crates/android, crates/web
-                         platform bootstrap only: a ClientHost, a window seam,
-                         and a call into `tcode_ui::run_shell`
+                         platform bootstrap only: a ClientHost and a call into
+                         `tcode_ui::run_shell`
 crates/headless          headless host binary
 crates/agent             provider clients (no GPUI) — claude.rs, codex.rs, acp.rs
 crates/term              terminal implementation (PTY)

@@ -8,7 +8,8 @@ use gpui::{
     Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, Scene, Size,
     TextInputConfiguration, TextInputStateChange, TouchEvent, TouchId, TouchPhase,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowInsets, point, px, size,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowInsets, WindowVisibility,
+    point, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use ndk::native_window::NativeWindow;
@@ -77,6 +78,8 @@ struct Callbacks {
     close: Option<Box<dyn FnOnce()>>,
     appearance: Option<Box<dyn FnMut()>>,
     insets: Option<Box<dyn FnMut(WindowInsets)>>,
+    visual_viewport: Option<Box<dyn FnMut()>>,
+    visibility: Option<Box<dyn FnMut(WindowVisibility)>>,
     back: Option<Box<dyn FnMut()>>,
 }
 
@@ -106,6 +109,7 @@ pub(crate) struct AndroidWindowInner {
     callbacks: RefCell<Callbacks>,
     frame_requested: Cell<bool>,
     forced_frame_requested: Cell<bool>,
+    reported_visibility: Cell<Option<WindowVisibility>>,
     keyboard_tap: Cell<Option<Point<Pixels>>>,
     input_sync: RefCell<crate::text_input::InputSync>,
 }
@@ -162,6 +166,7 @@ impl AndroidWindow {
             callbacks: RefCell::new(Callbacks::default()),
             frame_requested: Cell::new(true),
             forced_frame_requested: Cell::new(true),
+            reported_visibility: Cell::new(None),
             keyboard_tap: Cell::new(None),
             input_sync: RefCell::new(Default::default()),
         })))
@@ -200,7 +205,37 @@ impl AndroidWindow {
             None => {
                 state.renderer.unconfigure_surface();
                 state.native_surface = None;
+                drop(state);
             }
+        }
+        self.report_visibility();
+    }
+
+    /// The activity's surface exists exactly while it is on screen, so it is
+    /// the window's visibility.
+    fn current_visibility(&self) -> WindowVisibility {
+        if self.0.state.borrow().native_surface.is_some() {
+            WindowVisibility::Visible
+        } else {
+            WindowVisibility::Hidden
+        }
+    }
+
+    /// Reports a visibility transition to GPUI once `on_visibility_change`
+    /// has registered its callback; only changes since the last report fire.
+    fn report_visibility(&self) {
+        let Some(reported) = self.0.reported_visibility.get() else {
+            return;
+        };
+        let visibility = self.current_visibility();
+        if reported == visibility {
+            return;
+        }
+        self.0.reported_visibility.set(Some(visibility));
+        let callback = self.0.callbacks.borrow_mut().visibility.take();
+        if let Some(mut callback) = callback {
+            callback(visibility);
+            self.0.callbacks.borrow_mut().visibility = Some(callback);
         }
     }
 
@@ -295,19 +330,24 @@ impl AndroidWindow {
                 left: px(0.0),
             },
         };
-        let changed = {
-            let mut state = self.0.state.borrow_mut();
-            let changed = state.insets != insets;
-            state.insets = insets.clone();
-            changed
-        };
-        if changed {
-            let callback = self.0.callbacks.borrow_mut().insets.take();
-            if let Some(mut callback) = callback {
-                callback(insets);
-                self.0.callbacks.borrow_mut().insets = Some(callback);
-            }
-            self.schedule_frame();
+        let previous = std::mem::replace(&mut self.0.state.borrow_mut().insets, insets.clone());
+        if previous == insets {
+            return;
+        }
+        // GPUI refreshes the window from these callbacks and wakes the frame
+        // source itself, so no frame is scheduled here.
+        let callback = self.0.callbacks.borrow_mut().insets.take();
+        if let Some(mut callback) = callback {
+            callback(insets.clone());
+            self.0.callbacks.borrow_mut().insets = Some(callback);
+        }
+        if previous.ime == insets.ime {
+            return;
+        }
+        let callback = self.0.callbacks.borrow_mut().visual_viewport.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.callbacks.borrow_mut().visual_viewport = Some(callback);
         }
     }
 
@@ -776,6 +816,21 @@ impl PlatformWindow for AndroidWindow {
         self.bounds().size
     }
 
+    /// The IME overlays an edge-to-edge window rather than resizing it, so
+    /// the visible part of the layout viewport is everything above its inset.
+    /// System bars stay in `insets`; GPUI intersects both for
+    /// `fully_visible_bounds`.
+    fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
+        let state = self.0.state.borrow();
+        let mut bounds = Bounds::new(Point::default(), state.bounds.size);
+        bounds.size.height = (bounds.size.height - state.insets.ime.bottom).max(px(0.));
+        bounds
+    }
+
+    fn on_visual_viewport_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.callbacks.borrow_mut().visual_viewport = Some(callback);
+    }
+
     fn resize(&mut self, _size: Size<Pixels>) {}
 
     fn scale_factor(&self) -> f32 {
@@ -833,6 +888,10 @@ impl PlatformWindow for AndroidWindow {
         self.0.state.borrow().active
     }
 
+    fn visibility(&self) -> WindowVisibility {
+        self.current_visibility()
+    }
+
     fn is_hovered(&self) -> bool {
         false
     }
@@ -874,6 +933,13 @@ impl PlatformWindow for AndroidWindow {
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.callbacks.borrow_mut().active = Some(callback);
+    }
+
+    fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
+        self.0
+            .reported_visibility
+            .set(Some(self.current_visibility()));
+        self.0.callbacks.borrow_mut().visibility = Some(callback);
     }
 
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {

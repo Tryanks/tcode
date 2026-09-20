@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 
 #[derive(Clone)]
 /// One selectable model in the picker (a catalog [`ModelSpec`] row).
@@ -695,7 +695,7 @@ fn render_model_pane(
         .h_full()
         .border_r_1()
         .border_color(cx.theme().border)
-        .touch_overflow_y_scroll()
+        .overflow_y_scroll_area()
         .child(rail_col);
 
     let mut list = v_flex().w_full().min_h_0().gap_0p5().px_1().py_1();
@@ -746,7 +746,7 @@ fn render_model_pane(
                 .aria_label(crate::tr!("composer.model_results"))
                 .flex_1()
                 .min_h_0()
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll_area()
                 .child(list),
         );
     if pending_restart {
@@ -848,7 +848,7 @@ fn render_compact_model_footer(
         });
 
     let group = |label: gpui::SharedString,
-                 track: crate::touch_scroll::Registered<gpui::Stateful<gpui::Div>>,
+                 track: crate::scroll::ScrollArea<gpui::Stateful<gpui::Div>>,
                  cx: &mut Context<PopoverState>| {
         v_flex()
             .gap(px(6.))
@@ -1508,7 +1508,7 @@ fn render_traits_pane(
                 .id("traits-options-scroll")
                 .w_full()
                 .max_h(px(360.))
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll_area()
                 .child(pane),
         )
         .child(render_fast_mode_bolt(
@@ -1885,7 +1885,7 @@ fn render_context_meter_pane(
 #[cfg(test)]
 mod sheet_tests {
     use super::*;
-    use gpui::{Render, TestAppContext, WindowInsets, size};
+    use gpui::{Render, TestAppContext, size};
 
     struct PickerHarness {
         store: Entity<WorkspaceStore>,
@@ -1923,9 +1923,12 @@ mod sheet_tests {
         }
     }
 
+    /// A phone with a status bar and a keyboard gets a bottom sheet; a tablet
+    /// in landscape keeps the desktop-width popover.
     #[gpui::test]
     fn picker_sheets_span_window_and_preserve_wide_width(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
                 "tcode-sheet-test-{}",
@@ -1943,16 +1946,15 @@ mod sheet_tests {
                     context,
                 });
                 cx.simulate_resize(size(px(width), px(852.)));
-                cx.update(|window, cx| {
-                    cx.set_global(crate::window_seam::WindowSeam::new(move || {
-                        let mut insets = WindowInsets::default();
-                        insets.safe_area.top = px(47.);
-                        insets.safe_area.bottom = px(34.);
-                        insets.ime.bottom = px(bottom);
-                        insets
-                    }));
-                    window.draw(cx).clear(cx);
-                });
+                crate::window_seam::occlude_for_test(
+                    cx,
+                    gpui::Edges {
+                        top: px(47.),
+                        bottom: px(bottom),
+                        ..Default::default()
+                    },
+                );
+                cx.update(|window, cx| window.draw(cx).clear(cx));
                 let trigger = cx.debug_bounds("picker-open").unwrap().center();
                 cx.simulate_click(trigger, Default::default());
                 cx.update(|window, cx| window.draw(cx).clear(cx));

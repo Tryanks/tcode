@@ -1,6 +1,5 @@
 //! Proposed-plan Markdown and structured task steps, hosted beside the diff view.
 
-use crate::touch_scroll::TouchScrollExt as _;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -16,7 +15,7 @@ use gpui::{
     ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 
 use tcode_core::session::plan_title;
 
@@ -294,14 +293,17 @@ impl Render for PlanPanel {
             column = column.child(self.render_steps(&steps, cx));
         }
 
-        v_flex().size_full().child(
+        v_flex().size_full().child(crate::scroll::page_viewport(
+            "plan-scroll-bounce",
+            crate::wheel_easing::Handle::Scroll(self.vscroll.clone()),
             div()
                 .id("plan-scroll")
                 .flex_1()
                 .min_h_0()
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
                 .track_scroll(&self.vscroll)
                 .child(column),
-        )
+        ))
     }
 }

@@ -59,13 +59,12 @@ pub mod theme;
 mod thread_export;
 pub mod time;
 pub(crate) mod toast;
-mod touch_scroll;
+mod touch_selection;
 pub(crate) mod usage;
+mod wheel_easing;
 pub mod widgets;
 mod window_caption;
-/// The window's outer seam (system insets, software keyboard) and the one
-/// layout rule derived from it.
-pub mod window_seam;
+pub(crate) mod window_seam;
 mod window_state;
 mod workspace_walk;
 
@@ -76,7 +75,7 @@ pub use i18n::{
 pub use run::{ShellOptions, THEME_JSON, flattened_theme_json, last_host_target, run_shell};
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, ShellSetup, TogglePalette, handle_back};
-pub use window_seam::WindowSeam;
+pub use window_seam::force_mobile_layout;
 pub use window_state::{OpenThread, WindowState};
 
 /// Where this client may keep its own files (the WebView2 profile is the only

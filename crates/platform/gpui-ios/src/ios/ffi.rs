@@ -250,20 +250,6 @@ pub(crate) fn host_write_clipboard(text: &str) {
     unsafe { gpui_ios_host_write_clipboard(text.as_ptr(), text.len()) }
 }
 
-/// Current UIKit safe-area and keyboard insets in logical points.
-pub fn insets() -> WindowInsets {
-    host_metrics().insets()
-}
-
-/// Shows or hides the UIKit software-keyboard proxy.
-pub fn set_keyboard_visible(visible: bool) {
-    if visible {
-        host_show_keyboard();
-    } else {
-        host_hide_keyboard();
-    }
-}
-
 fn utf8(bytes: *const u8, length: usize) -> Option<String> {
     if length == 0 {
         return Some(String::new());
@@ -477,6 +463,11 @@ fn lifecycle(phase: AppLifecyclePhase, active: Option<bool>) {
     if let Some(active) = active {
         HOST.with(|host| host.borrow_mut().metrics.active = active);
         with_window(|window| window.update_active(active));
+    }
+    match phase {
+        AppLifecyclePhase::Background => with_window(|window| window.update_background(true)),
+        AppLifecyclePhase::Foreground => with_window(|window| window.update_background(false)),
+        _ => {}
     }
     super::with_platform(|platform| platform.notify_lifecycle(phase));
 }

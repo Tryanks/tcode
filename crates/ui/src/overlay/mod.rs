@@ -13,6 +13,7 @@ use gpui::{
 };
 
 use crate::theme::ActiveTheme as _;
+use crate::touch_selection::WindowTouchSelectionOverlay;
 use dialog::ActiveDialog;
 use notification::NotificationList;
 
@@ -54,11 +55,13 @@ impl OutsideDismissal {
     }
 }
 
-/// Window root that owns tcode's modal and toast layers.
+/// Window root that owns tcode's modal and toast layers, and the window text
+/// selection with the touch surfaces it leaves behind.
 pub struct OverlayHost {
     view: AnyView,
     dialogs: Vec<ActiveDialog>,
     notifications: Entity<NotificationList>,
+    touch_selection: Entity<WindowTouchSelectionOverlay>,
 }
 
 struct DetachedView;
@@ -78,6 +81,7 @@ impl OverlayHost {
             view: view.into(),
             dialogs: Vec::new(),
             notifications: cx.new(|cx| NotificationList::new(window, cx)),
+            touch_selection: cx.new(|cx| WindowTouchSelectionOverlay::new(window, cx)),
         }
     }
 
@@ -139,7 +143,7 @@ impl Render for OverlayHost {
         // dialog centred in the raw window would sit under a notch, and a toast
         // pinned to the corner would sit under the status bar.
         let compact = crate::window_seam::window_is_compact(window, cx);
-        let seam = crate::window_seam::WindowSeam::current(cx).content_insets();
+        let seam = crate::window_seam::content_insets(window);
         div()
             .relative()
             .size_full()
@@ -179,7 +183,15 @@ impl Render for OverlayHost {
             .bg(crate::material::canvas(cx))
             .text_color(cx.theme().foreground)
             .font_family(cx.theme().font_family.clone())
+            // The window selection layer is the first child of the window: its
+            // bubble-phase handlers then run after every control's, owning a
+            // press only when it propagates, and its capture-phase scroll
+            // handler runs before the touch pan capture below it, so the edit
+            // menu steps aside while a finger scrolls.
+            .child(gpui_base::TextSelectionLayer)
             .child(self.view.clone())
+            // After the content, so the edit menu floats above what was selected.
+            .child(self.touch_selection.clone())
             .when(!dialogs.is_empty(), |root| {
                 root.child(
                     div()
@@ -349,7 +361,7 @@ impl OverlayExt for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext, WindowInsets, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
 
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
@@ -361,18 +373,20 @@ mod tests {
     #[gpui::test]
     fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| DetachedView);
             OverlayHost::new(body, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                bottom: px(300.),
+                ..Default::default()
+            },
+        );
         cx.update(|window, cx| {
-            cx.set_global(crate::window_seam::WindowSeam::new(|| {
-                let mut insets = WindowInsets::default();
-                insets.safe_area.bottom = px(34.);
-                insets.ime.bottom = px(300.);
-                insets
-            }));
             window.push_notification(Notification::success("Copied"), cx);
         });
         draw(cx);
@@ -392,8 +406,8 @@ mod tests {
             root.notifications.read(cx).assert_messages(cx, &["Second"]);
         });
         cx.simulate_resize(size(px(1200.), px(800.)));
+        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
         cx.update(|window, cx| {
-            cx.set_global(crate::window_seam::WindowSeam::flush());
             window.push_notification("Wide", cx);
         });
         draw(cx);
@@ -408,6 +422,7 @@ mod tests {
     #[gpui::test]
     fn compact_timeout_and_error_recovery(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| DetachedView);
             OverlayHost::new(body, window, cx)

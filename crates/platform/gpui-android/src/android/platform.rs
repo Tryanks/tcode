@@ -9,8 +9,8 @@ use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent, input::Inp
 use anyhow::{Result, anyhow};
 use futures::channel::oneshot;
 use gpui::{
-    Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem, CursorStyle,
-    DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
+    Action, ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
+    CursorStyle, DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
     PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, ScrollPhysics, Task, ThermalState,
     WindowAppearance, WindowParams, point, px, size,
@@ -34,6 +34,7 @@ struct PlatformCallbacks {
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     quit: Option<Box<dyn FnMut() -> bool>>,
     reopen: Option<Box<dyn FnMut()>>,
+    system_sleep: Option<Box<dyn FnMut()>>,
     system_wake: Option<Box<dyn FnMut()>>,
     lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
     memory_warning: Option<Box<dyn FnMut()>>,
@@ -133,12 +134,6 @@ impl AndroidPlatform {
 
     fn scale_factor(&self) -> f32 {
         self.app.config().density().unwrap_or(160) as f32 / 160.0
-    }
-
-    pub(crate) fn insets(&self) -> gpui::WindowInsets {
-        self.window()
-            .map(|window| window.insets())
-            .unwrap_or_default()
     }
 
     fn appearance(&self) -> WindowAppearance {
@@ -491,6 +486,12 @@ impl Platform for AndroidPlatform {
         self.callbacks.borrow_mut().reopen = Some(callback);
     }
 
+    // Android reports device sleep only through the activity lifecycle
+    // (`on_app_lifecycle`), so these callbacks are kept but never fired.
+    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
+        self.callbacks.borrow_mut().system_sleep = Some(callback);
+    }
+
     fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
         self.callbacks.borrow_mut().system_wake = Some(callback);
     }
@@ -537,6 +538,10 @@ impl Platform for AndroidPlatform {
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
         self.callbacks.borrow_mut().thermal = Some(callback);
+    }
+
+    fn prevent_idle_sleep(&self, _reason: &str) -> Task<Result<ActivityGuard>> {
+        Task::ready(Ok(ActivityGuard::noop()))
     }
 
     fn app_path(&self) -> Result<PathBuf> {

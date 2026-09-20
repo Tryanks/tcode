@@ -2,7 +2,7 @@
 //! current branch, a default-branch safeguard banner, and a commit-message
 //! textarea pre-filled by AI generation (with a regenerate button).
 
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 use std::collections::HashSet;
 
 use crate::theme::ActiveTheme as _;
@@ -15,8 +15,7 @@ use crate::{
 };
 use gpui::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, Styled as _, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 
@@ -36,7 +35,6 @@ pub struct CommitDialog {
     create_feature_branch: bool,
     action: GitAction,
     generating: bool,
-    scroll: ScrollHandle,
     _gen_task: Option<Task<()>>,
 }
 
@@ -66,7 +64,6 @@ impl CommitDialog {
             create_feature_branch: false,
             action,
             generating: false,
-            scroll: ScrollHandle::new(),
             _gen_task: None,
         };
         this.regenerate(window, cx);
@@ -302,10 +299,9 @@ impl Render for CommitDialog {
         }
         let file_list = div()
             .id("commit-files")
-            .touch_overflow_y_scroll()
-            .track_scroll(&self.scroll)
             .w_full()
             .max_h(px(180.))
+            .overflow_y_scroll_area()
             .child(file_rows);
         body = body.child(
             v_flex().w_full().gap_1().child(files_header).child(

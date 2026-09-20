@@ -1,6 +1,6 @@
 # gpui-ios
 
-`gpui-ios` is the UIKit platform backend for `gpui-pre` 0.3.3 used by the
+`gpui-ios` is the UIKit platform backend for `gpui-pre` 0.3.5 used by the
 tcode iOS host. It is deliberately an embedded backend: `UIApplication` owns
 the process and run loop, Swift supplies a `UIView`, and
 `Application::run_embedded` keeps GPUI alive while UIKit drives frames and
@@ -26,7 +26,10 @@ hands its context to the published `gpui-pre-wgpu::WgpuRenderer`. Logical
 resizes are converted to device pixels before `update_drawable_size`. The
 UIKit content scale is also applied to the renderer at creation, on every
 scale change, and immediately after a detached surface is replaced so glass
-blur, thickness, refraction, and edge widths remain point-correct.
+blur, thickness, refraction, and edge widths remain point-correct. The window
+reports `WindowVisibility::Hidden` while the view is detached or the scene is
+in the background (`sceneDidEnterBackground` until `sceneWillEnterForeground`,
+when the host also pauses its display link).
 
 UIKit and GPUI both enter window/application state only on the main thread.
 The process-wide platform, attached view, and active window are therefore
@@ -71,7 +74,7 @@ begins and sends all changed contacts in a single C array. Rust emits one raw
 included for latency compensation, while actual coordinates remain the source
 of hit testing and velocity.
 
-`gpui-pre` 0.3.3 contains the gesture arena, so this backend intentionally does
+`gpui-pre` 0.3.5 contains the gesture arena, so this backend intentionally does
 not also synthesize mouse events. GPUI selects the primary touch, defers the
 mouse-down/up click pair until the tap wins, emits drag scrolling as
 `ScrollWheelEvent { delta: ScrollDelta::Pixels(..) }`, advances iOS-style fling
@@ -89,7 +92,12 @@ through `replace_and_mark_text_in_range`; a confirmed Chinese candidate is
 sent through `replace_text_in_range`, which replaces the marked range and
 commits the composition. Text assistance and return-key presentation are
 updated from `TextInputConfiguration`. Keyboard frame notifications update
-`WindowInsets::ime`, while `safeAreaInsets` update `WindowInsets::safe_area`.
+`WindowInsets::ime` and shrink the window's visual viewport by the same cover,
+while `safeAreaInsets` update `WindowInsets::safe_area`; GPUI refreshes the
+window from those callbacks and the display link presents the next frame.
+`Window::request_virtual_keyboard` and `dismiss_virtual_keyboard` reach the
+same proxy as text focus does, so an application can reopen a dismissed
+keyboard from an explicit tap without changing GPUI focus.
 
 ## Build and run
 
@@ -140,7 +148,7 @@ pairing with a host.
 
 The module boundaries and host/backend handshake were informed by the
 ISC-licensed `gpui-toolkit/crates/gpui-ios` reference supplied with this
-worktree. This implementation was written for the different `gpui-pre` 0.3.3
+worktree. This implementation was written for the different `gpui-pre` 0.3.5
 traits and renderer APIs; no reference source was vendored or copied into this
 crate.
 
@@ -148,6 +156,6 @@ crate.
 
 Both mobile backends use GPUI's private gesture recognizer and scroll dispatch.
 See the [shared scroll ownership constraints](../gpui-android/README.md#scroll-target-ownership)
-for the distinction between its existing touch-down coordinate anchor and stable
-element capture. tcode's UI capture listener intercepts recognized scroll events while preserving
-UIKit's actual and predicted coordinates and GPUI's gesture recognition.
+for why nesting is resolved per event by gpui-base's scrollable mask rather
+than by element capture. UIKit's actual and predicted coordinates and GPUI's
+gesture recognition are preserved unchanged.

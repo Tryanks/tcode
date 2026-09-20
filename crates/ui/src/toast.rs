@@ -1,4 +1,4 @@
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 use std::rc::Rc;
 
 use crate::overlay::{Notification, NotificationType};
@@ -96,12 +96,12 @@ pub fn notification(
                         div()
                             .id(("toast-detail-scroll", id as usize))
                             .max_h_40()
-                            .touch_overflow_y_scroll()
                             .p_2()
                             .rounded(crate::material::radius_input())
                             .bg(cx.theme().muted)
                             .text_xs()
                             .font_family(cx.theme().mono_font_family.clone())
+                            .overflow_y_scroll_area()
                             .child(detail.clone()),
                     );
                 }

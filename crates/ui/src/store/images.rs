@@ -212,10 +212,13 @@ mod tests {
                 );
             });
             for pixels in [16, 32] {
-                let (image, requested) = cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)));
                 assert!(
-                    requested,
+                    !cx.update(|cx| cx.has_asset::<HostImage>(&key(pixels))),
                     "a host event must invalidate both success and error entries"
+                );
+                assert!(
+                    cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)))
+                        .is_none()
                 );
                 cx.run_until_parked();
                 let request = std::iter::from_fn(|| requests.try_recv().ok())
@@ -257,16 +260,19 @@ mod tests {
                     )
                     .unwrap();
                 cx.run_until_parked();
+                let image = cx
+                    .update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)))
+                    .expect("the host reply completes the cached load");
                 match color {
                     Some(color) => {
-                        let image = image.await.unwrap();
+                        let image = image.unwrap();
                         let rgba = image::load_from_memory(&image.bytes).unwrap().into_rgba8();
                         assert_eq!(rgba.dimensions(), (pixels, pixels));
                         assert_eq!(rgba.get_pixel(0, 0).0, color);
                     }
-                    None => assert!(image.await.is_err()),
+                    None => assert!(image.is_err()),
                 }
-                assert!(!cx.update(|cx| cx.fetch_asset::<HostImage>(&key(pixels)).1));
+                assert!(cx.update(|cx| cx.has_asset::<HostImage>(&key(pixels))));
             }
         }
     }

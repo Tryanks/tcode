@@ -3168,7 +3168,9 @@ impl SessionsSidebar {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(crate::touch_scroll::register(
+                .child(crate::scroll::page_viewport(
+                    "compact-thread-bounce",
+                    crate::wheel_easing::Handle::List(self.compact_list_state.clone()),
                     list(
                         self.compact_list_state.clone(),
                         cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
@@ -3199,7 +3201,6 @@ impl SessionsSidebar {
                         }),
                     )
                     .size_full(),
-                    crate::touch_scroll::Handle::List(self.compact_list_state.clone()),
                 ))
                 .when(!window.is_inspector_picking(cx), |list| {
                     list.child(thread_list_scrollbar(
@@ -3718,14 +3719,7 @@ impl Render for SessionsSidebar {
                         .overflow_y_scrollbar()
                         .child(div().size_full().child(list_content))
                         .into_any_element();
-                    (
-                        self.render_flat_header(cx).into_any_element(),
-                        crate::touch_scroll::register(
-                            thread_list,
-                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
-                        )
-                        .into_any_element(),
-                    )
+                    (self.render_flat_header(cx).into_any_element(), thread_list)
                 } else {
                     let top_offsets = flat_thread_top_offsets(&visible, &flat_sessions);
                     let settled_top = visible
@@ -3806,9 +3800,10 @@ impl Render for SessionsSidebar {
                             .flex_1()
                             .min_h_0()
                             .relative()
-                            .child(crate::touch_scroll::register(
+                            .child(crate::scroll::page_viewport(
+                                "flat-thread-bounce",
+                                crate::wheel_easing::Handle::List(self.flat_list_state.clone()),
                                 thread_list,
-                                crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
                             ))
                             .when(!window.is_inspector_picking(cx), |list| {
                                 list.child(thread_list_scrollbar(
@@ -5015,7 +5010,26 @@ mod tests {
         let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
+        // The host answers the index and status subscriptions on its own
+        // thread, and each answer legitimately rebuilds the model. Count those
+        // so a rebuild can be told apart from one the scroll caused.
+        let store_changes = Rc::new(std::cell::Cell::new(0usize));
+        cx.update(|_, cx| {
+            let store_changes = store_changes.clone();
+            cx.subscribe(&store, move |_, change: &StoreChange, _| {
+                if matches!(
+                    change.topic,
+                    TopicKind::Index
+                        | TopicKind::Settings
+                        | TopicKind::ActiveSession
+                        | TopicKind::SessionStatus
+                ) {
+                    store_changes.set(store_changes.get() + 1);
+                }
+            })
+            .detach();
+        });
+        let mut model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
         assert_eq!(model.rows.len(), 301);
         for (index, selector) in [
             (0, "compact-row-virtual-0"),
@@ -5035,11 +5049,14 @@ mod tests {
                 cx.notify();
             });
             draw(cx);
+            let changes = store_changes.replace(0);
             sidebar.read_with(cx, |sidebar, _| {
+                let current = sidebar.compact_model.as_ref().unwrap();
                 assert!(
-                    Rc::ptr_eq(&model, sidebar.compact_model.as_ref().unwrap()),
+                    Rc::ptr_eq(&model, current) || changes > 0,
                     "scrolling must not rebuild families or labels"
                 );
+                model = current.clone();
                 assert!(
                     sidebar.compact_rows_rendered.get() < 40,
                     "one phone viewport must not construct 300 rows: rendered {} at index {index}",
