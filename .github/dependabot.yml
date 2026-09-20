@@ -5,6 +5,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    ignore:
+      # crates/ui pins webview2-com 0.38 / windows-core 0.61 to the versions
+      # lb-wry 0.53 resolves so both sides share the same WebView2 COM types.
+      # Lift these once lb-wry moves to webview2-com 0.39 / windows-core 0.62.
+      - dependency-name: windows-core
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: webview2-com
+        update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: /

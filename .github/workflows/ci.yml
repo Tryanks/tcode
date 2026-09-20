@@ -144,7 +144,7 @@ jobs:
           ref: ${{ needs.plan.outputs.head }}
 
       - name: Install cargo-machete
-        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
+        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
         with:
           tool: cargo-machete@0.9.2
 
