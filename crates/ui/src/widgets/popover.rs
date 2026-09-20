@@ -1,5 +1,5 @@
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
-use crate::touch_scroll::TouchScrollExt as _;
 use gpui::{
     Anchor, AnyElement, App, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
@@ -239,8 +239,10 @@ impl Popover {
         // Do not mount invisible hit targets over the trigger.
         if presence.should_render() && (open || progress > 0.) {
             let viewport = window.viewport_size();
-            let insets = crate::window_seam::WindowSeam::current(cx).content_insets();
+            let insets = crate::window_seam::content_insets(window);
             let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
+            // The grabber, the title row and the hairline above the content.
+            let chrome_height = px(16.) + px(48.) + px(1.);
             let close = state.clone();
             let backdrop = state.clone();
             let focus = state.read(cx).focus_handle(cx);
@@ -317,9 +319,12 @@ impl Popover {
                     div()
                         .id("touch-picker-content")
                         .debug_selector(|| "touch-picker-content".into())
-                        .min_h_0()
-                        .touch_overflow_y_scroll()
                         .w_full()
+                        // A bounded vertical area inside the sheet, with its
+                        // own resolved height: a diagonal pan stays on its
+                        // axis, and an edge hands the gesture on.
+                        .max_h((max_height - chrome_height).max(px(0.)))
+                        .overflow_y_scroll_area()
                         .p(px(crate::material::COMPACT_PAGE_INSET))
                         .children(content)
                         .children(self.children),
@@ -400,17 +405,16 @@ mod tests {
     #[gpui::test]
     fn tall_sheet_scrolls_below_navigation_and_above_keyboard(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
-        cx.update(|cx| {
-            cx.set_global(crate::window_seam::WindowSeam::new(|| {
-                let mut insets = gpui::WindowInsets::default();
-                insets.safe_area.top = px(47.);
-                insets.safe_area.bottom = px(34.);
-                insets.ime.bottom = px(300.);
-                insets
-            }))
-        });
         let (_, cx) = cx.add_window_view(|_, _| TallSheet);
         cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                top: px(47.),
+                bottom: px(300.),
+                ..Default::default()
+            },
+        );
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let sheet = cx.debug_bounds("touch-picker-sheet").unwrap();

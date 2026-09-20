@@ -12,11 +12,11 @@ default = []
 debug-exports = []
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false }
 # The browser constructs its own platform (gpui::Application::with_platform)
 # rather than going through gpui-pre-platform, whose wasm arm enables
 # gpui-pre-web's nightly-only "multithreaded" default.
-gpui_web = { package = "gpui-pre-web", version = "=0.3.3", default-features = false }
+gpui_web = { package = "gpui-pre-web", version = "=0.3.5", default-features = false }
 console_error_panic_hook = "0.1"
 tcode-protocol = { path = "../protocol", default-features = false }
 tcode-client = { path = "../client" }

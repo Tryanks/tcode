@@ -808,6 +808,11 @@ terminal:
   exited_code: "process exited (%{code})"
   exited: "process exited"
   starting: "Starting terminal…"
+edit_menu:
+  cut: "Cut"
+  copy: "Copy"
+  paste: "Paste"
+  select_all: "Select All"
 usage:
   title: "Usage"
   section: "USAGE"

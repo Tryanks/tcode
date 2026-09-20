@@ -9,7 +9,7 @@ name = "tcode_ios"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.3", default-features = false }
+gpui = { package = "gpui-pre", version = "=0.3.5", default-features = false }
 gpui-ios = { path = "../platform/gpui-ios" }
 log = "0.4"
 tcode-client = { path = "../client" }

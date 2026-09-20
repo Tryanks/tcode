@@ -26,13 +26,3 @@ pub fn platform() -> Rc<dyn gpui::Platform> {
 pub fn platform() -> Rc<dyn gpui::Platform> {
     panic!("gpui-ios::platform() is only available when target_os = \"ios\"")
 }
-
-/// Current safe-area and software-keyboard insets.
-#[cfg(not(target_os = "ios"))]
-pub fn insets() -> gpui::WindowInsets {
-    gpui::WindowInsets::default()
-}
-
-/// Requests the UIKit software keyboard on iOS.
-#[cfg(not(target_os = "ios"))]
-pub fn set_keyboard_visible(_visible: bool) {}

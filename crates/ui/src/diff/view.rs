@@ -1,7 +1,7 @@
 //! The right-side diff panel view: scope controls, virtualized unified/split
 //! lists, expandable gaps, and line-anchored review comments.
 
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, StyledText, Subscription, Window, div, list,
     prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 
 use super::model::{
@@ -1020,7 +1020,7 @@ impl DiffPanel {
                     .aria_label(crate::tr!("diff.scope_menu"))
                     .min_w(px(190.))
                     .max_h(px(320.))
-                    .touch_overflow_y_scroll()
+                    .overflow_y_scroll_area()
                     .child(list)
             })
             .bg(cx.theme().popover)
@@ -1111,7 +1111,7 @@ impl DiffPanel {
                         .aria_label(crate::tr!("diff.base_branches"))
                         .min_w(px(180.))
                         .max_h(px(280.))
-                        .touch_overflow_y_scroll()
+                        .overflow_y_scroll_area()
                         .child(list)
                 })
                 .bg(cx.theme().popover)
@@ -1399,21 +1399,22 @@ impl DiffPanel {
             rows = rows.min_w(px(content_width));
         }
 
-        let mut viewport = div()
-            .id("diff-body")
-            .debug_selector(|| "diff-body".into())
-            .flex_1()
-            .min_h_0()
-            .touch_overflow_x_scroll()
-            .child(crate::touch_scroll::register(
-                rows,
-                crate::touch_scroll::Handle::List(list_state),
-            ));
         // Do not let this horizontal overflow container translate ordinary
         // vertical wheel input into horizontal movement. The event can then
         // bubble to the List's vertical scroll handler; explicit horizontal
         // wheel/trackpad deltas (or Shift-wheel) still scroll this viewport.
-        viewport.style().restrict_scroll_to_axis = Some(true);
+        let viewport = div()
+            .id("diff-body")
+            .debug_selector(|| "diff-body".into())
+            .flex_1()
+            .min_h_0()
+            .overflow_x_scroll()
+            .lock_scroll_axis()
+            .child(crate::scroll::page_viewport(
+                "diff-body-bounce",
+                crate::wheel_easing::Handle::List(list_state),
+                rows,
+            ));
         // A compact page holds its content clear of the window edges; the code
         // itself still scrolls sideways *inside* that inset rather than running
         // off the page.

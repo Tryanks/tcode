@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 
 impl Composer {
     /// The active session's pending user-input request, if any.
@@ -164,7 +164,7 @@ impl Composer {
             .id("user-input-options-scroll")
             .w_full()
             .max_h(px(240.))
-            .touch_overflow_y_scroll()
+            .overflow_y_scroll_area()
             .child(options_content);
 
         let custom_input = self.user_input_custom.clone();

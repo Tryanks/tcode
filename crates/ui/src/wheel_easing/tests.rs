@@ -1,9 +1,9 @@
 //! Exercise Tcode viewport registration with unmodified GPUI.
-use crate::touch_scroll::{Handle, register, root};
+use crate::wheel_easing::{Handle, register, root};
 
 use gpui::{
     Context, FollowMode, InteractiveElement, IntoElement, ListAlignment, ListState, ParentElement,
-    Pixels, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement,
+    Pixels, Point, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, StatefulInteractiveElement,
     Styled, TestAppContext, VisualTestContext, Window, WindowHandle, div, list, point, px,
 };
 use std::time::Duration;
@@ -297,5 +297,50 @@ fn wheel_scroll_only_moves_the_innermost_scrollable_viewport(cx: &mut TestAppCon
     assert!(
         outer.offset().y < px(0.),
         "the parent must receive wheel input at the child's limit"
+    );
+}
+
+struct OccludedProbe(ScrollHandle);
+impl Render for OccludedProbe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        root(
+            div()
+                .relative()
+                .w(px(200.))
+                .h(px(300.))
+                .child(register(
+                    div()
+                        .id("page")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.0)
+                        .child(div().h(px(600.))),
+                    Handle::Scroll(self.0.clone()),
+                ))
+                .child(div().absolute().inset_0().occlude()),
+        )
+    }
+}
+
+#[gpui::test]
+fn wheel_scroll_leaves_a_page_behind_an_occluding_overlay_alone(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, _| OccludedProbe(ScrollHandle::new()));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(50.)),
+        delta: ScrollDelta::Lines(point(0., -3.)),
+        ..Default::default()
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(150));
+    cx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        view.read_with(cx, |view, _| view.0.offset()),
+        Point::default()
     );
 }

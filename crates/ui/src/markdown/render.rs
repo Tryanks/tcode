@@ -1,28 +1,23 @@
 //! Block renderer adapted from gpui-component's Apache-2.0 `text/node.rs` and
 //! `text/document.rs`, with rushdown IR and syntect highlighting.
 
-#[cfg(not(target_family = "wasm"))]
-use std::time::Instant;
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     ops::Range,
     sync::Arc,
-    time::Duration,
 };
-#[cfg(target_family = "wasm")]
-use web_time::Instant;
 
 use crate::highlight::HighlightTheme;
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, Entity, FontStyle, FontWeight,
     GlobalElementId, HighlightStyle, InspectorElementId, InteractiveElement as _, IntoElement,
     LayoutId, ListSizingBehavior, ListState, ObjectFit, ParentElement as _, Pixels, Role,
-    ScrollHandle, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Style,
-    Styled as _, StyledImage as _, TouchPhase, Window, div, img, prelude::FluentBuilder as _, px,
-    relative, rems, size,
+    SharedString, StatefulInteractiveElement as _, Style, Styled as _, StyledImage as _, Window,
+    div, img, prelude::FluentBuilder as _, px, relative, rems, size,
 };
 use gpui_base::{h_flex, v_flex};
 
@@ -39,7 +34,6 @@ use super::{
 
 const CODE_CACHE_CAPACITY: usize = 64;
 const BLOCK_OVERDRAW: Pixels = px(300.);
-const SCROLL_GESTURE_TIMEOUT: Duration = Duration::from_millis(250);
 const TABLE_BORDER_PX: f32 = 1.;
 const HEADING_BASE_FONT_SIZE: Pixels = px(15.);
 const INLINE_CODE_FONT_SIZE: Pixels = px(13.);
@@ -62,53 +56,6 @@ struct CodeCacheKey {
 struct CodeHighlightCache {
     entries: HashMap<CodeCacheKey, SharedHighlightRuns>,
     order: VecDeque<CodeCacheKey>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScrollGestureAxis {
-    Horizontal,
-    Vertical,
-}
-
-#[derive(Default)]
-struct HorizontalScrollState {
-    scroll: ScrollHandle,
-    locked_axis: Option<ScrollGestureAxis>,
-    last_event_at: Option<Instant>,
-}
-
-impl HorizontalScrollState {
-    fn route_gesture(
-        &mut self,
-        delta_x: f32,
-        delta_y: f32,
-        phase: TouchPhase,
-        now: Instant,
-    ) -> ScrollGestureAxis {
-        let continuous = self
-            .last_event_at
-            .is_some_and(|last| now.saturating_duration_since(last) <= SCROLL_GESTURE_TIMEOUT);
-        if phase == TouchPhase::Started || !continuous || self.locked_axis.is_none() {
-            self.locked_axis = Some(dominant_scroll_axis(delta_x, delta_y));
-        }
-
-        let axis = self.locked_axis.unwrap_or(ScrollGestureAxis::Vertical);
-        if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-            self.locked_axis = None;
-            self.last_event_at = None;
-        } else {
-            self.last_event_at = Some(now);
-        }
-        axis
-    }
-}
-
-fn dominant_scroll_axis(delta_x: f32, delta_y: f32) -> ScrollGestureAxis {
-    if delta_x.abs() > delta_y.abs() {
-        ScrollGestureAxis::Horizontal
-    } else {
-        ScrollGestureAxis::Vertical
-    }
 }
 
 thread_local! {
@@ -1062,13 +1009,6 @@ fn render_scroll_table(
                 }))
         })
         .collect::<Vec<_>>();
-    let scroll_key: SharedString = format!(
-        "markdown-table-scroll-{}-{}",
-        view.entity_id(),
-        options.path
-    )
-    .into();
-    let scroll = window.use_keyed_state(scroll_key, cx, |_, _| HorizontalScrollState::default());
     let track = v_flex()
         .min_w_full()
         .w(px(total_width))
@@ -1086,59 +1026,14 @@ fn render_scroll_table(
         .id(options.path.clone())
         .w_full()
         .pb(if options.is_last { rems(0.) } else { rems(1.) })
-        .child(horizontal_scroll_area(
-            format!("{}-viewport", options.path),
-            &scroll,
-            cx,
-            track,
-        ))
+        .child(
+            div()
+                .id(SharedString::from(format!("{}-viewport", options.path)))
+                .w_full()
+                .overflow_x_scroll_area()
+                .child(track),
+        )
         .into_any_element()
-}
-
-fn horizontal_scroll_area(
-    id: impl Into<gpui::ElementId>,
-    state: &Entity<HorizontalScrollState>,
-    cx: &App,
-    child: impl IntoElement,
-) -> impl IntoElement {
-    let scroll = state.read(cx).scroll.clone();
-    let state = state.clone();
-    let area = div()
-        .id(id)
-        .w_full()
-        .relative()
-        .overflow_hidden()
-        .track_scroll(&scroll)
-        .child(child)
-        .on_scroll_wheel(move |event: &ScrollWheelEvent, window, cx| {
-            let delta = event.delta.pixel_delta(window.line_height());
-            let can_scroll_horizontally = state.read(cx).scroll.max_offset().x > Pixels::ZERO;
-            if !can_scroll_horizontally {
-                return;
-            }
-
-            let axis = state.update(cx, |state, cx| {
-                let axis = state.route_gesture(
-                    f32::from(delta.x),
-                    f32::from(delta.y),
-                    event.touch_phase,
-                    Instant::now(),
-                );
-                if axis == ScrollGestureAxis::Horizontal {
-                    let mut offset = state.scroll.offset();
-                    offset.x += delta.x;
-                    if offset != state.scroll.offset() {
-                        state.scroll.set_offset(offset);
-                        cx.notify();
-                    }
-                }
-                axis
-            });
-            if axis == ScrollGestureAxis::Horizontal {
-                cx.stop_propagation();
-            }
-        });
-    crate::touch_scroll::register(area, crate::touch_scroll::Handle::Scroll(scroll))
 }
 
 #[cfg(test)]
@@ -1157,68 +1052,5 @@ mod tests {
     fn table_track_width_includes_cell_and_outer_borders() {
         assert_eq!(table_track_width(&[48., 72., 96.]), 220.);
         assert_eq!(table_track_width(&[]), 2.);
-    }
-
-    #[test]
-    fn scroll_axis_uses_strict_horizontal_dominance() {
-        assert_eq!(dominant_scroll_axis(8., 3.), ScrollGestureAxis::Horizontal);
-        assert_eq!(dominant_scroll_axis(3., 8.), ScrollGestureAxis::Vertical);
-        assert_eq!(dominant_scroll_axis(8., 8.), ScrollGestureAxis::Vertical);
-    }
-
-    #[test]
-    fn scroll_axis_sticks_for_a_continuous_gesture() {
-        let start = Instant::now();
-        let mut state = HorizontalScrollState::default();
-        assert_eq!(
-            state.route_gesture(12., 4., TouchPhase::Started, start),
-            ScrollGestureAxis::Horizontal
-        );
-        assert_eq!(
-            state.route_gesture(2., 8., TouchPhase::Moved, start + Duration::from_millis(50)),
-            ScrollGestureAxis::Horizontal
-        );
-
-        let mut state = HorizontalScrollState::default();
-        assert_eq!(
-            state.route_gesture(4., 12., TouchPhase::Started, start),
-            ScrollGestureAxis::Vertical
-        );
-        assert_eq!(
-            state.route_gesture(8., 2., TouchPhase::Moved, start + Duration::from_millis(50)),
-            ScrollGestureAxis::Vertical
-        );
-    }
-
-    #[test]
-    fn scroll_axis_unlocks_after_timeout_or_end() {
-        let start = Instant::now();
-        let mut state = HorizontalScrollState::default();
-        state.route_gesture(12., 4., TouchPhase::Moved, start);
-        assert_eq!(
-            state.route_gesture(
-                2.,
-                8.,
-                TouchPhase::Moved,
-                start + Duration::from_millis(251)
-            ),
-            ScrollGestureAxis::Vertical
-        );
-
-        state.route_gesture(
-            2.,
-            8.,
-            TouchPhase::Ended,
-            start + Duration::from_millis(252),
-        );
-        assert_eq!(
-            state.route_gesture(
-                8.,
-                2.,
-                TouchPhase::Moved,
-                start + Duration::from_millis(253)
-            ),
-            ScrollGestureAxis::Horizontal
-        );
     }
 }

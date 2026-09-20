@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gpui::{Application, ApplicationHandle, WindowBackgroundAppearance, WindowOptions};
 use tcode_client::host::ClientHost;
-use tcode_ui::{ShellOptions, ShellSetup, WindowSeam};
+use tcode_ui::{ShellOptions, ShellSetup};
 
 thread_local! {
     static APPLICATION: OnceCell<ApplicationHandle> = const { OnceCell::new() };
@@ -27,11 +27,6 @@ pub extern "C" fn tcode_ios_start() {
                 tcode_ui::run_shell(
                     cx,
                     host.clone(),
-                    // UIKit's safe area and keyboard frame. The platform
-                    // schedules a frame whenever either changes.
-                    WindowSeam::new(gpui_ios::insets)
-                        .with_lifecycle(gpui_ios::platform())
-                        .with_soft_keyboard(|| gpui_ios::set_keyboard_visible(true)),
                     ShellOptions {
                         window: WindowOptions {
                             // UIKit owns the geometry; the shell reads it back.
@@ -43,6 +38,8 @@ pub extern "C" fn tcode_ios_start() {
                         theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                         activate: true,
                         system_locale,
+                        // UIKit suspends the app; the shell reconnects on return.
+                        lifecycle: Some(gpui_ios::platform()),
                         setup: ShellSetup {
                             initial: tcode_ui::last_host_target(host.as_ref()),
                             initial_pairing_error: None,

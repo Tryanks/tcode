@@ -12,28 +12,43 @@ URLs, file names and data directories retain lowercase `tcode`.
 ## One shell, one layout rule
 
 Desktop, iOS, Android and the browser run the same shell. It has exactly one
-layout rule:
+layout rule, and the rule asks two things — what kind of build this is, then
+how wide the window is:
 
-> **Compact iff the available logical content width — the viewport width minus
-> whatever the system occludes on its left and right — is under 900px.** At
-> exactly 900 the layout is wide.
+> **A desktop build — macOS, Windows, Linux, the browser — is always the wide
+> layout, however narrow its window.** A mobile build — iOS or Android — is
+> **compact iff the available logical content width — the width of the
+> window's fully visible bounds, that is the viewport minus whatever the system
+> occludes on its left and right — is under 900px**, and wide at or above it.
+> At exactly 900 the layout is wide.
 
-Nothing else decides it. Not the operating system, not the input device, not a
-saved preference: a desktop window dragged narrow is compact, an iPad in
-landscape is wide, and rotating a phone changes the layout the same way
-dragging a window edge does. The rule is never persisted, because a window
-width is not a setting.
+So a phone is compact, an iPad in landscape is wide, and rotating a phone
+changes the layout the same way rotating a tablet across 900px does. A desktop
+window tiled to half a screen or dragged narrow is *not* compact: it is the
+whole product at a squeeze, never a phone shell it cannot leave. Nothing else
+decides it — not the input device, not a saved preference — and the rule is
+never persisted, because a window width is not a setting. The one exception
+is a preview-only affordance: the desktop `phone` example forces the mobile
+layout so the compact shell can be reviewed without a device.
+
+**Wide and unattached.** A wide window with no attachment — a tablet in
+landscape before it connects, or a desktop that disconnected — is the Machines
+page and nothing else, wearing the same navigation bar as its compact self: its
+title, and on **Add a machine** the Back that returns to Machines. There is no
+sidebar to switch routes with and nothing else to reach; attaching leaves the
+page for the new machine's threads and the wide workspace, and **Disconnect**
+returns to it.
 
 Input-device behavior is a separate question with a separate answer. Whether
 Enter submits follows the *keyboard*, not the width: a wide tablet still types
-on glass, and a narrow desktop window still has a hardware Enter key.
+on glass, and a desktop window still has a hardware Enter key.
 
-Crossing the breakpoint is a layout change and nothing else. It never detaches
-from the host, never reconnects, and never rebuilds a view that holds user
-state. The selected thread, the composer draft and its selection, pending
-attachments, approvals, scroll position and focus all survive in both
-directions, and the sidebar and right-panel widths come back as they were left
-when the window widens again.
+Crossing the breakpoint — a tablet rotating, a split-screen resize — is a
+layout change and nothing else. It never detaches from the host, never
+reconnects, and never rebuilds a view that holds user state. The selected
+thread, the composer draft and its selection, pending attachments, approvals,
+scroll position and focus all survive in both directions, and the sidebar and
+right-panel widths come back as they were left when the window widens again.
 
 ## Capability-appropriate UI
 
@@ -184,10 +199,12 @@ so startup never exposes a default white/black window or decorative backdrop.
   (must reflow, never clip, when the diff panel narrows the chat region).
 - Composer: floating opaque card with the shared composer radius, a hairline
   border and subtle shadow. Focus changes the border color without resizing it.
-- Timeline-to-composer spacing: **16px** from the last timeline row's bottom
+- Timeline-to-composer spacing: **8px** from the last timeline row's bottom
   edge to the composer card's top edge when scrolled to the end, in both compact
-  and wide layouts, including when the last row has a running status. The timeline
-  wrapper owns this gap outside the `List`; the composer adds no top inset.
+  and wide layouts, including when the last row has a running status; the same
+  8px separates the timeline from the header. On iOS and Android the inset is
+  **0**. The timeline wrapper owns this gap outside the `List`; the composer
+  adds no top inset.
 - Sidebar thread rows ≈30px, 13px text, 4px-radius hover bg.
 - Parent thread rows always show a disclosure chevron and total-child badge;
   when children are active, the badge reads active/total in the success color.
@@ -272,27 +289,40 @@ produces an explicit error.
 
 The jump-to-latest pill appears when more than one timeline viewport remains
 below the reading position. Its visibility follows the list's pixel geometry
-on wheel, captured touch, and programmatic scrolling, and after history or
-layout changes; unmeasured offscreen history does not suppress it. Following is
+on wheel, touch, and programmatic scrolling, and after history or layout
+changes; unmeasured offscreen history does not suppress it. Following is
 independent of that threshold: any upward user scroll pauses following immediately,
-including wheel, captured touch, scrollbar drag and keyboard scrolling. Incoming
-content and history paging preserve the reading anchor while paused. Following
-resumes only when the reader scrolls back to the bottom (within one pixel) or
-clicks the pill. Opening a conversation starts at the tail.
+including wheel, touch pans, scrollbar drags by mouse or finger, and keyboard
+scrolling. Incoming content and history paging preserve the reading anchor while
+paused. Following resumes only when the reader scrolls back to the bottom (within
+one pixel) or clicks the pill. Opening a conversation starts at the tail.
 
 The timeline uses the space above the composer's measured height, including its
 attached compact settings drawer, and never overlaps it. Vertical breathing room belongs
-to the timeline container, outside the list's scroll extent, so captured touch,
-wheel and tail following agree on the bottom. The shell reserves the window's
+to the timeline container, outside the list's scroll extent, so touch, wheel and
+tail following agree on the bottom. The shell reserves the window's
 safe-area/IME inset once. The running-status row remains fully visible above the
 composer at the end, including when the keyboard opens or closes.
 
 ## Scrolling contract
 
+Every viewport scrolls through its own GPUI handler: `overflow` containers,
+`list`s and gpui-base inputs apply the wheel, trackpad and touch deltas that
+reach them. Because those handlers do not consume events, nesting is resolved
+by gpui-base's scrollable mask, composed by [`scroll.rs`](../crates/ui/src/scroll.rs):
+a bounded vertical area inside a page or the timeline (menus, option lists,
+approval and toast details, inline diffs, disclosure bodies) moves alone while
+it can and hands the next gesture to its ancestor once it reaches an edge;
+horizontal strips (markdown tables, inline diff rows, the terminal key bar,
+segmented tracks) own horizontal movement even at their edges, so a sideways
+gesture never moves the page, and leave vertical movement to the view behind
+them. Page-level vertical viewports lock a gesture to its starting axis.
+
 The conversation timeline overlays a vertical scrollbar at its right edge,
 using the shared theme's hover/scroll visibility. Its track follows the list's
-viewport, excluding the timeline padding and composer. Dragging it moves the
-conversation and pauses tail-following when the reader leaves the bottom.
+viewport, excluding the timeline padding and composer. Dragging it, by mouse or
+by finger, moves the conversation and pauses tail-following when the reader
+leaves the bottom.
 
 Thread lists also overlay the shared vertical scrollbar, in Recent and By
 project at both layout widths. Each scrollbar follows its list's viewport and
@@ -300,14 +330,22 @@ scroll position; headers, search controls and footers stay outside its track.
 Virtualized lists estimate offscreen row heights so the thumb represents the
 whole list from the first frame; measured heights refine that estimate.
 
-Vertical mouse-wheel notches ease over about 125ms in Tcode's registered scroll
-views (chat, sidebars, settings, and diffs). Repeated input accumulates; reversing
-direction discards the previous direction's remaining movement. Trackpad pixels,
-native touch, textareas, and custom horizontal/terminal scrolling retain their
-existing input handling. Reduced motion uses direct scrolling. Pointer presses,
-keyboard input, and direct positioning interrupt wheel animation. Scrolling up
-releases chat tail-following immediately; animation uses relative movement so
-row remeasurement and prepended history preserve the reading anchor.
+On iOS and Android the page-level vertical viewports (the timeline, thread
+lists, settings, the command palette, plan and hosts pages, and the diff body)
+stretch past their edges under the finger and spring back on release, as a
+`UIScrollView` does. The stretch is a displacement of the viewport only: the
+scroll position stays clamped, scrollbars and fixed chrome do not move, and
+reduced motion disables it. Bounded inner areas do not bounce.
+
+Vertical mouse-wheel notches ease over about 125ms in Tcode's vertical scroll
+views (pages, lists, and the bounded areas above). Repeated input accumulates;
+reversing direction discards the previous direction's remaining movement.
+Trackpad pixels, native touch, textareas, and horizontal/terminal scrolling
+retain their existing input handling. Reduced motion uses direct scrolling.
+Pointer presses, keyboard input, and direct positioning interrupt wheel
+animation. Scrolling up releases chat tail-following immediately; animation
+uses relative movement so row remeasurement and prepended history preserve the
+reading anchor. The owner is [`wheel_easing.rs`](../crates/ui/src/wheel_easing.rs).
 
 Potentially unbounded content always has its own resolved-height viewport and a
 separate, non-shrinking content column. Headers, search fields, footers and
@@ -326,6 +364,10 @@ way — width and height — because a dialog wider than the viewport is also
 positioned off-centre.
 
 ## Compact layout
+
+The compact layout is the mobile build's answer to a window under 900px of
+usable width — a phone, or a tablet in a narrow split — as **One shell, one
+layout rule** defines it. A desktop window never enters it.
 
 ### Destinations
 
@@ -444,7 +486,11 @@ running. Resizing never detaches and keeps the page the window is on.
 
 A window is not always the rectangle it reports: a status bar, a notch, a home
 indicator or a software keyboard can cover part of it. Those edges belong to the
-*window*, not to the host the workspace is attached to.
+*window*, not to the host the workspace is attached to, and the window owns
+them: GPUI's fully visible bounds — the viewport intersected with the
+platform's visual viewport and inset by the effective system insets — are read
+from the window wherever they are needed, at render time. Nothing caches,
+polls or installs them.
 
 There is one safe content rectangle, shared by pages, the palette, dialogs and
 toasts. Bottom avoidance is **max(safe area, keyboard)**, never their sum — a
@@ -453,7 +499,8 @@ Backgrounds paint edge to edge: safe-area bands use the opaque T0 theme canvas,
 not the near-white T1 reading surface. Only interactive content is constrained, and
 only once. The browser canvas is already resized around its on-screen keyboard,
 so the client adds no inset of its own there and takes its size from the actual
-canvas.
+canvas; a browser that keeps its layout viewport and shrinks only the visual
+viewport reaches the same rule through the window's fully visible bounds.
 
 On iOS and Android the native host observes the resolved application theme,
 including an explicit light/dark choice that differs from the system. Status-bar
@@ -462,8 +509,10 @@ choice at startup and during live theme changes. System bars remain transparent
 over the shared shell's edge-to-edge background; native hosts do not add content
 padding or resize it again for the keyboard.
 
-Insets change without a timer: the platform schedules a frame when they move, so
-the layout follows the keyboard immediately.
+Insets change without a timer: the platform reports a moved inset or visual
+viewport to GPUI, which refreshes the window, so the layout follows the keyboard
+immediately. Explicit taps that must reopen a dismissed keyboard ask the window
+for it; the platform decides whether to show one.
 
 ### Bottom sheets
 
@@ -474,8 +523,10 @@ spanning the full window width, independent of the wide popover’s desktop widt
 Only its top corners are rounded, at 16pt; content is inset 16pt. The full-page
 scrim includes the window seam, while bottom padding on that layer places the
 sheet above `max(safe.bottom, ime.bottom)`. Its height is capped below the 52pt
-nav bar plus the top safe area; taller content scrolls inside the sheet. Tapping
-the scrim dismisses and consumes the whole pointer sequence, including release.
+nav bar plus the top safe area; taller content scrolls inside the sheet as a
+bounded vertical area (see the scrolling contract), so a diagonal pan stays on
+its axis. Tapping the scrim dismisses and consumes the whole pointer sequence,
+including release.
 
 ### Toasts
 
@@ -496,15 +547,19 @@ stack, details, close controls and existing timing.
 
 ### Touch and typography
 
-Native touch pans capture the innermost registered scroll viewport at touch-down.
-The capture keeps the same handle through redraws, finger movement, and momentum;
-a textarea moving beneath the finger or the original anchor cannot steal it.
-ScrollHandle and list viewports can hand excess movement once to their nearest
-registered scroll ancestor. Textareas keep exclusive capture at their limits
-because their public scroll API clamps after layout. A new touch replaces the
-capture; cancel stops it. Taps, long presses, selection drags, and desktop mouse
-wheel dispatch retain GPUI's normal recognition. The UI owner is
-[`touch_scroll.rs`](../crates/ui/src/touch_scroll.rs).
+GPUI recognizes touch itself: a pan becomes scroll events, locked to the axis it
+started on and delivered to the elements under the finger at touch-down, with
+momentum after release; taps, long presses and selection drags keep their own
+recognition, and a touch that begins on a selection handle is that handle's
+drag, never a pan. Nothing in Tcode intercepts those events. Horizontal code and table
+areas own horizontal movement through their scrollable mask, so a vertical pan
+over a table scrolls the conversation and a horizontal one moves only the
+table; nested vertical areas chain to their ancestor at an edge rather than
+being captured for the gesture. The main vertical viewports bounce at their
+edges on iOS and Android (reduced motion disables the stretch), scrollbar
+thumbs can be dragged by touch, and the composer textarea scrolls through
+gpui-base input's own handling. Wheel easing remains a desktop mouse-wheel
+behaviour. See the scrolling contract above.
 
 - Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.
   Icon buttons have a 44×44pt touch target and use the shared stroke icons in
@@ -519,6 +574,53 @@ wheel dispatch retain GPUI's normal recognition. The UI owner is
   every other available action on its own; user questions keep their options,
   free text and editor prefill.
 
+### Touch selection
+
+A finger cannot hover an I-beam or right-click, so a selection made by touch
+carries its own controls. The gesture and the geometry belong to gpui-base;
+[`touch_selection`](../crates/ui/src/touch_selection/mod.rs) draws them with
+Tcode's tokens. Nothing is configured per view: every input and every
+selectable Markdown body behaves the same.
+
+- **Making one.** A long press selects the word under the finger and keeps
+  following the finger while it stays down; in an editable field a double tap
+  selects the word too. A long press on whitespace or in an empty field places
+  the caret and offers what applies to a caret. Releasing shows the edit menu.
+- **Handles.** A non-empty touch selection has a grab handle at each end: a
+  2px bar down the caret line with a 10px knob, the start's above the line and
+  the end's below, in the theme selection color at full opacity, with a
+  44×(line + 12)pt touch target. Dragging a handle moves that end only; it
+  never collapses the selection, and dragging one end past the other swaps
+  them. An input's handles float above the field so the knobs clear its clip;
+  Markdown paints its handles in place, so whatever covers the text covers
+  them. An end scrolled out of view keeps no handle.
+- **Edit menu.** A T3 pill (opaque popover fill, hairline border, soft shadow,
+  overlay radius) of ghost buttons in 32pt rows with 15px text, separated by
+  full-height hairlines. It sits 8pt above the selection and the room its
+  knobs take, or below when there is no room above, and never leaves the
+  window. Editable text offers **Cut**, **Copy**, **Paste** and **Select All**
+  — each only when it applies: Cut and Copy need a selection (a masked field
+  offers neither), Paste an editable field (the clipboard is never read just
+  to decide, which would raise the system paste banner on iOS), Select All
+  text that is not all selected yet. Read-only text offers Copy and Select
+  All only. Pressing an item leaves focus on the text it acts on. Copy closes
+  the menu and keeps the handles; in a field, a tap on the selection brings
+  the menu back.
+- **Select All** selects the whole field or the whole message, past the
+  viewport, and keeps the handles and the menu over the result; the handles
+  drag on from there.
+- **Lifetime.** There is one touch selection at a time: a long press
+  elsewhere takes it over, and a field's controls go with its focus. Typing,
+  moving the caret, or a press on the text anywhere but a handle or the menu
+  ends it; the handles and the menu go with it. A tap on inert page space
+  outside a field leaves the field focused and its selection in place, as
+  gpui-base does; a tap on a message's text clears the window selection. While a finger scrolls a message or a
+  text field the menu steps aside and returns over the handles when the
+  finger lifts; an end that scrolls out of view keeps no handle, and a
+  selection wholly out of view has no menu until it scrolls back. The
+  long-press context menu of sidebar rows is opt-in per row and never sits
+  over selectable text, so one press opens at most one of the two.
+
 ### The compact inset rule
 
 One inset, applied once, at the page:
@@ -529,8 +631,9 @@ One inset, applied once, at the page:
   denser padding when it becomes a page.
 - **Card inset 12pt.** A card, notice, chip or row *inside* that content pads a
   further 12pt; it never re-applies the page inset.
-- **Timeline-to-composer gap 16pt**, once, as in wide layout. No additional
-  separator spacer or composer top padding is added to the timeline's bottom inset.
+- **Timeline-to-composer gap 8pt** on desktop, at every width, and **0** on
+  iOS and Android. No additional separator spacer or composer top padding is
+  added to the timeline's bottom inset.
 - **Terminal exception.** The terminal grid stays edge to edge horizontally —
   it is measured in columns, and narrowing it drops columns — but it still sits
   inside the window's safe rect and keeps 8pt of air below the segmented control.

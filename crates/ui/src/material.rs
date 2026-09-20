@@ -2,9 +2,9 @@
 //! Reading surfaces remain near-opaque over the translucent window canvas;
 //! semantic colors come from the active theme.
 
+use crate::scroll::ScrollableElement as _;
 use crate::sizing::Sizable as _;
 use crate::theme::ActiveTheme as _;
-use crate::touch_scroll::TouchScrollExt as _;
 use crate::widgets::Popover;
 use crate::widgets::button::{Button, ButtonVariants as _};
 use gpui::prelude::FluentBuilder as _;
@@ -295,7 +295,7 @@ pub fn empty_state(
 pub(crate) fn segmented_track(
     id: impl Into<ElementId>,
     cx: &App,
-) -> crate::touch_scroll::Registered<Stateful<Div>> {
+) -> crate::scroll::ScrollArea<Stateful<Div>> {
     gpui_base::h_flex()
         .id(id)
         .h(px(40.))
@@ -304,7 +304,7 @@ pub(crate) fn segmented_track(
         .p(px(3.))
         .rounded(px(10.))
         .bg(cx.theme().secondary)
-        .touch_overflow_x_scroll()
+        .overflow_x_scroll_area()
 }
 
 /// One segment of a [`segmented_track`]. The selected segment is a T3 solid

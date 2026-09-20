@@ -1,0 +1,404 @@
+//! Touch selection: the grab handles and the edit menu a long press leaves
+//! behind, drawn over an [`crate::widgets::input::Input`] or over the window
+//! text selection that [`crate::markdown::MarkdownView`] takes part in.
+//!
+//! Base owns the gesture and the drag; see [`gpui_base::TouchSelectionSnapshot`].
+//! This module draws what Base laid out: a handle at each end of the
+//! selection, and a row of commands above it. Adapted from gpui-component's
+//! Apache-2.0 `touch_selection` module, styled with tcode's own tokens.
+
+mod edit_menu;
+mod handle;
+mod window_overlay;
+
+use std::rc::Rc;
+
+use gpui::{
+    Action, AnyElement, App, Bounds, ElementId, IntoElement, Pixels, Point, TouchPhase, Window,
+};
+use gpui_base::{SelectionEdge, TouchHandle, TouchSelectionSnapshot};
+use serde::Deserialize;
+
+pub(crate) use edit_menu::{EditMenu, EditMenuItem};
+pub(crate) use handle::{DragHandler, SelectionHandles, SnapshotSource, SurfaceHandler};
+pub(crate) use window_overlay::WindowTouchSelectionOverlay;
+
+/// Select All, as the window selection's edit menu asks for it: everything
+/// the participant the touch selection started in shows, past its viewport,
+/// keeping the handles and the menu over the result.
+///
+/// Dispatched on the focused element — the engine focuses the participant a
+/// long press starts in — so the participant that holds the selection
+/// answers it. The keyboard's `SelectAll` replaces the window selection
+/// instead, which would drop the handles.
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = tcode_touch_selection, no_json)]
+pub(crate) struct SelectAllTouched;
+
+/// Draws one touch selection: its handles and, when open, its edit menu.
+///
+/// The handles read the selection's geometry as they paint, so they follow
+/// text that scrolls in the same frame. The menu is placed from the snapshot
+/// read here; it steps aside while the text scrolls, so a frame's lag in its
+/// anchor never shows.
+pub(crate) struct TouchSelectionOverlay {
+    id: ElementId,
+    source: SnapshotSource,
+    items: Vec<EditMenuItem>,
+    on_drag: Option<DragHandler>,
+    on_paint: Option<SurfaceHandler>,
+}
+
+impl TouchSelectionOverlay {
+    pub(crate) fn new(
+        id: impl Into<ElementId>,
+        source: impl Fn(&Window, &App) -> Option<TouchSelectionSnapshot> + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            source: Rc::new(source),
+            items: Vec::new(),
+            on_drag: None,
+            on_paint: None,
+        }
+    }
+
+    /// Draws floating handles, dragged through `on_drag`. An owner whose
+    /// text paints its own handles in place leaves this unset.
+    pub(crate) fn handles(
+        mut self,
+        on_drag: impl Fn(SelectionEdge, TouchPhase, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_drag = Some(Rc::new(on_drag));
+        self
+    }
+
+    /// The commands the edit menu offers. With none, no menu is drawn.
+    pub(crate) fn items(mut self, items: impl IntoIterator<Item = EditMenuItem>) -> Self {
+        self.items.extend(items);
+        self
+    }
+
+    /// Called with every surface's bounds as it paints, for an owner whose
+    /// press handling must leave those surfaces alone.
+    pub(crate) fn on_paint(
+        mut self,
+        on_paint: impl Fn(Bounds<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_paint = Some(Rc::new(on_paint));
+        self
+    }
+
+    /// The elements to add to the owner: the handles, and the menu when it
+    /// is open. Each floats in window coordinates.
+    pub(crate) fn into_elements(self, window: &Window, cx: &App) -> Vec<AnyElement> {
+        let Some(snapshot) = (self.source)(window, cx) else {
+            return Vec::new();
+        };
+        let mut elements = Vec::with_capacity(2);
+        if let Some(on_drag) = self.on_drag {
+            let handles = SelectionHandles::new(self.source, on_drag);
+            let handles = match self.on_paint.clone() {
+                Some(on_paint) => handles.on_paint(on_paint),
+                None => handles,
+            };
+            elements.push(handles.into_any_element());
+        }
+
+        if let Some(mut anchor) = snapshot
+            .bounds()
+            .filter(|_| snapshot.is_menu_open() && !self.items.is_empty())
+        {
+            // Leave the knobs uncovered: the menu anchors to the selection
+            // plus the room its handles take above and below.
+            if !snapshot.is_empty() {
+                anchor.origin.y -= TouchHandle::EXTENT;
+                anchor.size.height += TouchHandle::EXTENT * 2.;
+            }
+            let menu = EditMenu::new(self.id, anchor).items(self.items);
+            let menu = match self.on_paint {
+                Some(on_paint) => menu.on_paint(on_paint),
+                None => menu,
+            };
+            elements.push(menu.into_any_element());
+        }
+        elements
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, LongPressEvent, Modifiers,
+        ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext,
+        TouchDragEvent, TouchPhase, VisualTestContext, Window, div, point, px, size,
+    };
+    use gpui_base::{SelectionEdge, TouchHandle};
+
+    use crate::widgets::input::{Input, InputState, Textarea, TextareaState};
+
+    struct Probe {
+        input: Entity<InputState>,
+        textarea: Entity<TextareaState>,
+        multiline: bool,
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().p_4().w(px(320.)).child(if self.multiline {
+                Textarea::new(&self.textarea).into_any_element()
+            } else {
+                Input::new(&self.input).into_any_element()
+            })
+        }
+    }
+
+    macro_rules! with_state {
+        ($probe:expr, $cx:expr, |$state:ident| $body:expr) => {
+            $probe.read_with($cx, |probe, cx| {
+                if probe.multiline {
+                    let $state = probe.textarea.read(cx);
+                    $body
+                } else {
+                    let $state = probe.input.read(cx);
+                    $body
+                }
+            })
+        };
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn mount(cx: &mut TestAppContext, multiline: bool) -> (Entity<Probe>, &mut VisualTestContext) {
+        cx.update(crate::theme::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| Probe {
+            input: cx.new(|cx| InputState::new(window, cx).default_value("quick select value")),
+            textarea: cx
+                .new(|cx| TextareaState::new(window, cx).default_value("quick select value")),
+            multiline,
+        });
+        cx.run_until_parked();
+        draw(cx);
+        (probe, cx)
+    }
+
+    fn long_press(cx: &mut VisualTestContext, position: gpui::Point<gpui::Pixels>) {
+        for phase in [TouchPhase::Started, TouchPhase::Ended] {
+            cx.simulate_event(LongPressEvent {
+                phase,
+                start_position: position,
+                position,
+            });
+            draw(cx);
+        }
+    }
+
+    fn tap(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is shown"));
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        draw(cx);
+    }
+
+    fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+
+    #[gpui::test]
+    fn long_press_offers_the_edit_menu_whose_handles_drag(cx: &mut TestAppContext) {
+        for multiline in [false, true] {
+            let (probe, cx) = mount(cx, multiline);
+            let first = with_state!(probe, cx, |state| state.range_to_bounds(&(0..1))).unwrap();
+            long_press(cx, first.center());
+            assert_eq!(
+                with_state!(probe, cx, |state| state.selected_text().to_string()),
+                "quick"
+            );
+            for item in [
+                "edit-menu-cut",
+                "edit-menu-copy",
+                "edit-menu-paste",
+                "edit-menu-select-all",
+            ] {
+                assert!(cx.debug_bounds(item).is_some(), "{item} is offered");
+            }
+
+            // Select All keeps the handles and the menu over the whole text,
+            // which leaves Select All itself with nothing to offer.
+            tap(cx, "edit-menu-select-all");
+            assert_eq!(
+                with_state!(probe, cx, |state| state.selected_range()),
+                0..18
+            );
+            assert!(cx.debug_bounds("edit-menu-copy").is_some());
+            assert!(cx.debug_bounds("edit-menu-select-all").is_none());
+
+            // Copy goes through the input's action and closes the menu; the
+            // selection and its handles stay.
+            tap(cx, "edit-menu-copy");
+            assert_eq!(clipboard(cx).as_deref(), Some("quick select value"));
+            assert!(cx.debug_bounds("edit-menu").is_none());
+            let snapshot =
+                with_state!(probe, cx, |state| state.touch_selection()).expect("handles remain");
+            assert!(!snapshot.is_menu_open());
+
+            // A touch on the start knob drags that end along the text; the
+            // release brings the menu back.
+            let finger = TouchHandle::hit_bounds(SelectionEdge::Start, snapshot.start()).center();
+            cx.simulate_event(TouchDragEvent {
+                phase: TouchPhase::Started,
+                start_position: finger,
+                position: finger,
+            });
+            assert_eq!(
+                with_state!(probe, cx, |state| state
+                    .touch_selection()
+                    .unwrap()
+                    .dragging()),
+                Some(SelectionEdge::Start)
+            );
+            let target = with_state!(probe, cx, |state| state.range_to_bounds(&(6..7))).unwrap();
+            for phase in [TouchPhase::Moved, TouchPhase::Ended] {
+                cx.simulate_event(TouchDragEvent {
+                    phase,
+                    start_position: finger,
+                    position: point(target.left(), finger.y),
+                });
+                draw(cx);
+            }
+            assert_eq!(
+                with_state!(probe, cx, |state| state.selected_text().to_string()),
+                "select value"
+            );
+            assert!(cx.debug_bounds("edit-menu").is_some());
+
+            // Cut takes the selection with it; nothing is left to hold a
+            // handle or a menu.
+            tap(cx, "edit-menu-cut");
+            assert_eq!(
+                with_state!(probe, cx, |state| state.value().to_string()),
+                "quick "
+            );
+            assert_eq!(clipboard(cx).as_deref(), Some("select value"));
+            assert!(with_state!(probe, cx, |state| state.touch_selection()).is_none());
+            assert!(cx.debug_bounds("edit-menu").is_none());
+        }
+    }
+
+    /// A textarea taller than its field, under the shell's root wheel-easing
+    /// wrapper, as the composer is.
+    struct OverflowingField {
+        textarea: Entity<TextareaState>,
+    }
+
+    impl Render for OverflowingField {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::wheel_easing::root(
+                div()
+                    .size_full()
+                    .p_4()
+                    .child(Textarea::new(&self.textarea).h(px(60.))),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_pan_over_a_textarea_scrolls_it_and_the_menu_steps_aside_until_the_finger_lifts(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        let text = (0..40)
+            .map(|ix| format!("line {ix} of the draft"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let textarea = std::rc::Rc::new(std::cell::OnceCell::new());
+        let (_, cx) = cx.add_window_view({
+            let textarea = textarea.clone();
+            move |window, cx| {
+                let state = cx.new(|cx| TextareaState::new(window, cx).default_value(&text));
+                textarea.set(state.clone()).ok().unwrap();
+                OverflowingField { textarea: state }
+            }
+        });
+        let textarea = textarea.get().unwrap().clone();
+        cx.simulate_resize(size(px(320.), px(400.)));
+        cx.run_until_parked();
+        draw(cx);
+        draw(cx);
+
+        // The second line: a short pan keeps it in the field's viewport.
+        let second = textarea
+            .read_with(cx, |state, _| state.range_to_bounds(&(20..21)))
+            .unwrap();
+        long_press(cx, second.center());
+        assert_eq!(
+            textarea.read_with(cx, |state, _| state.selected_text().to_string()),
+            "line"
+        );
+        assert!(cx.debug_bounds("edit-menu-cut").is_some());
+        let menu_open = |cx: &mut VisualTestContext| {
+            textarea.read_with(cx, |state, _| {
+                state
+                    .touch_selection()
+                    .map(|snapshot| snapshot.is_menu_open())
+            })
+        };
+        assert_eq!(menu_open(cx), Some(true));
+        let offset =
+            |cx: &mut VisualTestContext| textarea.read_with(cx, |state, _| state.scroll_offset().y);
+        assert_eq!(offset(cx), px(0.));
+
+        // A finger panning the field reaches the input's own scroll handler:
+        // the text moves, and the menu steps aside until the finger lifts,
+        // then returns over the handles. The selection stays.
+        // The finger lands on the field, clear of the handles' touch targets:
+        // a touch that begins on a handle is that handle's drag, not a pan.
+        let finger = point(second.left() + px(80.), second.center().y);
+        let pan = |cx: &mut VisualTestContext, phase, dy| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: finger,
+                delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                modifiers: Modifiers::default(),
+                touch_phase: phase,
+            });
+            draw(cx);
+        };
+        for (phase, open) in [
+            (TouchPhase::Started, false),
+            (TouchPhase::Moved, false),
+            (TouchPhase::Ended, true),
+        ] {
+            pan(cx, phase, -4.);
+            assert_eq!(menu_open(cx), Some(open), "{phase:?}");
+            assert_eq!(
+                cx.debug_bounds("edit-menu-cut").is_some(),
+                open,
+                "{phase:?}"
+            );
+        }
+        assert_eq!(offset(cx), px(-12.), "the pan scrolled the textarea");
+        assert_eq!(
+            textarea.read_with(cx, |state, _| state.selected_text().to_string()),
+            "line"
+        );
+        assert!(cx.debug_bounds("edit-menu-cut").is_some());
+
+        // A pan that carries the selection out of the field takes the
+        // handles and the menu with it; the selection itself stays.
+        for phase in [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended] {
+            pan(cx, phase, -40.);
+        }
+        assert_eq!(menu_open(cx), Some(true));
+        assert!(cx.debug_bounds("edit-menu-cut").is_none());
+        assert_eq!(
+            textarea.read_with(cx, |state, _| state.selected_text().to_string()),
+            "line"
+        );
+    }
+}

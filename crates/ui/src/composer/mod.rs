@@ -196,7 +196,7 @@ impl Composer {
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.interactive(cx) && !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
+        if self.interactive(cx) && !self.compact && !crate::window_seam::is_mobile(cx) {
             self.input.update(cx, |input, cx| input.focus(window, cx));
         }
     }
@@ -258,7 +258,7 @@ impl Composer {
                 // Whether Enter sends is an input-device question, not a width
                 // one: a wide tablet still types on glass, and a desktop window
                 // dragged narrow still has a hardware Enter key.
-                .submit_on_enter(!crate::window_seam::soft_keyboard())
+                .submit_on_enter(!gpui_base::is_mobile())
                 .placeholder(draft_placeholder(compact))
         });
         let model_search = cx.new(|cx| {
@@ -468,7 +468,7 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(cursor..cursor, cx);
-            if !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
+            if !self.compact && !crate::window_seam::is_mobile(cx) {
                 state.focus(window, cx);
             }
         });
@@ -491,7 +491,7 @@ impl Composer {
         self.input.update(cx, |state, cx| {
             state.set_value(text, window, cx);
             state.set_selected_range(selection, cx);
-            if !self.compact && !crate::window_seam::uses_soft_keyboard(cx) {
+            if !self.compact && !crate::window_seam::is_mobile(cx) {
                 state.focus(window, cx);
             }
         });

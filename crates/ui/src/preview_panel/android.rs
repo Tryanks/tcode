@@ -162,7 +162,7 @@ impl Render for WebView {
         div().size_full().child(
             canvas(
                 move |bounds, window, _| {
-                    let safe = gpui_android::insets().safe_area;
+                    let safe = crate::window_seam::content_insets(window);
                     let physical = super::android_geometry::physical_bounds(
                         gpui::Bounds {
                             origin: bounds.origin - point(safe.left, safe.top),

@@ -4,8 +4,8 @@ use super::{IosDispatcher, IosDisplay, IosTextSystem, IosWindow};
 use anyhow::{Result, anyhow};
 use futures::channel::oneshot;
 use gpui::{
-    Action, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem, CursorStyle,
-    DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
+    Action, ActivityGuard, AnyWindowHandle, AppLifecyclePhase, BackgroundExecutor, ClipboardItem,
+    CursorStyle, DummyKeyboardMapper, ForegroundExecutor, GestureTuning, Keymap, Menu, MenuItem,
     PathPromptOptions, Platform, PlatformDisplay, PlatformGestures, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Task, ThermalState,
     WindowAppearance, WindowParams,
@@ -32,6 +32,7 @@ struct IosPlatformState {
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     on_quit: Option<Box<dyn FnMut() -> bool>>,
     on_reopen: Option<Box<dyn FnMut()>>,
+    on_system_sleep: Option<Box<dyn FnMut()>>,
     on_system_wake: Option<Box<dyn FnMut()>>,
     on_lifecycle: Option<Box<dyn FnMut(AppLifecyclePhase)>>,
     on_memory_warning: Option<Box<dyn FnMut()>>,
@@ -222,6 +223,12 @@ impl Platform for IosPlatform {
         self.state.borrow_mut().on_reopen = Some(callback);
     }
 
+    // UIKit exposes no system sleep notifications; `on_app_lifecycle` is the
+    // closest signal, so these callbacks are kept but never fired.
+    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
+        self.state.borrow_mut().on_system_sleep = Some(callback);
+    }
+
     fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
         self.state.borrow_mut().on_system_wake = Some(callback);
     }
@@ -254,6 +261,10 @@ impl Platform for IosPlatform {
 
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>) {
         self.state.borrow_mut().on_thermal_state_change = Some(callback);
+    }
+
+    fn prevent_idle_sleep(&self, _reason: &str) -> Task<Result<ActivityGuard>> {
+        Task::ready(Ok(ActivityGuard::noop()))
     }
 
     fn app_path(&self) -> Result<PathBuf> {

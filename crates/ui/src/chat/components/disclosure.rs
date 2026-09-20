@@ -1,4 +1,4 @@
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -124,14 +124,16 @@ fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
         .w_full()
         .rounded(crate::material::radius_card())
         .bg(cx.theme().muted)
-        .occlude()
+        // The card keeps clicks to itself, but a pan that its body cannot use
+        // must still reach the timeline behind it.
+        .block_mouse_except_scroll()
         .p_3()
         .child(
             div()
                 .id(SharedString::from(format!("disclosure-body-{key}")))
                 .w_full()
                 .max_h(px(DISCLOSURE_CARD_MAX_HEIGHT))
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll_area()
                 .child(
                     v_flex()
                         .w_full()

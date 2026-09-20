@@ -9,7 +9,6 @@
 //!
 //! Title and action search use [`fuzzy_score`]; message search runs through the host.
 
-use crate::touch_scroll::TouchScrollExt as _;
 use std::time::Duration;
 
 use crate::theme::ActiveTheme as _;
@@ -21,10 +20,10 @@ use crate::{
 use agent::ProviderKind;
 use gpui::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    KeyDownEvent, ParentElement as _, Render, Role, ScrollHandle, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use tcode_protocol::{SessionSearchHit, ThreadExportFormat};
 
 use crate::provider_card::provider_glyph;
@@ -116,6 +115,7 @@ pub struct CommandPalette {
     pub(crate) outside_dismissal: crate::overlay::OutsideDismissal,
     content_hits: Vec<SessionSearchHit>,
     search_generation: u64,
+    list_scroll: ScrollHandle,
     _search_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -158,6 +158,7 @@ impl CommandPalette {
             outside_dismissal: crate::overlay::OutsideDismissal::default(),
             content_hits: Vec::new(),
             search_generation: 0,
+            list_scroll: ScrollHandle::new(),
             _search_task: None,
             _subscriptions: subscriptions,
         }
@@ -542,7 +543,7 @@ impl Render for CommandPalette {
         let muted = cx.theme().muted_foreground;
         let compact = self.window_state.read(cx).compact;
         let viewport = window.viewport_size();
-        let insets = crate::window_seam::WindowSeam::current(cx).content_insets();
+        let insets = crate::window_seam::content_insets(window);
         let available =
             (viewport.height - insets.top - insets.bottom - px(if compact { 52. } else { 120. }))
                 .max(px(0.));
@@ -679,15 +680,21 @@ impl Render for CommandPalette {
                     .child(crate::tr!("palette.no_matches")),
             );
         }
-        let list = div()
-            .id("palette-list")
-            .debug_selector(|| "palette-list".into())
-            .role(Role::ListBox)
-            .aria_label(crate::tr!("palette.results"))
-            .flex_1()
-            .min_h_0()
-            .touch_overflow_y_scroll()
-            .child(list_content);
+        let list = crate::scroll::page_viewport(
+            "palette-list-bounce",
+            crate::wheel_easing::Handle::Scroll(self.list_scroll.clone()),
+            div()
+                .id("palette-list")
+                .debug_selector(|| "palette-list".into())
+                .role(Role::ListBox)
+                .aria_label(crate::tr!("palette.results"))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
+                .track_scroll(&self.list_scroll)
+                .child(list_content),
+        );
 
         let card = crate::material::overlay_contour(
             v_flex()

@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 
 impl Composer {
     pub(in super::super) fn menu_visible(&self) -> bool {
@@ -362,7 +362,7 @@ impl Composer {
                 .aria_label(crate::tr!("composer.trigger_results"))
                 .w_full()
                 .max_h(px(288.))
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll_area()
                 .rounded(crate::material::radius_overlay())
                 .border_1()
                 .border_color(cx.theme().border)

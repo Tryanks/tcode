@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 #[cfg(not(target_family = "wasm"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(target_family = "wasm")]
@@ -155,7 +155,7 @@ impl Composer {
                 .id("queued-messages-scroll")
                 .w_full()
                 .max_h(px(180.))
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll_area()
                 .child(strip)
                 .into_any_element(),
         )

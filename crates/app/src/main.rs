@@ -14,9 +14,7 @@ use tcode_remote::{HostMux, NativeClientHost};
 use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
 use tcode_ui::remote::{AttachmentTarget, RemoteController, machine_name};
-use tcode_ui::{
-    AppShell, Quit, ShellOptions, ShellSetup, WindowSeam, WindowState, theme::ActiveTheme as _,
-};
+use tcode_ui::{AppShell, Quit, ShellOptions, ShellSetup, WindowState, theme::ActiveTheme as _};
 use tcode_ui::{assets, settings};
 
 use tcode_ui::overlay::{DialogActions, OverlayExt as _};
@@ -487,8 +485,6 @@ fn main() {
             let (window, shell) = tcode_ui::run_shell(
                 cx,
                 native_client.clone(),
-                // A desktop window has no system occlusion of its own.
-                WindowSeam::flush(),
                 ShellOptions {
                     window: window_options,
                     title: tcode_ui::tr!("app.name").into(),
@@ -496,6 +492,8 @@ fn main() {
                     theme_json,
                     activate: true,
                     system_locale: None,
+                    // A desktop window is never suspended by the OS.
+                    lifecycle: None,
                     setup: ShellSetup {
                         client_host: Some(native_client.clone()),
                         local: Some(Rc::new(move || local_kernel.transport())),

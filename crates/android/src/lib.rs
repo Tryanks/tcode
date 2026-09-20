@@ -11,7 +11,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
     use std::borrow::Cow;
     use std::rc::Rc;
     use tcode_client::host::ClientHost;
-    use tcode_ui::{ShellOptions, ShellSetup, WindowSeam};
+    use tcode_ui::{ShellOptions, ShellSetup};
 
     android_logger::init_once(
         android_logger::Config::default()
@@ -61,11 +61,6 @@ pub fn android_main(app: android_activity::AndroidApp) {
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
-                // System bars, display cutout and the IME. Android schedules a
-                // frame whenever they change, so the shell never polls.
-                WindowSeam::new(gpui_android::insets)
-                    .with_lifecycle(gpui_android::platform())
-                    .with_soft_keyboard(gpui_android::show_keyboard),
                 ShellOptions {
                     window: WindowOptions {
                         // The activity owns the geometry; the shell reads it back.
@@ -77,6 +72,9 @@ pub fn android_main(app: android_activity::AndroidApp) {
                     theme_json: Cow::Owned(tcode_ui::flattened_theme_json()),
                     activate: true,
                     system_locale,
+                    // The activity is stopped in the background; the shell
+                    // reconnects on return.
+                    lifecycle: Some(gpui_android::platform()),
                     setup: ShellSetup {
                         initial: tcode_ui::last_host_target(host.as_ref()),
                         initial_pairing_error: None,

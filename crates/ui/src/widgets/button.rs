@@ -5,9 +5,9 @@ use crate::{
     widgets::{Spinner, Tooltip},
 };
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement, Interactivity, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement,
-    Styled, Window, prelude::FluentBuilder as _, px,
+    AnyElement, App, ClickEvent, Corners, ElementId, InteractiveElement, Interactivity,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
+    StyleRefinement, Styled, Window, prelude::FluentBuilder as _, px,
 };
 use std::rc::Rc;
 
@@ -50,6 +50,9 @@ enum ButtonRounded {
     #[default]
     Medium,
     Size(Pixels),
+    /// One radius per corner, for a button that fills the end of a bar and
+    /// takes the bar's own corners on that side.
+    Corners(Corners<Pixels>),
 }
 
 impl From<Pixels> for ButtonRounded {
@@ -109,6 +112,17 @@ impl Button {
     }
     pub fn rounded(mut self, rounded: impl Into<Pixels>) -> Self {
         self.rounded = ButtonRounded::Size(rounded.into());
+        self
+    }
+    pub fn rounded_corners(mut self, corners: Corners<Pixels>) -> Self {
+        self.rounded = ButtonRounded::Corners(corners);
+        self
+    }
+    /// Whether pressing the button moves focus onto it; see
+    /// [`gpui_base::Button::focusable`]. A menu that acts on a focused
+    /// input's selection must leave that focus where it is.
+    pub fn focusable(mut self, focusable: bool) -> Self {
+        self.base = self.base.focusable(focusable);
         self
     }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
@@ -253,9 +267,10 @@ impl RenderOnce for Button {
         } else {
             (bg, fg)
         };
-        let radius = match self.rounded {
-            ButtonRounded::Medium => theme.radius,
-            ButtonRounded::Size(value) => value,
+        let corners = match self.rounded {
+            ButtonRounded::Medium => Corners::all(theme.radius),
+            ButtonRounded::Size(value) => Corners::all(value),
+            ButtonRounded::Corners(corners) => corners,
         };
         let icon_only = self.label.is_none() && self.children.is_empty();
         let icon_size = match self.size {
@@ -295,7 +310,10 @@ impl RenderOnce for Button {
             .flex_shrink_0()
             .items_center()
             .justify_center()
-            .rounded(radius)
+            .rounded_tl(corners.top_left)
+            .rounded_tr(corners.top_right)
+            .rounded_bl(corners.bottom_left)
+            .rounded_br(corners.bottom_right)
             .when(icon_only, |this| match self.size {
                 Size::XSmall => this.size_5(),
                 Size::Small => this.size_6(),

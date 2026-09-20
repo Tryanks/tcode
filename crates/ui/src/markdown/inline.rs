@@ -13,7 +13,7 @@ use gpui::{
     App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId, Entity, GlobalElementId,
     HighlightStyle, Hitbox, InspectorElementId, InteractiveText, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextLayout, Window, WrappedLineLayout, point, px, quad,
+    StyledText, TextLayout, Window, WrappedLineLayout, point, px, quad, size,
 };
 
 use super::{
@@ -115,6 +115,25 @@ impl Inline {
             text_layout.line_height(),
             mask_bounds,
         )
+    }
+
+    /// The caret line boxes at the two ends of a painted selection, where the
+    /// touch handles are drawn.
+    fn selection_edges(
+        selection: &Range<usize>,
+        text_layout: &TextLayout,
+    ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        let (start, end) = (
+            selection.start.min(selection.end),
+            selection.start.max(selection.end),
+        );
+        let line_height = text_layout.line_height();
+        let caret = |index| {
+            text_layout
+                .position_for_index(index)
+                .map(|position| Bounds::new(position, size(px(0.), line_height)))
+        };
+        Some((caret(start)?, caret(end)?))
     }
 
     fn paint_selection(
@@ -270,37 +289,39 @@ impl Element for Inline {
         self.interactive_text
             .paint(global_id, None, bounds, &mut (), hitbox, window, cx);
 
-        let selectable = self.view.read(cx).is_selectable();
-        let selection = selectable
-            .then(|| {
-                let text_bounds =
-                    Self::text_line_bounds(&text_layout, window.content_mask().bounds);
-                let adapter = self.view.read(cx).selection_adapter.clone();
-                let projection = adapter.update_run(
-                    self.text.clone(),
-                    text_layout.clone(),
-                    bounds,
-                    text_bounds,
-                    cx,
-                );
-                if adapter.selection.has_local_selection(cx) {
-                    Some(0..self.text.len())
-                } else {
-                    projection
-                }
-            })
-            .flatten();
+        let adapter = {
+            let view = self.view.read(cx);
+            view.is_selectable().then(|| view.selection_adapter.clone())
+        };
+        let selection = adapter.as_ref().and_then(|adapter| {
+            let text_bounds = Self::text_line_bounds(&text_layout, window.content_mask().bounds);
+            let projection = adapter.update_run(
+                self.text.clone(),
+                text_layout.clone(),
+                bounds,
+                text_bounds,
+                cx,
+            );
+            if adapter.selection.has_local_selection(cx) {
+                Some(0..self.text.len())
+            } else {
+                projection
+            }
+        });
         if let Ok(mut state) = self.state.lock() {
             state.selection = selection.clone();
         }
-        if selectable {
+        if adapter.is_some() {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
         if Self::link_for_position(&text_layout, &self.links, window.mouse_position()).is_some() {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
-        if let Some(selection) = &selection {
+        if let (Some(selection), Some(adapter)) = (&selection, &adapter) {
             Self::paint_selection(selection, &text_layout, bounds, window, cx);
+            if let Some((start, end)) = Self::selection_edges(selection, &text_layout) {
+                adapter.register_selection_edges(start, end);
+            }
         }
 
         window.on_mouse_event({

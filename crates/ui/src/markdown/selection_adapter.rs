@@ -1,13 +1,14 @@
 use std::{cell::RefCell, ops::RangeInclusive, rc::Rc, time::Duration};
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, EntityId, Hitbox, Modifiers, Pixels,
+    AnyWindowHandle, App, AppContext as _, Bounds, EntityId, Hitbox, Hsla, Modifiers, Pixels,
     PlatformInput, Point, ScrollDelta, ScrollWheelEvent, Task, TextLayout, WeakEntity, Window,
     point, px,
 };
 use gpui_base::{
     TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint, TextSelectionEvent,
     TextSelectionHandle, TextSelectionRegistration, TextSelectionRun, TextSelectionSnapshot,
+    TouchHandleLayout,
 };
 
 use super::MarkdownState;
@@ -83,6 +84,9 @@ pub(super) struct MarkdownSelectionAdapter {
 struct FrameSelectionGeometry {
     text_bounds: Vec<Bounds<Pixels>>,
     runs: Vec<TextSelectionRun>,
+    /// The caret boxes at the first and last selected character painted this
+    /// frame, where the touch handles go.
+    selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
 }
 
 #[derive(Default)]
@@ -133,6 +137,12 @@ impl MarkdownSelectionAdapter {
                                 snapshot.is_some_and(|snapshot| snapshot.is_selecting());
                             cx.notify();
                         });
+                    }
+                    // The view paints the handles and lays their hitboxes out
+                    // from the ends it painted last frame, so it renders once
+                    // more.
+                    TextSelectionEvent::TouchSelectionChanged => {
+                        let _ = view_for_events.update(cx, |_, cx| cx.notify());
                     }
                     TextSelectionEvent::AutoScroll(_) | TextSelectionEvent::Cleared => {}
                 },
@@ -217,6 +227,14 @@ impl MarkdownSelectionAdapter {
         *self.frame.borrow_mut() = FrameSelectionGeometry::default();
     }
 
+    /// Records one inline's painted selection ends. Inlines paint in document
+    /// order, so the first start and the last end are the view's.
+    pub(super) fn register_selection_edges(&self, start: Bounds<Pixels>, end: Bounds<Pixels>) {
+        let mut frame = self.frame.borrow_mut();
+        let first = frame.selection_edges.map_or(start, |(first, _)| first);
+        frame.selection_edges = Some((first, end));
+    }
+
     pub(super) fn update_run(
         &self,
         text: impl Into<gpui::SharedString>,
@@ -253,14 +271,41 @@ impl MarkdownSelectionAdapter {
             auto_scroll.window = Some(window.window_handle());
             auto_scroll.viewport = Some(hitbox.content_mask.bounds);
         }
-        self.selection.register(
-            TextSelectionRegistration::new(hitbox, bounds)
+        let registration = {
+            let frame = self.frame.borrow();
+            let registration = TextSelectionRegistration::new(hitbox, bounds)
                 .with_scroll_offset(scroll_offset)
                 .with_document_order(document_order)
-                .with_text_bounds(self.frame.borrow().text_bounds.clone()),
-            window,
-            cx,
-        );
+                .with_text_bounds(frame.text_bounds.clone());
+            match frame.selection_edges {
+                Some((start, end)) => registration.with_selection_edges(start, end),
+                None => registration,
+            }
+        };
+        self.selection.register(registration, window, cx);
+    }
+
+    /// Lays out the touch handles this view owns; see
+    /// [`TextSelectionHandle::prepaint_touch_handles`].
+    pub(super) fn prepaint_touch_handles(
+        &self,
+        window: &mut Window,
+        cx: &App,
+    ) -> TouchHandleLayout {
+        self.selection.prepaint_touch_handles(window, cx)
+    }
+
+    /// Paints the touch handles this view owns, after its content for the
+    /// frame; see [`TextSelectionHandle::paint_touch_handles`].
+    pub(super) fn paint_touch_handles(
+        &self,
+        layout: &TouchHandleLayout,
+        color: Hsla,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.selection
+            .paint_touch_handles(layout, color, window, cx);
     }
 
     pub(super) fn participates_in_selection(&self, cx: &App) -> bool {
