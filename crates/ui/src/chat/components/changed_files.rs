@@ -1,4 +1,4 @@
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 use std::path::Path;
 
 use crate::icon::{Icon, IconName};
@@ -363,13 +363,13 @@ fn render_inline_diff(key: &str, row: &LiveEditRow, cx: &App) -> AnyElement {
             .w_full()
             .min_w_0()
             .max_h(px(240.))
-            .touch_overflow_y_scroll()
+            .overflow_y_scroll_area()
             .child(
                 div()
                     .id(SharedString::from(format!("file-edit-diff-x-{key}")))
                     .w_full()
                     .min_w_0()
-                    .touch_overflow_x_scroll()
+                    .overflow_x_scroll_area()
                     .child(
                         v_flex()
                             .min_w_full()

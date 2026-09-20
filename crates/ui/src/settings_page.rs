@@ -1,6 +1,5 @@
 //! Full-page settings route with section navigation and editable settings.
 
-use crate::touch_scroll::TouchScrollExt as _;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -14,10 +13,11 @@ use crate::{
 };
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, Role, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Toggled, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Render, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Toggled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, v_flex};
+use gpui_base::{InteractiveElementExt as _, StyledExt as _, v_flex};
 
 use crate::acp_panel::{AcpAgentCard, AcpPanel};
 use crate::orchestrate_settings::OrchestrateSettingsPanel;
@@ -335,6 +335,10 @@ pub struct SettingsPage {
     /// activation, so its capture-phase Space handler must be able to tell
     /// "the row is focused" from "the inline reset button inside it is".
     toggle_focus: HashMap<&'static str, FocusHandle>,
+    /// The compact section list and the section content page each keep their
+    /// reading position across rerenders.
+    section_scroll: ScrollHandle,
+    content_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -523,6 +527,8 @@ impl SettingsPage {
             local_permissions,
             host_permissions: None,
             toggle_focus: HashMap::new(),
+            section_scroll: ScrollHandle::new(),
+            content_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         };
         page._subscriptions
@@ -1008,13 +1014,19 @@ impl SettingsPage {
             }
             column = column.child(card);
         }
-        div()
-            .id("settings-section-list")
-            .flex_1()
-            .min_h_0()
-            .touch_overflow_y_scroll()
-            .child(column)
-            .into_any_element()
+        crate::scroll::page_viewport(
+            "settings-section-bounce",
+            crate::wheel_easing::Handle::Scroll(self.section_scroll.clone()),
+            div()
+                .id("settings-section-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
+                .track_scroll(&self.section_scroll)
+                .child(column),
+        )
+        .into_any_element()
     }
 
     /// One tappable section row of the compact list.
@@ -1195,23 +1207,29 @@ impl SettingsPage {
             Section::Remote => v_flex().child(self.hosting_panel.clone()),
             Section::Archived => self.render_archived(cx),
         };
-        div()
-            .id("settings-scroll")
-            .flex_1()
-            .min_h_0()
-            .touch_overflow_y_scroll()
-            .child(
-                gpui_base::h_flex()
-                    .w_full()
-                    .justify_center()
-                    .px_6()
-                    .py_6()
-                    // Keep this width definite before capping it. Reversing
-                    // these constraints makes nested multiline inputs resolve
-                    // their percentage width to zero when the cap applies.
-                    .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full()),
-            )
-            .into_any_element()
+        crate::scroll::page_viewport(
+            "settings-scroll-bounce",
+            crate::wheel_easing::Handle::Scroll(self.content_scroll.clone()),
+            div()
+                .id("settings-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
+                .track_scroll(&self.content_scroll)
+                .child(
+                    gpui_base::h_flex()
+                        .w_full()
+                        .justify_center()
+                        .px_6()
+                        .py_6()
+                        // Keep this width definite before capping it. Reversing
+                        // these constraints makes nested multiline inputs resolve
+                        // their percentage width to zero when the cap applies.
+                        .child(column.w(px(CONTENT_MAX_WIDTH)).max_w_full()),
+                ),
+        )
+        .into_any_element()
     }
 
     fn render_general(&mut self, cx: &mut Context<Self>) -> gpui::Div {

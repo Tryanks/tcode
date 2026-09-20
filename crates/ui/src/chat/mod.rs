@@ -2808,9 +2808,10 @@ impl Render for ChatView {
                 .min_h_0()
                 .relative()
                 .py_4()
-                .child(crate::touch_scroll::register(
+                .child(crate::scroll::page_viewport(
+                    "timeline-bounce",
+                    crate::wheel_easing::Handle::List(self.list_state.clone()),
                     timeline,
-                    crate::touch_scroll::Handle::List(self.list_state.clone()),
                 ))
                 .when(!window.is_inspector_picking(cx), |timeline| {
                     timeline.child(Scrollbar::vertical(&self.list_state).id("timeline-scrollbar"))
@@ -3744,7 +3745,7 @@ mod tests {
         struct ChatRoot(Entity<ChatView>);
         impl Render for ChatRoot {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                crate::touch_scroll::root(self.0.clone())
+                self.0.clone()
             }
         }
 
@@ -3800,7 +3801,7 @@ mod tests {
         struct ChatRoot(Entity<ChatView>);
         impl Render for ChatRoot {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                crate::touch_scroll::root(self.0.clone())
+                self.0.clone()
             }
         }
 
@@ -3858,9 +3859,7 @@ mod tests {
         impl Render for OccludedChat {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 // Reserve the system-occluded area, as the shell's window seam does.
-                crate::touch_scroll::root(
-                    div().size_full().pb(self.bottom).child(self.chat.clone()),
-                )
+                div().size_full().pb(self.bottom).child(self.chat.clone())
             }
         }
         let mut timeline = synthetic_markdown_timeline(30);
@@ -3945,7 +3944,7 @@ mod tests {
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                crate::touch_scroll::root(self.0.clone())
+                self.0.clone()
             }
         }
         let draw = |cx: &mut gpui::VisualTestContext| {
@@ -4021,7 +4020,7 @@ mod tests {
         struct TouchChat(Entity<ChatView>);
         impl Render for TouchChat {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                crate::touch_scroll::root(self.0.clone())
+                self.0.clone()
             }
         }
         let draw = |cx: &mut VisualTestContext| {
@@ -4108,8 +4107,8 @@ mod tests {
             "new turn did not move the tail anchor"
         );
 
-        // Started is captured by touch_scroll::root and applies a pixel offset,
-        // bypassing the list's wheel callback. No store notification drives this UI.
+        // A touch pan reaches the list's own wheel handler. No store
+        // notification drives this UI.
         scroll(height * 3., gpui::TouchPhase::Started, cx);
         assert!(
             cx.debug_bounds("scroll-to-end").is_some(),

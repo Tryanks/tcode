@@ -1,4 +1,4 @@
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 use std::borrow::Cow;
 use std::path::Path;
 
@@ -131,7 +131,7 @@ fn disclosure_body(key: &str, full_text: &str, cx: &App) -> Div {
                 .id(SharedString::from(format!("disclosure-body-{key}")))
                 .w_full()
                 .max_h(px(DISCLOSURE_CARD_MAX_HEIGHT))
-                .touch_overflow_y_scroll()
+                .overflow_y_scroll_area()
                 .child(
                     v_flex()
                         .w_full()

@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::touch_scroll::TouchScrollExt as _;
+use crate::scroll::ScrollableElement as _;
 
 impl Composer {
     pub(in super::super) fn render_checkout_row(
@@ -146,7 +146,7 @@ impl Composer {
                         .id("branch-list")
                         .w(px(220.))
                         .max_h(px(280.))
-                        .touch_overflow_y_scroll()
+                        .overflow_y_scroll_area()
                         .child(col)
                         .into_any_element()
                 })

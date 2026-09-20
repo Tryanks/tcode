@@ -12,15 +12,14 @@
 //! `hosting`, behind `remote-hosting`, inside Settings → Remote. The browser
 //! uses `hosted` to control its headless listener over the authenticated pipe.
 
-use crate::touch_scroll::TouchScrollExt as _;
 use std::rc::Rc;
 
 use gpui::{
     Action, AnyElement, App, Context, Entity, Global, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px,
+    MouseButton, ParentElement as _, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{InteractiveElementExt as _, StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_client::host::ClientHost;
 use tcode_client::pairing::PairedHost;
@@ -150,6 +149,7 @@ pub struct RemotePanel {
     /// back to whatever asked for it.
     window_state: Entity<WindowState>,
     form: PairForm,
+    page_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -199,6 +199,7 @@ impl RemotePanel {
             store,
             window_state,
             form,
+            page_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -773,23 +774,29 @@ impl RemotePanel {
     /// full-bleed in compact.
     fn page(&self, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let compact = self.window_state.read(cx).compact;
-        div()
-            .id("hosts-scroll")
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .touch_overflow_y_scroll()
-            .on_action(cx.listener(Self::on_disconnect))
-            .on_action(cx.listener(Self::on_forget))
-            .child(
-                h_flex().w_full().justify_center().child(
-                    div()
-                        .w_full()
-                        .when(!compact, |column| column.max_w(px(CONTENT_MAX_WIDTH)))
-                        .child(body),
+        crate::scroll::page_viewport(
+            "hosts-scroll-bounce",
+            crate::wheel_easing::Handle::Scroll(self.page_scroll.clone()),
+            div()
+                .id("hosts-scroll")
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .overflow_y_scroll()
+                .lock_scroll_axis()
+                .track_scroll(&self.page_scroll)
+                .on_action(cx.listener(Self::on_disconnect))
+                .on_action(cx.listener(Self::on_forget))
+                .child(
+                    h_flex().w_full().justify_center().child(
+                        div()
+                            .w_full()
+                            .when(!compact, |column| column.max_w(px(CONTENT_MAX_WIDTH)))
+                            .child(body),
+                    ),
                 ),
-            )
-            .into_any_element()
+        )
+        .into_any_element()
     }
 
     fn page_with_footer(

@@ -3168,7 +3168,9 @@ impl SessionsSidebar {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .child(crate::touch_scroll::register(
+                .child(crate::scroll::page_viewport(
+                    "compact-thread-bounce",
+                    crate::wheel_easing::Handle::List(self.compact_list_state.clone()),
                     list(
                         self.compact_list_state.clone(),
                         cx.processor(move |this, index: usize, _, cx| match &model.rows[index] {
@@ -3199,7 +3201,6 @@ impl SessionsSidebar {
                         }),
                     )
                     .size_full(),
-                    crate::touch_scroll::Handle::List(self.compact_list_state.clone()),
                 ))
                 .when(!window.is_inspector_picking(cx), |list| {
                     list.child(thread_list_scrollbar(
@@ -3718,14 +3719,7 @@ impl Render for SessionsSidebar {
                         .overflow_y_scrollbar()
                         .child(div().size_full().child(list_content))
                         .into_any_element();
-                    (
-                        self.render_flat_header(cx).into_any_element(),
-                        crate::touch_scroll::register(
-                            thread_list,
-                            crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
-                        )
-                        .into_any_element(),
-                    )
+                    (self.render_flat_header(cx).into_any_element(), thread_list)
                 } else {
                     let top_offsets = flat_thread_top_offsets(&visible, &flat_sessions);
                     let settled_top = visible
@@ -3806,9 +3800,10 @@ impl Render for SessionsSidebar {
                             .flex_1()
                             .min_h_0()
                             .relative()
-                            .child(crate::touch_scroll::register(
+                            .child(crate::scroll::page_viewport(
+                                "flat-thread-bounce",
+                                crate::wheel_easing::Handle::List(self.flat_list_state.clone()),
                                 thread_list,
-                                crate::touch_scroll::Handle::List(self.flat_list_state.clone()),
                             ))
                             .when(!window.is_inspector_picking(cx), |list| {
                                 list.child(thread_list_scrollbar(
