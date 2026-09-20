@@ -9,7 +9,8 @@
 //! Layout is decided by one rule (`crate::window_seam`): a desktop build is
 //! always the wide split, and a mobile build is a navigation stack — hosts,
 //! threads, thread, panel — under 900px of usable width and the wide split at
-//! or above it.
+//! or above it. Wide and unattached, the shell is the hosts page and nothing
+//! else until it attaches somewhere.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -1344,6 +1345,7 @@ impl AppShell {
         let label = self.window_state.read(cx).parent()?.back_label();
         Some(
             back_button("compact-back", label, cx)
+                .debug_selector(|| "compact-back".into())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.back(window, cx);
                 }))
@@ -1985,14 +1987,24 @@ impl AppShell {
         let palette_open = self.window_state.read(cx).palette_open;
         let fullscreen = window.is_fullscreen();
         if self.attachment.is_none() {
-            // No host: the hosts list is the whole window.
-            let body = self.hosts_body(window, cx);
+            // No host: the hosts page is the whole window, and the only page
+            // there is. A tablet in landscape lands here before it attaches
+            // and a desktop after it disconnects; neither has a sidebar to
+            // switch routes with, so the page wears the same nav bar as its
+            // compact self — the title, and on Pair the Back that returns to
+            // Machines. Whatever the history says, nothing else is shown
+            // until `attach` enters a workspace.
+            let page = if self.destination(cx) == Destination::Pair {
+                self.render_pair_page(window, cx)
+            } else {
+                self.render_hosts_page(window, cx)
+            };
             return div()
                 .id("app-shell")
                 .size_full()
                 .bg(crate::material::opaque_canvas(cx))
                 .text_color(cx.theme().foreground)
-                .child(v_flex().id("hosts").size_full().child(body))
+                .child(v_flex().id("hosts").size_full().child(page))
                 .into_any_element();
         }
         let Some(attachment) = &mut self.attachment else {
@@ -3020,6 +3032,90 @@ mod tests {
             assert!(shell.store().is_none());
         });
         assert!(sent(&host).is_empty());
+    }
+
+    /// A tablet in landscape with nothing to attach to is the hosts page and
+    /// nothing else: the wide layout has no local host and no sidebar to
+    /// switch routes with, so the page is the whole window until the window
+    /// attaches somewhere, Pair returns to it, and disconnecting comes back
+    /// to it.
+    #[gpui::test]
+    fn a_wide_mobile_window_stays_on_hosts_until_it_attaches(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
+        let (shell, _host, client, cx) =
+            mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
+        let assert_locked_on_hosts = |cx: &mut VisualTestContext| {
+            draw(cx);
+            assert!(
+                cx.debug_bounds("hosts-page").is_some(),
+                "the hosts page is the window"
+            );
+            assert!(
+                cx.debug_bounds("hosts-route").is_none(),
+                "no workspace column"
+            );
+            assert!(
+                cx.debug_bounds("sidebar-feature-hosts").is_none(),
+                "no sidebar"
+            );
+            assert!(
+                cx.debug_bounds("compact-back").is_none(),
+                "nothing to go back to"
+            );
+        };
+        shell.read_with(cx, |shell, cx| {
+            assert!(!shell.compact(cx), "1024px on a mobile build is wide");
+            assert!(shell.store().is_none());
+            assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
+        });
+        assert_locked_on_hosts(cx);
+        let state = shell.read_with(cx, |shell, _| shell.window_state());
+        // Nothing leads away: Back is the root, a thread intent has no thread,
+        // and a stale destination still shows the hosts page.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| assert!(!shell.back(window, cx)));
+        });
+        state.update(cx, |state, cx| state.open_thread(cx));
+        assert_locked_on_hosts(cx);
+        state.update(cx, |state, cx| state.go(Destination::Threads, cx));
+        draw(cx);
+        assert!(cx.debug_bounds("hosts-page").is_some());
+        assert!(cx.debug_bounds("compact-threads-page").is_none());
+        state.update(cx, |state, cx| state.leave_workspace(cx));
+        // Pair is the one page over Hosts, and its Back returns to Hosts.
+        state.update(cx, |state, cx| state.go(Destination::Pair, cx));
+        draw(cx);
+        let back = cx
+            .debug_bounds("compact-back")
+            .expect("Pair returns to Machines");
+        cx.simulate_click(back.center(), gpui::Modifiers::default());
+        assert_locked_on_hosts(cx);
+
+        // Attaching leaves the page for the new host's workspace...
+        let saved = client.saved.clone();
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.switch_to(AttachmentTarget::Remote(saved), window, cx)
+            });
+        });
+        draw(cx);
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.store().is_some());
+            assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
+        });
+        assert!(cx.debug_bounds("hosts-page").is_none());
+        assert!(
+            cx.debug_bounds("sidebar-feature-hosts").is_some(),
+            "the wide workspace"
+        );
+
+        // ...and disconnecting returns to it.
+        shell.update(cx, |shell, cx| shell.detach(cx));
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.store().is_none());
+            assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
+        });
+        assert_locked_on_hosts(cx);
     }
 
     #[gpui::test]
