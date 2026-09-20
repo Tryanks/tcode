@@ -3979,7 +3979,7 @@ mod tests {
             assert_eq!(m.base_permission_mode, "bypassPermissions");
             assert_eq!(m.applied_permission_mode, "plan");
             assert!(m.pending_permission_modes.is_empty());
-            stdin.close().await.unwrap();
+            drop(stdin);
             assert!(child.status().await.unwrap().success());
         });
     }
