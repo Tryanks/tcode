@@ -503,8 +503,10 @@ spanning the full window width, independent of the wide popover’s desktop widt
 Only its top corners are rounded, at 16pt; content is inset 16pt. The full-page
 scrim includes the window seam, while bottom padding on that layer places the
 sheet above `max(safe.bottom, ime.bottom)`. Its height is capped below the 52pt
-nav bar plus the top safe area; taller content scrolls inside the sheet. Tapping
-the scrim dismisses and consumes the whole pointer sequence, including release.
+nav bar plus the top safe area; taller content scrolls inside the sheet as a
+bounded vertical area (see the scrolling contract), so a diagonal pan stays on
+its axis. Tapping the scrim dismisses and consumes the whole pointer sequence,
+including release.
 
 ### Toasts
 
@@ -590,10 +592,10 @@ selectable Markdown body behaves the same.
 - **Lifetime.** There is one touch selection at a time: a long press
   elsewhere takes it over, and a field's controls go with its focus. Typing,
   moving the caret, or a press anywhere but a handle or the menu ends it; the
-  handles and the menu go with it. While a finger scrolls a message the menu
-  steps aside and returns over the handles when the finger lifts; a text
-  field scrolling under a finger keeps its menu on the selection, and the
-  menu leaves with the selection when that scrolls out of view. The
+  handles and the menu go with it. While a finger scrolls a message or a
+  text field the menu steps aside and returns over the handles when the
+  finger lifts; an end that scrolls out of view keeps no handle, and a
+  selection wholly out of view has no menu until it scrolls back. The
   long-press context menu of sidebar rows is opt-in per row and never sits
   over selectable text, so one press opens at most one of the two.
 

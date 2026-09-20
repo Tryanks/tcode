@@ -130,8 +130,8 @@ impl TouchSelectionOverlay {
 mod tests {
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, LongPressEvent, Modifiers,
-        ParentElement as _, Render, Styled as _, TestAppContext, TouchDragEvent, TouchPhase,
-        VisualTestContext, Window, div, point, px,
+        ParentElement as _, Render, ScrollDelta, ScrollWheelEvent, Styled as _, TestAppContext,
+        TouchDragEvent, TouchPhase, VisualTestContext, Window, div, point, px, size,
     };
     use gpui_base::{SelectionEdge, TouchHandle};
 
@@ -289,5 +289,116 @@ mod tests {
             assert!(with_state!(probe, cx, |state| state.touch_selection()).is_none());
             assert!(cx.debug_bounds("edit-menu").is_none());
         }
+    }
+
+    /// A textarea taller than its field, under the shell's root wheel-easing
+    /// wrapper, as the composer is.
+    struct OverflowingField {
+        textarea: Entity<TextareaState>,
+    }
+
+    impl Render for OverflowingField {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            crate::wheel_easing::root(
+                div()
+                    .size_full()
+                    .p_4()
+                    .child(Textarea::new(&self.textarea).h(px(60.))),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_pan_over_a_textarea_scrolls_it_and_the_menu_steps_aside_until_the_finger_lifts(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::theme::init);
+        let text = (0..40)
+            .map(|ix| format!("line {ix} of the draft"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let textarea = std::rc::Rc::new(std::cell::OnceCell::new());
+        let (_, cx) = cx.add_window_view({
+            let textarea = textarea.clone();
+            move |window, cx| {
+                let state = cx.new(|cx| TextareaState::new(window, cx).default_value(&text));
+                textarea.set(state.clone()).ok().unwrap();
+                OverflowingField { textarea: state }
+            }
+        });
+        let textarea = textarea.get().unwrap().clone();
+        cx.simulate_resize(size(px(320.), px(400.)));
+        cx.run_until_parked();
+        draw(cx);
+        draw(cx);
+
+        // The second line: a short pan keeps it in the field's viewport.
+        let second = textarea
+            .read_with(cx, |state, _| state.range_to_bounds(&(20..21)))
+            .unwrap();
+        long_press(cx, second.center());
+        assert_eq!(
+            textarea.read_with(cx, |state, _| state.selected_text().to_string()),
+            "line"
+        );
+        assert!(cx.debug_bounds("edit-menu-cut").is_some());
+        let menu_open = |cx: &mut VisualTestContext| {
+            textarea.read_with(cx, |state, _| {
+                state
+                    .touch_selection()
+                    .map(|snapshot| snapshot.is_menu_open())
+            })
+        };
+        assert_eq!(menu_open(cx), Some(true));
+        let offset =
+            |cx: &mut VisualTestContext| textarea.read_with(cx, |state, _| state.scroll_offset().y);
+        assert_eq!(offset(cx), px(0.));
+
+        // A finger panning the field reaches the input's own scroll handler:
+        // the text moves, and the menu steps aside until the finger lifts,
+        // then returns over the handles. The selection stays.
+        // The finger lands on the field, clear of the handles' touch targets:
+        // a touch that begins on a handle is that handle's drag, not a pan.
+        let finger = point(second.left() + px(80.), second.center().y);
+        let pan = |cx: &mut VisualTestContext, phase, dy| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: finger,
+                delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                modifiers: Modifiers::default(),
+                touch_phase: phase,
+            });
+            draw(cx);
+        };
+        for (phase, open) in [
+            (TouchPhase::Started, false),
+            (TouchPhase::Moved, false),
+            (TouchPhase::Ended, true),
+        ] {
+            pan(cx, phase, -4.);
+            assert_eq!(menu_open(cx), Some(open), "{phase:?}");
+            assert_eq!(
+                cx.debug_bounds("edit-menu-cut").is_some(),
+                open,
+                "{phase:?}"
+            );
+        }
+        assert_eq!(offset(cx), px(-12.), "the pan scrolled the textarea");
+        assert_eq!(
+            textarea.read_with(cx, |state, _| state.selected_text().to_string()),
+            "line"
+        );
+        assert!(cx.debug_bounds("edit-menu-cut").is_some());
+
+        // A pan that carries the selection out of the field takes the
+        // handles and the menu with it; the selection itself stays.
+        for phase in [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended] {
+            pan(cx, phase, -40.);
+        }
+        assert_eq!(menu_open(cx), Some(true));
+        assert!(cx.debug_bounds("edit-menu-cut").is_none());
+        assert_eq!(
+            textarea.read_with(cx, |state, _| state.selected_text().to_string()),
+            "line"
+        );
     }
 }
