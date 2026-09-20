@@ -134,9 +134,9 @@ impl Destination {
 
 /// Window-global UI state owned by the GPUI layer.
 pub struct WindowState {
-    /// The layout the window's current width calls for. Derived from the
-    /// viewport by [`crate::window_seam::compact_for`] and never persisted:
-    /// widening a window is not a preference.
+    /// The layout the window calls for. Derived from the build and the
+    /// viewport by [`crate::window_seam::window_is_compact`] and never
+    /// persisted: widening a window is not a preference.
     pub compact: bool,
     /// Where the window has been, oldest first. Never empty: `history[0]` is
     /// [`Destination::Hosts`], the root the platform's Back gesture falls off.

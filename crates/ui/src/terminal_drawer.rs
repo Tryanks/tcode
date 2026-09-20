@@ -1521,7 +1521,7 @@ impl Render for TerminalDrawer {
         // A compact page gives the drawer one toolbar row on the page inset:
         // the tab strip, a new-terminal target, and everything else in an
         // overflow menu rather than five dense controls fighting for 393pt.
-        let compact = crate::window_seam::window_is_compact(window);
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let new_tooltip = if at_limit {
             crate::tr!("terminal.max_reached", count = MAX_TERMINALS_PER_SESSION)
         } else {

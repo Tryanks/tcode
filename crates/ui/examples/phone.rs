@@ -1,8 +1,10 @@
 //! The compact layout in a desktop window, at phone geometry.
 //!
-//! Nothing here is phone-specific: it opens the same `run_shell` every client
-//! opens, at a width below the compact breakpoint, so the desktop can review
-//! the compact layout without a device.
+//! It opens the same `run_shell` every client opens, at a width below the
+//! compact breakpoint. A desktop build is always the wide layout, so the one
+//! phone-specific thing here is `force_mobile_layout`: a preview-only switch
+//! that makes this process lay out as a mobile build would, so the desktop can
+//! review the compact layout without a device.
 //!
 //! ```sh
 //! cargo run -p tcode-ui --example phone            # 393×852
@@ -21,6 +23,7 @@ fn main() {
     gpui_platform::application()
         .with_assets(tcode_ui::assets::Assets)
         .run(move |cx| {
+            tcode_ui::force_mobile_layout(cx);
             let dimensions = if android {
                 size(px(412.), px(915.))
             } else {

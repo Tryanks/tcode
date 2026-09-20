@@ -6,9 +6,10 @@
 //! Switching hosts replaces the attachment; it does not replace the window's
 //! navigation root, and resizing the window never touches the attachment at all.
 //!
-//! Layout is decided by one thing (`crate::window_seam`): the width the window
-//! can actually lay content out in. Under 900px the shell is a navigation stack
-//! — hosts, threads, thread, panel — and at or above it the desktop split.
+//! Layout is decided by one rule (`crate::window_seam`): a desktop build is
+//! always the wide split, and a mobile build is a navigation stack — hosts,
+//! threads, thread, panel — under 900px of usable width and the wide split at
+//! or above it.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -342,7 +343,7 @@ impl AppShell {
         // Seed the layout from the window before any child view exists, so the
         // first frame is already the right one rather than a wide split that
         // reflows on the second.
-        let compact = crate::window_seam::window_is_compact(window);
+        let compact = crate::window_seam::window_is_compact(window, cx);
         window_state.update(cx, |state, cx| {
             state.set_compact(compact, cx);
         });
@@ -831,7 +832,7 @@ impl AppShell {
     /// flip reconciles navigation to where the state already is — it is not a
     /// Back gesture and must not animate like one.
     fn sync_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let compact = crate::window_seam::window_is_compact(window);
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let flipped = self
             .window_state
             .update(cx, |state, cx| state.set_compact(compact, cx));
@@ -889,8 +890,10 @@ impl AppShell {
         self.mounted.extend(pushed);
     }
 
+    /// Navigating dismisses a software keyboard. Only a mobile build has one,
+    /// and every compact window is a mobile build's.
     fn blur_navigation(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compact(cx) || crate::window_seam::is_mobile(cx) {
+        if crate::window_seam::is_mobile(cx) {
             window.blur(cx);
         }
     }
@@ -2475,6 +2478,8 @@ mod tests {
         }
     }
 
+    /// A returning phone: a mobile build at phone width, so the restored
+    /// destination is a page of the compact stack.
     fn mount_restored<'a>(
         cx: &'a mut TestAppContext,
         history: &[&str],
@@ -2485,6 +2490,7 @@ mod tests {
         Rc<ReturningClient>,
         &'a mut VisualTestContext,
     ) {
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         mount_restored_at_width(cx, history, machine_exists, 393., "plan")
     }
 
@@ -3027,9 +3033,13 @@ mod tests {
         });
     }
 
+    /// Navigation never raises a software keyboard: on a phone every route
+    /// leaves the composer unfocused, and a desktop window opening a thread
+    /// focuses it.
     #[gpui::test]
     fn conversation_navigation_only_focuses_the_wide_composer(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
         let store = store_of(&shell, cx);
@@ -3077,17 +3087,22 @@ mod tests {
             draw(cx);
             cx.update(|window, _| assert!(!focus.is_focused(window)));
         }
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         resize(cx, 1024.);
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_thread(window, cx)));
         draw(cx);
         cx.update(|window, _| assert!(focus.is_focused(window)));
     }
 
+    /// A tablet that rotates through phone widths and back: the read-only
+    /// child composer stays visible and inert at every width, and the parent
+    /// draft is intact when its thread is reopened.
     #[gpui::test]
     fn native_subagent_composer_is_visible_inert_and_restores_parent_draft(
         cx: &mut TestAppContext,
     ) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1200., "plan");
         restore_index(&shell, &host, true, cx);
@@ -3206,7 +3221,13 @@ mod tests {
             composer.read_with(cx, |composer, cx| composer.draft(cx)),
             "parent draft"
         );
-        cx.update(|window, cx| composer.update(cx, |composer, cx| composer.focus(window, cx)));
+        // A software keyboard waits for an explicit tap on the composer.
+        let card = cx.debug_bounds("composer-card").expect("parent composer");
+        cx.simulate_click(
+            gpui::point(card.center().x, card.top() + px(24.)),
+            gpui::Modifiers::default(),
+        );
+        draw(cx);
         cx.simulate_keystrokes("end x");
         draw(cx);
         assert_eq!(
@@ -3390,6 +3411,9 @@ mod tests {
         store.update(cx, |store, cx| {
             *store = WorkspaceStore::new(host.link(), cx)
         });
+        if compact {
+            as_mobile(cx);
+        }
         cx.simulate_resize(size(px(if compact { 393. } else { 1024. }), px(852.)));
         cx.executor()
             .advance_clock(std::time::Duration::from_millis(250));
@@ -3472,6 +3496,9 @@ mod tests {
                 )
             });
             if cx.update(|_, cx| crate::window_seam::is_mobile(cx)) {
+                // Let the compact push finish sliding before tapping into it.
+                cx.executor().advance_clock(Duration::from_millis(250));
+                draw(cx);
                 let card = cx.debug_bounds("composer-card").expect("draft composer");
                 cx.simulate_click(
                     gpui::point(card.center().x, card.top() + px(24.)),
@@ -3481,7 +3508,13 @@ mod tests {
                 cx.update(|window, _| {
                     assert!(focus.is_focused(window), "explicit composer tap focuses")
                 });
-                for width in [393., 1024.] {
+                // Rotate away and back to the width the scenario started at.
+                let rotation = if compact {
+                    [1024., 393.]
+                } else {
+                    [393., 1024.]
+                };
+                for width in rotation {
                     resize(cx, width);
                     cx.update(|window, _| {
                         assert!(focus.is_focused(window), "rotation preserves editing focus")
@@ -3550,6 +3583,9 @@ mod tests {
         await_restore_update(&shell, cx, |store| !store.chat_loading());
         let state = shell.read_with(cx, |shell, _| shell.window_state());
         for (width, selector) in [(1024., "toggle-sidebar"), (393., "compact-search")] {
+            if width < 900. {
+                as_mobile(cx);
+            }
             resize(cx, width);
             cx.executor().advance_clock(Duration::from_millis(250));
             draw(cx);
@@ -3638,6 +3674,7 @@ mod tests {
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
         cx.executor().advance_clock(Duration::from_millis(250));
@@ -3729,9 +3766,16 @@ mod tests {
         draw(cx);
     }
 
+    /// Make the test app a mobile build: only there is a phone-sized window
+    /// compact, a desktop window being wide at any width.
+    fn as_mobile(cx: &mut VisualTestContext) {
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, true));
+    }
+
     #[gpui::test]
     fn compact_tap_push_and_back_pop_slide(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
         resize(cx, 393.);
         cx.executor().advance_clock(Duration::from_millis(250));
         draw(cx);
@@ -3904,11 +3948,33 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Resizing a window is a layout decision and nothing else: it must not
-    /// touch the attachment, the selected thread, the draft or the split.
+    /// A desktop tiled to half a screen is still the whole product: the width
+    /// rule belongs to mobile builds, so no desktop width is compact.
+    #[gpui::test]
+    fn a_narrow_desktop_window_keeps_the_wide_workspace(cx: &mut TestAppContext) {
+        let (shell, _host, cx) = mount(cx);
+        cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
+        for width in [1024., 899., 400.] {
+            resize(cx, width);
+            shell.read_with(cx, |shell, cx| {
+                assert!(!shell.compact(cx), "{width}px on a desktop build is wide");
+                assert_eq!(shell.window_state.read(cx).route(), Route::Chat);
+            });
+            assert!(
+                cx.debug_bounds("sidebar-feature-hosts").is_some(),
+                "{width}px keeps the workspace sidebar"
+            );
+            assert!(cx.debug_bounds("compact-threads-page").is_none());
+        }
+    }
+
+    /// Rotating a tablet across the breakpoint is a layout decision and
+    /// nothing else: it must not touch the attachment, the selected thread,
+    /// the draft or the split.
     #[gpui::test]
     fn the_breakpoint_flips_at_nine_hundred_and_disturbs_nothing_else(cx: &mut TestAppContext) {
         let (shell, host, cx) = mount(cx);
+        as_mobile(cx);
         let store = store_of(&shell, cx);
         host.incoming
             .try_send(
@@ -4128,6 +4194,7 @@ mod tests {
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
+        as_mobile(cx);
         resize(cx, 393.);
 
         let back = |cx: &mut VisualTestContext| {
@@ -4178,6 +4245,7 @@ mod tests {
     #[gpui::test]
     fn back_leaves_a_settings_section_then_settings_then_the_page_below(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
         resize(cx, 393.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         let settings = shell.read_with(cx, |shell, _| {
@@ -4221,6 +4289,7 @@ mod tests {
     #[gpui::test]
     fn back_leaves_the_pair_page_for_the_hosts_page_that_pushed_it(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
         resize(cx, 393.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         window_state.update(cx, |state, cx| {
@@ -4242,6 +4311,7 @@ mod tests {
     #[gpui::test]
     fn the_hosts_page_never_shows_hosting_settings(cx: &mut TestAppContext) {
         let (shell, _host, cx) = mount(cx);
+        as_mobile(cx);
         resize(cx, 393.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
         window_state.update(cx, |state, cx| state.go(Destination::Hosts, cx));
@@ -4389,6 +4459,7 @@ mod tests {
         let (shell, host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
+        as_mobile(cx);
         resize(cx, 393.);
         let chat = shell.read_with(cx, |shell, _| {
             shell
@@ -4603,6 +4674,7 @@ mod tests {
     ) {
         let (shell, host, cx) = mount(cx);
         seed_wide_diff(&shell, &host, cx);
+        as_mobile(cx);
         resize(cx, 393.);
         shell.update(cx, |shell, cx| shell.open_panels(cx));
         draw_until(&shell, cx, &host, "diff-body");

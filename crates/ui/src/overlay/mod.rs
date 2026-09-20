@@ -142,7 +142,7 @@ impl Render for OverlayHost {
         // Dialogs and toasts share the shell's one safe content rectangle: a
         // dialog centred in the raw window would sit under a notch, and a toast
         // pinned to the corner would sit under the status bar.
-        let compact = crate::window_seam::window_is_compact(window);
+        let compact = crate::window_seam::window_is_compact(window, cx);
         let seam = crate::window_seam::content_insets(window);
         div()
             .relative()
@@ -318,7 +318,7 @@ impl OverlayExt for Window {
 
     fn push_notification(&mut self, note: impl Into<Notification>, cx: &mut App) {
         let note = note.into();
-        if crate::window_seam::window_is_compact(self) && note.requires_dialog() {
+        if crate::window_seam::window_is_compact(self, cx) && note.requires_dialog() {
             let note = cx.new(|_| note);
             open_notification_dialog(note, self, cx);
             return;
@@ -373,6 +373,7 @@ mod tests {
     #[gpui::test]
     fn compact_toast_obeys_seam_replaces_and_wide_keeps_card(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| DetachedView);
             OverlayHost::new(body, window, cx)
@@ -421,6 +422,7 @@ mod tests {
     #[gpui::test]
     fn compact_timeout_and_error_recovery(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (root, cx) = cx.add_window_view(|window, cx| {
             let body = cx.new(|_| DetachedView);
             OverlayHost::new(body, window, cx)

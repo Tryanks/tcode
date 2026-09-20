@@ -3762,13 +3762,19 @@ mod tests {
             }
         }
 
+        // A phone and a tablet: the shell's layout rule, applied by hand since
+        // no shell is mounted here.
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         for (width, height) in [(393., 852.), (1024., 768.)] {
             let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(30));
-            window_state.update(cx, |state, _| state.compact = width < 900.);
             let (view, cx) = cx.add_window_view(|window, cx| {
-                ChatRoot(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+                ChatRoot(cx.new(|cx| ChatView::new(store, window_state.clone(), window, cx)))
             });
             cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.update(|window, cx| {
+                let compact = crate::window_seam::window_is_compact(window, cx);
+                window_state.update(cx, |state, _| state.compact = compact);
+            });
             cx.run_until_parked();
             cx.update(|window, cx| {
                 let _ = window.draw(cx);
@@ -3995,11 +4001,16 @@ mod tests {
                 timeline.turn_running = running;
                 timeline.turns.last_mut().unwrap().running = running;
                 let (store, window_state, _) = seed_chat(cx, timeline);
-                window_state.update(cx, |state, _| state.compact = width < 900.);
                 let (view, cx) = cx.add_window_view(|window, cx| {
-                    ChatRoot(cx.new(|cx| ChatView::new(store, window_state, window, cx)))
+                    ChatRoot(cx.new(|cx| ChatView::new(store, window_state.clone(), window, cx)))
                 });
                 cx.simulate_resize(gpui::size(px(width), px(height)));
+                // The shell's layout rule, applied by hand since no shell is
+                // mounted here: only the mobile phone is compact.
+                cx.update(|window, cx| {
+                    let compact = crate::window_seam::window_is_compact(window, cx);
+                    window_state.update(cx, |state, _| state.compact = compact);
+                });
                 let list = view.read_with(cx, |view, cx| view.0.read(cx).list_state.clone());
                 list.scroll_to_end();
                 cx.run_until_parked();

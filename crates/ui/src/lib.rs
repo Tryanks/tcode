@@ -75,6 +75,7 @@ pub use i18n::{
 pub use run::{ShellOptions, THEME_JSON, flattened_theme_json, last_host_target, run_shell};
 pub(crate) use shell::window_drag_area;
 pub use shell::{AppShell, Quit, ShellSetup, TogglePalette, handle_back};
+pub use window_seam::force_mobile_layout;
 pub use window_state::{OpenThread, WindowState};
 
 /// Where this client may keep its own files (the WebView2 profile is the only

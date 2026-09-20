@@ -487,7 +487,7 @@ impl Composer {
             })
             .trigger(trigger)
             .content(move |_, window, cx| {
-                let compact = crate::window_seam::window_is_compact(window);
+                let compact = crate::window_seam::window_is_compact(window, cx);
                 render_context_meter_pane(usage, account_usage.clone(), provider, pct, compact, cx)
             })
             .into_any_element()
@@ -1634,7 +1634,7 @@ fn render_overflow_pane(
     let interaction_popover = popover.clone();
     v_flex()
         .w_full()
-        .when(!crate::window_seam::window_is_compact(window), |pane| {
+        .when(!crate::window_seam::window_is_compact(window, cx), |pane| {
             pane.w(px(220.))
         })
         .p_1()
@@ -1893,8 +1893,8 @@ mod sheet_tests {
     }
 
     impl Render for PickerHarness {
-        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let compact = crate::window_seam::window_is_compact(window);
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let compact = crate::window_seam::window_is_compact(window, cx);
             let store = self.store.clone();
             let context = self.context;
             div().size_full().p_4().child(
@@ -1923,9 +1923,12 @@ mod sheet_tests {
         }
     }
 
+    /// A phone with a status bar and a keyboard gets a bottom sheet; a tablet
+    /// in landscape keeps the desktop-width popover.
     #[gpui::test]
     fn picker_sheets_span_window_and_preserve_wide_width(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let host = tcode_runtime::pipe::spawn_host(
             tcode_services::store::SessionStore::open_at(std::env::temp_dir().join(format!(
                 "tcode-sheet-test-{}",

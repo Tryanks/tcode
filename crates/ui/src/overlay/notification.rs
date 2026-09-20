@@ -235,7 +235,7 @@ impl EventEmitter<DismissEvent> for Notification {}
 
 impl Render for Notification {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if crate::window_seam::window_is_compact(window) {
+        if crate::window_seam::window_is_compact(window, cx) {
             let entering = self.transition_status == ToastTransitionStatus::Starting;
             let action = self
                 .action
@@ -386,7 +386,7 @@ impl NotificationList {
     }
 
     pub fn push(&mut self, note: Notification, window: &mut Window, cx: &mut Context<Self>) {
-        let compact = crate::window_seam::window_is_compact(window);
+        let compact = crate::window_seam::window_is_compact(window, cx);
         self.sync_layout(compact, window, cx);
         let timeout = if compact {
             // Replacement is immediate: discarded messages never reappear later.
@@ -499,7 +499,7 @@ impl NotificationList {
     fn advance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let changes = self.manager.advance(
             cx.background_executor().now(),
-            !crate::window_seam::window_is_compact(window)
+            !crate::window_seam::window_is_compact(window, cx)
                 && (self.stack_state.is_expanded() || !window.is_window_active()),
         );
         for id in changes.presented {
@@ -561,7 +561,7 @@ impl NotificationList {
 
 impl Render for NotificationList {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = crate::window_seam::window_is_compact(window);
+        let compact = crate::window_seam::window_is_compact(window, cx);
         self.sync_layout(compact, window, cx);
         if compact {
             return div()
