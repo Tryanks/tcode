@@ -1,6 +1,8 @@
 //! Real host pipe and HTTP/WebSocket transport, including a stopped host process.
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 use tcode_client::host::DeviceIdentity;
 use tcode_client::{ConnectionFailure, ConnectionState};
 use tcode_remote::client::{RemoteClient, connect, pair};
