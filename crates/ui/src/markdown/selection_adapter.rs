@@ -134,7 +134,11 @@ impl MarkdownSelectionAdapter {
                             cx.notify();
                         });
                     }
-                    TextSelectionEvent::AutoScroll(_) | TextSelectionEvent::Cleared => {}
+                    // Touch handles are not painted by this participant yet,
+                    // so touch-selection changes need no extra frame.
+                    TextSelectionEvent::AutoScroll(_)
+                    | TextSelectionEvent::Cleared
+                    | TextSelectionEvent::TouchSelectionChanged => {}
                 },
                 cx,
             )
