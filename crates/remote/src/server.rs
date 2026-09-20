@@ -955,7 +955,7 @@ where
                         let _ = websocket.close(None).await;
                         break;
                     }
-                    let device = format!("{:x}", Sha1::digest(token.as_bytes()));
+                    let device = crate::identity::encode_hex(&Sha1::digest(token.as_bytes()));
                     value["key"] = format!("{device}:{key}").into();
                 }
                 let mut line = value.to_string();
