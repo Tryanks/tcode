@@ -650,7 +650,7 @@ impl HostingPanel {
 
 impl Render for HostingPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = crate::window_seam::window_is_compact(window, cx);
+        let compact = crate::window_seam::window_is_compact(window);
         div()
             .w_full()
             .min_w_0()

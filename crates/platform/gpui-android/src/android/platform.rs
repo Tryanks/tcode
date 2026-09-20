@@ -136,12 +136,6 @@ impl AndroidPlatform {
         self.app.config().density().unwrap_or(160) as f32 / 160.0
     }
 
-    pub(crate) fn insets(&self) -> gpui::WindowInsets {
-        self.window()
-            .map(|window| window.insets())
-            .unwrap_or_default()
-    }
-
     fn appearance(&self) -> WindowAppearance {
         match self.app.config().ui_mode_night() {
             UiModeNight::Yes => WindowAppearance::Dark,

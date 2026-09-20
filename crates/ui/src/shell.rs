@@ -54,7 +54,6 @@ use crate::sidebar::SessionsSidebar;
 use crate::store::{StoreChange, TopicKind, WorkspaceStore};
 use crate::toast::{RuntimeToastNotification, ToastAction, ToastId, ToastKind};
 use crate::window_caption;
-use crate::window_seam::WindowSeam;
 use crate::window_state::{Destination, OpenThread, Route, WindowState};
 
 actions!(tcode, [Quit, TogglePalette]);
@@ -343,7 +342,7 @@ impl AppShell {
         // Seed the layout from the window before any child view exists, so the
         // first frame is already the right one rather than a wide split that
         // reflows on the second.
-        let compact = crate::window_seam::window_is_compact(window, cx);
+        let compact = crate::window_seam::window_is_compact(window);
         window_state.update(cx, |state, cx| {
             state.set_compact(compact, cx);
         });
@@ -832,7 +831,7 @@ impl AppShell {
     /// flip reconciles navigation to where the state already is — it is not a
     /// Back gesture and must not animate like one.
     fn sync_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let compact = crate::window_seam::window_is_compact(window, cx);
+        let compact = crate::window_seam::window_is_compact(window);
         let flipped = self
             .window_state
             .update(cx, |state, cx| state.set_compact(compact, cx));
@@ -891,7 +890,7 @@ impl AppShell {
     }
 
     fn blur_navigation(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compact(cx) || crate::window_seam::uses_soft_keyboard(cx) {
+        if self.compact(cx) || crate::window_seam::is_mobile(cx) {
             window.blur(cx);
         }
     }
@@ -934,7 +933,7 @@ impl AppShell {
     /// consumed; `false` only at the root, where the platform closes the app.
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         // A composition or a software keyboard is on top of everything.
-        if WindowSeam::current(cx).insets().ime.bottom > px(0.) {
+        if crate::window_seam::keyboard_covers_window(window) {
             window.blur(cx);
             return true;
         }
@@ -1826,8 +1825,8 @@ impl AppShell {
     /// paint edge to edge — the surface below is the window's — and interactive
     /// content is inset exactly once, at both widths. A window the system does
     /// not occlude gets no wrapper at all.
-    fn within_seam(&self, body: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let seam = WindowSeam::current(cx).content_insets();
+    fn within_seam(&self, body: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let seam = crate::window_seam::content_insets(window);
         if seam == gpui::Edges::default() {
             return body;
         }
@@ -2390,7 +2389,7 @@ impl Render for AppShell {
                 .children(
                     dismissal.map(|dismissal| dismissal.release_listener().into_any_element()),
                 )
-                .child(self.within_seam(body, cx)),
+                .child(self.within_seam(body, window, cx)),
         )
     }
 }
@@ -3226,7 +3225,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
-        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) = mount_restored_at_width(
             cx,
             &["hosts", "threads", "thread", "panel"],
@@ -3292,7 +3291,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_wide_cold_restore_stays_unfocused(cx: &mut TestAppContext) {
-        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
         restore_index(&shell, &host, true, cx);
@@ -3316,7 +3315,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_navigation_stays_unfocused_at_both_widths(cx: &mut TestAppContext) {
-        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         let focus = shell.read_with(cx, |shell, cx| {
@@ -3361,7 +3360,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_wide_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
-        cx.update(|cx| crate::window_seam::override_soft_keyboard_for_test(cx, true));
+        cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         new_thread_from_projects(cx, 2, false);
     }
 
@@ -3477,10 +3476,10 @@ mod tests {
             cx.update(|window, cx| {
                 assert_eq!(
                     focus.is_focused(window),
-                    !compact && !crate::window_seam::uses_soft_keyboard(cx)
+                    !compact && !crate::window_seam::is_mobile(cx)
                 )
             });
-            if cx.update(|_, cx| crate::window_seam::uses_soft_keyboard(cx)) {
+            if cx.update(|_, cx| crate::window_seam::is_mobile(cx)) {
                 let card = cx.debug_bounds("composer-card").expect("draft composer");
                 cx.simulate_click(
                     gpui::point(card.center().x, card.top() + px(24.)),
@@ -3692,15 +3691,14 @@ mod tests {
                         .contains_focused(window, cx)
                 );
             });
-            cx.update(|_, cx| {
-                cx.set_global(WindowSeam::new(|| {
-                    let mut insets = gpui::WindowInsets::default();
-                    insets.safe_area.top = px(47.);
-                    insets.safe_area.bottom = px(34.);
-                    insets.ime.bottom = px(400.);
-                    insets
-                }));
-            });
+            crate::window_seam::occlude_for_test(
+                cx,
+                gpui::Edges {
+                    top: px(47.),
+                    bottom: px(400.),
+                    ..Default::default()
+                },
+            );
             draw(cx);
             let card = cx.debug_bounds("palette-card").unwrap();
             assert_eq!(card.top(), px(99.));
@@ -3714,7 +3712,9 @@ mod tests {
                     state.read(cx).palette_open,
                     "Back dismisses the keyboard first"
                 );
-                cx.set_global(WindowSeam::flush());
+            });
+            crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
+            cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| assert!(shell.back(window, cx)));
             });
             assert!(!state.read_with(cx, |state, _| state.palette_open));

@@ -78,6 +78,7 @@ struct Callbacks {
     close: Option<Box<dyn FnOnce()>>,
     appearance: Option<Box<dyn FnMut()>>,
     insets: Option<Box<dyn FnMut(WindowInsets)>>,
+    visual_viewport: Option<Box<dyn FnMut()>>,
     visibility: Option<Box<dyn FnMut(WindowVisibility)>>,
     back: Option<Box<dyn FnMut()>>,
 }
@@ -329,19 +330,24 @@ impl AndroidWindow {
                 left: px(0.0),
             },
         };
-        let changed = {
-            let mut state = self.0.state.borrow_mut();
-            let changed = state.insets != insets;
-            state.insets = insets.clone();
-            changed
-        };
-        if changed {
-            let callback = self.0.callbacks.borrow_mut().insets.take();
-            if let Some(mut callback) = callback {
-                callback(insets);
-                self.0.callbacks.borrow_mut().insets = Some(callback);
-            }
-            self.schedule_frame();
+        let previous = std::mem::replace(&mut self.0.state.borrow_mut().insets, insets.clone());
+        if previous == insets {
+            return;
+        }
+        // GPUI refreshes the window from these callbacks and wakes the frame
+        // source itself, so no frame is scheduled here.
+        let callback = self.0.callbacks.borrow_mut().insets.take();
+        if let Some(mut callback) = callback {
+            callback(insets.clone());
+            self.0.callbacks.borrow_mut().insets = Some(callback);
+        }
+        if previous.ime == insets.ime {
+            return;
+        }
+        let callback = self.0.callbacks.borrow_mut().visual_viewport.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.callbacks.borrow_mut().visual_viewport = Some(callback);
         }
     }
 
@@ -808,6 +814,21 @@ impl PlatformWindow for AndroidWindow {
 
     fn content_size(&self) -> Size<Pixels> {
         self.bounds().size
+    }
+
+    /// The IME overlays an edge-to-edge window rather than resizing it, so
+    /// the visible part of the layout viewport is everything above its inset.
+    /// System bars stay in `insets`; GPUI intersects both for
+    /// `fully_visible_bounds`.
+    fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
+        let state = self.0.state.borrow();
+        let mut bounds = Bounds::new(Point::default(), state.bounds.size);
+        bounds.size.height = (bounds.size.height - state.insets.ime.bottom).max(px(0.));
+        bounds
+    }
+
+    fn on_visual_viewport_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.callbacks.borrow_mut().visual_viewport = Some(callback);
     }
 
     fn resize(&mut self, _size: Size<Pixels>) {}

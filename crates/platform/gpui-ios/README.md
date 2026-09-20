@@ -92,7 +92,12 @@ through `replace_and_mark_text_in_range`; a confirmed Chinese candidate is
 sent through `replace_text_in_range`, which replaces the marked range and
 commits the composition. Text assistance and return-key presentation are
 updated from `TextInputConfiguration`. Keyboard frame notifications update
-`WindowInsets::ime`, while `safeAreaInsets` update `WindowInsets::safe_area`.
+`WindowInsets::ime` and shrink the window's visual viewport by the same cover,
+while `safeAreaInsets` update `WindowInsets::safe_area`; GPUI refreshes the
+window from those callbacks and the display link presents the next frame.
+`Window::request_virtual_keyboard` and `dismiss_virtual_keyboard` reach the
+same proxy as text focus does, so an application can reopen a dismissed
+keyboard from an explicit tap without changing GPUI focus.
 
 ## Build and run
 

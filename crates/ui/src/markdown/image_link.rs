@@ -43,7 +43,7 @@ pub(super) fn badge(
     window: &Window,
     cx: &App,
 ) -> Div {
-    let (row_height, badge_height) = if crate::window_seam::window_is_compact(window, cx) {
+    let (row_height, badge_height) = if crate::window_seam::window_is_compact(window) {
         (44., 38.)
     } else {
         (28., 26.)

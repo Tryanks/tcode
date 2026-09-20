@@ -138,8 +138,8 @@ impl Render for OverlayHost {
         // Dialogs and toasts share the shell's one safe content rectangle: a
         // dialog centred in the raw window would sit under a notch, and a toast
         // pinned to the corner would sit under the status bar.
-        let compact = crate::window_seam::window_is_compact(window, cx);
-        let seam = crate::window_seam::WindowSeam::current(cx).content_insets();
+        let compact = crate::window_seam::window_is_compact(window);
+        let seam = crate::window_seam::content_insets(window);
         div()
             .relative()
             .size_full()
@@ -306,7 +306,7 @@ impl OverlayExt for Window {
 
     fn push_notification(&mut self, note: impl Into<Notification>, cx: &mut App) {
         let note = note.into();
-        if crate::window_seam::window_is_compact(self, cx) && note.requires_dialog() {
+        if crate::window_seam::window_is_compact(self) && note.requires_dialog() {
             let note = cx.new(|_| note);
             open_notification_dialog(note, self, cx);
             return;
@@ -349,7 +349,7 @@ impl OverlayExt for Window {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{TestAppContext, VisualTestContext, WindowInsets, size};
+    use gpui::{TestAppContext, VisualTestContext, size};
 
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
@@ -366,13 +366,14 @@ mod tests {
             OverlayHost::new(body, window, cx)
         });
         cx.simulate_resize(size(px(393.), px(852.)));
+        crate::window_seam::occlude_for_test(
+            cx,
+            gpui::Edges {
+                bottom: px(300.),
+                ..Default::default()
+            },
+        );
         cx.update(|window, cx| {
-            cx.set_global(crate::window_seam::WindowSeam::new(|| {
-                let mut insets = WindowInsets::default();
-                insets.safe_area.bottom = px(34.);
-                insets.ime.bottom = px(300.);
-                insets
-            }));
             window.push_notification(Notification::success("Copied"), cx);
         });
         draw(cx);
@@ -392,8 +393,8 @@ mod tests {
             root.notifications.read(cx).assert_messages(cx, &["Second"]);
         });
         cx.simulate_resize(size(px(1200.), px(800.)));
+        crate::window_seam::occlude_for_test(cx, gpui::Edges::default());
         cx.update(|window, cx| {
-            cx.set_global(crate::window_seam::WindowSeam::flush());
             window.push_notification("Wide", cx);
         });
         draw(cx);

@@ -94,10 +94,6 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
             tcode_ui::run_shell(
                 cx,
                 host.clone(),
-                // The canvas *is* the window: the browser resizes it around the
-                // on-screen keyboard itself, so subtracting one here would
-                // subtract it twice.
-                tcode_ui::WindowSeam::flush(),
                 tcode_ui::ShellOptions {
                     window: gpui::WindowOptions {
                         // GPUI takes the browser window's size from the canvas
