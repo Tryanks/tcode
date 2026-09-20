@@ -5024,7 +5024,29 @@ This begins after the hard break."#;
         workspace_store.update(cx, |store, cx| {
             store.set_session_replica_for_test(session_id.clone(), timeline, cx);
         });
+        // GPUI's executor does not wait for the host's detached Git process.
+        smol::block_on(async {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let id = session_id.clone();
+                if host
+                    .update_state_for_test(move |state, _| {
+                        state.git_status_snapshot(&id).status.is_some()
+                    })
+                    .await
+                    .expect("read fixture Git completion")
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "chat fixture Git probe did not finish"
+                );
+                smol::Timer::after(Duration::from_millis(5)).await;
+            }
+        });
         let window_state = cx.new(|_| WindowState::new(false));
+        cx.on_quit(move || host.shutdown_blocking().expect("stop chat test host"));
         (workspace_store, window_state, session_id)
     }
 }
