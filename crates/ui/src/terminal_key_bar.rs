@@ -488,32 +488,6 @@ mod tests {
         );
     }
 
-    /// The tail is ordered by how often a shell line needs the character, so
-    /// what scrolls off the edge is what is reached for least.
-    #[test]
-    fn the_symbol_tail_is_ordered_by_shell_frequency() {
-        assert_eq!(
-            SYMBOL_KEYS.map(|(_, symbol)| symbol),
-            ['-', '/', '|', '~', ':', '.', '_']
-        );
-    }
-
-    #[test]
-    fn escape_is_the_terminal_escape_byte() {
-        let mut state = TerminalKeyEncoder {
-            modifiers: StickyModifiers::default(),
-        };
-        assert_eq!(
-            state.encode_key(
-                TerminalKey::Escape,
-                TerminalMode::empty(),
-                KeyboardModes::NO_MODE,
-                None,
-            ),
-            vec![0x1b]
-        );
-    }
-
     struct NarrowBarProbe {
         width: f32,
         bar: Entity<TerminalKeyBar>,

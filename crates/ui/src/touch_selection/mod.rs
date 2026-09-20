@@ -212,6 +212,7 @@ mod tests {
 
     #[gpui::test]
     fn long_press_offers_the_edit_menu_whose_handles_drag(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         for multiline in [false, true] {
             let (probe, cx) = mount(cx, multiline);
             let first = with_state!(probe, cx, |state| state.range_to_bounds(&(0..1))).unwrap();
@@ -312,6 +313,7 @@ mod tests {
     fn a_pan_over_a_textarea_scrolls_it_and_the_menu_steps_aside_until_the_finger_lifts(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         let text = (0..40)
             .map(|ix| format!("line {ix} of the draft"))

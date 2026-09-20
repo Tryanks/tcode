@@ -571,7 +571,6 @@ impl tcode_client::outbox::Storage for FileOutbox {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -675,16 +674,39 @@ mod tests {
     }
 
     #[test]
-    fn device_name_prefers_environment_override() {
-        assert_eq!(
-            resolve_device_name(
-                Some(" Explicit name ".into()),
-                Some("Friendly Mac".into()),
-                Some("host.local".into()),
-                Some("etc-host".into()),
+    fn device_name_uses_the_first_nonempty_source_and_strips_only_local_host_suffix() {
+        for (sources, expected) in [
+            (
+                [
+                    Some(" Explicit name "),
+                    Some("Friendly Mac"),
+                    Some("host.local"),
+                    Some("etc-host"),
+                ],
+                "Explicit name",
             ),
-            "Explicit name"
-        );
+            (
+                [Some(" "), Some("Friendly Mac"), Some("host.local"), None],
+                "Friendly Mac",
+            ),
+            (
+                [None, Some(""), Some("studio.local"), Some("etc-host")],
+                "studio",
+            ),
+            (
+                [None, None, Some("studio.localdomain"), None],
+                "studio.localdomain",
+            ),
+            ([None, None, Some(".local"), Some(" etc-host ")], "etc-host"),
+            ([None, None, None, None], "Tcode"),
+        ] {
+            let [environment, computer, host, etc] = sources.map(|value| value.map(str::to_owned));
+            assert_eq!(
+                resolve_device_name(environment, computer, host, etc),
+                expected,
+                "{sources:?}"
+            );
+        }
     }
 
     #[test]
@@ -713,30 +735,12 @@ mod tests {
         assert_eq!(second.last_host_id().as_deref(), Some("host"));
     }
 
-    #[test]
-    fn device_name_strips_local_suffix_from_system_hostname() {
-        assert_eq!(
-            resolve_device_name(None, None, Some("studio.local".into()), None),
-            "studio"
-        );
-        assert_eq!(
-            resolve_device_name(None, None, Some("studio.localdomain".into()), None),
-            "studio.localdomain"
-        );
-    }
-
     struct TestDir(PathBuf);
 
     impl TestDir {
         fn new() -> Self {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "tcode-native-client-host-{}-{nonce}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("tcode-native-client-host-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }

@@ -2573,6 +2573,7 @@ mod tests {
 
     #[gpui::test]
     fn pending_outbox_overrides_desktop_launch_without_a_snapshot(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         struct SavedOutbox;
         impl tcode_client::outbox::Storage for SavedOutbox {
             fn load(
@@ -2732,6 +2733,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_restores_thread_and_selects_it_once(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         assert!(
             cx.debug_bounds("baseline-loading").is_some(),
@@ -2841,6 +2843,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_discards_settings_above_the_restored_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, _, cx) = mount_restored(
             cx,
             &["hosts", "threads", "thread", "settings", "settings_section"],
@@ -2860,6 +2863,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_waits_for_index_before_popping_a_missing_session(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, client, cx) =
             mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
         assert!(
@@ -2893,6 +2897,7 @@ mod tests {
     fn cold_start_missing_session_pops_even_if_status_arrives_before_index(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) =
             mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
         restore_status(&shell, &host, cx);
@@ -2907,6 +2912,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_restores_the_selected_panel_after_session_status(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, client, cx) =
             mount_restored(cx, &["hosts", "threads", "thread", "panel"], true);
         restore_index(&shell, &host, true, cx);
@@ -2971,6 +2977,7 @@ mod tests {
     fn same_page_thread_selection_is_checkpointed_without_waiting_for_host(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         store_of(&shell, cx).update(cx, |store, _| store.select_session("thread-b".into()));
         shell
@@ -2991,6 +2998,7 @@ mod tests {
     fn navigation_checkpoint_debounces_selection_and_history_without_losing_preferences(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, client, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         let store = store_of(&shell, cx);
         store.update(cx, |store, cx| {
@@ -3025,6 +3033,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_with_a_missing_machine_restores_hosts(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], false);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(shell.window_state.read(cx).history(), [Destination::Hosts]);
@@ -3040,6 +3049,7 @@ mod tests {
     /// to it.
     #[gpui::test]
     fn a_wide_mobile_window_stays_on_hosts_until_it_attaches(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, _host, client, cx) =
             mount_restored_at_width(cx, &["hosts"], false, 1024., "plan");
@@ -3119,6 +3129,7 @@ mod tests {
 
     #[gpui::test]
     fn cold_start_does_not_restore_the_pair_form(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _, _, cx) = mount_restored(cx, &["hosts", "threads", "hosts", "pair"], true);
         shell.read_with(cx, |shell, cx| {
             assert_eq!(
@@ -3133,6 +3144,7 @@ mod tests {
     /// focuses it.
     #[gpui::test]
     fn conversation_navigation_only_focuses_the_wide_composer(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
@@ -3196,6 +3208,7 @@ mod tests {
     fn native_subagent_composer_is_visible_inert_and_restores_parent_draft(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) =
@@ -3333,6 +3346,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_restored_terminal_does_not_raise_keyboard(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) = mount_restored_at_width(
             cx,
@@ -3399,6 +3413,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_wide_cold_restore_stays_unfocused(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, host, _, cx) =
             mount_restored_at_width(cx, &["hosts", "threads", "thread"], true, 1024., "plan");
@@ -3423,6 +3438,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_navigation_stays_unfocused_at_both_widths(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
@@ -3468,6 +3484,7 @@ mod tests {
 
     #[gpui::test]
     fn software_keyboard_wide_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, true));
         new_thread_from_projects(cx, 2, false);
     }
@@ -3572,15 +3589,17 @@ mod tests {
             loop {
                 store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
                 draw(cx);
-                if store
-                    .read_with(cx, |store, _| store.chat_active_session())
-                    .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
-                {
+                if store.read_with(cx, |store, _| {
+                    !store.chat_loading()
+                        && store
+                            .chat_active_session()
+                            .is_some_and(|(_, cwd, draft)| cwd == expected.root && draft)
+                }) {
                     break;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "selected project's draft reaches chat"
+                    "selected project's draft and event baseline reach chat"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -3633,21 +3652,25 @@ mod tests {
 
     #[gpui::test]
     fn compact_project_choice_opens_an_unfocused_draft(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         new_thread_from_projects(cx, 2, true);
     }
 
     #[gpui::test]
     fn compact_single_project_skips_the_chooser(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         new_thread_from_projects(cx, 1, true);
     }
 
     #[gpui::test]
     fn wide_project_choice_opens_a_focused_draft(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         new_thread_from_projects(cx, 2, false);
     }
 
     #[gpui::test]
     fn header_controls_activate_after_pointer_jitter_without_dragging(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         for (topic, event) in [
             (
@@ -3745,6 +3768,7 @@ mod tests {
     fn connecting_from_the_hosts_panel_releases_its_entity_before_attachment(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount_initial(cx, None);
         resize(cx, 393.);
         let hosts = shell.read_with(cx, |shell, _| shell.hosts.clone());
@@ -3768,6 +3792,7 @@ mod tests {
 
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
@@ -3869,6 +3894,7 @@ mod tests {
 
     #[gpui::test]
     fn compact_tap_push_and_back_pop_slide(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -3926,6 +3952,7 @@ mod tests {
     fn thread_shortcuts_follow_list_order_and_leave_model_picker_numbers_alone(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         cx.update(crate::shortcut::init);
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4047,6 +4074,7 @@ mod tests {
     /// rule belongs to mobile builds, so no desktop width is compact.
     #[gpui::test]
     fn a_narrow_desktop_window_keeps_the_wide_workspace(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         cx.update(|_, cx| crate::window_seam::override_mobile_for_test(cx, false));
         for width in [1024., 899., 400.] {
@@ -4068,6 +4096,7 @@ mod tests {
     /// the draft or the split.
     #[gpui::test]
     fn the_breakpoint_flips_at_nine_hundred_and_disturbs_nothing_else(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         as_mobile(cx);
         let store = store_of(&shell, cx);
@@ -4208,6 +4237,7 @@ mod tests {
     ))]
     #[gpui::test]
     fn compact_preview_release_and_navigation(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, _, cx) = mount_restored(cx, &["hosts", "threads", "thread"], true);
         let store = store_of(&shell, cx);
         restore_index(&shell, &host, true, cx);
@@ -4286,6 +4316,7 @@ mod tests {
 
     #[gpui::test]
     fn back_unwinds_overlays_then_the_history_and_stops_at_the_root(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
@@ -4339,6 +4370,7 @@ mod tests {
     /// of its own: detail → root → whatever Settings was opened from.
     #[gpui::test]
     fn back_leaves_a_settings_section_then_settings_then_the_page_below(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -4383,6 +4415,7 @@ mod tests {
     /// Pair is pushed from Hosts and comes back to it.
     #[gpui::test]
     fn back_leaves_the_pair_page_for_the_hosts_page_that_pushed_it(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -4405,6 +4438,7 @@ mod tests {
     /// where the build can actually host.
     #[gpui::test]
     fn the_hosts_page_never_shows_hosting_settings(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         as_mobile(cx);
         resize(cx, 393.);
@@ -4429,6 +4463,7 @@ mod tests {
     /// the content column, not a window of its own.
     #[gpui::test]
     fn the_wide_hosts_route_keeps_the_sidebar_and_its_feature_area(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -4452,6 +4487,7 @@ mod tests {
     /// it switches the content column away from Hosts without requiring Back.
     #[gpui::test]
     fn a_wide_store_thread_selection_leaves_the_hosts_route(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         draw(cx);
@@ -4491,6 +4527,7 @@ mod tests {
     /// turn the active wide route into a page-stack entry or leave the route.
     #[gpui::test]
     fn a_second_wide_hosts_feature_click_stays_on_hosts(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         draw(cx);
@@ -4523,6 +4560,7 @@ mod tests {
     /// area in it — is gone while the route is showing.
     #[gpui::test]
     fn the_wide_settings_route_replaces_the_sidebar_with_its_own_rail(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, _host, cx) = mount(cx);
         resize(cx, 1024.);
         let window_state = shell.read_with(cx, |shell, _| shell.window_state());
@@ -4551,6 +4589,7 @@ mod tests {
     /// Back returns to exactly where the visit started.
     #[gpui::test]
     fn a_hosts_visit_keeps_the_link_and_returns_to_the_thread(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         let store = store_of(&shell, cx);
         store.update(cx, |store, _| store.select_session("thread-1".into()));
@@ -4767,6 +4806,7 @@ mod tests {
     fn the_compact_panel_page_drops_the_right_panel_chrome_and_stays_inset(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         seed_wide_diff(&shell, &host, cx);
         as_mobile(cx);
@@ -4802,6 +4842,7 @@ mod tests {
     /// The wide right panel keeps every control the compact page hides.
     #[gpui::test]
     fn the_wide_diff_panel_keeps_its_tab_row_and_close(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let (shell, host, cx) = mount(cx);
         seed_wide_diff(&shell, &host, cx);
         resize(cx, 1024.);
@@ -4814,60 +4855,33 @@ mod tests {
     }
 
     #[test]
-    fn hover_transitions_open_preserve_and_close_the_overlay() {
-        for (current, transition, visible) in [
-            (false, SidebarHoverTransition::Trigger(true), true),
-            (false, SidebarHoverTransition::Trigger(false), false),
-            (true, SidebarHoverTransition::Trigger(false), true),
-            (false, SidebarHoverTransition::Overlay(true), true),
-            (true, SidebarHoverTransition::Overlay(true), true),
-            (true, SidebarHoverTransition::Overlay(false), false),
+    fn sidebar_overlay_follows_hover_only_on_collapsed_workspace_routes() {
+        for (current, transition, popover, visible) in [
+            (false, SidebarHoverTransition::Trigger(true), false, true),
+            (false, SidebarHoverTransition::Trigger(false), false, false),
+            (true, SidebarHoverTransition::Trigger(false), false, true),
+            (false, SidebarHoverTransition::Overlay(true), false, true),
+            (true, SidebarHoverTransition::Overlay(true), false, true),
+            (true, SidebarHoverTransition::Overlay(false), false, false),
+            (true, SidebarHoverTransition::Overlay(false), true, true),
+            (false, SidebarHoverTransition::Overlay(false), true, false),
         ] {
             assert_eq!(
-                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, false),
+                next_sidebar_overlay_visibility(current, transition, true, Route::Chat, popover),
                 visible
             );
+            assert!(!next_sidebar_overlay_visibility(
+                current,
+                transition,
+                false,
+                Route::Chat,
+                popover
+            ));
+            for route in [Route::Settings, Route::Hosts] {
+                assert!(!next_sidebar_overlay_visibility(
+                    current, transition, true, route, popover
+                ));
+            }
         }
-    }
-
-    #[test]
-    fn open_popover_keeps_overlay_through_occluded_hover_loss() {
-        assert!(next_sidebar_overlay_visibility(
-            true,
-            SidebarHoverTransition::Overlay(false),
-            true,
-            Route::Chat,
-            true,
-        ));
-        // But a popover cannot conjure an overlay that is already closed.
-        assert!(!next_sidebar_overlay_visibility(
-            false,
-            SidebarHoverTransition::Overlay(false),
-            true,
-            Route::Chat,
-            true,
-        ));
-    }
-
-    #[test]
-    fn expanded_sidebar_forces_overlay_closed() {
-        assert!(!next_sidebar_overlay_visibility(
-            true,
-            SidebarHoverTransition::Overlay(true),
-            false,
-            Route::Chat,
-            false,
-        ));
-    }
-
-    #[test]
-    fn non_workspace_route_forces_overlay_closed() {
-        assert!(!next_sidebar_overlay_visibility(
-            true,
-            SidebarHoverTransition::Overlay(true),
-            true,
-            Route::Settings,
-            false,
-        ));
     }
 }

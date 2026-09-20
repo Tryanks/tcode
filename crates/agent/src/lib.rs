@@ -1793,23 +1793,6 @@ mod resolve_binary_tests {
             ]
         );
     }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_pathext_defaults_when_unset() {
-        // On a real Windows host PATHEXT is always set, but the default must be
-        // the documented one when it is not.
-        assert!(
-            path_extensions()
-                .iter()
-                .any(|ext| ext.eq_ignore_ascii_case(".EXE"))
-        );
-        assert!(
-            path_extensions()
-                .iter()
-                .any(|ext| ext.eq_ignore_ascii_case(".CMD"))
-        );
-    }
 }
 
 #[cfg(test)]

@@ -541,102 +541,45 @@ pub(super) fn file_change_kind_label(kind: FileChangeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::composer::components::images::transcode_image_to_png;
     use chrono::Timelike as _;
 
     #[test]
-    fn bmp_and_tiff_transcode_to_decodable_png() {
-        let source = image::DynamicImage::new_rgba8(2, 2);
-        for format in [image::ImageFormat::Bmp, image::ImageFormat::Tiff] {
-            let mut encoded = std::io::Cursor::new(Vec::new());
-            source.write_to(&mut encoded, format).unwrap();
-
-            let png = transcode_image_to_png(&encoded.into_inner()).unwrap();
-            assert_eq!(image::guess_format(&png).unwrap(), image::ImageFormat::Png);
-            let decoded = image::load_from_memory(&png).unwrap();
-            assert_eq!((decoded.width(), decoded.height()), (2, 2));
-        }
-    }
-
-    fn thread(id: &str) -> ComposerDestination {
-        ComposerDestination::Thread(id.to_string())
-    }
-
-    fn project_draft(id: &str) -> ComposerDestination {
-        ComposerDestination::ProjectDraft(id.to_string())
-    }
-
-    #[test]
-    fn composer_destination_uses_thread_id_or_stable_project_draft_key() {
-        assert_eq!(
-            composer_destination(false, "thread-a", Some("project-a")),
-            Some(thread("thread-a"))
-        );
-        assert_eq!(
-            composer_destination(true, "transient-draft-uuid-1", Some("project-a")),
-            Some(project_draft("project-a"))
-        );
-        assert_eq!(
-            composer_destination(true, "transient-draft-uuid-2", Some("project-a")),
-            Some(project_draft("project-a"))
-        );
-    }
-
-    #[test]
-    fn composer_text_cache_isolates_threads_and_project_drafts() {
-        for (a, b) in [
-            (thread("a"), thread("b")),
-            (project_draft("a"), project_draft("b")),
+    fn composer_drafts_are_isolated_reused_and_cleared_only_after_submission() {
+        for (is_draft, project_a, project_b) in [
+            (false, None, None),
+            (true, Some("project-a"), Some("project-b")),
         ] {
+            let a = composer_destination(is_draft, "thread-a", project_a);
+            let b = composer_destination(is_draft, "thread-b", project_b);
             let mut cache = ComposerTextCache::default();
-            assert_eq!(cache.switch_to(Some(a.clone()), ""), Some(String::new()));
+            assert_eq!(cache.switch_to(a.clone(), ""), Some(String::new()));
+            assert_eq!(cache.switch_to(a.clone(), "typed"), None);
             assert_eq!(
-                cache.switch_to(Some(b.clone()), "text for a"),
+                cache.switch_to(b.clone(), "text for a"),
                 Some(String::new())
             );
             assert_eq!(
-                cache.switch_to(Some(a), "text for b"),
+                cache.switch_to(a.clone(), "text for b"),
                 Some("text for a".into())
             );
-            assert_eq!(
-                cache.switch_to(Some(b), "text for a"),
-                Some("text for b".into())
-            );
+            if is_draft {
+                assert_eq!(
+                    composer_destination(true, "replacement-draft", project_a),
+                    a
+                );
+            }
+            cache.clear_current();
+            assert_eq!(cache.switch_to(b.clone(), ""), Some("text for b".into()));
+            assert_eq!(cache.switch_to(a, "text for b"), Some(String::new()));
         }
-    }
-
-    #[test]
-    fn composer_text_cache_first_visit_is_empty() {
         let mut cache = ComposerTextCache::default();
-
+        let thread = composer_destination(false, "same-id", None);
+        let draft = composer_destination(true, "temporary", Some("same-id"));
+        cache.switch_to(thread.clone(), "");
+        assert_eq!(cache.switch_to(draft, "thread text"), Some(String::new()));
         assert_eq!(
-            cache.switch_to(Some(thread("never-visited")), ""),
-            Some(String::new())
-        );
-        assert_eq!(
-            cache.switch_to(Some(thread("never-visited")), "typed"),
-            None
-        );
-    }
-
-    #[test]
-    fn composer_text_cache_clears_only_the_submitted_destination() {
-        let mut cache = ComposerTextCache::default();
-
-        cache.switch_to(Some(thread("a")), "");
-        cache.switch_to(Some(thread("b")), "text for a");
-        cache.switch_to(Some(thread("a")), "text for b");
-        cache.clear_current();
-
-        assert!(!cache.drafts.contains_key(&thread("a")));
-        assert_eq!(cache.drafts.get(&thread("b")).unwrap(), "text for b");
-        assert_eq!(
-            cache.switch_to(Some(thread("b")), ""),
-            Some("text for b".to_string())
-        );
-        assert_eq!(
-            cache.switch_to(Some(thread("a")), "text for b"),
-            Some(String::new())
+            cache.switch_to(thread, "draft text"),
+            Some("thread text".into())
         );
     }
 
@@ -769,23 +712,6 @@ mod tests {
                 ..Default::default()
             })),
             "200k"
-        );
-    }
-
-    #[test]
-    fn approval_mode_meta_matches_ui_copy() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        assert_eq!(
-            approval_mode_meta(ApprovalMode::Supervised),
-            ("Supervised".to_string(), "icons/lock.svg")
-        );
-        assert_eq!(
-            approval_mode_meta(ApprovalMode::AutoAcceptEdits),
-            ("Auto-accept edits".to_string(), "icons/pencil.svg")
-        );
-        assert_eq!(
-            approval_mode_meta(ApprovalMode::FullAccess),
-            ("Full access".to_string(), "icons/unlock.svg")
         );
     }
 

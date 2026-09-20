@@ -207,7 +207,7 @@ fn provider_native_subagent_events_create_and_feed_read_only_mirror_session() {
 /// How the mirror's single turn ends: the Subagent item reaching a terminal
 /// status, or the parent process closing while it is still running. A parent
 /// `TurnCompleted` is never an ending — a background subagent outlives it.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum MirrorEnd {
     SubagentCompleted,
     /// Parent turn completes first (background subagent), then a child item
@@ -337,7 +337,15 @@ fn assert_native_mirror_turn_lifecycle(evict: bool, late: bool, end: MirrorEnd, 
             state.load_background_session(meta, cx);
         }
     });
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.resident(&mirror_id).is_some_and(|mirror| {
+            mirror
+                .timeline
+                .turns
+                .first()
+                .is_some_and(|turn| turn.end_ts.is_some())
+        })
+    });
     state.update(cx, |state, _| {
         let mirror = state.resident(&mirror_id).unwrap();
         assert!(!mirror.timeline.turn_running);
@@ -394,50 +402,21 @@ fn native_mirror_child_item(i: usize) -> AgentEvent {
 }
 
 #[test]
-fn native_mirror_turn_lifecycle_resident() {
-    assert_native_mirror_turn_lifecycle(false, false, MirrorEnd::SubagentCompleted, false);
-}
-
-#[test]
-fn native_mirror_turn_lifecycle_evicted() {
-    assert_native_mirror_turn_lifecycle(true, false, MirrorEnd::SubagentCompleted, false);
-}
-
-#[test]
-fn native_mirror_turn_lifecycle_async_reload() {
-    assert_native_mirror_turn_lifecycle(true, false, MirrorEnd::SubagentCompleted, true);
-}
-
-/// A straggler after the terminal status joins the closed turn instead of
-/// opening a zero-length one.
-#[test]
-fn native_mirror_turn_lifecycle_late_item() {
-    assert_native_mirror_turn_lifecycle(false, true, MirrorEnd::SubagentCompleted, false);
-    assert_native_mirror_turn_lifecycle(true, true, MirrorEnd::SubagentCompleted, false);
-}
-
-/// Background subagent: the parent turn's result lands while the child still
-/// runs; the mirror keeps its single open turn until the Subagent item ends.
-#[test]
-fn native_mirror_turn_lifecycle_outlives_parent_turn() {
-    assert_native_mirror_turn_lifecycle(
-        false,
-        true,
-        MirrorEnd::ParentTurnThenSubagentCompleted,
-        false,
-    );
-    assert_native_mirror_turn_lifecycle(
-        true,
-        false,
-        MirrorEnd::ParentTurnThenSubagentCompleted,
-        false,
-    );
-}
-
-#[test]
-fn native_mirror_turn_lifecycle_session_closed_interrupts() {
-    assert_native_mirror_turn_lifecycle(false, false, MirrorEnd::SessionClosed, false);
-    assert_native_mirror_turn_lifecycle(true, true, MirrorEnd::SessionClosed, false);
+fn native_mirror_keeps_one_turn_across_residency_late_items_and_parent_completion() {
+    for (evict, reload) in [(false, false), (true, false), (true, true)] {
+        for late in [false, true] {
+            for end in [
+                MirrorEnd::SubagentCompleted,
+                MirrorEnd::ParentTurnThenSubagentCompleted,
+                MirrorEnd::SessionClosed,
+            ] {
+                eprintln!(
+                    "mirror lifecycle: evict={evict}, reload={reload}, late={late}, end={end:?}"
+                );
+                assert_native_mirror_turn_lifecycle(evict, late, end, reload);
+            }
+        }
+    }
 }
 
 #[test]
@@ -787,7 +766,7 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             attachment_paths: Vec::new(),
         },
     );
-    cx.run_until_parked();
+    cx.run_until(|_| !commands.is_empty());
 
     let delivery_id = match commands.try_recv() {
         Ok(SessionCommand::SendTurn {
@@ -806,7 +785,15 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
             turn_id: "scripted-turn".into(),
         })
         .unwrap();
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.selected_session().is_some_and(|session| {
+            session
+                .timeline
+                .turns
+                .iter()
+                .any(|turn| turn.provider_turn_id.as_deref() == Some("scripted-turn"))
+        })
+    });
 
     let outgoing = cx.drain_outgoing();
     assert!(outgoing.iter().any(|message| matches!(
@@ -1009,45 +996,34 @@ fn title_session_uses_configured_model_with_low_effort() {
 }
 
 #[test]
-fn parse_fallback_review_with_delimiter() {
-    assert_eq!(
-        parse_fallback_review(
-            "ASSESSMENT: This looks legitimate. The scope is specific.\n---DRAFT---\nI own the test system."
+fn fallback_review_separates_assessment_and_draft_without_inventing_missing_text() {
+    for (input, assessment, draft) in [
+        (
+            "ASSESSMENT: Specific scope.\n---DRAFT---\nI own the test system.",
+            "Specific scope.",
+            "I own the test system.",
         ),
         (
-            "This looks legitimate. The scope is specific.".into(),
-            "I own the test system.".into()
-        )
-    );
-}
-
-#[test]
-fn parse_fallback_review_without_delimiter() {
-    assert_eq!(
-        parse_fallback_review("A cautious assessment without the expected separator."),
-        (
-            "A cautious assessment without the expected separator.".into(),
-            String::new()
-        )
-    );
-}
-
-#[test]
-fn parse_fallback_review_with_empty_draft() {
-    assert_eq!(
-        parse_fallback_review("ASSESSMENT: This appears genuinely concerning.\n---DRAFT---\n"),
-        ("This appears genuinely concerning.".into(), String::new())
-    );
-}
-
-#[test]
-fn parse_fallback_review_strips_case_insensitive_label_with_whitespace() {
-    assert_eq!(
-        parse_fallback_review(
-            "  assessment   :   Likely benign.\n  ---DRAFT---  \n  I administer this host.  "
+            "Assessment without a separator.",
+            "Assessment without a separator.",
+            "",
         ),
-        ("Likely benign.".into(), "I administer this host.".into())
-    );
+        ("ASSESSMENT: Concerning.\n---DRAFT---\n", "Concerning.", ""),
+        (
+            "  assessment   :   Likely benign.\n  ---DRAFT---  \n  I administer this host.  ",
+            "Likely benign.",
+            "I administer this host.",
+        ),
+        ("", "", ""),
+        ("---DRAFT---\nDraft only.", "", "Draft only."),
+        ("评估内容\n---DRAFT---\n申诉内容", "评估内容", "申诉内容"),
+    ] {
+        assert_eq!(
+            parse_fallback_review(input),
+            (assessment.into(), draft.into()),
+            "input: {input:?}",
+        );
+    }
 }
 
 #[test]
@@ -1147,7 +1123,7 @@ fn title_regeneration_uses_stored_history_and_preserves_intervening_changes() {
                 },
             );
         }
-        cx.run_until_parked();
+        cx.run_until(|_| !scripted.commands.is_empty());
         let prompt = match scripted.commands.try_recv().unwrap() {
             SessionCommand::SendTurn {
                 text, attachments, ..
@@ -1286,7 +1262,7 @@ fn title_regeneration_rejects_empty_history_without_calling_the_provider() {
             session_id: id.clone(),
         },
     );
-    cx.run_until_parked();
+    cx.run_until(|state| !state.index_snapshot().title_generating.contains(&id));
     assert!(scripted.commands.try_recv().is_err());
     state.read(|state| {
         assert!(!state.index_snapshot().title_generating.contains(&id));
@@ -1967,7 +1943,7 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
             cx,
         );
     });
-    cx.run_until_parked();
+    cx.run_until(|_| !title_commands.is_empty());
 
     let title_prompt = match title_commands.try_recv() {
         Ok(SessionCommand::SendTurn { text, .. }) => text,
@@ -1998,7 +1974,12 @@ fn orchestrate_title_generation_uses_only_the_users_request() {
     title_events
         .try_send(AgentEvent::SessionClosed { reason: None })
         .unwrap();
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        !state
+            .index_snapshot()
+            .title_generating
+            .contains("orchestrator-title")
+    });
 }
 
 #[test]
@@ -2219,45 +2200,12 @@ fn draft_send_creates_session_with_project_cwd() {
 }
 
 #[test]
-fn draft_inherits_newest_unarchived_session_from_same_project() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-draft-project-defaults-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        let mut other_project = SessionMeta::new(
-            ProviderKind::ClaudeCode,
-            PathBuf::from("/tmp/other"),
-            Some("opus".into()),
-        );
-        other_project.project_id = Some("project-other".into());
-        other_project.updated_at = 900;
-        other_project.option_selections.push(OptionSelection {
-            id: "reasoningEffort".into(),
-            value: serde_json::json!("minimal"),
-        });
-
-        let mut target_older = SessionMeta::new(
-            ProviderKind::ClaudeCode,
-            PathBuf::from("/tmp/target-old"),
-            Some("sonnet".into()),
-        );
-        target_older.project_id = Some("project-target".into());
-        target_older.updated_at = 100;
-        target_older.option_selections.push(OptionSelection {
-            id: "reasoningEffort".into(),
-            value: serde_json::json!("medium"),
-        });
-
-        let mut target_newest = SessionMeta::new(
-            ProviderKind::Codex,
-            PathBuf::from("/tmp/target-new"),
-            Some("gpt-5.2-codex".into()),
-        );
-        target_newest.project_id = Some("project-target".into());
-        target_newest.updated_at = 500;
-        target_newest.option_selections = vec![
+fn draft_defaults_follow_project_history_then_global_history_without_persisting_a_draft() {
+    let history = |provider, project: &str, model: &str, updated_at| {
+        let mut meta = SessionMeta::new(provider, PathBuf::from("/history"), Some(model.into()));
+        meta.project_id = Some(project.into());
+        meta.updated_at = updated_at;
+        meta.option_selections = vec![
             OptionSelection {
                 id: "serviceTier".into(),
                 value: serde_json::json!("fast"),
@@ -2267,38 +2215,109 @@ fn draft_inherits_newest_unarchived_session_from_same_project() {
                 value: serde_json::json!("high"),
             },
         ];
-
-        let mut target_archived = SessionMeta::new(
+        meta
+    };
+    let older = history(ProviderKind::ClaudeCode, "target", "sonnet", 100);
+    let mut archived = history(ProviderKind::Codex, "target", "archived", 1000);
+    archived.archived_at = Some(1001);
+    let mut global = history(ProviderKind::Acp, "other", "global-model", 900);
+    global.acp_agent_id = Some("global-agent".into());
+    let mut acp = history(ProviderKind::Acp, "target", "agent-model", 500);
+    acp.acp_agent_id = Some("agent.example".into());
+    let mut profile = history(ProviderKind::ClaudeCode, "target", "k3[1m]", 500);
+    profile.profile_id = Some("klaude-kode".into());
+    let codex = history(ProviderKind::Codex, "target", "gpt-5.2-codex", 500);
+    for (name, sessions, provider, model, agent, profile, effort) in [
+        (
+            "project",
+            vec![global.clone(), older.clone(), archived.clone(), codex],
+            ProviderKind::Codex,
+            Some("gpt-5.2-codex"),
+            None,
+            None,
+            true,
+        ),
+        (
+            "acp",
+            vec![global.clone(), archived.clone(), acp],
+            ProviderKind::Acp,
+            Some("agent-model"),
+            Some("agent.example"),
+            None,
+            true,
+        ),
+        (
+            "profile",
+            vec![global.clone(), older, profile],
             ProviderKind::ClaudeCode,
-            PathBuf::from("/tmp/target-archived"),
-            Some("haiku".into()),
-        );
-        target_archived.project_id = Some("project-target".into());
-        target_archived.updated_at = 800;
-        target_archived.archived_at = Some(801);
-        target_archived.option_selections.push(OptionSelection {
-            id: "reasoningEffort".into(),
-            value: serde_json::json!("low"),
+            Some("k3[1m]"),
+            None,
+            Some("klaude-kode"),
+            true,
+        ),
+        (
+            "global",
+            vec![global.clone()],
+            ProviderKind::Acp,
+            Some("global-model"),
+            Some("global-agent"),
+            None,
+            false,
+        ),
+        (
+            "archived target",
+            vec![archived.clone(), global],
+            ProviderKind::Acp,
+            Some("global-model"),
+            Some("global-agent"),
+            None,
+            false,
+        ),
+        (
+            "all archived",
+            vec![archived],
+            ProviderKind::ClaudeCode,
+            None,
+            None,
+            None,
+            false,
+        ),
+        (
+            "empty",
+            vec![],
+            ProviderKind::ClaudeCode,
+            None,
+            None,
+            None,
+            false,
+        ),
+    ] {
+        let cx = &mut TestAppContext::default();
+        let store = TestStore::new("tcode-draft-defaults");
+        let state = cx.new_entity(TestClientState::new((*store).clone()));
+        state.update(cx, |state, cx| {
+            state.sessions = sessions;
+            state.start_draft("target".into(), PathBuf::from("/new-project"), cx);
+            let draft = state.selected_session().unwrap();
+            assert!(draft.draft, "{name}");
+            assert_eq!(draft.meta.provider, provider, "{name}");
+            assert_eq!(draft.meta.model.as_deref(), model, "{name}");
+            assert_eq!(draft.meta.acp_agent_id.as_deref(), agent, "{name}");
+            assert_eq!(draft.meta.profile_id.as_deref(), profile, "{name}");
+            assert_eq!(draft.meta.cwd, PathBuf::from("/new-project"));
+            assert_eq!(draft.meta.project_id.as_deref(), Some("target"));
+            let expected = if effort {
+                vec![OptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: serde_json::json!("high"),
+                }]
+            } else {
+                vec![]
+            };
+            assert_eq!(draft.meta.option_selections, expected, "{name}");
+            assert!(state.store.load_index().is_empty(), "{name}");
         });
-
-        // Deliberately interleaved and not timestamp-sorted: selection must
-        // be project-scoped and based on updated_at, not vector position.
-        state.sessions = vec![other_project, target_older, target_archived, target_newest];
-        state.start_draft("project-target".into(), PathBuf::from("/tmp/target"), cx);
-
-        let draft = state.selected_session().unwrap();
-        assert!(draft.draft);
-        assert_eq!(draft.meta.provider, ProviderKind::Codex);
-        assert_eq!(draft.meta.model.as_deref(), Some("gpt-5.2-codex"));
-        assert_eq!(draft.meta.acp_agent_id, None);
-        assert_eq!(draft.meta.option_selections.len(), 1);
-        assert_eq!(draft.meta.option_selections[0].id, "reasoningEffort");
-        assert_eq!(
-            draft.meta.option_selections[0].value,
-            serde_json::json!("high")
-        );
-        assert!(state.store.load_index().is_empty());
-    });
+    }
 }
 
 #[test]
@@ -2393,173 +2412,6 @@ fn model_switch_restores_last_effort_used_with_that_model() {
             serde_json::json!("max")
         );
     });
-}
-
-#[test]
-fn draft_inherits_acp_agent_id_from_project_history() {
-    let test_store = TestStore::new("tcode-draft-acp-defaults-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-    let mut acp = SessionMeta::new(
-        ProviderKind::Acp,
-        PathBuf::from("/tmp/acp"),
-        Some("agent-model".into()),
-    );
-    acp.project_id = Some("project-acp".into());
-    acp.acp_agent_id = Some("agent.example".into());
-    acp.updated_at = 40;
-    state.sessions = vec![acp];
-
-    let (provider, model, acp_agent_id, _profile, effort) = state.draft_defaults("project-acp");
-    assert_eq!(provider, ProviderKind::Acp);
-    assert_eq!(model.as_deref(), Some("agent-model"));
-    assert_eq!(acp_agent_id.as_deref(), Some("agent.example"));
-    assert!(effort.is_none());
-}
-
-#[test]
-fn draft_without_project_history_keeps_global_fallback_and_stays_unpersisted() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-draft-fallback-test");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        let mut global = SessionMeta::new(
-            ProviderKind::Acp,
-            PathBuf::from("/tmp/existing"),
-            Some("fallback-model".into()),
-        );
-        global.project_id = Some("project-existing".into());
-        global.acp_agent_id = Some("fallback-agent".into());
-        global.updated_at = 200;
-        global.option_selections.push(OptionSelection {
-            id: "reasoningEffort".into(),
-            value: serde_json::json!("low"),
-        });
-        state.sessions = vec![global];
-
-        state.start_draft("project-empty".into(), PathBuf::from("/tmp/empty"), cx);
-
-        let draft = state.selected_session().unwrap();
-        let draft_id = draft.meta.id.clone();
-        assert!(draft.draft);
-        assert_eq!(draft.meta.provider, ProviderKind::Acp);
-        assert_eq!(draft.meta.model.as_deref(), Some("fallback-model"));
-        assert_eq!(draft.meta.acp_agent_id.as_deref(), Some("fallback-agent"));
-        assert!(draft.meta.option_selections.is_empty());
-        assert!(
-            !state
-                .store
-                .load_index()
-                .iter()
-                .any(|meta| meta.id == draft_id)
-        );
-    });
-}
-
-#[test]
-fn draft_global_fallback_ignores_target_projects_archived_history() {
-    let test_store = TestStore::new("tcode-draft-archived-fallback-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-
-    let mut target_archived = SessionMeta::new(
-        ProviderKind::Codex,
-        PathBuf::from("/tmp/target-archived"),
-        Some("gpt-5.2-codex".into()),
-    );
-    target_archived.project_id = Some("project-target".into());
-    target_archived.updated_at = 900;
-    target_archived.archived_at = Some(901);
-    target_archived.option_selections.push(OptionSelection {
-        id: "reasoningEffort".into(),
-        value: serde_json::json!("high"),
-    });
-
-    let mut other_active = SessionMeta::new(
-        ProviderKind::Acp,
-        PathBuf::from("/tmp/other-active"),
-        Some("active-model".into()),
-    );
-    other_active.project_id = Some("project-other".into());
-    other_active.acp_agent_id = Some("active-agent".into());
-    other_active.updated_at = 100;
-    other_active.option_selections.push(OptionSelection {
-        id: "reasoningEffort".into(),
-        value: serde_json::json!("low"),
-    });
-
-    // The target's archived session is globally newest and first, but must
-    // not be reselected by the global fallback.
-    state.sessions = vec![target_archived, other_active];
-    let (provider, model, acp_agent_id, _profile, effort) = state.draft_defaults("project-target");
-    assert_eq!(provider, ProviderKind::Acp);
-    assert_eq!(model.as_deref(), Some("active-model"));
-    assert_eq!(acp_agent_id.as_deref(), Some("active-agent"));
-    assert!(effort.is_none());
-}
-
-#[test]
-fn draft_defaults_to_claude_when_all_sessions_are_archived() {
-    let test_store = TestStore::new("tcode-draft-all-archived-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-
-    let mut target_archived = SessionMeta::new(
-        ProviderKind::Codex,
-        PathBuf::from("/tmp/target-archived"),
-        Some("gpt-5.2-codex".into()),
-    );
-    target_archived.project_id = Some("project-target".into());
-    target_archived.updated_at = 200;
-    target_archived.archived_at = Some(201);
-
-    let mut other_archived = SessionMeta::new(
-        ProviderKind::Acp,
-        PathBuf::from("/tmp/other-archived"),
-        Some("archived-model".into()),
-    );
-    other_archived.project_id = Some("project-other".into());
-    other_archived.acp_agent_id = Some("archived-agent".into());
-    other_archived.updated_at = 300;
-    other_archived.archived_at = Some(301);
-
-    state.sessions = vec![other_archived, target_archived];
-    let (provider, model, acp_agent_id, _profile, effort) = state.draft_defaults("project-target");
-    assert_eq!(provider, ProviderKind::ClaudeCode);
-    assert!(model.is_none());
-    assert!(acp_agent_id.is_none());
-    assert!(effort.is_none());
-}
-
-/// A new draft must inherit the previous session's *profile*, not just its
-/// model — otherwise "new thread" keeps the third-party model but routes it
-/// to the built-in provider, which rejects it.
-#[test]
-fn draft_defaults_inherit_profile_id() {
-    let test_store = TestStore::new("tcode-draft-profile-test");
-    let store = (*test_store).clone();
-    let mut state = TestClientState::new(store);
-
-    let mut prev = SessionMeta::new(
-        ProviderKind::ClaudeCode,
-        PathBuf::from("/tmp/kimi"),
-        Some("k3[1m]".into()),
-    );
-    prev.project_id = Some("project-kimi".into());
-    prev.profile_id = Some("klaude-kode".into());
-    prev.updated_at = 500;
-    state.sessions = vec![prev];
-
-    let (provider, model, _acp, profile, _effort) = state.draft_defaults("project-kimi");
-    assert_eq!(provider, ProviderKind::ClaudeCode);
-    assert_eq!(model.as_deref(), Some("k3[1m]"));
-    assert_eq!(
-        profile.as_deref(),
-        Some("klaude-kode"),
-        "the draft must stay on the third-party profile"
-    );
 }
 
 #[test]
@@ -2889,218 +2741,90 @@ fn third_party_profile_launches_in_parallel_with_builtin() {
 }
 
 #[test]
-fn pi_session_options_coerce_modes_and_drop_preview_without_native_approvals() {
-    let settings = Settings::default();
-    let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
-    meta.approval_mode = ApprovalMode::Supervised;
-    let reg = agent::McpRegistration {
-        name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
-        url: "http://127.0.0.1:7/mcp".into(),
-        bearer_token: "tok".into(),
+fn session_launch_preserves_approval_policy_and_scopes_mcp_registrations() {
+    let registration = |name: &str, port| agent::McpRegistration {
+        name: name.into(),
+        url: format!("http://127.0.0.1:{port}/mcp"),
+        bearer_token: format!("{name}-token"),
     };
-
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        Some(reg),
-        None,
-        None,
-        None,
-    );
-
-    assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
-    assert!(opts.mcp_servers.is_empty());
-    assert_eq!(meta.approval_mode, ApprovalMode::Supervised);
-
-    meta.approval_mode = ApprovalMode::AutoAcceptEdits;
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        None,
-    );
-    assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
-
-    meta.approval_mode = ApprovalMode::ReadOnly;
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        None,
-    );
-    assert_eq!(opts.approval_mode, ApprovalMode::ReadOnly);
-
-    meta.approval_mode = ApprovalMode::FullAccess;
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        None,
-    );
-    assert_eq!(opts.approval_mode, ApprovalMode::FullAccess);
-}
-
-#[test]
-fn pi_session_options_preserve_supervised_with_native_approvals() {
-    let mut settings = Settings::default();
-    settings.provider_mut(ProviderKind::Pi).pi.native_approvals = true;
-    let mut meta = SessionMeta::new(ProviderKind::Pi, PathBuf::from("/x"), None);
-    meta.approval_mode = ApprovalMode::Supervised;
-
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        None,
-    );
-
-    assert_eq!(opts.approval_mode, ApprovalMode::Supervised);
-}
-
-#[test]
-fn non_pi_session_options_preserve_mode_and_preview_registration() {
-    let settings = Settings::default();
-    let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/x"), None);
-    meta.approval_mode = ApprovalMode::AutoAcceptEdits;
-    let reg = agent::McpRegistration {
-        name: agent::McpRegistration::SERVER_NAME_PREVIEW.into(),
-        url: "http://127.0.0.1:7/mcp".into(),
-        bearer_token: "tok".into(),
-    };
-
-    let opts = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        Some(reg),
-        None,
-        None,
-        None,
-    );
-
-    assert_eq!(opts.approval_mode, ApprovalMode::AutoAcceptEdits);
-    assert_eq!(opts.mcp_servers.len(), 1);
-    assert_eq!(opts.mcp_servers[0].url, "http://127.0.0.1:7/mcp");
-    assert_eq!(opts.mcp_servers[0].bearer_token, "tok");
-}
-
-#[test]
-fn session_options_isolates_orchestrate_registration_by_meta_flag() {
-    let settings = Settings::default();
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-    let registration = agent::McpRegistration {
-        name: agent::McpRegistration::SERVER_NAME_ORCHESTRATE.into(),
-        url: "http://127.0.0.1:8/mcp".into(),
-        bearer_token: "parent-token".into(),
-    };
-    let normal = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        Some(registration.clone()),
-        None,
-        None,
-    );
-    assert!(normal.mcp_servers.is_empty());
-
-    meta.orchestrate_enabled = true;
-    let enabled = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        Some(registration),
-        None,
-        None,
-    );
-    assert_eq!(
-        enabled.mcp_servers[0].name,
-        agent::McpRegistration::SERVER_NAME_ORCHESTRATE
-    );
-}
-
-#[test]
-fn session_options_gates_computer_use_registration_on_global_setting() {
-    let mut settings = Settings::default();
-    let meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/x"), None);
-    let registration = agent::McpRegistration {
-        name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
-        url: "http://127.0.0.1:9/mcp".into(),
-        bearer_token: "computer-token".into(),
-    };
-
-    let disabled = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        Some(registration.clone()),
-    );
-    assert!(disabled.mcp_servers.is_empty());
-
-    settings.computer_use.enabled = true;
-    let enabled = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        Some(registration),
-    );
-    assert_eq!(
-        enabled.mcp_servers[0].name,
-        agent::McpRegistration::SERVER_NAME_COMPUTER_USE
-    );
-}
-
-#[test]
-fn collaboration_child_receives_enabled_computer_use_registration() {
-    let mut settings = Settings::default();
-    settings.computer_use.enabled = true;
-    let mut meta = SessionMeta::new(
-        ProviderKind::Codex,
-        PathBuf::from("/x"),
-        Some("gpt-6-astra".into()),
-    );
-    meta.parent_session_id = Some("lead".into());
-    meta.approval_mode = ApprovalMode::ReadOnly;
-    let computer_use = agent::McpRegistration {
-        name: agent::McpRegistration::SERVER_NAME_COMPUTER_USE.into(),
-        url: "http://127.0.0.1:9/mcp".into(),
-        bearer_token: "computer-token".into(),
-    };
-
-    let options = session_options(
-        &meta,
-        &settings,
-        LaunchEnv::default(),
-        None,
-        None,
-        None,
-        Some(computer_use),
-    );
-
-    assert!(options.mcp_servers.iter().any(|registration| {
-        registration.name == agent::McpRegistration::SERVER_NAME_COMPUTER_USE
-    }));
-    assert_eq!(options.approval_mode, ApprovalMode::ReadOnly);
+    let preview = registration(agent::McpRegistration::SERVER_NAME_PREVIEW, 7);
+    let orchestrate = registration(agent::McpRegistration::SERVER_NAME_ORCHESTRATE, 8);
+    let report = registration("child-report", 9);
+    let computer = registration(agent::McpRegistration::SERVER_NAME_COMPUTER_USE, 10);
+    for (provider, preview_supported) in [
+        (ProviderKind::ClaudeCode, true),
+        (ProviderKind::Codex, true),
+        (ProviderKind::Pi, false),
+    ] {
+        for native_approvals in [false, true] {
+            let mut settings = Settings::default();
+            settings.provider_mut(provider).pi.native_approvals = native_approvals;
+            for mode in [
+                ApprovalMode::Supervised,
+                ApprovalMode::AutoAcceptEdits,
+                ApprovalMode::ReadOnly,
+                ApprovalMode::FullAccess,
+            ] {
+                for (lead, child, computer_enabled) in [
+                    (false, false, false),
+                    (true, false, false),
+                    (false, true, true),
+                    (true, true, true),
+                    (false, false, true),
+                ] {
+                    settings.computer_use.enabled = computer_enabled;
+                    let mut meta = SessionMeta::new(provider, PathBuf::from("/x"), None);
+                    meta.approval_mode = mode;
+                    meta.orchestrate_enabled = lead;
+                    meta.parent_session_id = child.then(|| "parent".into());
+                    let options = session_options(
+                        &meta,
+                        &settings,
+                        LaunchEnv::default(),
+                        Some(preview.clone()),
+                        Some(orchestrate.clone()),
+                        Some(report.clone()),
+                        Some(computer.clone()),
+                    );
+                    let expected_mode = match (provider, native_approvals, mode) {
+                        (
+                            ProviderKind::Pi,
+                            false,
+                            ApprovalMode::Supervised | ApprovalMode::AutoAcceptEdits,
+                        ) => ApprovalMode::FullAccess,
+                        _ => mode,
+                    };
+                    assert_eq!(
+                        options.approval_mode, expected_mode,
+                        "{provider:?}, native approvals {native_approvals}, {mode:?}"
+                    );
+                    assert_eq!(
+                        meta.approval_mode, mode,
+                        "launch must not rewrite saved intent"
+                    );
+                    let mut expected = Vec::new();
+                    for (enabled, reg) in [
+                        (preview_supported, &preview),
+                        (lead, &orchestrate),
+                        (child, &report),
+                        (computer_enabled, &computer),
+                    ] {
+                        if enabled {
+                            expected.push((&reg.name, &reg.url, &reg.bearer_token));
+                        }
+                    }
+                    assert_eq!(
+                        options
+                            .mcp_servers
+                            .iter()
+                            .map(|reg| (&reg.name, &reg.url, &reg.bearer_token))
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -3413,7 +3137,11 @@ fn terminal_callback_archives_only_when_requested() {
         }
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        ["auto", "keep", "retry"]
+            .iter()
+            .all(|id| state.callback_last_turn.contains_key(*id))
+    });
 
     state.read(|state| {
         assert!(
@@ -3496,7 +3224,11 @@ fn reported_result_reaches_parent_and_fallback_covers_silent_children() {
         }
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        ["reporter", "silent"]
+            .iter()
+            .all(|id| state.callback_last_turn.contains_key(*id))
+    });
 
     let mut callbacks = Vec::new();
     while let Ok(command) = parent_receiver.try_recv() {
@@ -5422,7 +5154,6 @@ fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
     let test_store = TestStore::new("tcode-draft-subscription-readopt-test");
     let state = cx.new_entity(TestClientState::new((*test_store).clone()));
     state.update(cx, |state, cx| {
-        state.resident_idle_grace = Duration::from_millis(1);
         let id = AppState::start_draft(state, "project".into(), PathBuf::from("/tmp"), cx);
         let subscription = tcode_protocol::Subscription {
             topic: Topic::SessionStatus {
@@ -5434,15 +5165,13 @@ fn subscribing_readopts_an_uncommitted_draft_before_its_idle_reaper() {
         state.unsubscribe(&subscription, cx);
         assert!(state.residents.parked.contains_key(&id));
         assert!(state.sessions.iter().all(|meta| meta.id != id));
+        let idle_since = state.residents.parked[&id].idle_since.unwrap();
         state.subscribe(&subscription, cx);
+        state.reap_idle_resident(&id, idle_since, cx);
         assert!(state.residents.live[&id].draft);
         assert!(state.residents.live[&id].idle_since.is_none());
         assert!(!state.residents.parked.contains_key(&id));
-    });
-    cx.run_until_parked();
-    state.update(cx, |state, _| {
         assert_eq!(state.residents.live.len(), 1);
-        assert!(state.residents.live.values().next().unwrap().draft);
     });
 }
 
@@ -5676,7 +5405,11 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
     let state = cx.new_entity(TestClientState::new(store));
 
     state.update(cx, |state, cx| state.fork_thread(&source.id, cx));
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state
+            .selected_session()
+            .is_some_and(|session| session.timeline.turns.len() == 1)
+    });
 
     state.update(cx, |state, _cx| {
         let active = state.selected_session().unwrap();
@@ -5699,19 +5432,32 @@ fn fork_thread_clones_timeline_and_provider_cursor() {
 }
 
 #[test]
-fn store_writer_appends_events_in_fifo_order() {
+fn store_writer_flush_persists_ordered_events_metadata_and_secrets_for_reopening() {
     let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-writer-events");
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store.clone()));
-
+    let test_store = TestStore::new("tcode-writer-reopen");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
+    meta.title = "persisted by writer".into();
+    let id = meta.id.clone();
     state.update(cx, |state, cx| {
-        state.record_event("ordered", &persisted_assistant_event("first"), cx);
-        state.record_event("ordered", &persisted_assistant_event("second"), cx);
+        state.persist_meta(&meta, cx);
+        state.record_event(&id, &persisted_assistant_event("first"), cx);
+        state.set_profile_secret("profile", "ANTHROPIC_API_KEY", Some("writer-secret"), cx);
+        state.record_event(&id, &persisted_assistant_event("second"), cx);
     });
     cx.run_until_parked();
 
-    let events = store.read_events("ordered");
+    let fresh = SessionStore::open_at(test_store.root().clone()).unwrap();
+    assert_eq!(
+        fresh
+            .load_index()
+            .iter()
+            .find(|meta| meta.id == id)
+            .unwrap()
+            .title,
+        "persisted by writer"
+    );
+    let events = fresh.read_events(&id);
     let texts: Vec<_> = events
         .iter()
         .filter_map(|stored| match &stored.event {
@@ -5723,56 +5469,10 @@ fn store_writer_appends_events_in_fifo_order() {
         })
         .collect();
     assert_eq!(texts, ["first", "second"]);
-}
-
-#[test]
-fn store_writer_upsert_is_visible_to_fresh_store() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-writer-upsert");
-    let root = test_store.root().clone();
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-    let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/tmp/upsert"), None);
-    meta.title = "persisted by writer".into();
-    let id = meta.id.clone();
-
-    state.update(cx, |state, cx| state.persist_meta(&meta, cx));
-    cx.run_until_parked();
-
-    let fresh = SessionStore::open_at(root.clone()).unwrap();
+    let settings = SettingsStore::new(test_store.root().clone());
     assert_eq!(
-        fresh
-            .load_index()
-            .into_iter()
-            .find(|stored| stored.id == id)
-            .unwrap()
-            .title,
-        "persisted by writer"
-    );
-}
-
-#[test]
-fn store_writer_profile_secret_is_visible_to_fresh_store() {
-    let cx = &mut TestAppContext::default();
-    let test_store = TestStore::new("tcode-writer-secret");
-    let root = test_store.root().clone();
-    let store = (*test_store).clone();
-    let state = cx.new_entity(TestClientState::new(store));
-
-    state.update(cx, |state, cx| {
-        state.set_profile_secret(
-            "klaude-kode",
-            "ANTHROPIC_API_KEY",
-            Some("writer-secret"),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let fresh = SettingsStore::new(root.clone());
-    assert_eq!(
-        fresh
-            .profile_secrets("klaude-kode")
+        settings
+            .profile_secrets("profile")
             .get("ANTHROPIC_API_KEY")
             .map(String::as_str),
         Some("writer-secret")
@@ -5860,7 +5560,11 @@ fn terminal_open_installs_after_executor_pump_and_preserves_cwd_override() {
         );
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state
+            .selected_session()
+            .is_some_and(|session| !session.terminal_workspace.terminals.is_empty())
+    });
 
     state.read(|state| {
         let workspace = &state.selected_session().unwrap().terminal_workspace;
@@ -5929,7 +5633,15 @@ fn cold_select_installs_immediately_then_loads_persisted_timeline() {
         assert!(active.timeline.entries.is_empty());
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.selected_session().is_some_and(|session| {
+            session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "item-persisted cold output")
+        })
+    });
 
     state.update(cx, |state, _| {
         assert!(state.selected_session().unwrap().timeline.entries.iter().any(
@@ -5952,7 +5664,15 @@ fn parked_readopt_refolds_events_appended_while_parked() {
     let state = cx.new_entity(TestClientState::new(store));
 
     state.update(cx, |state, cx| state.select_session(&id, cx));
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.selected_session().is_some_and(|session| {
+            session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "item-before parking")
+        })
+    });
     state.update(cx, |state, cx| {
         let active = state.selected_session_mut().unwrap();
         active.turn_in_flight = true;
@@ -5962,7 +5682,15 @@ fn parked_readopt_refolds_events_appended_while_parked() {
         state.select_session(&id, cx);
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.selected_session().is_some_and(|session| {
+            session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "item-while parked")
+        })
+    });
 
     state.update(cx, |state, _| {
         assert!(state.selected_session().unwrap().timeline.entries.iter().any(
@@ -5995,7 +5723,15 @@ fn stale_timeline_completion_cannot_land_on_another_session() {
         assert_eq!(state.active_session_id(), Some(id_b.as_str()));
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.selected_session().is_some_and(|session| {
+            session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "item-only session B")
+        })
+    });
 
     state.update(cx, |state, _| {
         let active = state.selected_session().unwrap();
@@ -6027,7 +5763,15 @@ fn timeline_load_keeps_records_appended_during_the_fold() {
         state.record_event(&id, &persisted_assistant_event("raced append"), cx);
     });
 
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state.selected_session().is_some_and(|session| {
+            session
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| entry.id == "item-before load")
+        })
+    });
 
     state.update(cx, |state, _| {
         let timeline = &state.selected_session().unwrap().timeline;
@@ -6625,8 +6369,11 @@ fn failed_provider_start_keeps_the_queued_message() {
         assert_eq!(state.selected_session().unwrap().queue.len(), 1);
     });
 
-    // Let the spawned start attempt run to its failure.
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state
+            .selected_session()
+            .is_some_and(|session| matches!(session.runtime, Runtime::Idle))
+    });
 
     state.update(cx, |state, _| {
         let active = state.selected_session().unwrap();
@@ -6675,32 +6422,19 @@ fn plan_workspace_save_completes_after_background_executor_runs() {
         // both inside and after this update).
     });
 
-    // The write lands on a real blocking thread that run_until_parked does
-    // not wait for; poll with a bounded budget.
-    let mut contents = None;
-    for _ in 0..500 {
-        cx.run_until_parked();
-        if let Ok(text) = std::fs::read_to_string(cwd.join("PLAN-1.md")) {
-            contents = Some(text);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(contents.as_deref(), Some("# Saved plan"));
+    cx.run_until(|_| {
+        std::fs::read_to_string(cwd.join("PLAN-1.md")).is_ok_and(|text| text == "# Saved plan")
+    });
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-/// Dispatch replies arrive from a real blocking thread, which
-/// `run_until_parked` does not wait for; poll with a bounded budget.
 fn recv_dispatch_reply<T>(cx: &mut TestAppContext, rx: &smol::channel::Receiver<T>) -> T {
-    for _ in 0..500 {
-        cx.run_until_parked();
-        if let Ok(reply) = rx.try_recv() {
-            return reply;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    panic!("dispatch reply did not arrive within the polling budget");
+    let mut reply = None;
+    cx.run_until(|_| {
+        reply = rx.try_recv().ok();
+        reply.is_some()
+    });
+    reply.expect("dispatch reply observed above")
 }
 
 #[test]
@@ -6817,17 +6551,39 @@ fn orchestrate_dispatch_resolves_cwd_before_reply() {
 
 #[test]
 fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
-    let cx = &mut TestAppContext::default();
-    let root =
-        std::env::temp_dir().join(format!("tcode-dispatch-worktree-{}", uuid::Uuid::new_v4()));
+    let Some(root) = std::env::var_os("TCODE_TEST_WORKTREE_DISPATCH_ROOT") else {
+        let data = TestStore::new("tcode-dispatch-worktree");
+        // The override must be inherited at process creation: other tests and
+        // their background workers can read it without participating in a lock.
+        let output = tcode_services::process::command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree",
+                "--nocapture",
+            ])
+            .env("TCODE_TEST_WORKTREE_DISPATCH_ROOT", data.root())
+            .env(
+                "TCODE_WORKTREES_DIR",
+                data.root().join("tcode-owned-worktrees"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    let root = PathBuf::from(root);
     let isolated_worktrees = root.join("tcode-owned-worktrees");
-    // The services lifecycle honors this process-local override so this test
-    // cannot create or clean entries in the user's real ~/.tcode/worktrees.
-    unsafe {
-        std::env::set_var("TCODE_WORKTREES_DIR", &isolated_worktrees);
-    }
+    let cx = &mut TestAppContext::default();
     std::fs::create_dir_all(&root).unwrap();
     run_git(&root, &["init", "-b", "main"]).unwrap();
+    run_git(&root, &["config", "commit.gpgsign", "false"]).unwrap();
+    run_git(&root, &["config", "core.hooksPath", ".no-hooks"]).unwrap();
+    run_git(&root, &["config", "core.autocrlf", "false"]).unwrap();
     run_git(&root, &["config", "user.name", "tcode"]).unwrap();
     run_git(&root, &["config", "user.email", "tcode@localhost"]).unwrap();
     std::fs::write(root.join("tracked.txt"), "initial\n").unwrap();
@@ -6835,7 +6591,12 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
     run_git(&root, &["commit", "-m", "initial"]).unwrap();
 
     let test_store = TestStore::new("tcode-dispatch-worktree-data");
-    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let scripted = scripted_provider(ProviderKind::Codex);
+    let state = cx.new_entity({
+        let mut state = TestClientState::new((*test_store).clone());
+        state.set_provider_launcher_for_test(scripted.launcher);
+        state
+    });
     let parent = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
     let parent_id = parent.id.clone();
     let (reply, response) = smol::channel::bounded(1);
@@ -6885,9 +6646,6 @@ fn orchestrate_worktree_dispatch_resolves_child_cwd_to_worktree() {
         );
     });
     remove_git_worktree(&root, &expected_path).unwrap();
-    unsafe {
-        std::env::remove_var("TCODE_WORKTREES_DIR");
-    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -7289,7 +7047,11 @@ fn history_pages_of_an_opened_session_parse_the_log_once() {
         assert_eq!(total_turns, 5, "the absolute turn count comes from the log");
         (from, records)
     });
-    cx.run_until_parked();
+    cx.run_until(|state| {
+        state
+            .resident("paged")
+            .is_some_and(|session| session.timeline.turns.len() == 5)
+    });
     state.update(cx, |state, _| {
         assert_eq!(
             state.resident("paged").unwrap().timeline.turns.len(),
@@ -7397,7 +7159,7 @@ fn session_log_follows_residency_and_flushes_before_release() {
             "the log outlives residency until the store writer flushed its appends"
         );
     });
-    cx.run_until_parked();
+    cx.run_until(|state| !state.event_records.contains_key("resident"));
     state.update(cx, |state, _| {
         assert!(!state.event_records.contains_key("resident"));
         assert_eq!(

@@ -460,61 +460,6 @@ fn parse_txt(txt: &mdns_sd::TxtProperties, port: u16, addr: String) -> Option<Be
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "requires local multicast; run explicitly during native acceptance"]
-    fn mdns_loopback_round_trip() {
-        let advertise = ServiceDaemon::new().unwrap();
-        let browser = ServiceDaemon::new().unwrap();
-        for daemon in [&advertise, &browser] {
-            daemon.disable_interface(mdns_sd::IfKind::All).unwrap();
-            daemon
-                .enable_interface(mdns_sd::IfKind::LoopbackV4)
-                .unwrap();
-            daemon.set_multicast_loop_v4(true).unwrap();
-        }
-        let name = format!("p4c-{}", std::process::id());
-        let props = [
-            ("host_id", name.as_str()),
-            ("name", "Loopback"),
-            ("port", "47420"),
-        ];
-        let mut info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &name,
-            &format!("{name}.local."),
-            "127.0.0.1",
-            47420,
-            &props[..],
-        )
-        .unwrap();
-        info.set_requires_probe(false);
-        let fullname = info.get_fullname().to_owned();
-        let events = browser.browse(SERVICE_TYPE).unwrap();
-        advertise.register(info).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(6);
-        let mut found = false;
-        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(event) = events.recv_timeout(left) else {
-                break;
-            };
-            if let ServiceEvent::ServiceResolved(info) = event
-                && info.get_fullname() == fullname
-            {
-                found =
-                    parse_txt(info.get_properties(), info.get_port(), "127.0.0.1".into()).is_some();
-                break;
-            }
-        }
-        let _ = advertise.unregister(&fullname);
-        let _ = browser.stop_browse(SERVICE_TYPE);
-        let _ = advertise.shutdown();
-        let _ = browser.shutdown();
-        assert!(
-            found,
-            "loopback multicast unavailable; TXT validation remains the portable test"
-        );
-    }
-
-    #[test]
     fn txt_records_are_bounded_and_consistent() {
         let props = [
             ("host_id", "test"),
@@ -773,30 +718,6 @@ mod tests {
     }
 
     #[test]
-    fn address_ranking_ignores_virtual_bridges_and_prefers_the_receiving_lan() {
-        let local_interfaces = [
-            LocalNetwork {
-                name: "bridge100".into(),
-                ip: "192.168.139.1".parse().unwrap(),
-                prefix: Some(24),
-            },
-            LocalNetwork {
-                name: "vmnet8".into(),
-                ip: "192.168.215.1".parse().unwrap(),
-                prefix: Some(24),
-            },
-            LocalNetwork {
-                name: "en0".into(),
-                ip: "192.168.1.22".parse().unwrap(),
-                prefix: Some(24),
-            },
-        ];
-        let mut addresses = ["192.168.139.3", "192.168.215.0", "192.168.1.6"];
-        addresses.sort_by_key(|address| address_preference(address, &local_interfaces));
-        assert_eq!(addresses[0], "192.168.1.6");
-    }
-
-    #[test]
     fn pairing_addresses_prefer_wifi_at_home_and_work_without_losing_shared_networks() {
         for wifi in ["192.168.31.42", "192.168.1.161"] {
             let networks = [
@@ -824,64 +745,70 @@ mod tests {
     }
 
     #[test]
-    fn discovered_address_ranking_uses_the_actual_prefix() {
-        let interfaces = [LocalNetwork {
-            name: "en0".into(),
-            ip: "10.20.30.40".parse().unwrap(),
-            prefix: Some(16),
-        }];
-        assert!(
-            address_preference("10.20.90.2", &interfaces)
-                < address_preference("192.168.139.3", &interfaces)
-        );
-        let interfaces = [LocalNetwork {
-            name: "en0".into(),
-            ip: "192.168.1.200".parse().unwrap(),
-            prefix: Some(25),
-        }];
-        assert!(
-            address_preference("192.168.1.161", &interfaces)
-                < address_preference("192.168.1.2", &interfaces)
-        );
-    }
-
-    #[test]
-    fn mdns_keeps_alternative_origins_for_one_host() {
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            "workstation",
-            "workstation.local.",
-            "192.168.139.3,192.168.1.161,fd00::2",
-            47420,
-            &[
-                ("host_id", "workstation"),
-                ("name", "Workstation"),
-                ("port", "47420"),
-            ][..],
-        )
-        .unwrap();
-        let interfaces = [LocalNetwork {
-            name: "en0".into(),
-            ip: "192.168.1.22".parse().unwrap(),
-            prefix: Some(24),
-        }];
-        let mut beacons = Vec::new();
-        // Browsers can emit the same resolution again on another interface.
-        for _ in 0..2 {
-            collect_resolved_beacons(
-                &mut beacons,
-                info.get_properties(),
-                info.get_port(),
-                info.get_addresses().iter().copied(),
-                &interfaces,
+    fn resolved_hosts_keep_deduplicated_alternatives_ranked_by_the_receiving_subnet() {
+        for (local, prefix, addresses, expected) in [
+            (
+                "192.168.1.22",
+                24,
+                "192.168.139.3,192.168.1.161,fd00::2",
+                vec!["192.168.1.161", "192.168.139.3", "fd00::2"],
+            ),
+            (
+                "10.20.30.40",
+                16,
+                "192.168.139.3,10.20.90.2",
+                vec!["10.20.90.2", "192.168.139.3"],
+            ),
+            (
+                "192.168.1.200",
+                25,
+                "192.168.1.2,192.168.1.161",
+                vec!["192.168.1.161", "192.168.1.2"],
+            ),
+        ] {
+            let info = ServiceInfo::new(
+                SERVICE_TYPE,
+                "workstation",
+                "workstation.local.",
+                addresses,
+                47420,
+                &[
+                    ("host_id", "workstation"),
+                    ("name", "Workstation"),
+                    ("port", "47420"),
+                ][..],
+            )
+            .unwrap();
+            let interfaces = [
+                LocalNetwork {
+                    name: "bridge100".into(),
+                    ip: "192.168.139.1".parse().unwrap(),
+                    prefix: Some(24),
+                },
+                LocalNetwork {
+                    name: "en0".into(),
+                    ip: local.parse().unwrap(),
+                    prefix: Some(prefix),
+                },
+            ];
+            let mut beacons = Vec::new();
+            for _ in 0..2 {
+                collect_resolved_beacons(
+                    &mut beacons,
+                    info.get_properties(),
+                    info.get_port(),
+                    info.get_addresses().iter().copied(),
+                    &interfaces,
+                );
+            }
+            assert_eq!(
+                beacons
+                    .iter()
+                    .map(|beacon| beacon.addr.as_str())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{local}/{prefix}"
             );
         }
-        assert_eq!(
-            beacons
-                .iter()
-                .map(|beacon| beacon.addr.as_str())
-                .collect::<Vec<_>>(),
-            ["192.168.1.161", "192.168.139.3", "fd00::2"]
-        );
     }
 }

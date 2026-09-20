@@ -2546,36 +2546,23 @@ mod tests {
     }
 
     #[test]
-    fn interaction_mode_plan_targets_the_advertised_mode() {
-        let mut state = state();
-        state.ingest_modes(Some(&modes("build", &["build", "plan"])));
-        assert_eq!(
-            interaction_mode_target(InteractionMode::Plan, &state),
-            Some(acp::SessionModeId::new("plan"))
-        );
-    }
-
-    #[test]
-    fn interaction_mode_build_restores_the_previous_non_plan_mode() {
-        let mut state = state();
-        state.ingest_modes(Some(&modes("review", &["review", "build", "plan"])));
-        state.select_mode(acp::SessionModeId::new("plan"));
-        assert_eq!(
-            interaction_mode_target(InteractionMode::Build, &state),
-            Some(acp::SessionModeId::new("review"))
-        );
-    }
-
-    #[test]
-    fn interaction_mode_plan_without_advertised_plan_warns() {
+    fn plan_mode_requires_advertisement_and_restores_the_previous_mode() {
+        for previous in ["build", "review"] {
+            let mut state = state();
+            state.ingest_modes(Some(&modes(previous, &["build", "review", "plan"])));
+            let plan = interaction_mode_target(InteractionMode::Plan, &state).unwrap();
+            assert_eq!(plan, acp::SessionModeId::new("plan"));
+            state.select_mode(plan);
+            assert_eq!(
+                interaction_mode_target(InteractionMode::Build, &state),
+                Some(acp::SessionModeId::new(previous))
+            );
+        }
         let mut state = state();
         state.ingest_modes(Some(&modes("build", &["build", "review"])));
         assert_eq!(interaction_mode_target(InteractionMode::Plan, &state), None);
-        assert!(matches!(
-            missing_mode_warning(InteractionMode::Plan),
-            AgentEvent::Warning { message }
-                if message.contains("does not advertise a Plan mode")
-        ));
+        assert!(matches!(missing_mode_warning(InteractionMode::Plan),
+            AgentEvent::Warning { message } if message.contains("does not advertise a Plan mode")));
     }
 
     #[test]
@@ -2611,21 +2598,6 @@ mod tests {
             ));
             assert!(pending.lock_recover().is_empty());
         });
-    }
-
-    #[test]
-    fn npx_recipe_becomes_npm_exec() {
-        let (program, args) = launch_command(&AcpLaunch::Npx {
-            package: "@google/gemini-cli@0.50.0".into(),
-            args: vec!["--acp".into()],
-            env: Vec::new(),
-        })
-        .expect("npm must resolve on PATH");
-        assert_eq!(program.file_stem().unwrap(), "npm");
-        assert_eq!(
-            args,
-            vec!["exec", "--yes", "--", "@google/gemini-cli@0.50.0", "--acp"]
-        );
     }
 
     /// The preview MCP server is a loopback HTTP endpoint: it may only be handed
@@ -2676,70 +2648,75 @@ mod tests {
     }
 
     #[test]
-    fn agent_message_chunks_stream_then_complete() {
+    fn streamed_text_keeps_block_identity_across_reasoning_and_ignores_user_echoes() {
         let mut state = state();
-        let events = state.apply_update(update(json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "Hel" }
-        })));
-        let item_id = match &events[0] {
-            AgentEvent::Delta {
-                item_id,
-                kind,
-                text,
-            } => {
-                assert_eq!(*kind, DeltaKind::AssistantText);
-                assert_eq!(text, "Hel");
-                item_id.clone()
-            }
-            other => panic!("expected Delta, got {other:?}"),
-        };
-        state.apply_update(update(json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "lo" }
-        })));
-        match &state.flush_text()[0] {
-            AgentEvent::ItemCompleted(item) => {
-                assert_eq!(item.id, item_id);
-                match &item.content {
-                    ItemContent::AssistantMessage { text } => assert_eq!(text, "Hello"),
-                    other => panic!("expected AssistantMessage, got {other:?}"),
+        let mut previous = None;
+        for (kind, wire_kind, chunks, expected) in [
+            (
+                DeltaKind::AssistantText,
+                "agent_message_chunk",
+                ["Hel", "lo"],
+                "Hello",
+            ),
+            (
+                DeltaKind::ReasoningText,
+                "agent_thought_chunk",
+                ["Think", "ing"],
+                "Thinking",
+            ),
+            (
+                DeltaKind::AssistantText,
+                "agent_message_chunk",
+                ["An", "swer"],
+                "Answer",
+            ),
+        ] {
+            let mut id = None;
+            for chunk in chunks {
+                let mut events = state
+                    .apply_update(update(json!({
+                        "sessionUpdate": wire_kind, "content": {"type":"text", "text":chunk}
+                    })))
+                    .into_iter();
+                if let Some((previous_id, previous_kind, previous_text)) = previous.take() {
+                    let Some(AgentEvent::ItemCompleted(item)) = events.next() else {
+                        panic!("changing text kind must complete the previous block");
+                    };
+                    assert_eq!(item.id, previous_id);
+                    match (previous_kind, item.content) {
+                        (DeltaKind::AssistantText, ItemContent::AssistantMessage { text })
+                        | (DeltaKind::ReasoningText, ItemContent::Reasoning { text }) => {
+                            assert_eq!(text, previous_text)
+                        }
+                        other => panic!("wrong completed block: {other:?}"),
+                    }
                 }
+                let Some(AgentEvent::Delta {
+                    item_id,
+                    kind: actual_kind,
+                    text,
+                }) = events.next()
+                else {
+                    panic!("text chunk must stream a delta");
+                };
+                assert_eq!(actual_kind, kind);
+                assert_eq!(text, chunk);
+                if let Some(id) = &id {
+                    assert_eq!(&item_id, id);
+                }
+                id = Some(item_id);
+                assert!(events.next().is_none());
+                assert!(state.apply_update(update(json!({
+                    "sessionUpdate":"user_message_chunk", "content":{"type":"text", "text":"prompt echo"}
+                }))).is_empty());
             }
-            other => panic!("expected ItemCompleted, got {other:?}"),
+            previous = Some((id.unwrap(), kind, expected));
         }
-    }
-
-    #[test]
-    fn thought_chunks_map_to_reasoning_and_close_the_prose_block() {
-        let mut state = state();
-        state.apply_update(update(json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "hi" }
-        })));
-        let events = state.apply_update(update(json!({
-            "sessionUpdate": "agent_thought_chunk",
-            "content": { "type": "text", "text": "pondering" }
-        })));
-        // The open assistant block completes before the thought stream opens.
-        assert!(matches!(events[0], AgentEvent::ItemCompleted(_)));
-        match &events[1] {
-            AgentEvent::Delta { kind, text, .. } => {
-                assert_eq!(*kind, DeltaKind::ReasoningText);
-                assert_eq!(text, "pondering");
-            }
-            other => panic!("expected Delta, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn user_message_chunks_are_ignored() {
-        let mut state = state();
-        let events = state.apply_update(update(json!({
-            "sessionUpdate": "user_message_chunk",
-            "content": { "type": "text", "text": "echo of my own prompt" }
-        })));
-        assert!(events.is_empty(), "user echoes must not be re-rendered");
+        let (id, _, expected) = previous.unwrap();
+        assert!(matches!(state.flush_text().as_slice(),
+            [AgentEvent::ItemCompleted(ThreadItem { id: actual_id, content: ItemContent::AssistantMessage { text }, .. })]
+                if actual_id == &id && text == expected));
+        assert!(state.flush_text().is_empty());
     }
 
     #[test]

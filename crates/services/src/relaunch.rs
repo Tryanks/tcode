@@ -87,59 +87,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_then_take_consumes_the_marker() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-relaunch-test-{}", uuid::Uuid::new_v4()));
+    fn restart_marker_is_consumed_once_and_cancelled_or_corrupt_markers_are_discarded() {
+        let root = std::env::temp_dir().join(format!("tcode-relaunch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-
-        // No marker yet.
         assert_eq!(take(&root), None);
+        clear(&root).unwrap();
 
         let marker = RelaunchMarker {
             reopen_settings: "computer_use".into(),
             active_session: Some("sess-42".into()),
         };
         write(&root, &marker).unwrap();
-
-        // Taking returns it exactly once, then the file is gone.
-        assert_eq!(take(&root), Some(marker));
-        assert!(!marker_path(&root).exists());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("relaunch.json")).unwrap()).unwrap();
+        assert_eq!(
+            persisted,
+            serde_json::json!({
+                "reopen_settings": "computer_use", "active_session": "sess-42"
+            })
+        );
+        assert_eq!(take(&root), Some(marker.clone()));
         assert_eq!(take(&root), None);
 
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn take_removes_a_corrupt_marker() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-relaunch-corrupt-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(marker_path(&root), b"not json").unwrap();
-
+        write(&root, &marker).unwrap();
+        clear(&root).unwrap();
         assert_eq!(take(&root), None);
-        // A corrupt marker is deleted so it can't wedge future launches.
-        assert!(!marker_path(&root).exists());
+        std::fs::write(root.join("relaunch.json"), b"not json").unwrap();
+        assert_eq!(take(&root), None);
+        assert!(!root.join("relaunch.json").exists());
 
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn clear_discards_a_pending_marker() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-relaunch-clear-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        write(
-            &root,
-            &RelaunchMarker {
-                reopen_settings: "computer_use".into(),
-                active_session: None,
-            },
+        std::fs::write(
+            root.join("relaunch.json"),
+            br#"{"reopen_settings":"browser"}"#,
         )
         .unwrap();
-
-        clear(&root).unwrap();
-
-        assert_eq!(take(&root), None);
-        let _ = std::fs::remove_dir_all(root);
+        assert_eq!(
+            take(&root),
+            Some(RelaunchMarker {
+                reopen_settings: "browser".into(),
+                active_session: None,
+            })
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

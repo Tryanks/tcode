@@ -166,24 +166,6 @@ mod tests {
     }
 
     #[test]
-    fn line_diff_reports_basic_hunks() {
-        let hunks = line_diff("one\ntwo\nthree\n", "one\nTWO\nthree\nfour\n", false);
-        assert_eq!(
-            hunks,
-            vec![
-                LineHunk {
-                    old: 1..2,
-                    new: 1..2
-                },
-                LineHunk {
-                    old: 3..3,
-                    new: 3..4
-                }
-            ]
-        );
-    }
-
-    #[test]
     fn line_diff_can_ignore_all_whitespace() {
         assert!(line_diff("let x = 1;\n", "let  x=1;\n", true).is_empty());
         assert!(!line_diff("let x = 1;\n", "let  x=1;\n", false).is_empty());

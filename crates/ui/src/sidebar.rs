@@ -4979,57 +4979,75 @@ mod tests {
             }
         }
         cx.update(crate::theme::init);
-        let root = std::env::temp_dir().join(format!(
-            "tcode-sidebar-virtual-{}",
-            tcode_services::store::now_millis()
-        ));
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let project = Project::from_root(root.join("project"));
-        smol::block_on(host.update_state_for_test(move |state, _| {
-            state.sessions = (0..300)
-                .map(|index| {
-                    let mut meta = session(&format!("virtual-{index}"), None);
-                    meta.project_id = Some(project.id.clone());
-                    meta.updated_at = now_secs().saturating_sub(index);
-                    meta
-                })
-                .collect();
-            state.projects = vec![project];
-        }))
-        .unwrap();
-        let store = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+        let (to_host, _outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = Project::from_root(PathBuf::from("/project"));
+        let sessions = (0..300)
+            .map(|index| {
+                let mut meta = session(&format!("virtual-{index}"), None);
+                meta.project_id = Some(project.id.clone());
+                meta.updated_at = 1_000 - index;
+                meta
+            })
+            .collect();
+        for (topic, event) in [
+            (
+                tcode_protocol::Topic::Settings,
+                tcode_protocol::ServerEvent::SettingsSnapshot(Default::default()),
+            ),
+            (
+                tcode_protocol::Topic::Index,
+                tcode_protocol::ServerEvent::IndexSnapshot(tcode_protocol::IndexSnapshot {
+                    sessions,
+                    projects: vec![project],
+                    activity: Default::default(),
+                    title_generating: Default::default(),
+                }),
+            ),
+        ] {
+            incoming
+                .try_send(
+                    tcode_protocol::encode_line(&tcode_protocol::HostMessage::Event(
+                        tcode_protocol::EventEnvelope {
+                            request_id: None,
+                            topic,
+                            event,
+                        },
+                    ))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        store.update(cx, |store, _| store.select_session("virtual-0".into()));
         let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
         let (page, cx) = cx.add_window_view(|_, cx| SlidingPage {
             sidebar: cx.new(|cx| SessionsSidebar::new(store.clone(), window_state, cx)),
             offset: px(0.),
         });
         let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);
-        // The host answers the index and status subscriptions on its own
-        // thread, and each answer legitimately rebuilds the model. Count those
-        // so a rebuild can be told apart from one the scroll caused.
-        let store_changes = Rc::new(std::cell::Cell::new(0usize));
-        cx.update(|_, cx| {
-            let store_changes = store_changes.clone();
-            cx.subscribe(&store, move |_, change: &StoreChange, _| {
-                if matches!(
-                    change.topic,
-                    TopicKind::Index
-                        | TopicKind::Settings
-                        | TopicKind::ActiveSession
-                        | TopicKind::SessionStatus
-                ) {
-                    store_changes.set(store_changes.get() + 1);
-                }
-            })
-            .detach();
-        });
-        let mut model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
+        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
         assert_eq!(model.rows.len(), 301);
         for (index, selector) in [
             (0, "compact-row-virtual-0"),
@@ -5049,14 +5067,12 @@ mod tests {
                 cx.notify();
             });
             draw(cx);
-            let changes = store_changes.replace(0);
             sidebar.read_with(cx, |sidebar, _| {
                 let current = sidebar.compact_model.as_ref().unwrap();
                 assert!(
-                    Rc::ptr_eq(&model, current) || changes > 0,
+                    Rc::ptr_eq(&model, current),
                     "scrolling must not rebuild families or labels"
                 );
-                model = current.clone();
                 assert!(
                     sidebar.compact_rows_rendered.get() < 40,
                     "one phone viewport must not construct 300 rows: rendered {} at index {index}",
@@ -5082,8 +5098,6 @@ mod tests {
                 "store changes retain the visible thread anchor"
             );
         });
-        host.shutdown_blocking().unwrap();
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[gpui::test]

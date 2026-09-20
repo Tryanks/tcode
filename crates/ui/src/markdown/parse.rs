@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_inline_runs_and_marks() {
+    fn inline_mapping_preserves_combined_marks_and_link_metadata() {
         let p = paragraph("a **bold** *italic* ~~strike~~ `code` [label](https://url \"title\")");
         assert_eq!(p.text(), "a bold italic strike code label");
         let marked = p
@@ -478,10 +478,6 @@ mod tests {
                 .iter()
                 .all(|node| node.marks[0].0 == (0..node.text.len()))
         );
-    }
-
-    #[test]
-    fn merges_nested_emphasis_marks() {
         let p = paragraph("***both***");
         assert_eq!(p.children.len(), 1);
         assert_eq!(p.children[0].text.as_ref(), "both");
@@ -494,19 +490,11 @@ mod tests {
     }
 
     #[test]
-    fn preserves_soft_hard_and_html_breaks() {
+    fn inline_text_preserves_breaks_html_and_escaped_entities() {
         assert_eq!(paragraph("a\nb").text(), "a\nb");
         assert_eq!(paragraph("a  \nb").text(), "a\nb");
         assert_eq!(paragraph("a<br>b").text(), "a\nb");
-    }
-
-    #[test]
-    fn decodes_entities() {
         assert_eq!(paragraph("&#32;x\n&#9;y &amp; z").text(), " x\n\ty & z");
-    }
-
-    #[test]
-    fn resolves_backslash_escapes() {
         // Escaped punctuation loses its backslash (CommonMark).
         assert_eq!(paragraph(r"\*not italic\*").text(), "*not italic*");
         assert_eq!(paragraph(r"\\").text(), r"\");
@@ -517,10 +505,11 @@ mod tests {
         assert_eq!(paragraph(r"\&amp\;").text(), "&amp;");
         // Unescaped entities still decode alongside escapes.
         assert_eq!(paragraph(r"\*&#32;\*").text(), "* *");
+        assert_eq!(paragraph("a<span>b</span>c").text(), "a<span>b</span>c");
     }
 
     #[test]
-    fn maps_task_order_and_spread() {
+    fn list_mapping_preserves_tasks_spacing_and_numbering() {
         let children = root_children("- [x] done\n- [ ] todo\n- plain");
         let BlockNode::List {
             children: items,
@@ -560,10 +549,6 @@ mod tests {
                 .iter()
                 .all(|item| matches!(item, BlockNode::ListItem { spread: true, .. }))
         );
-    }
-
-    #[test]
-    fn keeps_ordered_list_start() {
         let children = root_children("1. one\n\ntext\n\n2. two\n3. three");
         let BlockNode::List { ordered, start, .. } = &children[2] else {
             panic!()
@@ -587,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_fenced_and_indented_code() {
+    fn block_mapping_preserves_code_and_nested_document_structure() {
         let children = root_children("```rust extra\nfn main() {}\n```\n\n    indented\n");
         let BlockNode::CodeBlock(fenced) = &children[0] else {
             panic!()
@@ -599,10 +584,6 @@ mod tests {
         };
         assert_eq!(indented.lang, None);
         assert_eq!(indented.code.as_ref(), "indented\n");
-    }
-
-    #[test]
-    fn maps_blockquote_nesting() {
         let children = root_children("> quote\n>\n> - item");
         let BlockNode::Blockquote { children, .. } = &children[0] else {
             panic!()
@@ -611,43 +592,6 @@ mod tests {
             children.as_slice(),
             [BlockNode::Paragraph(_), BlockNode::List { .. }]
         ));
-    }
-
-    #[test]
-    fn maps_images() {
-        let p = paragraph("![alt](url \"title\")");
-        let image = p.children[0].image.as_ref().unwrap();
-        assert_eq!(image.url.as_ref(), "url");
-        assert_eq!(image.alt.as_deref(), Some("alt"));
-        assert_eq!(image.title(), "title");
-    }
-
-    #[test]
-    fn maps_autolinks_and_gfm_bare_urls() {
-        for source in ["<https://x.com>", "https://x.com"] {
-            let p = paragraph(source);
-            assert_eq!(p.text(), "https://x.com");
-            assert_eq!(
-                p.children[0].marks[0].1.link.as_ref().unwrap().url.as_ref(),
-                "https://x.com"
-            );
-        }
-    }
-
-    #[test]
-    fn rushdown_resolves_reference_links() {
-        let children = root_children("[a][b]\n\n[b]: https://u \"title\"");
-        assert_eq!(children.len(), 1, "definition nodes are skipped");
-        let BlockNode::Paragraph(p) = &children[0] else {
-            panic!()
-        };
-        let link = p.children[0].marks[0].1.link.as_ref().unwrap();
-        assert_eq!(link.url.as_ref(), "https://u");
-        assert_eq!(link.title.as_deref(), Some("title"));
-    }
-
-    #[test]
-    fn maps_all_heading_levels() {
         let children = root_children("# 1\n## 2\n### 3\n#### 4\n##### 5\n###### 6");
         assert_eq!(
             children
@@ -659,10 +603,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5, 6]
         );
-    }
-
-    #[test]
-    fn maps_horizontal_rules() {
         assert!(matches!(
             root_children("---").as_slice(),
             [BlockNode::HorizontalRule]
@@ -670,7 +610,27 @@ mod tests {
     }
 
     #[test]
-    fn preserves_non_break_inline_html() {
-        assert_eq!(paragraph("a<span>b</span>c").text(), "a<span>b</span>c");
+    fn link_mapping_preserves_destinations_titles_and_image_alternatives() {
+        let p = paragraph("![alt](url \"title\")");
+        let image = p.children[0].image.as_ref().unwrap();
+        assert_eq!(image.url.as_ref(), "url");
+        assert_eq!(image.alt.as_deref(), Some("alt"));
+        assert_eq!(image.title(), "title");
+        for source in ["<https://x.com>", "https://x.com"] {
+            let p = paragraph(source);
+            assert_eq!(p.text(), "https://x.com");
+            assert_eq!(
+                p.children[0].marks[0].1.link.as_ref().unwrap().url.as_ref(),
+                "https://x.com"
+            );
+        }
+        let children = root_children("[a][b]\n\n[b]: https://u \"title\"");
+        assert_eq!(children.len(), 1, "definition nodes are skipped");
+        let BlockNode::Paragraph(p) = &children[0] else {
+            panic!()
+        };
+        let link = p.children[0].marks[0].1.link.as_ref().unwrap();
+        assert_eq!(link.url.as_ref(), "https://u");
+        assert_eq!(link.title.as_deref(), Some("title"));
     }
 }

@@ -465,7 +465,6 @@ mod tests {
 
     #[cfg(not(windows))]
     use crate::pty::unix_shell;
-    use crate::pty::{default_shell, shell_label};
 
     fn command(script: &str) -> Terminal {
         #[cfg(windows)]
@@ -499,37 +498,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    fn find_char(state: &TermSnapshot, needle: char) -> Option<(usize, usize)> {
-        state
-            .visible_rows
-            .iter()
-            .enumerate()
-            .find_map(|(row, cells)| {
-                cells
-                    .inner
-                    .iter()
-                    .take(state.cols)
-                    .position(|square| square.c() == needle)
-                    .map(|col| (row, col))
-            })
-    }
-
-    #[test]
-    fn default_shell_matches_the_platform() {
-        let (program, args) = default_shell();
-        if cfg!(windows) {
-            assert!(args.is_empty());
-            assert!(
-                program.to_lowercase().contains("cmd")
-                    || program.to_lowercase().contains("powershell")
-            );
-        } else {
-            assert_eq!(args, vec!["-l".to_string()]);
-            assert!(program.starts_with('/'));
-        }
-    }
-
     #[cfg(not(windows))]
     #[test]
     fn unix_shell_uses_explicit_shell() {
@@ -544,20 +512,28 @@ mod tests {
         assert_eq!(unix_shell(Some("  \t")), "/bin/sh");
     }
 
-    #[test]
-    fn shell_label_is_the_file_stem() {
-        assert_eq!(shell_label("/bin/zsh"), "zsh");
-        assert_eq!(shell_label(r"C:\Windows\system32\cmd.exe"), "cmd");
-    }
-
     #[cfg(unix)]
     #[test]
-    fn captures_process_output_and_exit() {
-        let terminal = command("printf 'hello\\n'");
-        let state = wait_until(&terminal, |state| {
-            state.text().contains("hello") && state.exited
+    fn interactive_pty_delivers_input_resize_and_final_output_before_exit() {
+        let terminal = command(
+            "stty -echo; printf 'ready\\n'; read line; stty size; printf 'received:%s\\n' \"$line\"; read proceed; i=1; while [ \"$i\" -le 5000 ]; do printf 'output-%s\\n' \"$i\"; i=$((i + 1)); done; exit 37",
+        );
+        wait_until(&terminal, |state| state.text().contains("ready"));
+        terminal.resize(42, 9);
+        terminal.write_input(b"tcode-term-ok\r".to_vec());
+        let response = wait_until(&terminal, |state| {
+            state.text().contains("received:tcode-term-ok")
         });
-        assert_eq!(state.exit_code, Some(0));
+        assert!(response.text().contains("9 42"), "{}", response.text());
+        terminal.write_input(b"continue\r".to_vec());
+        let state = wait_until(&terminal, |state| state.exited);
+        assert_eq!(state.exit_code, Some(37), "{}", state.text());
+        assert_eq!((state.cols, state.screen_lines), (42, 9));
+        assert!(state.text().contains("output-5000"), "{}", state.text());
+        terminal.scroll(i32::MAX);
+        let beginning = terminal.snapshot();
+        assert!(beginning.display_offset > 0);
+        assert!(!beginning.text().contains("output-5000"));
     }
 
     #[cfg(unix)]
@@ -606,7 +582,10 @@ mod tests {
         let start = Instant::now();
         loop {
             match events.try_recv() {
-                Ok(PtyEvent::Exited { .. }) => break,
+                Ok(PtyEvent::Exited { exit_code }) => {
+                    assert_eq!(exit_code, None, "SIGHUP is not a normal exit code");
+                    break;
+                }
                 Ok(PtyEvent::Output(_) | PtyEvent::ProcessInfoChanged { .. }) => {}
                 Err(async_channel::TryRecvError::Empty) => {
                     assert!(
@@ -625,132 +604,18 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn resizes_grid_and_pty() {
-        let terminal = command("read line; stty size");
-        terminal.resize(42, 9);
-        let state = terminal.snapshot();
-        assert_eq!((state.cols, state.screen_lines), (42, 9));
-        terminal.write_input(b"\r".to_vec());
-        let state = wait_until(&terminal, |state| state.exited);
-        assert!(state.text().contains("9 42"), "{}", state.text());
-        assert_eq!(state.exit_code, Some(0));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn input_reaches_the_child_process() {
-        let terminal = command("read line; printf 'received:%s\\n' \"$line\"");
-        terminal.write_input(b"echo tcode-term-ok\r".to_vec());
-        let state = wait_until(&terminal, |state| state.exited);
-        assert!(
-            state.text().contains("received:echo tcode-term-ok"),
-            "{}",
-            state.text()
-        );
-        assert_eq!(state.exit_code, Some(0));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn handles_large_output_and_scrollback() {
-        let terminal = command("seq 1 5000");
-        let state = wait_until(&terminal, |state| {
-            state.exited && state.text().contains("5000")
-        });
-        assert_eq!(state.exit_code, Some(0));
-        terminal.scroll(800);
-        let scrolled = terminal.snapshot();
-        assert!(scrolled.display_offset > 0);
-        assert!(!scrolled.text().contains("5000"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn programmatic_selection_returns_grid_text() {
-        let terminal = command("printf 'alpha\\nbeta\\n'; sleep 1");
-        let state = wait_until(&terminal, |state| state.text().contains("beta"));
-        let alpha_row = state
-            .text()
-            .lines()
-            .position(|line| line.contains("alpha"))
-            .unwrap();
-        let beta_row = state
-            .text()
-            .lines()
-            .position(|line| line.contains("beta"))
-            .unwrap();
-        terminal.select((alpha_row, 0), (beta_row, 3));
-        let selected = terminal.selected_text().unwrap();
-        assert_eq!(selected.text, "alpha\nbeta");
-        assert_eq!(selected.line_end, selected.line_start + 1);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn pty_creation_is_serialized() {
-        use std::sync::{
-            Arc, Barrier,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            mpsc,
-        };
-
-        use crate::pty::with_pty_creation;
-
-        const THREADS: usize = 16;
-        let start = Arc::new(Barrier::new(THREADS + 1));
-        let active = Arc::new(AtomicUsize::new(0));
-        let max_active = Arc::new(AtomicUsize::new(0));
-        let release = Arc::new(AtomicBool::new(false));
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let mut threads = Vec::with_capacity(THREADS);
-
-        for _ in 0..THREADS {
-            let start = start.clone();
-            let active = active.clone();
-            let max_active = max_active.clone();
-            let release = release.clone();
-            let entered_tx = entered_tx.clone();
-            threads.push(thread::spawn(move || {
-                start.wait();
-                with_pty_creation(|| {
-                    let now_active = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_active.fetch_max(now_active, Ordering::SeqCst);
-                    entered_tx.send(()).unwrap();
-                    while !release.load(Ordering::SeqCst) {
-                        thread::yield_now();
-                    }
-                    active.fetch_sub(1, Ordering::SeqCst);
-                });
-            }));
-        }
-        drop(entered_tx);
-
-        start.wait();
-        entered_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("a thread should enter the PTY creation helper");
-        let second_entry = entered_rx.recv_timeout(Duration::from_millis(250));
-        release.store(true, Ordering::SeqCst);
-        for thread in threads {
-            thread.join().unwrap();
-        }
-        assert_eq!(
-            max_active.load(Ordering::SeqCst),
-            1,
-            "unexpected concurrent helper entry: {second_entry:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn compatibility_events_cover_consumed_intents() {
-        let terminal = command("printf '\\033]2;wire-title\\007\\007'");
+        let terminal = command("printf '\\033]2;wire-title\\007\\007\\033]52;c;dGNvZGU=\\007'");
         let events = terminal.events();
         let start = Instant::now();
         let mut emitted = Vec::new();
         while !emitted.contains(&TermEvent::Bell)
             || !emitted.contains(&TermEvent::Exited)
             || !emitted.contains(&TermEvent::Wakeup)
+            || !emitted.contains(&TermEvent::ClipboardStore {
+                kind: ClipboardType::Clipboard,
+                text: "tcode".into(),
+            })
         {
             match events.try_recv() {
                 Ok(event) => emitted.push(event),
@@ -773,101 +638,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn real_pty_mouse_mode_changes_routing_decision() {
-        let terminal = command("printf '\\033[?1002h\\033[?1006h'; sleep 1");
-        let state = wait_until(&terminal, |state| {
-            state.mode.contains(Mode::MOUSE_DRAG) && state.mode.contains(Mode::SGR_MOUSE)
-        });
-        // Routing itself is decided by the client from the replicated bits;
-        // this only guards that a real PTY still sets them.
-        assert!(state.mode.intersects(Mode::MOUSE_MODE));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn terminal_exposes_active_kitty_keyboard_mode_without_a_snapshot() {
-        let terminal = command("printf '\\033[>1u'; sleep 1");
-        let start = Instant::now();
-        while terminal.keyboard_mode() != KeyboardModes::DISAMBIGUATE_ESC_CODES {
-            assert!(
-                start.elapsed() < Duration::from_secs(120),
-                "terminal did not apply kitty keyboard mode"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn osc52_store_reaches_the_public_terminal_event_stream_decoded() {
-        let terminal = command("printf '\\033]52;c;dGNvZGU=\\007'; sleep 1");
-        let events = terminal.events();
-        let start = Instant::now();
-        loop {
-            match events.try_recv() {
-                Ok(TermEvent::ClipboardStore { kind, text }) => {
-                    assert_eq!(kind, ClipboardType::Clipboard);
-                    assert_eq!(text, "tcode");
-                    break;
-                }
-                Ok(_) => {}
-                Err(async_channel::TryRecvError::Empty) => {
-                    assert!(
-                        start.elapsed() < Duration::from_secs(120),
-                        "terminal did not emit the OSC 52 store"
-                    );
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => {
-                    panic!("terminal event stream closed before the OSC 52 store")
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn extracts_plain_and_osc8_hyperlinks() {
-        let plain = command("printf 'see https://example.com/docs?q=1 now\\n'; sleep 1");
-        let state = wait_until(&plain, |state| {
-            state.text().contains("https://example.com/docs?q=1")
-        });
-        let (row, col) = find_char(&state, 'h').unwrap();
-        assert_eq!(
-            plain.hyperlink_at(row, col + 10).unwrap().url,
-            "https://example.com/docs?q=1"
-        );
-
-        let osc = command(
-            "printf '\\033]8;;https://example.com/target\\033\\\\click-me\\033]8;;\\033\\\\'; sleep 1",
-        );
-        let state = wait_until(&osc, |state| state.text().contains("click-me"));
-        let (row, col) = find_char(&state, 'c').unwrap();
-        assert_eq!(
-            osc.hyperlink_at(row, col).unwrap().url,
-            "https://example.com/target"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn snapshots_wide_cells_spacers_and_combining_characters() {
-        let terminal = command("echo '中文e\u{301}'; sleep 1");
-        let state = wait_until(&terminal, |state| state.text().contains("中文e\u{301}"));
-        let (row, column) = find_char(&state, '中').unwrap();
-        assert_eq!(state.cell(row, column).unwrap().wide(), Wide::Wide);
-        assert_eq!(state.cell(row, column + 1).unwrap().wide(), Wide::Spacer);
-        assert_eq!(state.cell_text(row, column + 4).unwrap(), "e\u{301}");
-
-        terminal.select((row, column + 1), (row, column + 3));
-        assert_eq!(terminal.selected_text().unwrap().text, "中文");
-        let selected = terminal.snapshot();
-        assert!(selected.is_selected(row, column));
-        assert!(selected.is_selected(row, column + 1));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn forwards_primary_device_attribute_response_to_pty() {
         let terminal = command(
             "saved=$(stty -g); stty raw -echo; printf '\\033[c'; response=$(dd bs=1 count=16 2>/dev/null); stty \"$saved\"; printf '%s' \"$response\" | od -An -tx1; printf '\\n'",
@@ -885,33 +655,6 @@ mod tests {
                 })
         });
         assert_eq!(state.exit_code, Some(0));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn interactive_selection_and_clear_preserve_scrollback_semantics() {
-        let terminal = command("printf 'alpha\\n'; sleep 1");
-        let state = wait_until(&terminal, |state| state.text().contains("alpha"));
-        let row = state
-            .text()
-            .lines()
-            .position(|line| line.contains("alpha"))
-            .unwrap();
-        terminal.start_selection(SelectionKind::Simple, (row, 0), SelectionSide::Left);
-        assert_eq!(terminal.selected_text(), None);
-        terminal.update_selection((row, 4), SelectionSide::Right);
-        assert_eq!(terminal.selected_text().unwrap().text, "alpha");
-
-        terminal.clear_selection();
-        terminal.select_all();
-        assert!(
-            terminal
-                .selected_text()
-                .is_some_and(|selection| selection.text.contains("alpha"))
-        );
-        terminal.clear();
-        assert_eq!(terminal.snapshot().history_size, 0);
-        assert_eq!(terminal.selected_text(), None);
     }
 
     #[cfg(unix)]

@@ -201,6 +201,10 @@ mod tests {
         assert_eq!(usage.windows[0].scope, None);
         assert_eq!(usage.windows[0].used_percent, 88.0);
         assert_eq!(usage.windows[0].resets_at, Some(1_788_762_144));
+
+        let usage = parse_codex_rate_limits(&json!({ "rateLimits": null }), 45);
+        assert_eq!(usage.error.as_deref(), Some("no rate limits reported"));
+        assert!(usage.windows.is_empty());
     }
 
     #[test]
@@ -219,22 +223,11 @@ mod tests {
         assert_eq!(usage.windows[2].kind, UsageWindowKind::Weekly);
         assert_eq!(usage.windows[2].scope.as_deref(), Some("Fable"));
         assert_eq!(usage.windows[2].used_percent, 79.0);
-    }
-
-    #[test]
-    fn unavailable_claude_usage_is_an_error() {
         let usage = parse_claude_usage(
             &json!({ "subscription_type": null, "rate_limits_available": false }),
             44,
         );
         assert_eq!(usage.error.as_deref(), Some("usage not available"));
-        assert!(usage.windows.is_empty());
-    }
-
-    #[test]
-    fn absent_codex_limits_are_an_error() {
-        let usage = parse_codex_rate_limits(&json!({ "rateLimits": null }), 45);
-        assert_eq!(usage.error.as_deref(), Some("no rate limits reported"));
         assert!(usage.windows.is_empty());
     }
 

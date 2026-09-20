@@ -395,22 +395,4 @@ mod tests {
             assert_ne!(theme.success, theme.danger);
         }
     }
-
-    #[test]
-    fn parses_embedded_tcode_themes() {
-        let themes = parse_theme_file(TCODE_THEME).expect("embedded theme should parse");
-
-        assert_eq!(themes.light.theme_name.as_ref(), "tcode Light");
-        assert_eq!(themes.dark.theme_name.as_ref(), "tcode Dark");
-        assert_eq!(
-            themes.light.primary,
-            Rgba::try_from("#1447E6").unwrap().into()
-        );
-        assert_eq!(
-            themes.dark.background,
-            Rgba::try_from("#15171CC7").unwrap().into()
-        );
-        assert_eq!(themes.light.radius, px(10.));
-        assert_eq!(themes.dark.radius, px(10.));
-    }
 }

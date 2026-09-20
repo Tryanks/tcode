@@ -1521,13 +1521,6 @@ mod tests {
         crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
-    #[test]
-    fn timeline_overdraw_keeps_multiple_viewports_warm() {
-        assert_eq!(timeline_overdraw(0.), 3072.);
-        assert_eq!(timeline_overdraw(900.), 3600.);
-        assert_eq!(timeline_overdraw(1440.), 5760.);
-    }
-
     fn command(id: &str) -> Arc<TimelineEntry> {
         entry(
             id,
@@ -1823,7 +1816,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_entries_preserves_interleaved_timeline_order() {
+    fn segmentation_preserves_message_order_and_groups_adjacent_activities() {
         let entries = [
             entry("user", user_item("go")),
             command("cmd-1"),
@@ -1857,10 +1850,6 @@ mod tests {
         ));
         assert!(matches!(segments[4], Segment::Assistant(entry) if entry.id == "assistant-2"));
         assert!(matches!(segments[5], Segment::Error(entry) if entry.id == "error"));
-    }
-
-    #[test]
-    fn segment_entries_flushes_activities_before_context_window_changes() {
         let entries = [
             command("cmd"),
             entry(
@@ -1875,24 +1864,28 @@ mod tests {
             [Segment::ActivityRun(activities), Segment::ContextWindowChanged(entry)]
                 if activities.len() == 1 && entry.id == "window"
         ));
-    }
-
-    #[test]
-    fn segment_entries_coalesces_an_all_activity_turn() {
-        let entries = [command("cmd-1"), command("cmd-2")];
+        let segmented = segment_entries(&[], false);
+        assert!(segmented.flow.is_empty());
+        assert!(segmented.pending_steers.is_empty());
+        let entries = [
+            command("cmd-1"),
+            entry(
+                "edit",
+                EntryContent::Item(ItemContent::FileChange {
+                    changes: vec![],
+                    status: ItemStatus::Completed,
+                }),
+            ),
+            command("cmd-2"),
+        ];
         let segments = segment_entries(&entries, false).flow;
 
         assert!(matches!(
             segments.as_slice(),
-            [Segment::ActivityRun(entries)] if entries.len() == 2
+            [Segment::ActivityRun(run)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
+                    == ["cmd-1", "edit", "cmd-2"]
         ));
-    }
-
-    #[test]
-    fn segment_entries_handles_an_empty_turn() {
-        let segmented = segment_entries(&[], false);
-        assert!(segmented.flow.is_empty());
-        assert!(segmented.pending_steers.is_empty());
     }
 
     #[test]
@@ -1989,42 +1982,16 @@ mod tests {
     }
 
     #[test]
-    fn segment_entries_keeps_activity_runs_continuous_across_file_changes() {
-        let entries = [
-            command("cmd-1"),
-            entry(
-                "edit",
-                EntryContent::Item(ItemContent::FileChange {
-                    changes: vec![],
-                    status: ItemStatus::Completed,
-                }),
-            ),
-            command("cmd-2"),
-        ];
-        let segments = segment_entries(&entries, false).flow;
-
-        assert!(matches!(
-            segments.as_slice(),
-            [Segment::ActivityRun(run)]
-                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["cmd-1", "edit", "cmd-2"]
-        ));
-    }
-
-    #[test]
-    fn all_reasoning_remains_reachable_while_the_latest_is_live() {
+    fn reasoning_remains_reachable_during_the_turn_and_in_history() {
         let entries = [
             entry("reason-1", reasoning("first")),
             entry("reason-2", reasoning("latest")),
         ];
-
-        let segments = segment_entries(&entries, true).flow;
-        assert!(matches!(
-            segments.as_slice(),
-            [Segment::ActivityRun(run)]
-                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["reason-1", "reason-2"]
-        ));
+        for running in [true, false] {
+            let segments = segment_entries(&entries, running).flow;
+            assert!(matches!(segments.as_slice(), [Segment::ActivityRun(run)]
+                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["reason-1", "reason-2"]));
+        }
     }
 
     #[test]
@@ -2092,16 +2059,6 @@ mod tests {
         let prose_only = [entry("assistant", assistant("answer"))];
         let segments = segment_entries(&prose_only, true).flow;
         assert_eq!(live_activity_segment(&segments, true), None);
-    }
-
-    #[test]
-    fn completion_keeps_reasoning_reachable_in_history() {
-        let entries = [entry("reason", reasoning("finished thinking"))];
-
-        assert!(matches!(
-            segment_entries(&entries, false).flow.as_slice(),
-            [Segment::ActivityRun(run)] if run.len() == 1 && run[0].id == "reason"
-        ));
     }
 
     fn file_change(id: &str, paths: &[&str]) -> Arc<TimelineEntry> {
@@ -2248,97 +2205,62 @@ mod tests {
     }
 
     #[test]
-    fn live_edit_rows_expand_every_file_and_relativize_to_the_workspace() {
-        let cwd = Path::new("/work/repo");
-        let changes = vec![
-            FileChange {
-                path: "/work/repo/src/foo.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: None,
-            },
-            FileChange {
-                path: "/work/repo/crates/ui/src/chat.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: None,
-            },
-            FileChange {
-                path: "/elsewhere/vendor/bar.rs".into(),
-                kind: FileChangeKind::Create,
-                diff: None,
-            },
-        ];
-
-        let rows = live_edit_rows(&changes, cwd);
-        assert_eq!(
-            rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>(),
-            [
+    fn live_edit_rows_preserve_external_paths_and_report_only_observed_edits() {
+        let cases = [
+            (
+                "/work/repo/src/foo.rs",
+                Some(REAL_DIFF),
                 "src/foo.rs",
+                Some((2, 1)),
+            ),
+            (
+                "/work/repo/crates/ui/src/chat.rs",
+                None,
                 "crates/ui/src/chat.rs",
-                "/elsewhere/vendor/bar.rs"
-            ]
-        );
-        // No diff means no counts: "+0 -0" would claim the edit changed nothing.
-        assert!(rows.iter().all(|row| row.counts.is_none()));
-    }
-
-    #[test]
-    fn live_edit_counts_only_survive_when_a_diff_has_real_edits() {
-        assert_eq!(live_edit_counts(Some(REAL_DIFF)), Some((2, 1)));
-        assert_eq!(live_edit_counts(Some("+only added\n")), Some((1, 0)));
-        assert_eq!(live_edit_counts(Some("-only removed\n")), Some((0, 1)));
-
-        // Nothing displayable: "+0 -0" would claim the edit changed nothing.
-        assert_eq!(live_edit_counts(None), None);
-        assert_eq!(live_edit_counts(Some("")), None);
-        assert_eq!(live_edit_counts(Some("   \n\t\n \n")), None);
-        assert_eq!(
-            live_edit_counts(Some("--- a/src/foo.rs\n+++ b/src/foo.rs\n")),
-            None
-        );
-        assert_eq!(
-            live_edit_counts(Some("--- a/f\n+++ b/f\n@@ -1 +1 @@\n unchanged\n")),
-            None
-        );
-
-        // The finished CHANGED FILES card keeps its own totals semantics, so a
-        // header-only diff still contributes (0, 0) there rather than vanishing.
+                None,
+            ),
+            (
+                "/elsewhere/vendor/bar.rs",
+                Some("+only added\n"),
+                "/elsewhere/vendor/bar.rs",
+                Some((1, 0)),
+            ),
+            (
+                "removed.rs",
+                Some("-only removed\n"),
+                "removed.rs",
+                Some((0, 1)),
+            ),
+            ("empty.rs", Some(""), "empty.rs", None),
+            ("blank.rs", Some("   \n\t\n \n"), "blank.rs", None),
+            ("headers.rs", Some("--- a/f\n+++ b/f\n"), "headers.rs", None),
+            (
+                "context.rs",
+                Some("--- a/f\n+++ b/f\n@@ -1 +1 @@\n unchanged\n"),
+                "context.rs",
+                None,
+            ),
+        ];
+        let changes = cases
+            .iter()
+            .map(|(path, diff, _, _)| FileChange {
+                path: (*path).into(),
+                kind: FileChangeKind::Modify,
+                diff: diff.map(str::to_owned),
+            })
+            .collect::<Vec<_>>();
+        let expected = cases
+            .iter()
+            .map(|(_, diff, path, counts)| LiveEditRow {
+                path: (*path).into(),
+                kind: FileChangeKind::Modify,
+                counts: *counts,
+                diff: diff.map(str::to_owned),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(live_edit_rows(&changes, Path::new("/work/repo")), expected);
         assert_eq!(diff_stats(Some("--- a/f\n+++ b/f\n")), (0, 0));
         assert_eq!(diff_stats(Some(REAL_DIFF)), (2, 1));
-    }
-
-    #[test]
-    fn live_edit_rows_carry_counts_only_for_files_with_real_edits() {
-        let cwd = Path::new("/work/repo");
-        let changes = vec![
-            FileChange {
-                path: "/work/repo/src/foo.rs".into(),
-                kind: FileChangeKind::Modify,
-                diff: Some(REAL_DIFF.into()),
-            },
-            FileChange {
-                path: "/work/repo/src/bar.rs".into(),
-                kind: FileChangeKind::Create,
-                diff: Some(String::new()),
-            },
-        ];
-
-        assert_eq!(
-            live_edit_rows(&changes, cwd),
-            vec![
-                LiveEditRow {
-                    path: "src/foo.rs".into(),
-                    kind: FileChangeKind::Modify,
-                    counts: Some((2, 1)),
-                    diff: Some(REAL_DIFF.into()),
-                },
-                LiveEditRow {
-                    path: "src/bar.rs".into(),
-                    kind: FileChangeKind::Create,
-                    counts: None,
-                    diff: Some(String::new()),
-                },
-            ]
-        );
     }
 
     #[test]

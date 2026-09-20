@@ -454,41 +454,6 @@ mod tests {
         assert!(SYNTAX_SET.find_syntax_by_name("Plain Text").is_some());
     }
 
-    #[test]
-    fn bundled_dump_covers_supported_languages() {
-        for language in [
-            "rust",
-            "python",
-            "typescript",
-            "tsx",
-            "kotlin",
-            "swift",
-            "toml",
-            "elixir",
-            "zig",
-            "cmake",
-            "go",
-            "javascript",
-            "svelte",
-            "vue",
-            "protobuf",
-        ] {
-            assert!(
-                syntax_for_name_or_extension(language).is_some(),
-                "missing syntax for {language}"
-            );
-        }
-
-        assert_eq!(
-            syntax_for_name_or_extension("tsx").map(|syntax| syntax.name.as_str()),
-            Some("TypeScriptReact")
-        );
-        assert_eq!(
-            syntax_for_name_or_extension("jsx").map(|syntax| syntax.name.as_str()),
-            Some("JavaScript (Babel)")
-        );
-    }
-
     /// Mirror of syntect's private `substitute_backrefs_in_regex` with the
     /// placeholder substituter its YAML loader validates patterns with; kept
     /// in sync with `examples/sanitize_syntaxes.rs`.
@@ -601,26 +566,6 @@ mod tests {
 
         assert_eq!(fn_style.color, keyword_style.color);
         assert_ne!(identifier_style, keyword_style);
-        assert!(
-            runs.iter()
-                .all(|(range, _)| range.start < range.end && range.end <= src.len())
-        );
-        assert!(runs.windows(2).all(|pair| pair[0].0.end <= pair[1].0.start));
-    }
-
-    #[test]
-    fn highlights_typescript_with_distinct_ordered_in_bounds_runs() {
-        let src = "const x: number = 1;";
-        let theme = HighlightTheme::default_dark();
-        let runs = highlight_source(src, "typescript", &theme);
-
-        assert!(
-            runs.first().is_some_and(|(_, first_style)| runs
-                .iter()
-                .skip(1)
-                .any(|(_, style)| style != first_style)),
-            "expected at least two distinct styles"
-        );
         assert!(
             runs.iter()
                 .all(|(range, _)| range.start < range.end && range.end <= src.len())

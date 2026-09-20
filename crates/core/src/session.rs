@@ -2903,46 +2903,25 @@ mod tests {
     }
 
     #[test]
-    fn user_message_context_len_survives_a_serde_roundtrip() {
-        let event = user_msg_with_context("u1", "PREFIX\n\nvisible", Some(8));
-        let encoded = serde_json::to_string(&event).unwrap();
-        // The annotation is present in the wire form when set…
-        assert!(encoded.contains("\"context_len\":8"));
-        let decoded: AgentEvent = serde_json::from_str(&encoded).unwrap();
-        let timeline = Timeline::fold_events([decoded]);
-        assert!(matches!(
-            &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::UserMessage { text, context_len: Some(8), .. }) if text == "PREFIX\n\nvisible"
-        ));
-
-        // …and omitted entirely when absent (skip_serializing_if).
-        let plain = user_msg_with_context("u2", "hello", None);
-        let plain_encoded = serde_json::to_string(&plain).unwrap();
-        assert!(!plain_encoded.contains("context_len"));
-    }
-
-    #[test]
-    fn old_format_user_message_without_the_field_folds_to_a_plain_bubble() {
-        // A JSONL line written before the annotation existed carries no field.
-        let legacy = r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"just words"}}"#;
-        let event: AgentEvent = serde_json::from_str(legacy).unwrap();
-        let timeline = Timeline::fold_events([event]);
-        assert!(matches!(
-            &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::UserMessage { text, context_len: None, .. }) if text == "just words"
-        ));
-    }
-
-    fn user_msg_with_context(id: &str, text: &str, context_len: Option<usize>) -> AgentEvent {
-        AgentEvent::ItemCompleted(ThreadItem {
-            id: id.into(),
-            parent_item_id: None,
-            content: ItemContent::UserMessage {
-                text: text.into(),
-                context_len,
-                attachments: Vec::new(),
-            },
-        })
+    fn stored_user_messages_keep_injected_context_and_accept_older_plain_messages() {
+        for (record, expected_text, expected_context) in [
+            (
+                r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"just words"}}"#,
+                "just words",
+                None,
+            ),
+            (
+                r#"{"type":"item_completed","id":"u1","content":{"kind":"user_message","text":"PREFIX\n\nvisible","context_len":8}}"#,
+                "PREFIX\n\nvisible",
+                Some(8),
+            ),
+        ] {
+            let event: AgentEvent = serde_json::from_str(record).unwrap();
+            let timeline = Timeline::fold_events([event]);
+            assert!(matches!(&timeline.entries[0].content,
+                EntryContent::Item(ItemContent::UserMessage { text, context_len, .. })
+                    if text == expected_text && *context_len == expected_context));
+        }
     }
 
     fn at(ts: u64, event: AgentEvent) -> StoredEvent {
@@ -3093,76 +3072,67 @@ mod tests {
     }
 
     #[test]
-    fn repeated_updates_do_not_restart_an_open_tool_interval() {
-        let timing = timing_of(vec![
-            at(0, turn_started()),
-            started(1_000, running("a")),
-            updated(1_400, running("a")),
-            updated(2_200, running("a")),
-            completed(3_000, ran("a")),
-            // Re-using the same id after completion opens a fresh interval.
-            started(4_000, running("a")),
-            completed(4_500, ran("a")),
-            at(6_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.tool_ms, 2_500);
-        assert_eq!(timing.total_ms, 6_000);
-    }
-
-    #[test]
-    fn a_tool_first_seen_as_an_in_progress_update_still_opens_its_interval() {
-        let timing = timing_of(vec![
-            at(0, turn_started()),
-            // No ItemStarted: some providers announce the item mid-flight.
-            updated(1_000, running("a")),
-            completed(2_500, ran("a")),
-            at(5_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.tool_ms, 1_500);
-        assert_eq!(timing.total_ms, 5_000);
-    }
-
-    #[test]
-    fn a_failed_tool_still_closes_its_interval() {
-        let timing = timing_of(vec![
-            at(0, turn_started()),
-            started(1_000, running("a")),
-            updated(2_000, command("a", ItemStatus::Failed)),
-            at(5_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.tool_ms, 1_000);
-    }
-
-    #[test]
-    fn an_ai_only_turn_reports_a_zero_tool_share() {
-        let timing = timing_of(vec![
-            at(1_000, turn_started()),
-            at(2_000, assistant("m1", "thinking out loud")),
-            at(9_000, turn_completed()),
-        ])
-        .expect("an AI-only turn still has a breakdown");
-
-        assert_eq!(timing.total_ms, 8_000);
-        assert_eq!(timing.tool_ms, 0);
-    }
-
-    #[test]
-    fn a_tool_left_open_is_charged_up_to_the_turn_end() {
-        let timing = timing_of(vec![
-            at(1_000, turn_started()),
-            started(2_000, running("a")),
-            at(5_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.tool_ms, 3_000);
-        assert_eq!(timing.total_ms, 4_000);
+    fn tool_timing_follows_lifecycle_including_updates_failures_and_reused_ids() {
+        for (label, activity, expected_tool_ms) in [
+            (
+                "updates and reused id",
+                vec![
+                    started(1_000, running("a")),
+                    updated(1_400, running("a")),
+                    updated(2_200, running("a")),
+                    completed(3_000, ran("a")),
+                    started(4_000, running("a")),
+                    completed(4_500, ran("a")),
+                ],
+                2_500,
+            ),
+            (
+                "missing start",
+                vec![updated(1_000, running("a")), completed(2_500, ran("a"))],
+                1_500,
+            ),
+            (
+                "failed",
+                vec![
+                    started(1_000, running("a")),
+                    updated(2_000, command("a", ItemStatus::Failed)),
+                ],
+                1_000,
+            ),
+            (
+                "start carries terminal status",
+                vec![started(1_000, ran("a")), completed(3_000, ran("a"))],
+                2_000,
+            ),
+            (
+                "statusless web search",
+                vec![
+                    started(2_000, web_search("a")),
+                    updated(3_000, web_search("a")),
+                    completed(4_500, web_search("a")),
+                ],
+                2_500,
+            ),
+            (
+                "statusless provider item",
+                vec![
+                    started(2_000, other_item("a")),
+                    updated(3_000, other_item("a")),
+                    completed(4_500, other_item("a")),
+                ],
+                2_500,
+            ),
+        ] {
+            let mut events = vec![at(0, turn_started())];
+            events.extend(activity);
+            events.push(at(6_000, turn_completed()));
+            let timing = timing_of(events).unwrap_or_else(|| panic!("{label}: missing timing"));
+            assert_eq!(
+                (timing.total_ms, timing.tool_ms),
+                (6_000, expected_tool_ms),
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -3223,75 +3193,50 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_interval_wholly_before_the_turn_start_is_discarded() {
-        // Work from the previous exchange closes while this turn's user message
-        // is already open; only the in-bounds interval may be charged.
-        let timing = timing_of(vec![
-            at(1_000, user_msg("u1", "go")),
-            started(1_100, running("stale")),
-            completed(2_000, ran("stale")),
-            at(5_000, turn_started()),
-            started(6_000, running("a")),
-            completed(6_500, ran("a")),
-            at(9_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.total_ms, 4_000);
-        assert_eq!(timing.tool_ms, 500);
-    }
-
-    #[test]
-    fn a_tool_straddling_the_turn_start_counts_only_from_the_start() {
-        let timing = timing_of(vec![
-            at(1_000, user_msg("u1", "go")),
-            started(1_100, running("a")),
-            at(5_000, turn_started()),
-            completed(6_000, ran("a")),
-            at(9_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.total_ms, 4_000);
-        // [1_100, 6_000] intersected with [5_000, 9_000] is 1_000ms, not 4_900.
-        assert_eq!(timing.tool_ms, 1_000);
-    }
-
-    #[test]
-    fn statusless_tool_items_are_timed_by_their_lifecycle_events() {
-        for (label, item) in [
-            ("web search", web_search as fn(&str) -> ThreadItem),
-            ("other", other_item as fn(&str) -> ThreadItem),
+    fn timing_charges_only_tool_intervals_inside_the_observed_turn() {
+        for (label, activity, expected_tool_ms) in [
+            (
+                "before turn",
+                vec![
+                    started(1_100, running("a")),
+                    completed(2_000, ran("a")),
+                    at(5_000, turn_started()),
+                ],
+                0,
+            ),
+            (
+                "straddling start",
+                vec![
+                    started(1_100, running("a")),
+                    at(5_000, turn_started()),
+                    completed(6_000, ran("a")),
+                ],
+                1_000,
+            ),
+            (
+                "unfinished tool",
+                vec![at(5_000, turn_started()), started(6_000, running("a"))],
+                3_000,
+            ),
+            (
+                "model only",
+                vec![
+                    at(5_000, turn_started()),
+                    at(6_000, assistant("a", "answer")),
+                ],
+                0,
+            ),
         ] {
-            let timing = timing_of(vec![
-                at(1_000, turn_started()),
-                started(2_000, item("t")),
-                // A statusless update keeps the item active rather than
-                // silently closing it.
-                updated(3_000, item("t")),
-                completed(4_500, item("t")),
-                at(6_000, turn_completed()),
-            ])
-            .unwrap_or_else(|| panic!("{label}: a timestamped turn has a breakdown"));
-
-            assert_eq!(timing.total_ms, 5_000, "{label}");
-            assert_eq!(timing.tool_ms, 2_500, "{label}");
+            let mut events = vec![at(1_000, user_msg("u1", "go"))];
+            events.extend(activity);
+            events.push(at(9_000, turn_completed()));
+            let timing = timing_of(events).unwrap_or_else(|| panic!("{label}: missing timing"));
+            assert_eq!(
+                (timing.total_ms, timing.tool_ms),
+                (4_000, expected_tool_ms),
+                "{label}"
+            );
         }
-    }
-
-    #[test]
-    fn a_started_tool_opens_even_when_its_snapshot_claims_to_be_finished() {
-        // Providers that stamp a terminal status on the opening snapshot still
-        // describe a real interval; the lifecycle variant is authoritative.
-        let timing = timing_of(vec![
-            at(0, turn_started()),
-            started(1_000, ran("a")),
-            completed(3_000, ran("a")),
-            at(5_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.tool_ms, 2_000);
     }
 
     #[test]

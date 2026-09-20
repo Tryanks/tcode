@@ -32,9 +32,12 @@ class Workspace:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.rail = rail
-        self.git("init", "-q")
+        self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "CI scope test")
         self.git("config", "user.email", "ci@example.test")
+        self.git("config", "commit.gpgsign", "false")
+        self.git("config", "core.hooksPath", ".no-hooks")
+        self.git("config", "core.autocrlf", "false")
         self.write(
             "Cargo.toml",
             """[workspace]
@@ -226,50 +229,21 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(push["full"], "true")
 
-    def test_rail_scopes_leaf_and_reverse_dependent_source_changes(self) -> None:
-        leaf = self.workspace.scenario(
-            "leaf", lambda: self.workspace.write("crates/app/src/lib.rs", "pub fn changed() {}\n")
-        )
-        leaf_plan = self.workspace.rail_plan(leaf)
-        self.assertEqual(
-            leaf_plan["work"]["cargo.test"]["scope"]["selection"]["cargo_args"],
-            ["-p", "tcode"],
-        )
-        core = self.workspace.scenario(
-            "core", lambda: self.workspace.write("crates/core/src/lib.rs", "pub fn changed() {}\n")
-        )
-        core_plan = self.workspace.rail_plan(core)
-        args = core_plan["work"]["cargo.test"]["scope"]["selection"]["cargo_args"]
-        self.assertIn("tcode", args)
-        self.assertIn("tcode-core", args)
-        self.assertNotIn("tcode-unrelated", args)
-
-    def test_platform_scope_uses_modified_owner_not_host_reverse_closure(self) -> None:
-        runtime = self.workspace.scenario(
-            "runtime", lambda: self.workspace.write("crates/runtime/src/lib.rs", "pub fn changed() {}\n")
-        )
-        classification = self.classified(runtime)
-        result, final = self.workspace.finalize(runtime, classification, self.workspace.rail_plan(runtime))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((final["ios"], final["android"], final["web"]), ("false", "false", "false"))
-
-        ui = self.workspace.scenario(
-            "ui", lambda: self.workspace.write("crates/ui/src/lib.rs", "pub fn changed() {}\n")
-        )
-        classification = self.classified(ui)
-        result, final = self.workspace.finalize(ui, classification, self.workspace.rail_plan(ui))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((final["ios"], final["android"], final["web"]), ("true", "true", "true"))
-
-    def test_excluded_local_path_owner_selects_matching_platform(self) -> None:
-        head = self.workspace.scenario(
-            "gpui-ios",
-            lambda: self.workspace.write("crates/platform/gpui-ios/src/lib.rs", "pub fn changed() {}\n"),
-        )
-        classification = self.classified(head)
-        result, final = self.workspace.finalize(head, classification, self.workspace.rail_plan(head))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((final["ios"], final["android"], final["web"]), ("true", "false", "false"))
+    def test_platform_scope_follows_the_modified_owner_including_local_paths_and_test_modules(self) -> None:
+        for name, path, expected in [
+            ("runtime", "crates/runtime/src/lib.rs", ("false", "false", "false")),
+            ("ui", "crates/ui/src/lib.rs", ("true", "true", "true")),
+            ("gpui-ios", "crates/platform/gpui-ios/src/lib.rs", ("true", "false", "false")),
+            ("src-tests", "crates/ui/src/tests/helpers.rs", ("true", "true", "true")),
+        ]:
+            with self.subTest(owner=name):
+                head = self.workspace.scenario(
+                    name, lambda: self.workspace.write(path, "pub fn changed() {}\n")
+                )
+                classification = self.classified(head)
+                result, final = self.workspace.finalize(head, classification, self.workspace.rail_plan(head))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((final["ios"], final["android"], final["web"]), expected)
 
     def test_unknown_config_and_prompt_delete_or_rename_force_full(self) -> None:
         scenarios = {
@@ -316,14 +290,6 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(final["host_full"], "true")
         self.assertEqual(final["desktop"], "true")
 
-    def test_src_tests_module_is_not_treated_as_dev_only(self) -> None:
-        head = self.workspace.scenario(
-            "src-tests", lambda: self.workspace.write("crates/ui/src/tests/helpers.rs", "pub fn changed() {}\n")
-        )
-        classification = self.classified(head)
-        result, final = self.workspace.finalize(head, classification, self.workspace.rail_plan(head))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((final["ios"], final["android"], final["web"]), ("true", "true", "true"))
 
 
 class RailExecutorTests(unittest.TestCase):
@@ -375,25 +341,22 @@ open(os.environ['CARGO_LOG'], 'w').write(json.dumps(sys.argv[1:]))
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
 
-    def test_workspace_scope_is_explicit(self) -> None:
-        result = self.execute("workspace")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(self.log.read_text()), ["test", "--workspace", "--locked"])
-
-    def test_package_scope_uses_typed_nul_arguments(self) -> None:
-        result = self.execute("packages")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(self.log.read_text()), ["test", "-p", "tcode-core", "--locked"])
-
-    def test_selector_failure_never_starts_cargo(self) -> None:
-        result = self.execute("fail")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(self.log.exists())
-
-    def test_empty_nul_argument_never_starts_cargo(self) -> None:
-        result = self.execute("empty")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(self.log.exists())
+    def test_executor_passes_explicit_scopes_and_rejects_invalid_selection_before_cargo(self) -> None:
+        for mode, expected in [
+            ("workspace", ["test", "--workspace", "--locked"]),
+            ("packages", ["test", "-p", "tcode-core", "--locked"]),
+            ("fail", None),
+            ("empty", None),
+        ]:
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                result = self.execute(mode)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(self.log.exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(json.loads(self.log.read_text()), expected)
 
 
 if __name__ == "__main__":

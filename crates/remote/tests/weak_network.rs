@@ -229,17 +229,17 @@ fn relay_disconnect_fails_read_and_recreation_replays_write_without_execution_tw
             ConnectionState::Reconnecting { .. }
         )
     });
-    let start = Instant::now();
+    // The query must fail while replies are still blocked. Scheduler latency is
+    // not part of that contract; HostLink's unit test checks synchronous wakeup.
     let result = smol::block_on(async {
         futures_lite::future::race(rx.recv(), async {
-            smol::Timer::after(Duration::from_millis(100)).await;
+            smol::Timer::after(Duration::from_secs(10)).await;
             panic!("query waiter hung");
         })
         .await
     })
     .unwrap();
     assert_eq!(result.unwrap_err().code, "disconnected");
-    assert!(start.elapsed() < Duration::from_millis(100));
     assert_eq!(first.pending_commands()[0].0, key);
     assert!(
         ack_rx.try_recv().is_err(),

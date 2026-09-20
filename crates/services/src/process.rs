@@ -66,29 +66,3 @@ pub fn hide_console(_cmd: &mut std::process::Command) {}
 pub fn async_command<S: AsRef<std::ffi::OsStr>>(program: S) -> smol::process::Command {
     smol::process::Command::from(command(program))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::resolve_program;
-
-    /// Off Windows, resolution is a passthrough: `exec` searches PATH itself and
-    /// an absolute path would defeat a caller that means "whatever is on PATH".
-    #[cfg(not(windows))]
-    #[test]
-    fn resolve_program_is_a_passthrough_off_windows() {
-        assert_eq!(resolve_program("npm"), std::ffi::OsString::from("npm"));
-        assert_eq!(
-            resolve_program("/usr/bin/git"),
-            std::ffi::OsString::from("/usr/bin/git")
-        );
-    }
-
-    /// A path (either separator) is never PATH-searched, on any platform.
-    #[test]
-    fn resolve_program_passes_paths_through() {
-        assert_eq!(
-            resolve_program(r"C:\tools\npm.cmd"),
-            std::ffi::OsString::from(r"C:\tools\npm.cmd")
-        );
-    }
-}

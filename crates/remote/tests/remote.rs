@@ -224,14 +224,37 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
     recv_type(&client_a, "event", None);
     recv_type(&client_b, "event", None);
     recv_type(&client_a, "ack", Some(11));
-    let no_ack_deadline = Instant::now() + Duration::from_millis(200);
-    while Instant::now() < no_ack_deadline {
-        if let Ok(line) = client_b.from_host.try_recv() {
-            let value: Value = serde_json::from_str(line.trim_end()).unwrap();
-            assert_ne!(value["content"]["id"].as_u64(), Some(11));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    // A reply to B, ordered after A's command by the host, bounds the absence check.
+    client_b
+        .to_host
+        .send_blocking(
+            json!({
+                "id": 21,
+                "payload": {"type":"command", "content":{"type":"open_latest_session"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    smol::block_on(futures_lite::future::race(
+        async {
+            loop {
+                let line = client_b.from_host.recv().await.unwrap();
+                let value: Value = serde_json::from_str(&line).unwrap();
+                assert_ne!(
+                    value["content"]["id"].as_u64(),
+                    Some(11),
+                    "A's acknowledgment leaked to B"
+                );
+                if value["type"] == "ack" && value["content"]["id"] == 21 {
+                    break;
+                }
+            }
+        },
+        async {
+            smol::Timer::after(Duration::from_secs(5)).await;
+            panic!("B's command barrier was not acknowledged");
+        },
+    ));
 
     server.shutdown();
     wait_state(

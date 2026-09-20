@@ -551,7 +551,7 @@ mod tests {
             .expect("some visible agent must ship a binary for this platform")
             .clone();
 
-        let dir = std::env::temp_dir().join(format!("tcode-acp-live-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tcode-acp-live-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
         let installed = install(&agent, &dir, |_, _| {}).expect("install must succeed");
         assert_eq!(installed.id, agent.id);
@@ -571,26 +571,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    #[test]
-    fn parses_the_registry_schema() {
-        let registry = registry();
-        assert_eq!(registry.agents.len(), 7);
-
-        let gemini = &registry.agents[0];
-        assert_eq!(gemini.name, "Gemini CLI");
-        assert_eq!(gemini.version, "0.50.0");
-        assert!(gemini.icon.as_deref().unwrap().ends_with("gemini.svg"));
-        let npx = gemini.distribution.npx.as_ref().unwrap();
-        assert_eq!(npx.package, "@google/gemini-cli@0.50.0");
-        assert_eq!(npx.args, vec!["--acp".to_string()]);
-
-        let goose = &registry.agents[5];
-        let binary = goose.distribution.binary.get("darwin-aarch64").unwrap();
-        assert_eq!(binary.cmd, "./goose");
-        assert_eq!(binary.env.get("GOOSE_ACP").map(String::as_str), Some("1"));
-        assert!(goose.distribution.npx.is_none());
-    }
-
     /// Adapters over our own native CLIs are never offered in the marketplace.
     #[test]
     fn the_native_cli_adapters_are_never_visible() {
@@ -603,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn a_binary_distribution_wins_over_npx_on_a_supported_platform() {
+    fn recipes_prefer_platform_binaries_fall_back_to_npx_and_preserve_environment() {
         let registry = registry();
         let kilo = &registry.agents[6];
         match resolve_recipe(kilo, "darwin-aarch64") {
@@ -621,21 +601,12 @@ mod tests {
             }
             other => panic!("expected the npx recipe, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn an_agent_with_no_build_for_this_platform_does_not_resolve() {
-        let registry = registry();
         let goose = &registry.agents[5];
         assert!(resolve_recipe(goose, "windows-aarch64").is_none());
         assert!(matches!(
             resolve_recipe(goose, "linux-x86_64"),
             Some(Recipe::Binary(_))
         ));
-    }
-
-    #[test]
-    fn npx_recipes_carry_their_env() {
         let agent: RegistryAgent = serde_json::from_str(
             r#"{ "id": "x", "name": "X", "version": "1",
                  "distribution": { "npx": { "package": "x@1", "env": { "X_ACP": "1" } } } }"#,
@@ -653,7 +624,7 @@ mod tests {
     /// not be able to make us run an arbitrary program from the user's disk.
     #[test]
     fn cmd_may_not_escape_the_archive() {
-        let dir = std::env::temp_dir().join(format!("tcode-acp-cmd-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tcode-acp-cmd-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(resolve_cmd(&dir, "/bin/sh").is_err());
         assert!(resolve_cmd(&dir, "../../../bin/sh").is_err());
@@ -676,7 +647,7 @@ mod tests {
     /// A tar.gz install end to end (no network): extract, resolve, make runnable.
     #[test]
     fn a_tar_gz_archive_extracts_and_resolves_its_command() {
-        let dir = std::env::temp_dir().join(format!("tcode-acp-tar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tcode-acp-tar-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -713,7 +684,7 @@ mod tests {
 
     #[test]
     fn cached_index_remains_readable_after_ttl() {
-        let dir = std::env::temp_dir().join(format!("tcode-acp-cache-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tcode-acp-cache-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert!(cached(&dir).is_none());

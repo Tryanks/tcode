@@ -519,115 +519,45 @@ mod tests {
     }
 
     #[test]
-    fn append_and_read_events() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let id = "sess-1";
-        store
-            .append_event(
-                id,
-                1_000,
-                &AgentEvent::TurnStarted {
-                    turn_id: "t1".into(),
-                },
-            )
-            .unwrap();
-        store
-            .append_event(
-                id,
-                2_000,
-                &AgentEvent::TurnCompleted {
-                    turn_id: "t1".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
-                },
-            )
-            .unwrap();
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].ts, Some(1_000));
-        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
-        assert_eq!(events[1].ts, Some(2_000));
-        assert!(matches!(
-            events[1].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        let raw = fs::read_to_string(store.events_path(id)).unwrap();
-        let first: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
-        assert_eq!(
-            first,
-            serde_json::json!({
-                "ts": 1_000,
-                "event": {"type": "turn_started", "turn_id": "t1"},
-            })
-        );
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn reader_tolerates_legacy_bare_events_and_envelopes() {
+    fn append_recovers_a_mixed_legacy_log_and_writes_the_current_envelope() {
         let store = SessionStore::open_at(temp_root()).unwrap();
         let id = "mixed";
-        // A legacy bare event, a timestamped envelope, a blank line, and a corrupt line.
-        let contents = concat!(
-            r#"{"type":"turn_started","turn_id":"legacy"}"#,
-            "\n",
-            r#"{"ts":1730000000000,"event":{"type":"turn_completed","turn_id":"new","status":"completed","usage":null}}"#,
-            "\n",
-            "\n",
-            "{not valid json}\n",
-        );
-        fs::write(store.events_path(id), contents).unwrap();
-
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 2);
-        // Legacy bare event replays with no timestamp.
-        assert_eq!(events[0].ts, None);
-        assert!(matches!(events[0].event, AgentEvent::TurnStarted { .. }));
-        // Envelope carries the recorded timestamp.
-        assert_eq!(events[1].ts, Some(1_730_000_000_000));
-        assert!(matches!(
-            events[1].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        let _ = fs::remove_dir_all(store.root());
-    }
-
-    #[test]
-    fn append_separates_event_from_truncated_last_line() {
-        let store = SessionStore::open_at(temp_root()).unwrap();
-        let id = "truncated";
-        fs::write(store.events_path(id), br#"{"type":"turn_started"#).unwrap();
-
+        fs::write(store.events_path(id), concat!(
+            "{\"type\":\"turn_started\",\"turn_id\":\"legacy\"}\n",
+            "{\"ts\":2000,\"event\":{\"type\":\"turn_completed\",\"turn_id\":\"legacy\",\"status\":\"completed\",\"usage\":null}}\n",
+            "\n{not valid json}\n{\"type\":\"turn_started"
+        )).unwrap();
         store
             .append_event(
                 id,
-                7,
-                &AgentEvent::TurnCompleted {
-                    turn_id: "turn-1".into(),
-                    status: TurnStatus::Completed,
-                    usage: None,
+                3000,
+                &AgentEvent::TurnStarted {
+                    turn_id: "next".into(),
                 },
             )
             .unwrap();
-
-        let events = store.read_events(id);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].event,
-            AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            }
-        ));
-        let bytes = fs::read(store.events_path(id)).unwrap();
-        assert!(bytes.starts_with(b"{\"type\":\"turn_started\n"));
-        let _ = fs::remove_dir_all(store.root());
+        let reopened = SessionStore::open_at(store.root().clone()).unwrap();
+        let events = reopened.read_events(id);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.iter().map(|event| event.ts).collect::<Vec<_>>(),
+            [None, Some(2000), Some(3000)]
+        );
+        assert!(
+            matches!(&events[0].event, AgentEvent::TurnStarted { turn_id } if turn_id == "legacy")
+        );
+        assert!(
+            matches!(&events[1].event, AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Completed, .. } if turn_id == "legacy")
+        );
+        assert!(
+            matches!(&events[2].event, AgentEvent::TurnStarted { turn_id } if turn_id == "next")
+        );
+        let raw = fs::read_to_string(store.events_path(id)).unwrap();
+        assert_eq!(
+            raw.lines().last().unwrap(),
+            r#"{"ts":3000,"event":{"type":"turn_started","turn_id":"next"}}"#
+        );
+        fs::remove_dir_all(store.root()).unwrap();
     }
 
     #[test]

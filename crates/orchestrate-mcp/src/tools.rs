@@ -425,22 +425,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn child_service_exposes_only_report_result() {
-        let (tx, _rx) = async_channel::unbounded();
-        let tools = ChildReportTools::new(
-            broker(tx, std::time::Duration::from_secs(1)),
-            "child".into(),
-        );
-        let names: Vec<_> = tools
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        assert_eq!(names, ["report_result"]);
-    }
-
     #[tokio::test]
     async fn report_result_carries_child_scope() {
         let (tx, rx) = async_channel::unbounded();
@@ -457,7 +441,15 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let result = ChildReportTools::new(broker, "child".into())
+        let tools = ChildReportTools::new(broker, "child".into());
+        let names: Vec<_> = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(names, ["report_result"]);
+        let result = tools
             .report_result(Parameters(ReportResultParams {
                 text: "full report".into(),
             }))

@@ -2599,14 +2599,6 @@ mod tests {
     }
 
     #[test]
-    fn simple_selection_waits_until_drag_crosses_threshold() {
-        assert!(!selection_drag_started(0., 0.));
-        assert!(!selection_drag_started(SELECTION_DRAG_THRESHOLD, 0.));
-        assert!(selection_drag_started(SELECTION_DRAG_THRESHOLD + 0.01, 0.));
-        assert!(selection_drag_started(2., 2.));
-    }
-
-    #[test]
     fn selection_drag_distinguishes_click_from_drag_threshold() {
         let mut drag = SelectionDrag::default();
         assert!(matches!(

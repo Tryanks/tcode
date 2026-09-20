@@ -4674,9 +4674,11 @@ mod tests {
     }
 
     #[gpui::test]
-    fn classifier_block_survives_until_the_next_turn_starts(cx: &mut TestAppContext) {
+    fn classifier_stop_and_review_preserve_diagnostics_until_the_next_turn(
+        cx: &mut TestAppContext,
+    ) {
         let root = std::env::temp_dir().join(format!(
-            "tcode-fallback-block-test-{}",
+            "tcode-fallback-lifecycle-test-{}",
             tcode_services::store::now_millis()
         ));
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
@@ -4719,51 +4721,6 @@ mod tests {
         update_host!(&host, move |_state, cx| {
             cx.emit(HostEvent::Domain(EventEnvelope {
                 request_id: None,
-                topic: Topic::SessionEvents {
-                    session_id: session_id.clone(),
-                },
-                event: ServerEvent::SessionEvent(SessionEventRecord {
-                    ts: None,
-                    event: AgentEvent::TurnStarted {
-                        turn_id: "turn-next".into(),
-                    },
-                }),
-            }));
-        });
-        wait_until(cx, &workspace, "block cleared by the next turn", |cx| {
-            workspace.read_with(cx, |store, _| store.active_fallback_block().is_none())
-        });
-
-        shutdown_test_host(&host);
-        std::fs::remove_dir_all(root).expect("remove test data");
-    }
-
-    #[gpui::test]
-    fn fallback_review_survives_until_the_next_turn_starts(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-fallback-review-test-{}",
-            tcode_services::store::now_millis()
-        ));
-        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let meta = SessionMeta::new(ProviderKind::ClaudeCode, root.join("worktree"), None);
-        session_store.upsert_meta(&meta).expect("persist session");
-
-        let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        workspace.update(cx, |store, _| store.select_session(meta.id.clone()));
-        wait_until(cx, &workspace, "selected session", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store
-                    .session_status_replica
-                    .as_ref()
-                    .is_some_and(|status| status.session_id == meta.id)
-            })
-        });
-
-        let session_id = meta.id.clone();
-        update_host!(&host, move |_state, cx| {
-            cx.emit(HostEvent::Domain(EventEnvelope {
-                request_id: None,
                 topic: Topic::SessionStatus {
                     session_id: session_id.clone(),
                 },
@@ -4777,6 +4734,15 @@ mod tests {
         wait_until(cx, &workspace, "review ready", |cx| {
             workspace.read_with(cx, |store, _| store.active_fallback_review().is_some())
         });
+        workspace.read_with(cx, |store, _| {
+            let block = store.active_fallback_block().unwrap();
+            assert_eq!(block.category, Some(agent::ClassifierCategory::Cyber));
+            assert_eq!(block.model.as_deref(), Some("claude-sonnet-4-5"));
+            assert_eq!(block.detail, "request blocked by classifier");
+            let review = store.active_fallback_review().unwrap();
+            assert_eq!(review.assessment, "looks like a false positive");
+            assert_eq!(review.draft, "I am auditing my own service.");
+        });
 
         let session_id = meta.id.clone();
         update_host!(&host, move |_state, cx| {
@@ -4793,9 +4759,17 @@ mod tests {
                 }),
             }));
         });
-        wait_until(cx, &workspace, "review cleared by the next turn", |cx| {
-            workspace.read_with(cx, |store, _| store.active_fallback_review().is_none())
-        });
+        wait_until(
+            cx,
+            &workspace,
+            "block and review cleared by the next turn",
+            |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.active_fallback_block().is_none()
+                        && store.active_fallback_review().is_none()
+                })
+            },
+        );
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
