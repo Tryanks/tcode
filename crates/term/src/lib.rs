@@ -625,13 +625,32 @@ mod tests {
     #[test]
     #[ignore = "queries a real foreground PTY process group"]
     fn tracks_real_pty_foreground_cwd() {
-        let terminal = command("cd /tmp && sleep 5");
+        let terminal = Terminal::spawn_command(
+            PathBuf::from("/"),
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                "stty -echo; printf 'ready\\n'; read proceed; cd /tmp; printf 'moved\\n'; read finish"
+                    .into(),
+            ],
+            "sh".into(),
+        )
+        .unwrap();
+        wait_until(&terminal, |state| state.text().contains("ready"));
+        assert_eq!(terminal.working_directory(), PathBuf::from("/"));
+        terminal.write_input(b"continue\r".to_vec());
+        wait_until(&terminal, |state| state.text().contains("moved"));
         let expected = std::fs::canonicalize("/tmp").unwrap();
         let start = Instant::now();
         while terminal.working_directory() != expected {
             assert!(start.elapsed() < Duration::from_secs(10));
             thread::sleep(Duration::from_millis(50));
         }
+        terminal.write_input(b"finish\r".to_vec());
+        assert_eq!(
+            wait_until(&terminal, |state| state.exited).exit_code,
+            Some(0)
+        );
     }
 
     #[cfg(windows)]
