@@ -503,7 +503,8 @@ ScrollHandle and list viewports can hand excess movement once to their nearest
 registered scroll ancestor. Textareas keep exclusive capture at their limits
 because their public scroll API clamps after layout. A new touch replaces the
 capture; cancel stops it. Taps, long presses, selection drags, and desktop mouse
-wheel dispatch retain GPUI's normal recognition. The UI owner is
+wheel dispatch retain GPUI's normal recognition; a touch that begins on a
+selection handle is that handle's drag, never a pan. The UI owner is
 [`touch_scroll.rs`](../crates/ui/src/touch_scroll.rs).
 
 - Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.
@@ -518,6 +519,51 @@ wheel dispatch retain GPUI's normal recognition. The UI owner is
 - Compact approval cards default to expanded, with deny and allow on one row and
   every other available action on its own; user questions keep their options,
   free text and editor prefill.
+
+### Touch selection
+
+A finger cannot hover an I-beam or right-click, so a selection made by touch
+carries its own controls. The gesture and the geometry belong to gpui-base;
+[`touch_selection`](../crates/ui/src/touch_selection/mod.rs) draws them with
+Tcode's tokens. Nothing is configured per view: every input and every
+selectable Markdown body behaves the same.
+
+- **Making one.** A long press selects the word under the finger and keeps
+  following the finger while it stays down; in an editable field a double tap
+  selects the word too. A long press on whitespace or in an empty field places
+  the caret and offers what applies to a caret. Releasing shows the edit menu.
+- **Handles.** A non-empty touch selection has a grab handle at each end: a
+  2px bar down the caret line with a 10px knob, the start's above the line and
+  the end's below, in the theme selection color at full opacity, with a
+  44×(line + 12)pt touch target. Dragging a handle moves that end only; it
+  never collapses the selection, and dragging one end past the other swaps
+  them. An input's handles float above the field so the knobs clear its clip;
+  Markdown paints its handles in place, so whatever covers the text covers
+  them. An end scrolled out of view keeps no handle.
+- **Edit menu.** A T3 pill (opaque popover fill, hairline border, soft shadow,
+  overlay radius) of ghost buttons in 32pt rows with 15px text, separated by
+  full-height hairlines. It sits 8pt above the selection and the room its
+  knobs take, or below when there is no room above, and never leaves the
+  window. Editable text offers **Cut**, **Copy**, **Paste** and **Select All**
+  — each only when it applies: Cut and Copy need a selection (a masked field
+  offers neither), Paste an editable field (the clipboard is never read just
+  to decide, which would raise the system paste banner on iOS), Select All
+  text that is not all selected yet. Read-only text offers Copy and Select
+  All only. Pressing an item leaves focus on the text it acts on. Copy closes
+  the menu and keeps the handles; in a field, a tap on the selection brings
+  the menu back.
+- **Select All** selects the whole field or the whole message, past the
+  viewport, and keeps the handles and the menu over the result; the handles
+  drag on from there.
+- **Lifetime.** There is one touch selection at a time: a long press
+  elsewhere takes it over, and a field's controls go with its focus. Typing,
+  moving the caret, or a press anywhere but a handle or the menu ends it; the
+  handles and the menu go with it. While a finger scrolls a message the menu
+  steps aside and returns over the handles when the finger lifts; a text
+  field scrolling under a finger keeps its menu on the selection, and the
+  menu leaves with the selection when that scrolls out of view. The
+  long-press context menu of sidebar rows is opt-in per row and never sits
+  over selectable text, so one press opens at most one of the two.
 
 ### The compact inset rule
 
