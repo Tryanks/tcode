@@ -1,3 +1,4 @@
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
 use gpui::{
     Anchor, AnyElement, App, Context, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
@@ -240,6 +241,8 @@ impl Popover {
             let viewport = window.viewport_size();
             let insets = crate::window_seam::content_insets(window);
             let max_height = (viewport.height - insets.top - px(52.) - insets.bottom).max(px(0.));
+            // The grabber, the title row and the hairline above the content.
+            let chrome_height = px(16.) + px(48.) + px(1.);
             let close = state.clone();
             let backdrop = state.clone();
             let focus = state.read(cx).focus_handle(cx);
@@ -316,9 +319,12 @@ impl Popover {
                     div()
                         .id("touch-picker-content")
                         .debug_selector(|| "touch-picker-content".into())
-                        .min_h_0()
-                        .overflow_y_scroll()
                         .w_full()
+                        // A bounded vertical area inside the sheet, with its
+                        // own resolved height: a diagonal pan stays on its
+                        // axis, and an edge hands the gesture on.
+                        .max_h((max_height - chrome_height).max(px(0.)))
+                        .overflow_y_scroll_area()
                         .p(px(crate::material::COMPACT_PAGE_INSET))
                         .children(content)
                         .children(self.children),
