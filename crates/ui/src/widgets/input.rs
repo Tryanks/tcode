@@ -4,17 +4,19 @@ mod input_configuration;
 use crate::{
     sizing::{Sizable, Size},
     theme::ActiveTheme as _,
+    touch_selection::{EditMenuItem, TouchSelectionOverlay},
 };
 use gpui::{
-    App, DefiniteLength, Edges, Entity, Focusable as _, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StyleRefinement, Styled, TextAlign, Window, div,
-    prelude::FluentBuilder as _, px, rems,
+    Action, AnyElement, App, DefiniteLength, Edges, Entity, Focusable as _, IntoElement,
+    LongPressEvent, ParentElement as _, RenderOnce, SharedString, StyleRefinement, Styled,
+    TextAlign, TouchPhase, Window, div, prelude::FluentBuilder as _, px, rems,
 };
 use gpui_base::StyledExt as _;
 use gpui_base::{InputBase, RoleOverride};
 
 pub use gpui_base::input::{Copy, InputEvent, InputState, Paste, SelectAll, TextareaState};
 
+#[derive(Clone)]
 enum State {
     Input(Entity<InputState>),
     Textarea(Entity<TextareaState>),
@@ -100,6 +102,99 @@ impl Sizable for Input {
         self
     }
 }
+
+/// The handles and the edit menu of the selection a long press made.
+///
+/// The menu offers what the native context menu would: Cut, Copy, Paste and
+/// Select All, leaving out what cannot apply right now rather than disabling
+/// it. Cut, Copy and Paste go through the input's actions, so a custom key
+/// binding or a capture handler above the input (the composer's image paste)
+/// sees them the same way.
+fn render_touch_selection(state: &State, window: &Window, cx: &App) -> Vec<AnyElement> {
+    if dispatch_state!(state, |base| base.read(cx).touch_selection()).is_none() {
+        return Vec::new();
+    }
+    let entity_id = dispatch_state!(state, |base| base.entity_id());
+    let (capabilities, selectable, focus_handle) = dispatch_state!(state, |base| {
+        let base = base.read(cx);
+        (
+            base.context_menu_capabilities(),
+            // Select All has nothing left to offer once every character is
+            // selected.
+            base.text().len() > 0 && base.selected_range() != (0..base.text().len()),
+            base.presentation().focus_handle().clone(),
+        )
+    });
+    let editable = capabilities.is_editable();
+    let copyable = capabilities.is_copyable();
+    // Offered whenever the text can change, without peeking at the
+    // clipboard: on iOS every read of it shows the system's paste banner,
+    // and an empty clipboard pastes nothing.
+    let pasteable = editable;
+
+    let dispatch = move |action: &dyn Action, window: &mut Window, cx: &mut App| {
+        focus_handle.dispatch_action(action, window, cx);
+    };
+    let mut items = Vec::with_capacity(4);
+    if editable && copyable {
+        let dispatch = dispatch.clone();
+        items.push(EditMenuItem::new(
+            "cut",
+            crate::tr!("edit_menu.cut").into_owned(),
+            move |window, cx| dispatch(&gpui_base::input::Cut, window, cx),
+        ));
+    }
+    if copyable {
+        let dispatch = dispatch.clone();
+        let state = state.clone();
+        items.push(EditMenuItem::new(
+            "copy",
+            crate::tr!("edit_menu.copy").into_owned(),
+            move |window, cx| {
+                dispatch(&Copy, window, cx);
+                dispatch_state!(&state, |base| base
+                    .update(cx, |base, cx| base.close_edit_menu(cx)));
+            },
+        ));
+    }
+    if pasteable {
+        let dispatch = dispatch.clone();
+        items.push(EditMenuItem::new(
+            "paste",
+            crate::tr!("edit_menu.paste").into_owned(),
+            move |window, cx| dispatch(&Paste, window, cx),
+        ));
+    }
+    if selectable {
+        let state = state.clone();
+        items.push(EditMenuItem::new(
+            "select-all",
+            crate::tr!("edit_menu.select_all").into_owned(),
+            move |window, cx| {
+                dispatch_state!(&state, |base| base
+                    .update(cx, |base, cx| base.select_all_from_edit_menu(window, cx)))
+            },
+        ));
+    }
+
+    let drag_state = state.clone();
+    let source_state = state.clone();
+    TouchSelectionOverlay::new(("input-touch-selection", entity_id), move |_, cx| {
+        dispatch_state!(&source_state, |base| base.read(cx).touch_selection())
+    })
+    .handles(move |edge, phase, position, _, cx| {
+        dispatch_state!(&drag_state, |base| base.update(
+            cx,
+            |base, cx| match phase {
+                TouchPhase::Started => base.begin_edge_drag(edge, position, cx),
+                TouchPhase::Moved => base.update_edge_drag(position, cx),
+                TouchPhase::Ended | TouchPhase::Cancelled => base.end_edge_drag(cx),
+            }
+        ))
+    })
+    .items(items)
+    .into_elements(window, cx)
+}
 impl Styled for Input {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.style
@@ -144,6 +239,14 @@ impl RenderOnce for Input {
         let aria_label = self
             .aria_label
             .or_else(|| (!placeholder.is_empty()).then_some(placeholder));
+        // The selection's controls belong to the field the finger is in:
+        // a field that lost focus to another keeps its selection, as any
+        // input does, but not the handles and the menu over it.
+        let touch_selection = if focused {
+            render_touch_selection(&self.state, window, cx)
+        } else {
+            Vec::new()
+        };
         dispatch_state!(&self.state, |base| {
             let editor = if multi_line {
                 // Give the editor a definite viewport before InputBase measures its
@@ -211,6 +314,20 @@ impl RenderOnce for Input {
                     gpui::canvas(
                         |_, _, _| (),
                         move |bounds, _, window, cx| {
+                            // A long press here selects in this field; the
+                            // window selection a message holds goes, as it
+                            // would on a tap. No tap precedes a long press.
+                            window.on_mouse_event(
+                                move |event: &LongPressEvent, phase, window, cx| {
+                                    if phase.bubble()
+                                        && event.phase == TouchPhase::Started
+                                        && !window.default_prevented()
+                                        && bounds.contains(&event.start_position)
+                                    {
+                                        gpui_base::TextSelection::clear(window, cx);
+                                    }
+                                },
+                            );
                             let bounds = input_entity.read(cx).text_bounds().unwrap_or(bounds);
                             window.handle_input(
                                 &focus,
@@ -226,6 +343,9 @@ impl RenderOnce for Input {
                     .absolute()
                     .size_full(),
                 )
+                // The handles float above the field and the menu above the
+                // window; both are deferred, so they draw over the editor.
+                .children(touch_selection)
                 .into_any_element()
         })
     }

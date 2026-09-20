@@ -1808,7 +1808,6 @@ impl AppShell {
             .text_size(px(16.))
             .line_height(px(22.))
             .on_action(cx.listener(Self::on_toggle_palette))
-            .child(gpui_base::TextSelectionLayer)
             // Every compact page, settings included, is one entry of the same
             // stack: one nav bar, one Back, one transition.
             .child(stack)
@@ -1991,7 +1990,6 @@ impl AppShell {
                 .size_full()
                 .bg(crate::material::opaque_canvas(cx))
                 .text_color(cx.theme().foreground)
-                .child(gpui_base::TextSelectionLayer)
                 .child(v_flex().id("hosts").size_full().child(body))
                 .into_any_element();
         }
@@ -2034,9 +2032,6 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
-                // Register first so its bubble-phase handlers run after child
-                // controls and own selection only when the press propagates.
-                .child(gpui_base::TextSelectionLayer)
                 .child(
                     div()
                         .id("workspace")
@@ -2065,7 +2060,6 @@ impl AppShell {
                 })
                 .text_color(cx.theme().foreground)
                 .on_action(cx.listener(Self::on_toggle_palette))
-                .child(gpui_base::TextSelectionLayer)
                 .child(
                     h_flex()
                         .id("workspace")
@@ -2316,8 +2310,6 @@ impl AppShell {
             })
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(Self::on_toggle_palette))
-            // The window selection layer must be the first child.
-            .child(gpui_base::TextSelectionLayer)
             .child(
                 div()
                     .id("workspace")
@@ -3529,7 +3521,6 @@ mod tests {
 
     #[gpui::test]
     fn header_controls_activate_after_pointer_jitter_without_dragging(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
         let (shell, host, cx) = mount(cx);
         for (topic, event) in [
             (
@@ -3590,6 +3581,9 @@ mod tests {
         cx: &mut TestAppContext,
         initial: Option<AttachmentTarget>,
     ) -> (Entity<AppShell>, MountedShell, &mut VisualTestContext) {
+        // As `run_shell` does before opening the window: the shell alone,
+        // without the window root, initializes nothing of gpui-base itself.
+        cx.update(crate::theme::init);
         let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let (_, state) = async_channel::unbounded();
@@ -3644,7 +3638,6 @@ mod tests {
 
     #[gpui::test]
     fn compact_palette_is_reachable_from_threads_and_thread(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
         let (shell, _host, cx) = mount(cx);
         cx.simulate_resize(size(px(393.), px(852.)));
         draw(cx);

@@ -802,6 +802,11 @@ terminal:
   exited_code: "进程已退出（%{code}）"
   exited: "进程已退出"
   starting: "正在启动终端…"
+edit_menu:
+  cut: "剪切"
+  copy: "复制"
+  paste: "粘贴"
+  select_all: "全选"
 usage:
   title: "用量"
   section: "用量"
