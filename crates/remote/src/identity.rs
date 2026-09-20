@@ -5,7 +5,7 @@
 //! This avoids disclosing a bearer token to an unrelated LAN address; it does
 //! not encrypt the subsequent stream or prevent an active plaintext relay.
 
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use ring::signature;
 #[cfg(feature = "server")]
 use ring::signature::KeyPair as _;
