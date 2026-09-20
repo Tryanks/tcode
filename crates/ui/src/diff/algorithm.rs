@@ -147,6 +147,7 @@ fn push_merged(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::iter::once;
 
     #[test]
     fn line_diff_can_ignore_all_whitespace() {
@@ -157,10 +158,25 @@ mod tests {
     #[test]
     fn word_highlights_preserve_utf8_token_boundaries_and_skip_unbounded_inputs() {
         for (old, new, old_ranges, new_ranges) in [
-            ("let x = 1;", "let x = 2;", vec![8..9], vec![8..9]),
-            ("let 中 = 1;", "let 中 = 2;", vec![10..11], vec![10..11]),
-            ("foo(x)", "foo(x, y)", vec![], vec![5..8]),
-            ("a += b", "a -= b", vec![2..3], vec![2..3]),
+            (
+                "let x = 1;",
+                "let x = 2;",
+                once(8..9).collect(),
+                once(8..9).collect(),
+            ),
+            (
+                "let 中 = 1;",
+                "let 中 = 2;",
+                once(10..11).collect(),
+                once(10..11).collect(),
+            ),
+            ("foo(x)", "foo(x, y)", vec![], once(5..8).collect()),
+            (
+                "a += b",
+                "a -= b",
+                once(2..3).collect(),
+                once(2..3).collect(),
+            ),
             ("unchanged", "unchanged", vec![], vec![]),
         ] {
             assert_eq!(
