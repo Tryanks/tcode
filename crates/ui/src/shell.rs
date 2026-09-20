@@ -2380,7 +2380,7 @@ impl Render for AppShell {
             .attachment
             .as_ref()
             .map(|attachment| attachment.palette.read(cx).outside_dismissal.clone());
-        crate::touch_scroll::root(
+        crate::wheel_easing::root(
             div()
                 .size_full()
                 // Both layouts must select UI text explicitly: GPUI's default

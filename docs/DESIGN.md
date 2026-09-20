@@ -273,27 +273,40 @@ produces an explicit error.
 
 The jump-to-latest pill appears when more than one timeline viewport remains
 below the reading position. Its visibility follows the list's pixel geometry
-on wheel, captured touch, and programmatic scrolling, and after history or
-layout changes; unmeasured offscreen history does not suppress it. Following is
+on wheel, touch, and programmatic scrolling, and after history or layout
+changes; unmeasured offscreen history does not suppress it. Following is
 independent of that threshold: any upward user scroll pauses following immediately,
-including wheel, captured touch, scrollbar drag and keyboard scrolling. Incoming
-content and history paging preserve the reading anchor while paused. Following
-resumes only when the reader scrolls back to the bottom (within one pixel) or
-clicks the pill. Opening a conversation starts at the tail.
+including wheel, touch pans, scrollbar drags by mouse or finger, and keyboard
+scrolling. Incoming content and history paging preserve the reading anchor while
+paused. Following resumes only when the reader scrolls back to the bottom (within
+one pixel) or clicks the pill. Opening a conversation starts at the tail.
 
 The timeline uses the space above the composer's measured height, including its
 attached compact settings drawer, and never overlaps it. Vertical breathing room belongs
-to the timeline container, outside the list's scroll extent, so captured touch,
-wheel and tail following agree on the bottom. The shell reserves the window's
+to the timeline container, outside the list's scroll extent, so touch, wheel and
+tail following agree on the bottom. The shell reserves the window's
 safe-area/IME inset once. The running-status row remains fully visible above the
 composer at the end, including when the keyboard opens or closes.
 
 ## Scrolling contract
 
+Every viewport scrolls through its own GPUI handler: `overflow` containers,
+`list`s and gpui-base inputs apply the wheel, trackpad and touch deltas that
+reach them. Because those handlers do not consume events, nesting is resolved
+by gpui-base's scrollable mask, composed by [`scroll.rs`](../crates/ui/src/scroll.rs):
+a bounded vertical area inside a page or the timeline (menus, option lists,
+approval and toast details, inline diffs, disclosure bodies) moves alone while
+it can and hands the next gesture to its ancestor once it reaches an edge;
+horizontal strips (markdown tables, inline diff rows, the terminal key bar,
+segmented tracks) own horizontal movement even at their edges, so a sideways
+gesture never moves the page, and leave vertical movement to the view behind
+them. Page-level vertical viewports lock a gesture to its starting axis.
+
 The conversation timeline overlays a vertical scrollbar at its right edge,
 using the shared theme's hover/scroll visibility. Its track follows the list's
-viewport, excluding the timeline padding and composer. Dragging it moves the
-conversation and pauses tail-following when the reader leaves the bottom.
+viewport, excluding the timeline padding and composer. Dragging it, by mouse or
+by finger, moves the conversation and pauses tail-following when the reader
+leaves the bottom.
 
 Thread lists also overlay the shared vertical scrollbar, in Recent and By
 project at both layout widths. Each scrollbar follows its list's viewport and
@@ -301,14 +314,22 @@ scroll position; headers, search controls and footers stay outside its track.
 Virtualized lists estimate offscreen row heights so the thumb represents the
 whole list from the first frame; measured heights refine that estimate.
 
-Vertical mouse-wheel notches ease over about 125ms in Tcode's registered scroll
-views (chat, sidebars, settings, and diffs). Repeated input accumulates; reversing
-direction discards the previous direction's remaining movement. Trackpad pixels,
-native touch, textareas, and custom horizontal/terminal scrolling retain their
-existing input handling. Reduced motion uses direct scrolling. Pointer presses,
-keyboard input, and direct positioning interrupt wheel animation. Scrolling up
-releases chat tail-following immediately; animation uses relative movement so
-row remeasurement and prepended history preserve the reading anchor.
+On iOS and Android the page-level vertical viewports (the timeline, thread
+lists, settings, the command palette, plan and hosts pages, and the diff body)
+stretch past their edges under the finger and spring back on release, as a
+`UIScrollView` does. The stretch is a displacement of the viewport only: the
+scroll position stays clamped, scrollbars and fixed chrome do not move, and
+reduced motion disables it. Bounded inner areas do not bounce.
+
+Vertical mouse-wheel notches ease over about 125ms in Tcode's vertical scroll
+views (pages, lists, and the bounded areas above). Repeated input accumulates;
+reversing direction discards the previous direction's remaining movement.
+Trackpad pixels, native touch, textareas, and horizontal/terminal scrolling
+retain their existing input handling. Reduced motion uses direct scrolling.
+Pointer presses, keyboard input, and direct positioning interrupt wheel
+animation. Scrolling up releases chat tail-following immediately; animation
+uses relative movement so row remeasurement and prepended history preserve the
+reading anchor. The owner is [`wheel_easing.rs`](../crates/ui/src/wheel_easing.rs).
 
 Potentially unbounded content always has its own resolved-height viewport and a
 separate, non-shrinking content column. Headers, search fields, footers and
@@ -504,15 +525,18 @@ stack, details, close controls and existing timing.
 
 ### Touch and typography
 
-Native touch pans capture the innermost registered scroll viewport at touch-down.
-The capture keeps the same handle through redraws, finger movement, and momentum;
-a textarea moving beneath the finger or the original anchor cannot steal it.
-ScrollHandle and list viewports can hand excess movement once to their nearest
-registered scroll ancestor. Textareas keep exclusive capture at their limits
-because their public scroll API clamps after layout. A new touch replaces the
-capture; cancel stops it. Taps, long presses, selection drags, and desktop mouse
-wheel dispatch retain GPUI's normal recognition. The UI owner is
-[`touch_scroll.rs`](../crates/ui/src/touch_scroll.rs).
+GPUI recognizes touch itself: a pan becomes scroll events, locked to the axis it
+started on and delivered to the elements under the finger at touch-down, with
+momentum after release; taps, long presses and selection drags keep their own
+recognition. Nothing in Tcode intercepts those events. Horizontal code and table
+areas own horizontal movement through their scrollable mask, so a vertical pan
+over a table scrolls the conversation and a horizontal one moves only the
+table; nested vertical areas chain to their ancestor at an edge rather than
+being captured for the gesture. The main vertical viewports bounce at their
+edges on iOS and Android (reduced motion disables the stretch), scrollbar
+thumbs can be dragged by touch, and the composer textarea scrolls through
+gpui-base input's own handling. Wheel easing remains a desktop mouse-wheel
+behaviour. See the scrolling contract above.
 
 - Pages inset 16pt left and right; nav bars are 52pt plus the top safe area.
   Icon buttons have a 44×44pt touch target and use the shared stroke icons in

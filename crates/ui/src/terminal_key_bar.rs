@@ -5,8 +5,8 @@
 //! terminal modes as hardware key events.
 
 use crate::material;
+use crate::scroll::ScrollableElement as _;
 use crate::theme::ActiveTheme as _;
-use crate::touch_scroll::TouchScrollExt as _;
 use gpui::{
     App, Context, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, Role, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -389,8 +389,7 @@ impl Render for TerminalKeyBar {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .overflow_y_hidden()
-                    .touch_overflow_x_scroll()
+                    .overflow_x_scroll_area()
                     .child(tail),
             )
     }
@@ -522,7 +521,7 @@ mod tests {
 
     impl Render for NarrowBarProbe {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            crate::touch_scroll::root(div().w(px(self.width)).child(self.bar.clone()))
+            div().w(px(self.width)).child(self.bar.clone())
         }
     }
 
