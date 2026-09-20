@@ -64,9 +64,13 @@ state back after app edits, cursor moves and draft clears. Revision and edit
 serial checks prevent delayed updates from restoring stale text. Terminal
 handlers keep the committed-text and control-key path because they expose no
 editable buffer. Hardware/IME key events become GPUI `KeyDown`/`KeyUp` events.
-System-bar, display-cutout, and IME geometry becomes `WindowInsets`. A GPUI
-window back handler takes precedence; `set_back_callback` exposes otherwise
-unhandled system back actions to the host application.
+System-bar, display-cutout, and IME geometry becomes `WindowInsets`, and the
+IME inset also shrinks the window's visual viewport; GPUI refreshes the window
+from those callbacks and wakes the frame source itself. Applications reach the
+keyboard through `Window::request_virtual_keyboard` and
+`dismiss_virtual_keyboard`, which call the same activity methods as text focus.
+A GPUI window back handler takes precedence; `set_back_callback` exposes
+otherwise unhandled system back actions to the host application.
 
 ## Pointer mapping
 

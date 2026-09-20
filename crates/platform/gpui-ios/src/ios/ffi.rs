@@ -250,20 +250,6 @@ pub(crate) fn host_write_clipboard(text: &str) {
     unsafe { gpui_ios_host_write_clipboard(text.as_ptr(), text.len()) }
 }
 
-/// Current UIKit safe-area and keyboard insets in logical points.
-pub fn insets() -> WindowInsets {
-    host_metrics().insets()
-}
-
-/// Shows or hides the UIKit software-keyboard proxy.
-pub fn set_keyboard_visible(visible: bool) {
-    if visible {
-        host_show_keyboard();
-    } else {
-        host_hide_keyboard();
-    }
-}
-
 fn utf8(bytes: *const u8, length: usize) -> Option<String> {
     if length == 0 {
         return Some(String::new());
