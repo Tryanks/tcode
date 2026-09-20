@@ -6,8 +6,8 @@ use gpui::{
     Keystroke, Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
     Scene, Size, TextInputConfiguration, TextInputStateChange, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams, px,
-    size,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
+    WindowVisibility, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use raw_window_handle::{
@@ -31,12 +31,17 @@ type UnitCallback = Box<dyn FnMut()>;
 type ShouldCloseCallback = Box<dyn FnMut() -> bool>;
 type HitTestCallback = Box<dyn FnMut() -> Option<WindowControlArea>>;
 type InsetsCallback = Box<dyn FnMut(WindowInsets)>;
+type VisibilityCallback = Box<dyn FnMut(WindowVisibility)>;
 
 pub(crate) struct IosWindow {
     view: Cell<NonNull<c_void>>,
     raw_handles: RefCell<IosRawHandles>,
     gpu_context: GpuContext,
     surface_attached: Cell<bool>,
+    /// Set between `sceneDidEnterBackground` and `sceneWillEnterForeground`,
+    /// while the host has paused its display link.
+    in_background: Cell<bool>,
+    reported_visibility: Cell<Option<WindowVisibility>>,
     bounds: Cell<Bounds<Pixels>>,
     scale_factor: Cell<f32>,
     appearance: Cell<WindowAppearance>,
@@ -59,6 +64,7 @@ pub(crate) struct IosWindow {
     close_callback: RefCell<Option<Box<dyn FnOnce()>>>,
     appearance_callback: RefCell<Option<UnitCallback>>,
     insets_callback: RefCell<Option<InsetsCallback>>,
+    visibility_callback: RefCell<Option<VisibilityCallback>>,
     dispatching_input: Cell<bool>,
     pending_input: RefCell<VecDeque<PlatformInput>>,
     requesting_frame: Cell<bool>,
@@ -156,6 +162,8 @@ impl IosWindow {
             raw_handles: RefCell::new(raw_handles),
             gpu_context,
             surface_attached: Cell::new(true),
+            in_background: Cell::new(false),
+            reported_visibility: Cell::new(None),
             bounds: Cell::new(Bounds::new(Default::default(), logical_size)),
             scale_factor: Cell::new(scale_factor),
             appearance: Cell::new(metrics.appearance),
@@ -178,6 +186,7 @@ impl IosWindow {
             close_callback: RefCell::new(None),
             appearance_callback: RefCell::new(None),
             insets_callback: RefCell::new(None),
+            visibility_callback: RefCell::new(None),
             dispatching_input: Cell::new(false),
             pending_input: RefCell::new(VecDeque::new()),
             requesting_frame: Cell::new(false),
@@ -236,6 +245,7 @@ impl IosWindow {
         self.surface_attached.set(true);
         self.resize_from_host(width, height, scale_factor);
         self.request_frame(true);
+        self.report_visibility();
         log::info!("GPUI iOS Metal surface replaced at scale factor {scale_factor:.2}");
         Ok(())
     }
@@ -245,6 +255,42 @@ impl IosWindow {
             return;
         }
         self.renderer.borrow_mut().unconfigure_surface();
+        self.report_visibility();
+    }
+
+    pub(crate) fn update_background(&self, in_background: bool) {
+        if self.in_background.replace(in_background) == in_background {
+            return;
+        }
+        self.report_visibility();
+    }
+
+    fn current_visibility(&self) -> WindowVisibility {
+        if self.surface_attached.get() && !self.in_background.get() {
+            WindowVisibility::Visible
+        } else {
+            WindowVisibility::Hidden
+        }
+    }
+
+    /// Reports a visibility transition to GPUI once `on_visibility_change`
+    /// has registered its callback; only changes since the last report fire.
+    fn report_visibility(&self) {
+        let Some(reported) = self.reported_visibility.get() else {
+            return;
+        };
+        let visibility = self.current_visibility();
+        if reported == visibility {
+            return;
+        }
+        self.reported_visibility.set(Some(visibility));
+        let mut callback = self.visibility_callback.borrow_mut().take();
+        if let Some(callback) = callback.as_mut() {
+            callback(visibility);
+        }
+        if self.visibility_callback.borrow().is_none() {
+            *self.visibility_callback.borrow_mut() = callback;
+        }
     }
 
     pub(crate) fn request_frame(&self, force_render: bool) {
@@ -520,6 +566,10 @@ impl PlatformWindow for IosWindow {
         self.active.get()
     }
 
+    fn visibility(&self) -> WindowVisibility {
+        self.current_visibility()
+    }
+
     fn is_hovered(&self) -> bool {
         false
     }
@@ -557,6 +607,12 @@ impl PlatformWindow for IosWindow {
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         *self.active_callback.borrow_mut() = Some(callback);
+    }
+
+    fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
+        self.reported_visibility
+            .set(Some(self.current_visibility()));
+        *self.visibility_callback.borrow_mut() = Some(callback);
     }
 
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {

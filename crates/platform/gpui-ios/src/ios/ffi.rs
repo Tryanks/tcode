@@ -478,6 +478,11 @@ fn lifecycle(phase: AppLifecyclePhase, active: Option<bool>) {
         HOST.with(|host| host.borrow_mut().metrics.active = active);
         with_window(|window| window.update_active(active));
     }
+    match phase {
+        AppLifecyclePhase::Background => with_window(|window| window.update_background(true)),
+        AppLifecyclePhase::Foreground => with_window(|window| window.update_background(false)),
+        _ => {}
+    }
     super::with_platform(|platform| platform.notify_lifecycle(phase));
 }
 
