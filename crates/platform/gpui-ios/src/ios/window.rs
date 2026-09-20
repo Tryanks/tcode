@@ -64,6 +64,7 @@ pub(crate) struct IosWindow {
     close_callback: RefCell<Option<Box<dyn FnOnce()>>>,
     appearance_callback: RefCell<Option<UnitCallback>>,
     insets_callback: RefCell<Option<InsetsCallback>>,
+    visual_viewport_callback: RefCell<Option<UnitCallback>>,
     visibility_callback: RefCell<Option<VisibilityCallback>>,
     dispatching_input: Cell<bool>,
     pending_input: RefCell<VecDeque<PlatformInput>>,
@@ -186,6 +187,7 @@ impl IosWindow {
             close_callback: RefCell::new(None),
             appearance_callback: RefCell::new(None),
             insets_callback: RefCell::new(None),
+            visual_viewport_callback: RefCell::new(None),
             visibility_callback: RefCell::new(None),
             dispatching_input: Cell::new(false),
             pending_input: RefCell::new(VecDeque::new()),
@@ -362,11 +364,14 @@ impl IosWindow {
         self.request_frame(true);
     }
 
+    /// GPUI refreshes the window from these callbacks; the display link
+    /// presents the next frame, so no frame is requested here.
     pub(crate) fn update_insets(&self, insets: WindowInsets) {
-        if *self.insets.borrow() == insets {
+        let previous = self.insets.replace(insets.clone());
+        if previous == insets {
             return;
         }
-        *self.insets.borrow_mut() = insets.clone();
+        let keyboard_moved = previous.ime != insets.ime;
         let mut callback = self.insets_callback.borrow_mut().take();
         if let Some(callback) = callback.as_mut() {
             callback(insets);
@@ -374,7 +379,16 @@ impl IosWindow {
         if self.insets_callback.borrow().is_none() {
             *self.insets_callback.borrow_mut() = callback;
         }
-        self.request_frame(true);
+        if !keyboard_moved {
+            return;
+        }
+        let mut callback = self.visual_viewport_callback.borrow_mut().take();
+        if let Some(callback) = callback.as_mut() {
+            callback();
+        }
+        if self.visual_viewport_callback.borrow().is_none() {
+            *self.visual_viewport_callback.borrow_mut() = callback;
+        }
     }
 
     pub(crate) fn update_active(&self, active: bool) {
@@ -510,6 +524,19 @@ impl PlatformWindow for IosWindow {
 
     fn content_size(&self) -> Size<Pixels> {
         self.bounds.get().size
+    }
+
+    /// The keyboard is a UIKit window over this view, so the visible part of
+    /// the layout viewport is everything above its cover. Safe areas stay in
+    /// `insets`; GPUI intersects both for `fully_visible_bounds`.
+    fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
+        let mut bounds = Bounds::new(Point::default(), self.content_size());
+        bounds.size.height = (bounds.size.height - self.insets.borrow().ime.bottom).max(px(0.));
+        bounds
+    }
+
+    fn on_visual_viewport_changed(&self, callback: Box<dyn FnMut()>) {
+        *self.visual_viewport_callback.borrow_mut() = Some(callback);
     }
 
     fn resize(&mut self, _size: Size<Pixels>) {}
