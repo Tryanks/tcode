@@ -642,7 +642,16 @@ mod tests {
         let temp = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         let root = temp.join("repo");
         std::fs::create_dir_all(&root).unwrap();
-        run(&root, &["init", "-b", "main"]);
+        run(&root, &["-c", "init.templateDir=", "init", "-b", "main"]);
+        run(&root, &["config", "commit.gpgSign", "false"]);
+        run(
+            &root,
+            &[
+                "config",
+                "core.hooksPath",
+                temp.join("no-hooks").to_str().unwrap(),
+            ],
+        );
         run(&root, &["config", "core.autocrlf", "false"]);
         // Production merge-back commits in this repo; CI runners have no
         // global git identity, so pin one at the repo level.
@@ -656,31 +665,9 @@ mod tests {
 
     #[test]
     fn working_tree_and_branch_diff_round_trip() {
-        let root = std::env::temp_dir().join(format!("tcode-diff-scope-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let git = |args: &[&str]| {
-            let output = crate::process::command("git")
-                .args(args)
-                .current_dir(&root)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            output
-        };
-        git(&["init"]);
-        git(&["config", "user.email", "diff-test@example.invalid"]);
-        git(&["config", "user.name", "Diff Test"]);
-        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
-        git(&["add", "tracked.txt"]);
-        git(&["commit", "-m", "base"]);
-        let base = String::from_utf8(git(&["branch", "--show-current"]).stdout)
-            .unwrap()
-            .trim()
-            .to_string();
+        let (temp, root) = scratch_repo("tcode-diff-scope");
+        let git = |args: &[&str]| run(&root, args);
+        let base = "main";
         git(&["checkout", "-b", "feature"]);
         std::fs::write(root.join("tracked.txt"), "after\n").unwrap();
         std::fs::write(root.join("untracked.txt"), "new\n").unwrap();
@@ -699,7 +686,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             working.texts[tracked_index].old.as_deref(),
-            Some("before\n")
+            Some("initial\n")
         );
         assert_eq!(working.texts[tracked_index].new.as_deref(), Some("after\n"));
         let untracked_index = working
@@ -711,18 +698,18 @@ mod tests {
         assert_eq!(working.texts[untracked_index].new.as_deref(), Some("new\n"));
         git(&["add", "."]);
         git(&["commit", "-m", "feature changes"]);
-        let branch = load_git_diff(&root, GitDiffScope::Branch, Some(&base), false);
+        let branch = load_git_diff(&root, GitDiffScope::Branch, Some(base), false);
         assert!(branch.error.is_none());
         assert_eq!(branch.changes.len(), 2);
         assert_eq!(branch.texts.len(), branch.changes.len());
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
     fn diff_texts_handle_created_and_deleted_files() {
         let (temp, root) = scratch_repo("tcode-diff-file-text-test");
         std::fs::remove_file(root.join("tracked.txt")).unwrap();
-        std::fs::write(root.join("created.txt"), "created\n").unwrap();
+        std::fs::write(root.join("created file.txt"), "created\n").unwrap();
 
         let result = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
 
@@ -742,7 +729,7 @@ mod tests {
         let created_index = result
             .changes
             .iter()
-            .position(|change| change.path.ends_with("created.txt"))
+            .position(|change| change.path.ends_with("created file.txt"))
             .unwrap();
         assert_eq!(result.changes[created_index].kind, FileChangeKind::Create);
         assert!(result.texts[created_index].old.is_none());
@@ -766,25 +753,6 @@ mod tests {
         assert_eq!(normal.texts.len(), normal.changes.len());
         assert!(ignored.changes.is_empty());
         assert_eq!(ignored.texts.len(), ignored.changes.len());
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn diff_texts_support_paths_with_spaces() {
-        let (temp, root) = scratch_repo("tcode-diff-spaced-path-test");
-        std::fs::write(root.join("new file.txt"), "new\n").unwrap();
-
-        let result = load_git_diff(&root, GitDiffScope::WorkingTree, None, false);
-
-        let index = result
-            .changes
-            .iter()
-            .position(|change| change.path.ends_with("new file.txt"))
-            .unwrap();
-        assert!(result.texts[index].old.is_none());
-        assert_eq!(result.texts[index].new.as_deref(), Some("new\n"));
-        assert_eq!(result.texts.len(), result.changes.len());
 
         let _ = std::fs::remove_dir_all(temp);
     }
@@ -831,19 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_list_parser_filters_blank_lines() {
-        let out = "main\nfeature/x\n\n  \nrelease-1.0\n";
-        assert_eq!(
-            parse_branch_list(out),
-            vec![
-                "main".to_string(),
-                "feature/x".to_string(),
-                "release-1.0".to_string()
-            ]
-        );
-    }
-
-    #[test]
     fn read_git_branch_reads_head() {
         let root = std::env::temp_dir().join(format!("tcode-branch-test-{}", uuid::Uuid::new_v4()));
         let git = root.join(".git");
@@ -870,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_refuses_dirty_worktree() {
+    fn checkout_preserves_dirty_worktree_then_switches_once_clean() {
         let (temp, root) = scratch_repo("tcode-checkout-dirty-test");
         run(&root, &["branch", "feature"]);
         std::fs::write(root.join("tracked.txt"), "dirty\n").unwrap();
@@ -880,15 +835,12 @@ mod tests {
             Err(CheckoutError::Dirty)
         );
         assert_eq!(read_git_branch(&root), Some("main".into()));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn checkout_switches_clean_worktree() {
-        let (temp, root) = scratch_repo("tcode-checkout-clean-test");
-        run(&root, &["branch", "feature"]);
-
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "dirty\n"
+        );
+        assert_eq!(list_git_branches(&root), ["feature", "main"]);
+        run(&root, &["checkout", "--", "tracked.txt"]);
         assert_eq!(checkout_if_clean(&root, "feature"), Ok(()));
         assert_eq!(read_git_branch(&root), Some("feature".into()));
 

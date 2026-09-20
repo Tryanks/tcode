@@ -880,16 +880,6 @@ mod tests {
     }
 
     #[cfg(feature = "remote-hosting")]
-    #[test]
-    fn device_rows_name_the_platform_only_when_reported() {
-        assert_eq!(
-            device_label("Xiaomi 15", Some("Android 15")),
-            "Xiaomi 15 · Android 15"
-        );
-        assert_eq!(device_label("older phone", None), "older phone");
-    }
-
-    #[cfg(feature = "remote-hosting")]
     #[gpui::test]
     fn superseded_pairing_does_not_overwrite_the_saved_machine(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!(

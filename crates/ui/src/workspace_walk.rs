@@ -56,46 +56,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn filter_ranks_basename_prefix_first() {
-        let entries = vec![
-            PathEntry {
-                rel_path: "src/composer.rs".into(),
-                basename: "composer.rs".into(),
-                parent: "src".into(),
-                is_dir: false,
-            },
-            PathEntry {
-                rel_path: "docs/decompose.md".into(),
-                basename: "decompose.md".into(),
-                parent: "docs".into(),
-                is_dir: false,
-            },
-            PathEntry {
-                rel_path: "src/ui/composer_trigger.rs".into(),
-                basename: "composer_trigger.rs".into(),
-                parent: "src/ui".into(),
-                is_dir: false,
-            },
-        ];
-        let out = filter_entries(&entries, "compo", 10);
-        assert_eq!(out[0].rel_path, "src/composer.rs");
-        assert!(
-            out.iter()
-                .any(|e| e.rel_path == "src/ui/composer_trigger.rs")
+    fn mention_results_rank_basename_before_path_and_apply_the_limit_after_sorting() {
+        let entries = [
+            "src/compo/other.rs",
+            "z/composer.rs",
+            "docs/decompose.md",
+            "a/composer.rs",
+            "src/ui/composer_trigger.rs",
+            "unrelated.rs",
+        ]
+        .map(|path| PathEntry {
+            rel_path: path.into(),
+            basename: path.rsplit('/').next().unwrap().into(),
+            parent: String::new(),
+            is_dir: false,
+        });
+        let paths = |query, limit| {
+            filter_entries(&entries, query, limit)
+                .into_iter()
+                .map(|entry| entry.rel_path.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            paths("COMPO", 10),
+            [
+                "a/composer.rs",
+                "z/composer.rs",
+                "src/ui/composer_trigger.rs",
+                "docs/decompose.md",
+                "src/compo/other.rs",
+            ]
         );
-        assert!(out.iter().any(|e| e.rel_path == "docs/decompose.md"));
-    }
-
-    #[test]
-    fn empty_query_returns_capped_prefix() {
-        let entries: Vec<PathEntry> = (0..10)
-            .map(|i| PathEntry {
-                rel_path: format!("f{i}.txt"),
-                basename: format!("f{i}.txt"),
-                parent: String::new(),
-                is_dir: false,
-            })
-            .collect();
-        assert_eq!(filter_entries(&entries, "", 3).len(), 3);
+        assert_eq!(paths("compo", 2), ["a/composer.rs", "z/composer.rs"]);
+        assert_eq!(paths("", 2), ["src/compo/other.rs", "z/composer.rs"]);
+        assert!(paths("compo", 0).is_empty());
+        assert!(paths("missing", 10).is_empty());
     }
 }

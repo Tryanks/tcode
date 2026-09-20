@@ -3180,14 +3180,25 @@ mod tests {
             assert!(page.home_url_input.dirty, "a typed value is a user edit");
         });
 
-        // Two more snapshots arrive: the echo of that edit, then an unrelated
-        // change made elsewhere. Neither may rewrite the field.
-        drain(cx);
         smol::block_on(host.link().command(tcode_protocol::Command::PatchSettings {
             patch: SettingsPatch::BrowserHomeUrl(Some("https://elsewhere.example".into())),
         }))
         .expect("patch settings");
-        drain(cx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+            cx.run_until_parked();
+            if store.read_with(cx, |store, _| {
+                store.settings().browser.home_url.as_deref() == Some("https://elsewhere.example")
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "later settings snapshot did not arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         page.read_with(cx, |page, cx| {
             assert_eq!(

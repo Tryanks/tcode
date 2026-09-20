@@ -192,7 +192,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_bare_create_diff() {
+    fn bare_diffs_preserve_create_and_edit_line_numbers() {
         let parsed = parse_unified_diff("+def f():\n+    return 1");
         assert_eq!(parsed.added, 2);
         assert_eq!(parsed.removed, 0);
@@ -203,10 +203,6 @@ mod tests {
         assert_eq!(rows[0].old_line, None);
         assert_eq!(rows[0].text, "def f():");
         assert_eq!(rows[1].new_line, Some(2));
-    }
-
-    #[test]
-    fn parses_bare_edit_diff() {
         let parsed = parse_unified_diff("-old one\n-old two\n+new one\n+new two\n+new three");
         assert_eq!(parsed.removed, 2);
         assert_eq!(parsed.added, 3);
@@ -218,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_multi_hunk_with_gaps_create_edit_and_no_newline() {
+    fn unified_diffs_preserve_line_numbers_gaps_and_no_newline_markers() {
         let diff = "\
 diff --git a/util.py b/util.py
 --- a/util.py
@@ -252,16 +248,8 @@ diff --git a/util.py b/util.py
         assert_eq!(h0[4].kind, RowKind::Context);
         assert_eq!((h0[4].old_line, h0[4].new_line), (Some(3), Some(4)));
         assert_eq!(parsed.hunks[1].rows.len(), 3);
-    }
-
-    #[test]
-    fn gap_before_first_hunk_when_not_at_top() {
         let parsed = parse_unified_diff("@@ -10,2 +10,3 @@\n ctx\n+added\n more");
         assert_eq!(parsed.hunks[0].gap_before, 9);
-    }
-
-    #[test]
-    fn hunk_header_without_counts_parses() {
         let parsed = parse_unified_diff("@@ -1 +1 @@\n-a\n+b");
         assert_eq!(parsed.hunks.len(), 1);
         assert_eq!(parsed.added, 1);

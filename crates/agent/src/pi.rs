@@ -1647,61 +1647,38 @@ mod tests {
     }
 
     #[test]
-    fn extension_bash_approval_is_tool_use() {
-        let approval = approval_kind(
+    fn bash_approval_distinguishes_builtin_execution_from_extension_tools() {
+        let input = json!({"command":"x"});
+        let builtin = approval_kind(
             "bash",
-            &json!({
-                "toolName": "bash",
-                "source": "extension",
-                "extensionPath": "/extensions/bash.ts",
-                "input": { "command": "x" }
-            }),
+            &json!({"toolName":"bash", "input":input, "cwd":"/project"}),
         );
-        assert!(matches!(
-            approval,
-            ApprovalKind::ToolUse { name, input, detail }
-                if name == "bash" && input == json!({ "command": "x" })
-                    && detail.contains("/extensions/bash.ts")
-        ));
-    }
-
-    #[test]
-    fn builtin_bash_approval_remains_exec_command() {
-        let approval = approval_kind(
-            "bash",
-            &json!({
-                "toolName": "bash",
-                "input": { "command": "x" },
-                "cwd": "/project"
-            }),
+        assert!(
+            matches!(builtin, ApprovalKind::ExecCommand { command, cwd, .. }
+            if command == "x" && cwd.as_deref() == Some("/project"))
         );
-        assert!(matches!(
-            approval,
-            ApprovalKind::ExecCommand { command, cwd, .. }
-                if command == "x" && cwd.as_deref() == Some("/project")
-        ));
-    }
-
-    #[test]
-    fn shadowed_builtin_is_noted_in_extension_approval_detail() {
-        let approval = approval_kind(
-            "bash",
-            &json!({
-                "toolName": "bash",
-                "source": "extension",
-                "extensionPath": "/extensions/bash.ts",
-                "shadowsBuiltin": true,
-                "input": { "command": "x" },
-                "reason": "requires confirmation"
-            }),
-        );
-        assert!(matches!(
-            approval,
-            ApprovalKind::ToolUse { detail, .. }
-                if detail.contains("requires confirmation")
-                    && detail.contains("/extensions/bash.ts")
-                    && detail.contains("overrides builtin bash")
-        ));
+        for shadows in [false, true] {
+            let approval = approval_kind(
+                "bash",
+                &json!({
+                    "toolName":"bash", "source":"extension", "extensionPath":"/extensions/bash.ts",
+                    "shadowsBuiltin":shadows, "input":input, "reason":"requires confirmation"
+                }),
+            );
+            let ApprovalKind::ToolUse {
+                name,
+                input: actual_input,
+                detail,
+            } = approval
+            else {
+                panic!("extension tools must not inherit builtin command semantics");
+            };
+            assert_eq!(name, "bash");
+            assert_eq!(actual_input, input);
+            assert!(detail.contains("/extensions/bash.ts"));
+            assert!(detail.contains("requires confirmation"));
+            assert_eq!(detail.contains("overrides builtin bash"), shadows);
+        }
     }
 
     #[test]
@@ -1787,6 +1764,20 @@ mod tests {
     #[test]
     fn responds_to_pending_extension_dialog_with_value_or_cancellation() {
         let mut pending = HashSet::from(["dialog".to_owned()]);
+        let mut output = Vec::new();
+        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
+        assert!(pending.is_empty());
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            response,
+            json!({
+                "type":"extension_ui_response",
+                "id":"dialog",
+                "cancelled":true
+            })
+        );
+
+        let mut pending = HashSet::from(["dialog".to_owned()]);
         let answers = serde_json::Map::from_iter([("dialog".into(), json!("custom answer"))]);
         assert_eq!(
             take_extension_dialog_response(&mut pending, "dialog", &answers),
@@ -1816,51 +1807,15 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_cancels_pending_extension_dialogs() {
-        let mut pending = HashSet::from(["dialog".to_owned()]);
-        let mut output = Vec::new();
-        cancel_pending_dialogs(&mut output, &mut pending).unwrap();
-        assert!(pending.is_empty());
-        let response: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(
-            response,
-            json!({
-                "type":"extension_ui_response",
-                "id":"dialog",
-                "cancelled":true
-            })
-        );
-    }
-
-    #[test]
-    fn map_model_uses_supported_state_thinking_level_as_default() {
+    fn model_catalog_only_offers_and_defaults_to_supported_thinking_levels() {
         let model = json!({
-            "id": "gpt-test",
-            "provider": "openai",
-            "reasoning": true,
-            "thinkingLevelMap": {"xhigh": "xhigh"}
+            "id": "test-model",
+            "provider": "test-provider",
+            "reasoning": false,
+            "thinkingLevelMap": {"xhigh": "xhigh", "max": "max"}
         });
-        let mapped = map_model(&model, None, Some("xhigh")).unwrap();
-        assert!(matches!(
-            mapped.options.as_slice(),
-            [OptionDescriptor::Select {
-                default_value: Some(level),
-                ..
-            }] if level == "xhigh"
-        ));
+        assert!(map_model(&model, None, None).unwrap().options.is_empty());
 
-        let mapped = map_model(&model, None, Some("unsupported")).unwrap();
-        assert!(matches!(
-            mapped.options.as_slice(),
-            [OptionDescriptor::Select {
-                default_value: None,
-                ..
-            }]
-        ));
-    }
-
-    #[test]
-    fn map_model_filters_unsupported_thinking_levels() {
         // Pi's thinkingLevelMap contract: omitted keys use provider defaults,
         // null disables a level, and xhigh/max require explicit support.
         for (mapping, expected) in [
@@ -1886,41 +1841,32 @@ mod tests {
             if !mapping.is_null() {
                 model["thinkingLevelMap"] = mapping;
             }
-            let mapped = map_model(&model, None, Some("medium")).unwrap();
-            let [
-                OptionDescriptor::Select {
-                    options,
-                    default_value,
-                    ..
-                },
-            ] = mapped.options.as_slice()
-            else {
-                panic!("reasoning model must expose its supported thinking levels");
-            };
-            assert_eq!(
-                options
-                    .iter()
-                    .map(|option| option.value.as_str())
-                    .collect::<Vec<_>>(),
-                expected,
-                "{model}"
-            );
-            assert_eq!(
-                default_value.as_deref(),
-                expected.contains(&"medium").then_some("medium")
-            );
+            for selected in ["medium", "xhigh", "unsupported"] {
+                let mapped = map_model(&model, None, Some(selected)).unwrap();
+                let [
+                    OptionDescriptor::Select {
+                        options,
+                        default_value,
+                        ..
+                    },
+                ] = mapped.options.as_slice()
+                else {
+                    panic!("reasoning model must expose its supported thinking levels");
+                };
+                assert_eq!(
+                    options
+                        .iter()
+                        .map(|option| option.value.as_str())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "{model}"
+                );
+                assert_eq!(
+                    default_value.as_deref(),
+                    expected.contains(&selected).then_some(selected)
+                );
+            }
         }
-    }
-
-    #[test]
-    fn map_model_hides_thinking_options_for_non_reasoning_models() {
-        let model = json!({
-            "id": "test-model",
-            "provider": "test-provider",
-            "reasoning": false,
-            "thinkingLevelMap": {"xhigh": "xhigh", "max": "max"}
-        });
-        assert!(map_model(&model, None, None).unwrap().options.is_empty());
     }
 
     /// Replays `pi --mode rpc` output recorded from pi 0.85.1 with a scripted
@@ -1949,69 +1895,6 @@ mod tests {
 
     #[test]
     fn maps_recorded_rpc_fixture() {
-        let mut mapper = PiMapper::new();
-        let mut events = Vec::new();
-        for message in recorded_rpc_events() {
-            events.extend(mapper.on_message(&message));
-        }
-        assert!(matches!(events[0], AgentEvent::TurnStarted { .. }));
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            AgentEvent::ItemCompleted(ThreadItem {
-                content: ItemContent::UserMessage { text, .. },
-                ..
-            }) if text == "DO NOT ECHO"
-        )));
-        assert_eq!(streamed_text(&events, DeltaKind::AssistantText), "PONG");
-        assert_eq!(
-            streamed_text(&events, DeltaKind::ReasoningText),
-            "CheckingTool done"
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { output, .. }, .. }) if output == "ok"
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::CommandExecution { command, output, .. }, .. })
-                if command == "printf ok" && output == "ok"
-        )));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    AgentEvent::ItemCompleted(ThreadItem {
-                        content: ItemContent::AssistantMessage { text },
-                        ..
-                    }) if text == "PONG"
-                ))
-                .count(),
-            1,
-            "message_end and turn_end must reconcile the same assistant message"
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::TokenUsage(TokenUsage {
-                input_tokens: Some(12),
-                output_tokens: Some(3),
-                ..
-            })
-        )));
-        assert!(matches!(
-            events.last(),
-            Some(AgentEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                ..
-            })
-        ));
-    }
-
-    /// pi streams `message_update` without the message, and `responseId`
-    /// only appears on `message_end`; the completed parts must still carry
-    /// the ids the deltas streamed under, or the timeline shows both.
-    #[test]
-    fn streamed_parts_complete_under_the_id_they_streamed_with() {
         let mut mapper = PiMapper::new();
         let mut events = Vec::new();
         for message in recorded_rpc_events() {
@@ -2064,6 +1947,58 @@ mod tests {
             )),
             "no assistant part completes under an id that was never streamed"
         );
+
+        assert!(matches!(events[0], AgentEvent::TurnStarted { .. }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemCompleted(ThreadItem {
+                content: ItemContent::UserMessage { text, .. },
+                ..
+            }) if text == "DO NOT ECHO"
+        )));
+        assert_eq!(streamed_text(&events, DeltaKind::AssistantText), "PONG");
+        assert_eq!(
+            streamed_text(&events, DeltaKind::ReasoningText),
+            "CheckingTool done"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemUpdated(ThreadItem { content: ItemContent::CommandExecution { output, .. }, .. }) if output == "ok"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemCompleted(ThreadItem { content: ItemContent::CommandExecution { command, output, .. }, .. })
+                if command == "printf ok" && output == "ok"
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::ItemCompleted(ThreadItem {
+                        content: ItemContent::AssistantMessage { text },
+                        ..
+                    }) if text == "PONG"
+                ))
+                .count(),
+            1,
+            "message_end and turn_end must reconcile the same assistant message"
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TokenUsage(TokenUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(3),
+                ..
+            })
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            })
+        ));
     }
 
     /// Two assistant messages stamped in the same millisecond must not share
@@ -2142,6 +2077,18 @@ mod tests {
     #[test]
     fn displayed_custom_messages_become_work_log_items() {
         let mut mapper = PiMapper::new();
+        for message in [
+            json!({"role":"custom","content":"hidden","display":false}),
+            json!({"role":"custom","content":"implicit hidden"}),
+            json!({"role":"custom","content":[{"type":"image","data":"ignored"}],"display":true}),
+        ] {
+            assert!(
+                mapper
+                    .on_message(&json!({"type":"message_end","message":message}))
+                    .is_empty()
+            );
+        }
+
         let plain = mapper.on_message(&json!({
             "type":"message_end",
             "message":{
@@ -2180,21 +2127,5 @@ mod tests {
                 ..
             })] if provider_kind == "pi-extension" && summary == "first\nsecond"
         ));
-    }
-
-    #[test]
-    fn hidden_or_empty_custom_messages_are_ignored() {
-        let mut mapper = PiMapper::new();
-        for message in [
-            json!({"role":"custom","content":"hidden","display":false}),
-            json!({"role":"custom","content":"implicit hidden"}),
-            json!({"role":"custom","content":[{"type":"image","data":"ignored"}],"display":true}),
-        ] {
-            assert!(
-                mapper
-                    .on_message(&json!({"type":"message_end","message":message}))
-                    .is_empty()
-            );
-        }
     }
 }

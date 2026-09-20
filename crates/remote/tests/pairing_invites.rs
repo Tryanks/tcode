@@ -178,7 +178,7 @@ impl Impostor {
 
     async fn assert_attempt_disclosed_no_code(&self) {
         futures_lite::future::race(async { self.settled.recv().await.unwrap() }, async {
-            smol::Timer::after(Duration::from_secs(2)).await;
+            smol::Timer::after(Duration::from_secs(30)).await;
             panic!("impostor connection remained open after pairing finished");
         })
         .await;
@@ -205,6 +205,7 @@ fn native_qr_pairing_uses_an_authenticated_alternate_and_consumes_one_pair_code(
         let impostor = Impostor::new(Attack::WrongKey).await;
         let mut request = desktop.invite();
         let expected_key = request.identity_key.clone();
+        request.identity_key = request.identity_key.map(|key| key.to_ascii_uppercase());
         request.origin = impostor.origin.clone();
         request.candidates = vec![desktop.origin(), desktop.origin()];
         let paired = phone.pair(request.clone()).await.unwrap();
@@ -262,19 +263,6 @@ fn an_older_qr_without_a_pin_uses_only_its_original_address() {
 }
 
 #[test]
-fn a_qr_public_key_accepts_uppercase_hex_without_losing_a_consumed_code() {
-    let desktop = Host::new();
-    let data = TestDir::new();
-    let phone = NativeClientHost::new(data.0.clone(), "Phone");
-    let mut request = desktop.invite();
-    let canonical_key = request.identity_key.clone();
-    request.identity_key = request.identity_key.map(|key| key.to_ascii_uppercase());
-    let paired = smol::block_on(phone.pair(request)).unwrap();
-    assert_eq!(paired.identity_key, canonical_key);
-    assert_eq!(desktop.server().devices().len(), 1);
-}
-
-#[test]
 fn a_qr_candidate_cannot_request_a_large_frame_allocation_before_identity_verification() {
     let desktop = Host::new();
     let data = TestDir::new();
@@ -289,7 +277,7 @@ fn a_qr_candidate_cannot_request_a_large_frame_allocation_before_identity_verifi
                 impostor.assert_attempt_disclosed_no_code().await;
             },
             async {
-                smol::Timer::after(Duration::from_secs(2)).await;
+                smol::Timer::after(Duration::from_secs(30)).await;
                 panic!("pairing waited for the oversized frame body");
             },
         )

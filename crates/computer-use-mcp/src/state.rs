@@ -669,15 +669,8 @@ mod tests {
         assert!(store.get("S2").is_err());
         assert!(store.get(&newest.state_id).is_ok());
         assert!(matches!(store.get("S2"), Err(StateError::Evicted(_))));
-    }
-
-    #[test]
-    fn evicting_the_last_observation_for_a_root_drops_its_harness_history() {
-        let mut store = StateStore::default();
-        for window_id in 1..=OBSERVATION_CAPACITY as u32 + 1 {
-            store.insert_observation(root(window_id), tree(&format!("Window {window_id}")));
-        }
-        assert!(!store.harness_histories.contains_key(&root(1).identity()));
+        assert!(store.harness_histories.contains_key(&root(1).identity()));
+        assert!(!store.harness_histories.contains_key(&root(2).identity()));
         assert_eq!(store.harness_histories.len(), OBSERVATION_CAPACITY);
     }
 
@@ -691,18 +684,37 @@ mod tests {
             Err(StateError::Stale { .. })
         ));
         assert!(store.validate_for_action(&second.state_id).is_ok());
+        let other = store.insert_observation(root(2), tree("other"));
+        assert!(store.validate_for_action(&second.state_id).is_ok());
+        assert!(store.validate_for_action(&other.state_id).is_ok());
+        assert!(first.harness_annotation.contains("observation_sequence: 1"));
+        assert!(
+            second
+                .harness_annotation
+                .contains("observation_sequence: 2")
+        );
+        assert!(other.harness_annotation.contains("observation_sequence: 1"));
     }
 
     #[test]
     fn bounded_output_continuation_round_trips_without_mutation() {
         let mut store = StateStore::default();
-        let original = "0123456789abcdef\n".repeat(4_000);
+        let original = "0123456789α中文😀\n".repeat(4_000);
         let visible = store.bound_model_text(Some("S9"), original.clone());
         assert!(visible.len() < 20 * 1024);
         let output_ref = visible
             .split_whitespace()
             .find(|part| part.starts_with("@o"))
             .unwrap();
+        assert!(matches!(
+            store.read_output(output_ref, Some("other-state"), None),
+            Err(StateError::OutputOwnerMismatch { .. })
+        ));
+        for offset in [11, original.len() + 1] {
+            assert!(
+                matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
+            );
+        }
         let mut rebuilt = visible
             .split("\n\n[output truncated")
             .next()
@@ -817,31 +829,5 @@ mod tests {
                 .any(|line| { line == &format!("- {action_ref} group \"Action group\"") })
         );
         assert!(candidates.iter().all(|line| !line.contains(&read_only_ref)));
-    }
-
-    #[test]
-    fn observation_sequence_increments_independently_per_root() {
-        let mut store = StateStore::default();
-        let first_root = root(1);
-        let other_root = root(2);
-        let first = store.insert_observation(first_root.clone(), tree("one"));
-        let second = store.insert_observation(first_root.clone(), tree("two"));
-        let other = store.insert_observation(other_root, tree("other"));
-
-        assert!(first.harness_annotation.contains("observation_sequence: 1"));
-        assert!(
-            second
-                .harness_annotation
-                .contains("observation_sequence: 2")
-        );
-        assert!(other.harness_annotation.contains("observation_sequence: 1"));
-        assert_eq!(
-            store
-                .harness_histories
-                .get(&first_root.identity())
-                .unwrap()
-                .observation_sequence,
-            2
-        );
     }
 }

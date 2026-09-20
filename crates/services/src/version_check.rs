@@ -157,6 +157,8 @@ mod tests {
             ("0.4.0", "v0.5.0-beta.1", true, false),
             ("0.5.0-beta.1", "v0.5.0", false, true),
             ("0.5.0-beta.1", "v0.6.0-beta.1", true, true),
+            ("0.4", "v0.4.1", false, false),
+            ("0.4.0", "latest", false, false),
         ] {
             let assessment = check(current, Ok(&release(latest, prerelease)));
             assert_eq!(
@@ -169,23 +171,6 @@ mod tests {
             );
             assert_eq!(assessment.release_url.as_deref(), Some(RELEASE_URL));
         }
-    }
-
-    #[test]
-    fn malformed_versions_preserve_release_details_without_announcing_updates() {
-        for (current, latest) in [("0.4", "v0.4.1"), ("0.4.0", "latest")] {
-            let assessment = check(current, Ok(&release(latest, false)));
-            assert!(!assessment.update_available);
-            assert_eq!(
-                assessment.latest.as_deref(),
-                Some(latest.trim_start_matches('v'))
-            );
-            assert_eq!(assessment.release_url.as_deref(), Some(RELEASE_URL));
-        }
-    }
-
-    #[test]
-    fn fetch_and_json_failures_leave_no_release_details() {
         assert_eq!(
             check("0.4.0", Err(FetchError::Network)),
             Assessment::default()

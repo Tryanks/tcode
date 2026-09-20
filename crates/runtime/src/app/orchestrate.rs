@@ -1115,17 +1115,19 @@ impl AppState {
         else {
             return;
         };
-        // tcode's own reporting channel is never a permission question, in any
-        // access mode: providers that gate MCP tools (Claude Code prompts for
-        // them outside bypassPermissions) would otherwise stall or fail every
-        // report_result call from a read_only or workspace_write child.
-        if let agent::ApprovalKind::ToolUse { name, .. } = &request.kind
-            && name.contains(agent::McpRegistration::SERVER_NAME_ORCHESTRATE_REPORT)
+        // Claude identifies this registered MCP tool by its qualified name.
+        // Other adapters expose arbitrary extension names or display titles,
+        // which cannot establish that a request belongs to our report server.
+        if child.provider == ProviderKind::ClaudeCode
+            && let agent::ApprovalKind::ToolUse { name, .. } = &request.kind
+            && name == "mcp__tcode_report__report_result"
         {
             if let Err(err) = self.respond_session_approval(
                 child_id,
                 request.id.clone(),
-                ApprovalDecision::ApproveForSession,
+                // A reporting exemption must not accept provider-suggested
+                // permission updates for the rest of the session.
+                ApprovalDecision::Approve,
             ) {
                 log::warn!("failed to auto-approve report_result for child {child_id}: {err}");
             }

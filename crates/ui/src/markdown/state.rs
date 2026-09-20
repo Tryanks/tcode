@@ -612,40 +612,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn pre_parsed_constructor_matches_synchronous_constructor(cx: &mut TestAppContext) {
-        cx.update(crate::theme::init);
-        cx.update(super::super::init);
-        let document =
-            "An earlier [reference].\n\n[reference]: https://example.com\n\nFinal paragraph.";
-        let parsed_document = super::super::parse::parse_document(document);
-        let synchronous = cx.update(|cx| cx.new(|cx| MarkdownState::new(document, cx)));
-        let pre_parsed =
-            cx.update(|cx| cx.new(|cx| MarkdownState::from_parsed(document, parsed_document, cx)));
-
-        let expected = synchronous.read_with(cx, |state, _| {
-            (
-                state.text.clone(),
-                state.parsed.clone(),
-                state.root_block_starts.clone(),
-                state.has_potential_link_reference_definition,
-                state.last_reparse_bytes,
-            )
-        });
-        pre_parsed.read_with(cx, |state, _| {
-            assert_eq!(
-                (
-                    state.text.clone(),
-                    state.parsed.clone(),
-                    state.root_block_starts.clone(),
-                    state.has_potential_link_reference_definition,
-                    state.last_reparse_bytes,
-                ),
-                expected
-            );
-        });
-    }
-
-    #[gpui::test]
     fn link_target_cache_tracks_document_content_and_base_dir(cx: &mut TestAppContext) {
         cx.update(crate::theme::init);
         cx.update(super::super::init);

@@ -196,7 +196,7 @@ pub(crate) fn copy_button(
 #[cfg(test)]
 mod tests {
     use super::MdState;
-    use crate::chat::model::{MdSync, md_sync, plain_text_as_markdown};
+    use crate::chat::model::plain_text_as_markdown;
     use crate::markdown::MarkdownState;
     use gpui::{AppContext as _, Entity, TestAppContext};
 
@@ -254,22 +254,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn md_state_synced_mirror_tracks_push_and_reset_paths(cx: &mut TestAppContext) {
+    fn markdown_mirror_keeps_rendered_text_coherent_across_append_rewrite_shrink_and_clear(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(crate::theme::init);
         cx.update(crate::markdown::init);
-        let mut md = cx.update(|cx| MdState::new("Seed", cx));
-
-        assert_eq!(
-            md_sync(&md.synced, "Seed tail"),
-            MdSync::Push(" tail".into())
-        );
-        cx.update(|cx| md.sync("Seed tail".into(), cx));
-        assert_eq!(md.synced.as_ref(), "Seed tail");
-        assert_eq!(rendered(&md.state, cx), "Seed tail\n");
-
-        assert_eq!(md_sync(&md.synced, "Replacement"), MdSync::Reset);
-        cx.update(|cx| md.sync("Replacement".into(), cx));
-        assert_eq!(md.synced.as_ref(), "Replacement");
-        assert_eq!(rendered(&md.state, cx), "Replacement\n");
+        let mut md = cx.update(|cx| MdState::new("", cx));
+        for (text, expected) in [
+            ("", ""),
+            ("Seed", "Seed\n"),
+            ("Seed", "Seed\n"),
+            ("Seed tail 文", "Seed tail 文\n"),
+            ("Replacement", "Replacement\n"),
+            ("Replace", "Replace\n"),
+            ("", ""),
+        ] {
+            cx.update(|cx| md.sync(text.into(), cx));
+            assert_eq!(md.synced.as_ref(), text);
+            assert_eq!(rendered(&md.state, cx), expected);
+        }
     }
 }

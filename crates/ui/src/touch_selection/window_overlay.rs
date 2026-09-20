@@ -156,6 +156,7 @@ mod tests {
 
     #[gpui::test]
     fn one_touch_selection_at_a_time_and_the_menu_steps_aside_for_a_pan(cx: &mut TestAppContext) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         let textarea = std::rc::Rc::new(std::cell::OnceCell::new());
         let (_, cx) = cx.add_window_view({
@@ -222,6 +223,7 @@ mod tests {
     fn long_press_on_a_message_offers_copy_and_select_all_past_the_viewport(
         cx: &mut TestAppContext,
     ) {
+        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         cx.update(crate::theme::init);
         let text = (0..40)
             .map(|ix| format!("Paragraph {ix} of the message."))

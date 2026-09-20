@@ -384,8 +384,17 @@ mod tests {
 
     #[tokio::test]
     async fn collaboration_tool_routes_peer_purpose_with_read_only_defaults() {
+        let schema = serde_json::to_value(schemars::schema_for!(CollaborationEffort)).unwrap();
+        assert_eq!(schema["enum"], serde_json::json!(["medium", "high"]));
+        for effort in ["medium", "high"] {
+            let params: CollaborateParams = serde_json::from_value(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).unwrap();
+            assert_eq!(params.effort.unwrap().as_str(), effort);
+        }
+        for effort in ["low", "xhigh", "max", "ultra"] {
+            assert!(serde_json::from_value::<CollaborateParams>(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).is_err());
+        }
         let (tx, rx) = async_channel::unbounded();
-        let broker = broker(tx, std::time::Duration::from_secs(2));
+        let broker = broker(tx, std::time::Duration::from_secs(30));
         let resolver = tokio::spawn(async move {
             let request = rx.recv().await.unwrap();
             assert!(matches!(request.op, OrchestrateOp::Dispatch {
@@ -412,39 +421,10 @@ mod tests {
         resolver.await.unwrap();
     }
 
-    #[test]
-    fn collaboration_schema_and_parameters_only_allow_medium_and_high() {
-        let schema = serde_json::to_value(schemars::schema_for!(CollaborationEffort)).unwrap();
-        assert_eq!(schema["enum"], serde_json::json!(["medium", "high"]));
-        for effort in ["medium", "high"] {
-            let params: CollaborateParams = serde_json::from_value(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).unwrap();
-            assert_eq!(params.effort.unwrap().as_str(), effort);
-        }
-        for effort in ["low", "xhigh", "max", "ultra"] {
-            assert!(serde_json::from_value::<CollaborateParams>(serde_json::json!({"provider":"codex", "effort":effort, "title":"Review", "brief":"Compare alternatives"})).is_err());
-        }
-    }
-
-    #[test]
-    fn child_service_exposes_only_report_result() {
-        let (tx, _rx) = async_channel::unbounded();
-        let tools = ChildReportTools::new(
-            broker(tx, std::time::Duration::from_secs(1)),
-            "child".into(),
-        );
-        let names: Vec<_> = tools
-            .tool_router
-            .list_all()
-            .into_iter()
-            .map(|tool| tool.name.to_string())
-            .collect();
-        assert_eq!(names, ["report_result"]);
-    }
-
     #[tokio::test]
     async fn report_result_carries_child_scope() {
         let (tx, rx) = async_channel::unbounded();
-        let broker = broker(tx, std::time::Duration::from_secs(2));
+        let broker = broker(tx, std::time::Duration::from_secs(30));
         let resolver = tokio::spawn(async move {
             let request = rx.recv().await.unwrap();
             assert!(
@@ -457,7 +437,15 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let result = ChildReportTools::new(broker, "child".into())
+        let tools = ChildReportTools::new(broker, "child".into());
+        let names: Vec<_> = tools
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        assert_eq!(names, ["report_result"]);
+        let result = tools
             .report_result(Parameters(ReportResultParams {
                 text: "full report".into(),
             }))

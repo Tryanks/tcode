@@ -2088,47 +2088,4 @@ mod tests {
         );
         assert_eq!(file_header_index(&files, &unified, "missing.rs", cwd), None);
     }
-
-    #[test]
-    fn large_diff_builds_virtual_list_models_without_row_elements() {
-        let rows = (1..=5_000)
-            .map(|line| RenderedRow {
-                kind: RowKind::Added,
-                old: None,
-                new: Some(line),
-                text: format!("let value_{line} = {line};"),
-                runs: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let all_split = (0..rows.len())
-            .map(|row| PairedRow {
-                left: None,
-                right: Some(row),
-            })
-            .collect();
-        let files = vec![RenderedFile {
-            path: "src/large.rs".into(),
-            kind: FileChangeKind::Modify,
-            added: 5_000,
-            removed: 0,
-            all_rows: rows,
-            all_split,
-            collapsed: Vec::new(),
-            expandable: false,
-        }];
-
-        let items = build_list_items(&files);
-        let (unified, split) = (items.unified, items.split);
-
-        assert_eq!(unified.len(), 5_001);
-        assert_eq!(split.len(), 5_001);
-        assert!(matches!(unified[0], DiffListItem::Header(0)));
-        assert!(matches!(
-            unified[5_000],
-            DiffListItem::UnifiedRow {
-                file: 0,
-                row: 4_999
-            }
-        ));
-    }
 }

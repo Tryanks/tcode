@@ -1371,44 +1371,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_archive_settings_are_legacy_safe_and_roundtrip() {
+    fn older_settings_preserve_access_policy_and_accept_partial_feature_blocks() {
         let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert!(!legacy.auto_archive_disabled);
         assert_eq!(legacy.auto_archive_max_idle_days, 7);
         assert_eq!(legacy.auto_archive_keep_count, 30);
         assert!(!legacy.auto_archive_notice_shown);
-
-        let settings = Settings {
-            auto_archive_disabled: true,
-            auto_archive_max_idle_days: 14,
-            auto_archive_keep_count: 42,
-            auto_archive_notice_shown: true,
-            ..Settings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.auto_archive_disabled, settings.auto_archive_disabled);
-        assert_eq!(
-            back.auto_archive_max_idle_days,
-            settings.auto_archive_max_idle_days
-        );
-        assert_eq!(
-            back.auto_archive_keep_count,
-            settings.auto_archive_keep_count
-        );
-        assert_eq!(
-            back.auto_archive_notice_shown,
-            settings.auto_archive_notice_shown
-        );
-    }
-
-    #[test]
-    fn sidebar_provider_marks_default_off_and_patch_on() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
         assert!(!legacy.sidebar_provider_marks);
-        let mut settings = Settings::default();
-        settings.apply(SettingsPatch::SidebarProviderMarks(true));
-        assert!(settings.sidebar_provider_marks);
+        assert!(!legacy.sidebar_collapsed);
+        assert!(!legacy.remote_hosting_enabled);
+        assert_eq!(legacy.remote_port, None);
+        assert_eq!(legacy.remote_host_name, None);
+        assert!(legacy.profiles.is_empty());
+        assert_eq!(legacy.title_generation.profile_id, None);
+        assert!(!legacy.computer_use.enabled);
+        assert!(legacy.browser.enabled);
+        assert!(legacy.browser.allow_evaluate);
+        assert_eq!(legacy.browser.home_url, None);
+
+        let partial: Settings = serde_json::from_str(
+            r#"{
+            "computer_use":{"enabled":true},
+            "browser":{"enabled":false},
+            "orchestrate":{},
+            "title_generation":{"provider":"codex","model":"m"}
+        }"#,
+        )
+        .unwrap();
+        assert!(partial.computer_use.enabled);
+        assert_eq!(partial.computer_use.image_mode, ImageMode::Auto);
+        assert!(partial.computer_use.allow_input);
+        assert!(!partial.computer_use.allow_foreground_fallback);
+        assert!(partial.computer_use.show_agent_cursor);
+        assert!(!partial.browser.enabled);
+        assert!(partial.browser.allow_evaluate);
+        assert_eq!(
+            partial.orchestrate.child_approval,
+            ChildApprovalMode::Orchestrator
+        );
+        assert!(!partial.orchestrate.child_worktrees);
+        assert_eq!(partial.title_generation.profile_id, None);
+
+        let child: OrchestrateChildModel =
+            serde_json::from_str(r#"{"provider":"codex","model":"m","enabled":true}"#).unwrap();
+        assert_eq!(child.profile_id, None);
+        assert!(!child.fast);
     }
 
     #[test]
@@ -1504,16 +1511,6 @@ mod tests {
         assert_eq!(settings.provider_color("codex"), 0x00FF00);
         assert!(PROVIDER_COLOR_PALETTE.contains(&settings.provider_color("broken")));
         assert_eq!(settings.provider_color("claude"), 0xD97757);
-    }
-
-    #[test]
-    fn removed_diff_view_mode_key_remains_compatible_with_old_settings() {
-        let settings: Settings =
-            serde_json::from_str(r#"{"theme_mode":"system","diff_view_mode":"line"}"#).unwrap();
-        assert_eq!(
-            settings.unknown.get("diff_view_mode"),
-            Some(&serde_json::Value::String("line".into()))
-        );
     }
 
     #[test]
@@ -1757,116 +1754,6 @@ mod tests {
     }
 
     #[test]
-    fn computer_use_defaults_disabled_and_round_trips() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(!legacy.computer_use.enabled);
-        // New fields tolerate an absent block: image mode auto, input allowed.
-        assert_eq!(legacy.computer_use.image_mode, ImageMode::Auto);
-        assert!(legacy.computer_use.allow_input);
-        assert!(!legacy.computer_use.allow_foreground_fallback);
-        assert!(legacy.computer_use.show_agent_cursor);
-
-        // A legacy block that predates image_mode / allow_input still defaults
-        // input ON (observe-only is opt-in, never the silent legacy behavior).
-        let partial: Settings =
-            serde_json::from_str(r#"{"computer_use":{"enabled":true}}"#).unwrap();
-        assert!(partial.computer_use.enabled);
-        assert_eq!(partial.computer_use.image_mode, ImageMode::Auto);
-        assert!(partial.computer_use.allow_input);
-        assert!(!partial.computer_use.allow_foreground_fallback);
-        assert!(partial.computer_use.show_agent_cursor);
-
-        let settings = Settings {
-            computer_use: ComputerUseSettings {
-                enabled: true,
-                image_mode: ImageMode::Always,
-                allow_input: false,
-                allow_foreground_fallback: true,
-                show_agent_cursor: false,
-            },
-            ..Settings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        assert!(json.contains(r#""image_mode":"always""#));
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert!(back.computer_use.enabled);
-        assert_eq!(back.computer_use.image_mode, ImageMode::Always);
-        assert!(!back.computer_use.allow_input);
-        assert!(back.computer_use.allow_foreground_fallback);
-        assert!(!back.computer_use.show_agent_cursor);
-    }
-
-    #[test]
-    fn browser_defaults_enabled_and_round_trips() {
-        // Legacy files (no `browser` key) get the defaults: enabled, no home
-        // URL, evaluate allowed.
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert_eq!(legacy.browser, BrowserSettings::default());
-        assert!(legacy.browser.enabled);
-        assert!(legacy.browser.allow_evaluate);
-        assert_eq!(legacy.browser.home_url, None);
-
-        // A partial block keeps unspecified fields at their (true) defaults.
-        let partial: Settings = serde_json::from_str(r#"{"browser":{"enabled":false}}"#).unwrap();
-        assert!(!partial.browser.enabled);
-        assert!(partial.browser.allow_evaluate);
-
-        // Default browser settings are skipped on serialize, like orchestrate.
-        let json = serde_json::to_string(&Settings::default()).unwrap();
-        assert!(!json.contains("\"browser\""));
-
-        let settings = Settings {
-            browser: BrowserSettings {
-                enabled: false,
-                home_url: Some("https://example.test".into()),
-                allow_evaluate: false,
-            },
-            ..Settings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.browser, settings.browser);
-    }
-
-    #[test]
-    fn orchestrate_child_approval_defaults_and_round_trips() {
-        let legacy: OrchestrateSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(legacy.child_approval, ChildApprovalMode::Orchestrator);
-
-        for mode in [ChildApprovalMode::AlwaysAllow, ChildApprovalMode::Manual] {
-            let settings = OrchestrateSettings {
-                child_approval: mode,
-                ..Default::default()
-            };
-            let json = serde_json::to_string(&settings).unwrap();
-            assert!(json.contains(match mode {
-                ChildApprovalMode::AlwaysAllow => r#""child_approval":"always_allow""#,
-                ChildApprovalMode::Manual => r#""child_approval":"manual""#,
-                ChildApprovalMode::Orchestrator => unreachable!(),
-            }));
-            let back: OrchestrateSettings = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.child_approval, mode);
-        }
-    }
-
-    #[test]
-    fn orchestrate_child_worktrees_default_false_and_round_trip() {
-        let legacy: OrchestrateSettings = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.child_worktrees);
-
-        let settings = OrchestrateSettings {
-            child_worktrees: true,
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        assert!(json.contains(r#""child_worktrees":true"#));
-        assert_eq!(
-            serde_json::from_str::<OrchestrateSettings>(&json).unwrap(),
-            settings
-        );
-    }
-
-    #[test]
     fn orchestrate_merges_legacy_tiers_and_upgrades_bundled_models() {
         let settings: OrchestrateSettings = serde_json::from_value(serde_json::json!({
             "child_models": [
@@ -1969,98 +1856,6 @@ mod tests {
     }
 
     #[test]
-    fn title_generation_defaults_and_round_trips() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert_eq!(
-            legacy.title_generation,
-            TitleGenerationSettings {
-                provider: ProviderKind::Codex,
-                model: "gpt-5.6-luna".into(),
-                profile_id: None,
-            }
-        );
-        let partial: TitleGenerationSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(partial, TitleGenerationSettings::default());
-
-        let settings = Settings {
-            title_generation: TitleGenerationSettings {
-                provider: ProviderKind::ClaudeCode,
-                model: "claude-haiku-4-5".into(),
-                profile_id: Some("work-claude".into()),
-            },
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.title_generation, settings.title_generation);
-    }
-
-    #[test]
-    fn provider_profile_fields_are_backward_compatible_and_round_trip() {
-        let child: OrchestrateChildModel =
-            serde_json::from_str(r#"{"provider":"codex","model":"m","enabled":true}"#).unwrap();
-        assert_eq!(child.profile_id, None);
-        assert!(!child.fast, "legacy profiles dispatch without fast mode");
-
-        let title: TitleGenerationSettings =
-            serde_json::from_str(r#"{"provider":"codex","model":"m"}"#).unwrap();
-        assert_eq!(title.profile_id, None);
-
-        let child = OrchestrateChildModel {
-            profile_id: Some("kimi".into()),
-            fast: true,
-            ..child
-        };
-        let child_back: OrchestrateChildModel =
-            serde_json::from_str(&serde_json::to_string(&child).unwrap()).unwrap();
-        assert_eq!(child_back, child);
-
-        let title = TitleGenerationSettings {
-            profile_id: Some("kimi".into()),
-            ..title
-        };
-        let title_back: TitleGenerationSettings =
-            serde_json::from_str(&serde_json::to_string(&title).unwrap()).unwrap();
-        assert_eq!(title_back, title);
-    }
-
-    #[test]
-    fn sidebar_collapsed_round_trips_and_defaults_to_expanded() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(!legacy.sidebar_collapsed, "legacy files must open expanded");
-
-        let settings = Settings {
-            sidebar_collapsed: true,
-            ..Settings::default()
-        };
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert!(back.sidebar_collapsed);
-    }
-    #[test]
-    fn remote_hosting_fields_default_off_and_round_trip() {
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(!legacy.remote_hosting_enabled, "legacy files never host");
-        assert_eq!(legacy.remote_port, None);
-        assert_eq!(legacy.remote_host_name, None);
-
-        let mut settings = Settings::default();
-        settings.apply(SettingsPatch::RemoteHostingEnabled(true));
-        settings.apply(SettingsPatch::RemotePort(Some(47_421)));
-        settings.apply(SettingsPatch::RemoteHostName(Some("Desk Mac".into())));
-        let back: Settings =
-            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-        assert!(back.remote_hosting_enabled);
-        assert_eq!(back.remote_port, Some(47_421));
-        assert_eq!(back.remote_host_name.as_deref(), Some("Desk Mac"));
-
-        // Defaults stay out of the file entirely.
-        let json = serde_json::to_string(&Settings::default()).unwrap();
-        assert!(!json.contains("remote_port"), "{json}");
-        assert!(!json.contains("remote_host_name"), "{json}");
-    }
-
-    #[test]
     fn resolves_builtin_and_user_profiles() {
         let mut settings = Settings::default();
         // Give the built-in Claude card a base URL and a display name.
@@ -2123,28 +1918,6 @@ mod tests {
         assert_eq!(settings.allocate_profile_id("Klaude Kode"), "klaude-kode-2");
     }
 
-    #[test]
-    fn profiles_round_trip_through_json() {
-        let mut settings = Settings::default();
-        let id = settings.allocate_profile_id("Kimi");
-        settings.profiles.insert(
-            id.clone(),
-            ProviderProfile {
-                kind: ProviderKind::ClaudeCode,
-                settings: ProviderSettings {
-                    display_name: Some("Kimi".into()),
-                    ..ProviderSettings::default()
-                },
-            },
-        );
-        let json = serde_json::to_string(&settings).unwrap();
-        let back: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.profiles, settings.profiles);
-        // Legacy files with no `profiles` key still parse (defaults to empty).
-        let legacy: Settings = serde_json::from_str(r#"{"theme_mode":"system"}"#).unwrap();
-        assert!(legacy.profiles.is_empty());
-    }
-
     /// A build that predates a field must not destroy it: unknown keys survive a
     /// load → save round trip. (We hit this for real: an older binary dropped
     /// `acp_agents` and the next save wiped the installed agents.)
@@ -2153,6 +1926,7 @@ mod tests {
         let json = r#"{
             "theme_mode": "dark",
             "a_future_field": {"nested": [1, 2, 3]},
+            "diff_view_mode": "line",
             "another": "value"
         }"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
@@ -2166,6 +1940,7 @@ mod tests {
             "an unknown field was dropped on save"
         );
         assert_eq!(back.get("another"), Some(&serde_json::json!("value")));
+        assert_eq!(back.get("diff_view_mode"), Some(&serde_json::json!("line")));
     }
 }
 

@@ -79,38 +79,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_keys_get_distinct_colors_while_the_palette_has_room() {
-        let keys: Vec<String> = (0..PROVIDER_COLOR_PALETTE.len())
-            .map(|i| format!("profile-{i}"))
-            .collect();
-        let mut known: Vec<&str> = keys.iter().map(String::as_str).collect();
-        known.sort_unstable();
-        let mut colors: Vec<u32> = known.iter().map(|k| palette_color(k, &known)).collect();
-        colors.sort_unstable();
-        colors.dedup();
-        assert_eq!(colors.len(), PROVIDER_COLOR_PALETTE.len());
-    }
-
-    /// Slots are pinned to independently computed FNV-1a values: changing the
-    /// hash or reordering the palette would recolor every user's threads.
-    #[test]
-    fn assignment_is_stable_and_unknown_keys_still_resolve() {
+    fn custom_colors_fill_the_palette_before_reusing_slots() {
         let known = ["acp:gemini", "work-claude"];
         assert_eq!(palette_color("acp:gemini", &known), 0x14B8A6);
         assert_eq!(palette_color("work-claude", &known), 0x6B7FD7);
         // A deleted profile's threads keep their hashed color rather than none.
         assert_eq!(palette_color("deleted-profile", &known), 0xF59E0B);
-    }
 
-    #[test]
-    fn overflowing_the_palette_still_yields_a_color() {
         let keys: Vec<String> = (0..PROVIDER_COLOR_PALETTE.len() + 3)
-            .map(|i| format!("p{i}"))
+            .map(|i| format!("profile-{i:02}"))
             .collect();
-        let mut known: Vec<&str> = keys.iter().map(String::as_str).collect();
-        known.sort_unstable();
-        for key in &known {
-            assert!(PROVIDER_COLOR_PALETTE.contains(&palette_color(key, &known)));
-        }
+        let known: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let colors: Vec<u32> = known.iter().map(|key| palette_color(key, &known)).collect();
+        let mut first_palette = colors[..PROVIDER_COLOR_PALETTE.len()].to_vec();
+        first_palette.sort_unstable();
+        first_palette.dedup();
+        assert_eq!(first_palette.len(), PROVIDER_COLOR_PALETTE.len());
+        assert!(
+            colors
+                .iter()
+                .all(|color| PROVIDER_COLOR_PALETTE.contains(color))
+        );
     }
 }

@@ -141,10 +141,6 @@ mod tests {
                 ("MULTI".into(), "line one\nline two".into()),
             ]
         );
-    }
-
-    #[test]
-    fn no_marker_means_no_vars() {
         assert!(parse_env_output("PATH=/usr/bin\0HOME=/root").is_empty());
     }
 }

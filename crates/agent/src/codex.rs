@@ -2609,7 +2609,7 @@ mod tests {
     }
 
     fn test_actor() -> (Actor, Receiver<AgentEvent>) {
-        let mut child = crate::process::command("cat")
+        let mut child = crate::process::test_echo_command()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -2619,7 +2619,12 @@ mod tests {
         let stdout = child.stdout.take().unwrap();
         let (line_tx, line_rx) = smol::channel::unbounded();
         std::thread::spawn(move || {
+            let mut ready = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if !ready {
+                    ready = line == crate::process::TEST_ECHO_READY;
+                    continue;
+                }
                 if line_tx.send_blocking(ChildOutput::Line(line)).is_err() {
                     return;
                 }
@@ -3621,6 +3626,8 @@ mod tests {
             );
             assert!(actor.subagents.is_empty());
             assert!(actor.subagent_parent_by_thread.is_empty());
+            let _ = actor.child.kill();
+            let _ = actor.child.wait();
         });
     }
 

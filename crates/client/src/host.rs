@@ -391,6 +391,35 @@ mod tests {
             ]
         );
         assert!(parse_discovered_hosts("not json").is_empty());
+        assert!(parse_discovered_hosts("{}").is_empty());
         assert!(parse_discovered_hosts(&" ".repeat(65_537)).is_empty());
+        let valid =
+            serde_json::json!({"host_id":"h","name":"Desk","addr":"192.168.1.2","port":47420});
+        for (field, invalid) in [
+            ("host_id", serde_json::json!("")),
+            ("name", serde_json::json!("line\nbreak")),
+            ("name", serde_json::json!("x".repeat(257))),
+            ("addr", serde_json::json!("::1")),
+            ("addr", serde_json::json!("user@desk")),
+            ("port", serde_json::json!(65536)),
+            ("port", serde_json::json!(-1)),
+        ] {
+            let mut invalid_host = valid.clone();
+            invalid_host[field] = invalid;
+            assert!(
+                parse_discovered_hosts(&serde_json::json!([invalid_host]).to_string()).is_empty(),
+                "{field}"
+            );
+        }
+        let many: Vec<_> = (0..129)
+            .map(|index| {
+                let mut host = valid.clone();
+                host["host_id"] = serde_json::json!(format!("host-{index:03}"));
+                host
+            })
+            .collect();
+        let bounded = parse_discovered_hosts(&serde_json::to_string(&many).unwrap());
+        assert_eq!(bounded.len(), 128);
+        assert_eq!(bounded.last().unwrap().host_id, "host-127");
     }
 }

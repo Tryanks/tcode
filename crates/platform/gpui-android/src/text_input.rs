@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_and_absent_text_fields_fall_back_to_control_keystrokes() {
+    fn ime_routes_text_control_keys_and_absent_editors() {
         assert_eq!(backward_delete_range(None, |_| None), None);
         assert_eq!(backward_delete_range(Some(0..0), |_| None), None);
         // An empty editor consumes deletion; it must not receive a second key.
@@ -282,7 +282,15 @@ mod tests {
             backward_delete_range(Some(0..0), |_| Some(String::new())),
             Some(0..0)
         );
-        for key in ["backspace", "enter", "left", "right", "up", "down"] {
+        for key in [
+            "backspace",
+            "delete",
+            "enter",
+            "left",
+            "right",
+            "up",
+            "down",
+        ] {
             let event = ime_key_down(
                 Keystroke {
                     key: key.into(),
@@ -294,10 +302,14 @@ mod tests {
             assert_eq!(event.keystroke.key, key);
             assert!(!event.prefer_character_input);
         }
-    }
-
-    #[test]
-    fn multiline_ime_enter_inserts_newline_while_single_line_runs_action() {
+        let mut stroke = Keystroke {
+            key: "a".into(),
+            key_char: Some("a".into()),
+            modifiers: Default::default(),
+        };
+        assert!(ime_key_down(stroke.clone(), false).prefer_character_input);
+        stroke.modifiers.control = true;
+        assert!(!ime_key_down(stroke, false).prefer_character_input);
         let enter = Keystroke {
             key: "enter".into(),
             key_char: None,
@@ -332,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_preedit_retains_its_suffix_and_relative_utf16_cursor() {
+    fn backspace_uses_utf16_graphemes_and_preserves_remaining_preedit() {
         assert_eq!(delete_from_composition("中文", 1..2), ("中".into(), 1..1));
         assert_eq!(
             delete_from_composition("nihao", 1..2),
@@ -340,10 +352,6 @@ mod tests {
         );
         assert_eq!(delete_from_composition("😀文", 0..2), ("文".into(), 0..0));
         assert_eq!(delete_from_composition("中", 0..1), (String::new(), 0..0));
-    }
-
-    #[test]
-    fn backspace_removes_a_whole_grapheme_in_utf16_coordinates() {
         for (text, expected) in [
             ("", 0..0),
             ("abc", 2..3),
@@ -353,32 +361,12 @@ mod tests {
             ("a👨‍👩‍👧‍👦", 1..12),
         ] {
             assert_eq!(
-                previous_grapheme_range(text, text.encode_utf16().count()),
-                expected
+                backward_delete_range(
+                    Some(text.encode_utf16().count()..text.encode_utf16().count()),
+                    |_| Some(text.into())
+                ),
+                Some(expected)
             );
         }
-    }
-
-    #[test]
-    fn ime_control_keys_reach_input_bindings() {
-        for key in ["backspace", "delete", "enter", "left", "right"] {
-            let event = ime_key_down(
-                Keystroke {
-                    key: key.into(),
-                    key_char: None,
-                    modifiers: Default::default(),
-                },
-                false,
-            );
-            assert!(!event.prefer_character_input, "{key} bypassed bindings");
-        }
-        let mut stroke = Keystroke {
-            key: "a".into(),
-            key_char: Some("a".into()),
-            modifiers: Default::default(),
-        };
-        assert!(ime_key_down(stroke.clone(), false).prefer_character_input);
-        stroke.modifiers.control = true;
-        assert!(!ime_key_down(stroke, false).prefer_character_input);
     }
 }

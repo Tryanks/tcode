@@ -1016,12 +1016,9 @@ mod tests {
         let recreated = HostLink::new(to_host, from_host);
         recreated.restore_outbox(storage.clone()).unwrap();
         recreated.set_connection_state(ConnectionState::Syncing);
-        let pump = std::thread::spawn({
-            let link = recreated.clone();
-            move || smol::block_on(link.pump())
-        });
+        let mut pump = std::pin::pin!(recreated.pump_with_timer(std::future::pending::<()>));
         for (index, entry) in entries.iter().enumerate() {
-            let line = outgoing.recv_blocking().unwrap();
+            let line = outgoing.try_recv().unwrap();
             let request = tcode_protocol::decode_client_line(&line).unwrap();
             assert_eq!(request.key.as_deref(), Some(entry.key.as_str()));
             assert!(
@@ -1032,7 +1029,7 @@ mod tests {
                 "later write must wait for this Ack"
             );
             incoming
-                .send_blocking(
+                .try_send(
                     encode_line(&HostMessage::Ack {
                         id: request.id,
                         result: Ok(CommandResponse::Unit),
@@ -1040,10 +1037,12 @@ mod tests {
                     .unwrap(),
                 )
                 .unwrap();
+            assert!(pump.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(storage.0.lock().unwrap().len(), entries.len() - index - 1);
         }
+        assert!(recreated.pending_commands().is_empty());
         recreated.close();
-        pump.join().unwrap();
-        // The final Ack may race close; wait for its application before closing in callers.
+        assert!(pump.as_mut().poll(&mut cx).is_ready());
     }
 
     #[test]
@@ -1055,7 +1054,6 @@ mod tests {
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(query.as_mut().poll(&mut cx).is_pending());
         outgoing.try_recv().unwrap();
-        let start = std::time::Instant::now();
         link.set_connection_state(ConnectionState::Reconnecting {
             attempt: 1,
             reason: None,
@@ -1064,7 +1062,7 @@ mod tests {
             std::task::Poll::Ready(Err(error)) => assert_eq!(error.code, "disconnected"),
             other => panic!("query must fail on disconnect, got {other:?}"),
         }
-        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        assert!(link.inner.pending.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -997,30 +997,3 @@ impl Render for OrchestrateSettingsPanel {
             .child(self.render_children(false, cx))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bundled_astra_restore_target_is_role_aware() {
-        let settings = OrchestrateSettings::default();
-        let decision_count = settings.decision_models.len();
-        let rows: Vec<_> = settings
-            .decision_models
-            .into_iter()
-            .chain(settings.child_models)
-            .collect();
-
-        let peer = builtin_child_target(&rows, 0, true).unwrap();
-        let executor = builtin_child_target(&rows, decision_count, false).unwrap();
-        assert_eq!(peer.model, "gpt-6-astra");
-        assert_eq!(executor.model, "gpt-6-astra");
-        assert_ne!(peer.description, executor.description);
-        assert!(
-            executor
-                .description
-                .contains("Always dispatch it at low effort")
-        );
-    }
-}

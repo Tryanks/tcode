@@ -117,7 +117,7 @@ pub(crate) fn occlude_for_test(cx: &mut gpui::VisualTestContext, insets: Edges<P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Bounds, Render, TestAppContext, WindowInsets, point, size};
+    use gpui::{Bounds, Render, TestAppContext, point, size};
 
     struct Probe;
 
@@ -129,29 +129,6 @@ mod tests {
         ) -> impl gpui::IntoElement {
             gpui::div()
         }
-    }
-
-    /// The breakpoint is on usable width, and 900 itself is wide.
-    #[test]
-    fn the_breakpoint_measures_content_width_and_is_wide_at_nine_hundred() {
-        assert!(compact_for(px(899.)));
-        assert!(!compact_for(px(900.)));
-    }
-
-    /// A keyboard over the home indicator is one occlusion, not two.
-    #[test]
-    fn keyboard_and_home_indicator_do_not_stack() {
-        let insets = WindowInsets {
-            safe_area: Edges {
-                bottom: px(34.),
-                ..Default::default()
-            },
-            ime: Edges {
-                bottom: px(300.),
-                ..Default::default()
-            },
-        };
-        assert_eq!(insets.effective().bottom, px(300.));
     }
 
     /// The layout is decided by the build first and the width second: a

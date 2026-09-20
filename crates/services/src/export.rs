@@ -373,8 +373,13 @@ mod tests {
         assert_eq!(header["version"], 1);
         assert_eq!(header["attachments"], "references_only");
         assert_eq!(header["redaction"], "none");
+        assert_eq!(
+            exported.split_once('\n').unwrap().1.as_bytes(),
+            source.read_event_log(&meta.id).unwrap()
+        );
 
         let project = Project::from_root(PathBuf::from("/restored/project"));
+        destination.upsert_project(&project).unwrap();
         let thread = ExternalThread {
             source: SourceTool::T3Code,
             file: export_path,
@@ -388,6 +393,17 @@ mod tests {
         );
 
         let restored = destination.load_index().pop().unwrap();
+        assert_ne!(restored.id, meta.id);
+        assert_eq!(restored.cwd, project.root);
+        assert_eq!(restored.project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(
+            restored.imported_from.as_deref(),
+            Some("tcode:session-export-1")
+        );
+        assert_eq!(
+            destination.read_event_log(&restored.id).unwrap(),
+            source.read_event_log(&meta.id).unwrap()
+        );
         let source_timeline = Timeline::fold_events(source.read_events(&meta.id));
         let restored_timeline = Timeline::fold_events(destination.read_events(&restored.id));
         let summarize = |timeline: &Timeline| {

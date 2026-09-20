@@ -147,77 +147,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_at_mention_after_whitespace() {
-        let text = "look at @src/ma";
-        let t = detect_composer_trigger(text, text.len()).unwrap();
-        assert_eq!(t.kind, TriggerKind::Path);
-        assert_eq!(t.query, "src/ma");
-        assert_eq!(&text[t.range.clone()], "@src/ma");
+    fn triggers_respect_token_boundaries_and_the_utf8_cursor() {
+        for (text, cursor, kind, query, range) in [
+            ("look at @src/ma", 15, TriggerKind::Path, "src/ma", 8..15),
+            ("use $rev", 8, TriggerKind::Skill, "rev", 4..8),
+            ("\t@文件 suffix", 5, TriggerKind::Path, "文", 1..5),
+            ("@文", 2, TriggerKind::Path, "", 0..1),
+            ("@file", usize::MAX, TriggerKind::Path, "file", 0..5),
+            ("hi\n/de", 6, TriggerKind::SlashCommand, "de", 3..6),
+            ("/", 1, TriggerKind::SlashCommand, "", 0..1),
+            ("/model", 6, TriggerKind::SlashModel, "", 0..6),
+            ("/MODEL", 6, TriggerKind::SlashModel, "", 0..6),
+            ("/model gpt", 10, TriggerKind::SlashModel, "gpt", 0..10),
+        ] {
+            assert_eq!(
+                detect_composer_trigger(text, cursor),
+                Some(ComposerTrigger {
+                    kind,
+                    query: query.into(),
+                    range
+                }),
+                "{text:?} at {cursor}",
+            );
+        }
+        for text in [
+            "",
+            "foo@bar",
+            "cost$rev",
+            "hello /pla",
+            " /pla",
+            "/plan done",
+            "@file ",
+        ] {
+            assert_eq!(detect_composer_trigger(text, text.len()), None, "{text:?}");
+        }
     }
 
     #[test]
-    fn at_mention_needs_whitespace_boundary() {
-        // `@` glued to a word (email-like) is still a token starting with the
-        // preceding non-space run, so it does NOT start with `@` → no trigger.
-        let text = "foo@bar";
-        assert!(detect_composer_trigger(text, text.len()).is_none());
-    }
-
-    #[test]
-    fn detects_skill_trigger() {
-        let text = "use $rev";
-        let t = detect_composer_trigger(text, text.len()).unwrap();
-        assert_eq!(t.kind, TriggerKind::Skill);
-        assert_eq!(t.query, "rev");
-    }
-
-    #[test]
-    fn slash_only_at_line_start() {
-        let t = detect_composer_trigger("/pla", 4).unwrap();
-        assert_eq!(t.kind, TriggerKind::SlashCommand);
-        assert_eq!(t.query, "pla");
-        assert!(detect_composer_trigger("hello /pla", 10).is_none());
-        let t2 = detect_composer_trigger("hi\n/de", 6).unwrap();
-        assert_eq!(t2.kind, TriggerKind::SlashCommand);
-        assert_eq!(t2.query, "de");
-    }
-
-    #[test]
-    fn slash_model_special_cases() {
-        let m = detect_composer_trigger("/model", 6).unwrap();
-        assert_eq!(m.kind, TriggerKind::SlashModel);
-        assert_eq!(m.query, "");
-        let m2 = detect_composer_trigger("/model gpt", 10).unwrap();
-        assert_eq!(m2.kind, TriggerKind::SlashModel);
-        assert_eq!(m2.query, "gpt");
-    }
-
-    #[test]
-    fn serialize_escapes_markdown_link_destination() {
-        assert_eq!(
-            serialize_composer_file_link("src/main.rs"),
-            "[main.rs](src/main.rs)"
-        );
-        assert_eq!(
-            serialize_composer_file_link("my file.txt"),
-            "[my file.txt](my%20file.txt)"
-        );
-        // Parentheses in the path are escaped in the destination but not the label.
-        assert_eq!(
-            serialize_composer_file_link("a(b).js"),
-            "[a(b).js](a%28b%29.js)"
-        );
-        // A `#` and `?` in the path get further-escaped past encodeURI.
-        assert_eq!(
-            serialize_composer_file_link("weird#name?.md"),
-            "[weird#name?.md](weird%23name%3F.md)"
-        );
-    }
-
-    #[test]
-    fn basename_handles_both_separators() {
-        assert_eq!(basename("a/b/c.rs"), "c.rs");
-        assert_eq!(basename("a\\b\\c.rs"), "c.rs");
-        assert_eq!(basename("bare.txt"), "bare.txt");
+    fn file_links_preserve_paths_without_creating_markdown_or_url_syntax() {
+        for (path, expected) in [
+            ("src/main.rs", "[main.rs](src/main.rs)"),
+            ("my file.txt", "[my file.txt](my%20file.txt)"),
+            ("a(b).js", "[a(b).js](a%28b%29.js)"),
+            ("weird#name?.md", "[weird#name?.md](weird%23name%3F.md)"),
+            (
+                r"C:\src\[稿].md",
+                r"[\[稿\].md](C:%5Csrc%5C%5B%E7%A8%BF%5D.md)",
+            ),
+            ("100%.txt", "[100%.txt](100%25.txt)"),
+        ] {
+            assert_eq!(serialize_composer_file_link(path), expected, "{path}");
+        }
     }
 }

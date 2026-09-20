@@ -614,177 +614,251 @@ mod tests {
     }
 
     #[test]
-    fn quick_action_non_repo_is_init() {
-        let s = GitStatus::default();
-        let qa = quick_action(&s, false);
-        assert_eq!(qa.action, Some(GitAction::InitializeGit));
-        assert!(!qa.disabled);
-    }
-
-    #[test]
-    fn quick_action_busy_is_disabled() {
-        let qa = quick_action(&dirty_upstream(), true);
-        assert!(qa.disabled);
-        assert_eq!(qa.label, GitAction::Commit);
-        assert_eq!(qa.hint, Some(GitHint::InProgress));
-    }
-
-    #[test]
-    fn quick_action_dirty_with_upstream_is_commit_push() {
-        assert_eq!(
-            quick_action(&dirty_upstream(), false).action,
-            Some(GitAction::CommitPush)
-        );
-    }
-
-    #[test]
-    fn quick_action_dirty_without_upstream_is_commit() {
-        let s = GitStatus {
-            has_upstream: false,
-            ..dirty_upstream()
-        };
-        assert_eq!(quick_action(&s, false).action, Some(GitAction::Commit));
-    }
-
-    #[test]
-    fn quick_action_clean_ahead_is_push() {
-        let s = GitStatus {
+    fn quick_action_selects_the_next_available_repository_operation() {
+        let clean = GitStatus {
             has_working_tree_changes: false,
-            ahead: 2,
             ..dirty_upstream()
         };
-        assert_eq!(quick_action(&s, false).action, Some(GitAction::Push));
+        for (label, status, action, hint) in [
+            (
+                "uninitialized",
+                GitStatus::default(),
+                GitAction::InitializeGit,
+                None,
+            ),
+            (
+                "dirty tracked",
+                dirty_upstream(),
+                GitAction::CommitPush,
+                None,
+            ),
+            (
+                "dirty untracked",
+                GitStatus {
+                    has_upstream: false,
+                    ..dirty_upstream()
+                },
+                GitAction::Commit,
+                None,
+            ),
+            (
+                "ahead",
+                GitStatus {
+                    ahead: 2,
+                    ..clean.clone()
+                },
+                GitAction::Push,
+                None,
+            ),
+            (
+                "behind",
+                GitStatus {
+                    behind: 3,
+                    ..clean.clone()
+                },
+                GitAction::Pull,
+                None,
+            ),
+            (
+                "diverged",
+                GitStatus {
+                    ahead: 1,
+                    behind: 1,
+                    ..clean.clone()
+                },
+                GitAction::Pull,
+                Some(GitHint::Diverged),
+            ),
+            (
+                "publish",
+                GitStatus {
+                    has_upstream: false,
+                    ..clean.clone()
+                },
+                GitAction::PublishBranch,
+                None,
+            ),
+            (
+                "no remote",
+                GitStatus {
+                    has_upstream: false,
+                    has_origin_remote: false,
+                    ..clean.clone()
+                },
+                GitAction::Commit,
+                Some(GitHint::NoRemote),
+            ),
+            (
+                "detached",
+                GitStatus {
+                    detached: true,
+                    ..dirty_upstream()
+                },
+                GitAction::Commit,
+                Some(GitHint::Detached),
+            ),
+            (
+                "initial dirty",
+                GitStatus {
+                    has_commits: false,
+                    ..dirty_upstream()
+                },
+                GitAction::Commit,
+                None,
+            ),
+            (
+                "initial clean",
+                GitStatus {
+                    has_commits: false,
+                    ..clean.clone()
+                },
+                GitAction::Commit,
+                Some(GitHint::NoCommits),
+            ),
+            (
+                "up to date",
+                clean,
+                GitAction::Commit,
+                Some(GitHint::UpToDate),
+            ),
+        ] {
+            assert_eq!(
+                quick_action(&status, false),
+                QuickAction {
+                    action: hint.is_none().then_some(action),
+                    label: action,
+                    hint,
+                    disabled: hint.is_some(),
+                },
+                "{label}"
+            );
+            assert_eq!(
+                quick_action(&status, true),
+                QuickAction {
+                    action: None,
+                    label: GitAction::Commit,
+                    hint: Some(GitHint::InProgress),
+                    disabled: true,
+                },
+                "{label}: busy takes precedence"
+            );
+        }
     }
 
     #[test]
-    fn quick_action_behind_is_pull() {
-        let s = GitStatus {
-            has_working_tree_changes: false,
-            behind: 3,
-            ..dirty_upstream()
-        };
-        assert_eq!(quick_action(&s, false).action, Some(GitAction::Pull));
-    }
-
-    #[test]
-    fn quick_action_diverged_is_disabled_with_reason() {
-        let s = GitStatus {
-            has_working_tree_changes: false,
-            ahead: 1,
-            behind: 1,
-            ..dirty_upstream()
-        };
-        let qa = quick_action(&s, false);
-        assert!(qa.disabled);
-        assert_eq!(qa.label, GitAction::Pull);
-        assert_eq!(qa.hint, Some(GitHint::Diverged));
-    }
-
-    #[test]
-    fn quick_action_clean_no_upstream_with_remote_is_publish() {
-        let s = GitStatus {
-            has_working_tree_changes: false,
-            has_upstream: false,
-            has_origin_remote: true,
-            ..dirty_upstream()
-        };
-        assert_eq!(
-            quick_action(&s, false).action,
-            Some(GitAction::PublishBranch)
-        );
-    }
-
-    #[test]
-    fn quick_action_detached_is_disabled() {
-        let s = GitStatus {
-            is_repo: true,
-            detached: true,
-            ..Default::default()
-        };
-        let qa = quick_action(&s, false);
-        assert!(qa.disabled);
-        assert_eq!(qa.label, GitAction::Commit);
-        assert_eq!(qa.hint, Some(GitHint::Detached));
-    }
-
-    #[test]
-    fn quick_action_no_commits_dirty_is_commit() {
-        let s = GitStatus {
-            is_repo: true,
-            has_commits: false,
-            has_working_tree_changes: true,
-            ..Default::default()
-        };
-        assert_eq!(quick_action(&s, false).action, Some(GitAction::Commit));
-    }
-
-    #[test]
-    fn menu_items_disable_with_reasons() {
-        // Clean, no upstream, with remote: Commit disabled (no changes),
-        // Push disabled (no upstream), Publish enabled.
-        let s = GitStatus {
+    fn repository_menu_offers_applicable_actions_and_explains_unavailable_ones() {
+        let repo = GitStatus {
             is_repo: true,
             has_commits: true,
             has_origin_remote: true,
             branch: Some("main".into()),
             ..Default::default()
         };
-        let items = menu_items(&s, false);
-        let commit = items
-            .iter()
-            .find(|i| i.action == GitAction::Commit)
-            .unwrap();
-        assert!(commit.disabled && commit.hint == Some(GitHint::NoChanges));
-        let push = items.iter().find(|i| i.action == GitAction::Push).unwrap();
-        assert!(push.disabled && push.hint == Some(GitHint::NoUpstream));
-        let publish = items
-            .iter()
-            .find(|i| i.action == GitAction::PublishBranch)
-            .unwrap();
-        assert!(!publish.disabled);
+        for (label, status, expected) in [
+            (
+                "not a repo",
+                GitStatus::default(),
+                vec![(GitAction::InitializeGit, false, None)],
+            ),
+            (
+                "unpublished",
+                repo.clone(),
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::NoChanges)),
+                    (GitAction::Push, true, Some(GitHint::NoUpstream)),
+                    (GitAction::PublishBranch, false, None),
+                ],
+            ),
+            (
+                "dirty and ahead",
+                GitStatus {
+                    has_working_tree_changes: true,
+                    has_upstream: true,
+                    ahead: 2,
+                    ..repo.clone()
+                },
+                vec![
+                    (GitAction::Commit, false, None),
+                    (GitAction::Push, false, None),
+                    (GitAction::Pull, true, Some(GitHint::UpToDate)),
+                ],
+            ),
+            (
+                "behind",
+                GitStatus {
+                    has_upstream: true,
+                    behind: 2,
+                    ..repo.clone()
+                },
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::NoChanges)),
+                    (GitAction::Push, true, Some(GitHint::Behind)),
+                    (GitAction::Pull, false, None),
+                ],
+            ),
+            (
+                "diverged",
+                GitStatus {
+                    has_upstream: true,
+                    ahead: 1,
+                    behind: 2,
+                    ..repo.clone()
+                },
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::NoChanges)),
+                    (GitAction::Push, true, Some(GitHint::Diverged)),
+                    (GitAction::Pull, true, Some(GitHint::Diverged)),
+                ],
+            ),
+            (
+                "detached",
+                GitStatus {
+                    detached: true,
+                    branch: None,
+                    ..repo
+                },
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::Detached)),
+                    (GitAction::Push, true, Some(GitHint::Detached)),
+                    (GitAction::PublishBranch, true, Some(GitHint::Detached)),
+                ],
+            ),
+        ] {
+            let items = menu_items(&status, false);
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|i| (i.action, i.disabled, i.hint))
+                    .collect::<Vec<_>>(),
+                expected,
+                "{label}"
+            );
+            let busy = menu_items(&status, true);
+            assert!(busy.iter().all(|i| i.disabled), "{label}");
+            assert_eq!(
+                busy.iter().map(|i| i.action).collect::<Vec<_>>(),
+                items.iter().map(|i| i.action).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
-    fn included_paths_none_when_nothing_excluded() {
-        let all = vec![
-            GitFileEntry {
-                path: "a.rs".into(),
-                insertions: 1,
-                deletions: 0,
-            },
-            GitFileEntry {
-                path: "b.rs".into(),
-                insertions: 0,
-                deletions: 2,
-            },
-        ];
-        assert_eq!(included_paths(&all, &HashSet::new()), None);
-    }
-
-    #[test]
-    fn included_paths_excludes_unchecked() {
-        let all = vec![
-            GitFileEntry {
-                path: "a.rs".into(),
-                insertions: 1,
-                deletions: 0,
-            },
-            GitFileEntry {
-                path: "b.rs".into(),
-                insertions: 0,
-                deletions: 2,
-            },
-            GitFileEntry {
-                path: "c.rs".into(),
-                insertions: 3,
-                deletions: 3,
-            },
-        ];
-        let excluded: HashSet<String> = ["b.rs".to_string()].into_iter().collect();
-        assert_eq!(
-            included_paths(&all, &excluded),
-            Some(vec!["a.rs".to_string(), "c.rs".to_string()])
-        );
+    fn commit_selection_distinguishes_all_some_and_no_files() {
+        let files = ["a.rs", "b.rs", "c.rs"].map(|path| GitFileEntry {
+            path: path.into(),
+            insertions: 0,
+            deletions: 0,
+        });
+        for (excluded, expected) in [
+            (vec![], None),
+            (vec!["b.rs"], Some(vec!["a.rs".into(), "c.rs".into()])),
+            (vec!["a.rs", "b.rs", "c.rs"], Some(vec![])),
+        ] {
+            assert_eq!(
+                included_paths(&files, &excluded.into_iter().map(String::from).collect()),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -827,48 +901,62 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_dirty_ahead_behind() {
-        let porcelain = "\
-# branch.oid abc123
-# branch.head feature/x
-# branch.upstream origin/feature/x
-# branch.ab +2 -1
-1 .M N... 100644 100644 100644 abc def src/app.rs
-? new_file.txt
-";
-        let numstat = vec![("src/app.rs".to_string(), 5, 3)];
-        let s = parse_status(porcelain, &numstat, Some("main"), true);
-        assert!(s.has_commits && !s.detached);
-        assert_eq!(s.branch.as_deref(), Some("feature/x"));
-        assert!(s.has_upstream && s.has_working_tree_changes);
-        assert_eq!((s.ahead, s.behind), (2, 1));
-        assert!(!s.is_default_branch);
-        assert_eq!(s.changed_files.len(), 2);
-        let app = s
-            .changed_files
-            .iter()
-            .find(|f| f.path == "src/app.rs")
-            .unwrap();
-        assert_eq!((app.insertions, app.deletions), (5, 3));
-    }
-
-    #[test]
-    fn parse_status_initial_and_default_branch() {
-        let porcelain = "\
-# branch.oid (initial)
-# branch.head main
-";
-        let s = parse_status(porcelain, &[], None, false);
-        assert!(!s.has_commits);
-        assert!(s.is_default_branch, "main is default when no origin/HEAD");
-        assert!(!s.has_upstream);
-    }
-
-    #[test]
-    fn parse_status_detached() {
-        let porcelain = "# branch.oid abc\n# branch.head (detached)\n";
-        let s = parse_status(porcelain, &[], None, false);
-        assert!(s.detached);
-        assert_eq!(s.branch, None);
+    fn porcelain_status_preserves_branch_state_and_changed_paths() {
+        let porcelain = "# branch.oid abc123\n# branch.head feature/x\n# branch.upstream origin/feature/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 abc def src/app.rs\n? new file.txt\n? new file.txt\n";
+        let status = parse_status(
+            porcelain,
+            &[("src/app.rs".into(), 5, 3)],
+            Some("main"),
+            true,
+        );
+        assert_eq!(
+            status,
+            GitStatus {
+                is_repo: true,
+                has_commits: true,
+                detached: false,
+                branch: Some("feature/x".into()),
+                is_default_branch: false,
+                has_working_tree_changes: true,
+                has_origin_remote: true,
+                has_upstream: true,
+                ahead: 2,
+                behind: 1,
+                changed_files: vec![
+                    GitFileEntry {
+                        path: "new file.txt".into(),
+                        insertions: 0,
+                        deletions: 0
+                    },
+                    GitFileEntry {
+                        path: "src/app.rs".into(),
+                        insertions: 5,
+                        deletions: 3
+                    },
+                ],
+            }
+        );
+        for (head, oid, default, commits, detached, is_default) in [
+            ("main", "(initial)", None, false, false, true),
+            ("master", "abc", None, true, false, true),
+            ("trunk", "abc", Some("trunk"), true, false, true),
+            ("main", "abc", Some("trunk"), true, false, false),
+            ("(detached)", "abc", None, true, true, false),
+        ] {
+            let porcelain = format!("# branch.oid {oid}\n# branch.head {head}\n");
+            let status = parse_status(&porcelain, &[], default, false);
+            assert_eq!(
+                status,
+                GitStatus {
+                    is_repo: true,
+                    has_commits: commits,
+                    detached,
+                    branch: (!detached).then(|| head.into()),
+                    is_default_branch: is_default,
+                    ..Default::default()
+                },
+                "{head} against {default:?}"
+            );
+        }
     }
 }

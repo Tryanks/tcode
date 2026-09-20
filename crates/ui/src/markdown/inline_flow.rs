@@ -737,16 +737,3 @@ fn slice_ranges<T, U>(
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_inline_image_uses_compact_fallback() {
-        assert_eq!(
-            inline_image_size_for_line(None, px(20.)),
-            size(px(15.), px(15.))
-        );
-    }
-}

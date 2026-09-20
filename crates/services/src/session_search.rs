@@ -261,101 +261,149 @@ mod tests {
     }
 
     #[test]
-    fn extracts_user_and_assistant_messages() {
-        let entries = extract_searchable_entries(&[
-            completed(
-                "user",
-                ItemContent::UserMessage {
-                    text: "Where is auth.rs?".into(),
-                    context_len: None,
-                    attachments: Vec::new(),
-                },
-            ),
-            completed(
-                "assistant",
-                ItemContent::AssistantMessage {
-                    text: "It is under crates/runtime.".into(),
-                },
-            ),
-        ]);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].text, "Where is auth.rs?");
-        assert_eq!(entries[1].text, "It is under crates/runtime.");
-    }
-
-    #[test]
-    fn extracts_tool_titles_paths_and_commands() {
-        let entries = extract_searchable_entries(&[
-            completed(
-                "command",
-                ItemContent::CommandExecution {
-                    command: "rg auth.rs crates".into(),
-                    output: "large output is deliberately not indexed".into(),
-                    exit_code: Some(0),
-                    status: ItemStatus::Completed,
-                },
-            ),
-            completed(
-                "tool",
-                ItemContent::ToolCall {
-                    name: "read_file".into(),
-                    input: json!({"path": "src/auth.rs"}),
-                    output: None,
-                    status: ItemStatus::Completed,
-                },
-            ),
-        ]);
-        assert_eq!(entries[0].text, "rg auth.rs crates");
-        assert!(entries[1].text.contains("read_file"));
-        assert!(entries[1].text.contains("src/auth.rs"));
-    }
-
-    #[test]
     fn query_matching_is_case_insensitive_and_generates_a_bounded_snippet() {
         let text = format!("{} AUTH.rs {}", "before ".repeat(20), "after ".repeat(20));
         let snippet = match_snippet(&text, "auth.RS", 60).expect("match");
         assert!(snippet.contains("AUTH.rs"));
         assert!(snippet.chars().count() <= 62); // up to two ellipses
         assert!(match_snippet(&text, "missing", 60).is_none());
+        for (text, query, expected) in [
+            ("  中文\nCAFÉ\t😀 ", " café ", Some("中文 CAFÉ 😀")),
+            ("İstanbul", "i\u{307}stan", Some("İstanbul")),
+            ("中文", "文", Some("中文")),
+            ("visible", "  ", None),
+            ("   ", "visible", None),
+        ] {
+            assert_eq!(
+                match_snippet(text, query, 60).as_deref(),
+                expected,
+                "{text:?}: {query:?}"
+            );
+        }
     }
 
     #[test]
-    fn searches_a_fixture_session_log_to_a_session_and_turn() {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-session-search-test-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let store = SessionStore::open_at(root.clone()).expect("store");
+    fn search_indexes_final_visible_content_and_refreshes_after_append_or_removal() {
+        let root = std::env::temp_dir().join(format!("tcode-search-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/project"), None);
         meta.title = "Authentication cleanup".into();
+        let mut search = SessionSearch::new(store.clone());
+        let sessions = std::slice::from_ref(&meta);
+        assert!(search.search(sessions, "auth.rs", 10).is_empty());
+
+        let events = [
+            AgentEvent::TurnStarted {
+                turn_id: "first".into(),
+            },
+            completed(
+                "user",
+                ItemContent::UserMessage {
+                    text: "Where is auth.rs?".into(),
+                    context_len: None,
+                    attachments: vec!["diagram.png".into()],
+                },
+            )
+            .event,
+            completed(
+                "command",
+                ItemContent::CommandExecution {
+                    command: "rg auth.rs crates".into(),
+                    output: "DO_NOT_INDEX output".into(),
+                    exit_code: Some(0),
+                    status: ItemStatus::Completed,
+                },
+            )
+            .event,
+            completed(
+                "tool",
+                ItemContent::ToolCall {
+                    name: "read_file".into(),
+                    input: json!({"path":"auth.rs"}),
+                    output: Some("DO_NOT_INDEX output".into()),
+                    status: ItemStatus::Completed,
+                },
+            )
+            .event,
+            completed(
+                "reasoning",
+                ItemContent::Reasoning {
+                    text: "DO_NOT_INDEX reasoning".into(),
+                },
+            )
+            .event,
+            AgentEvent::ItemStarted(ThreadItem {
+                id: "assistant".into(),
+                parent_item_id: None,
+                content: ItemContent::AssistantMessage {
+                    text: "obsolete draft".into(),
+                },
+            }),
+            completed(
+                "assistant",
+                ItemContent::AssistantMessage {
+                    text: "I updated crates/runtime/src/auth.rs".into(),
+                },
+            )
+            .event,
+            AgentEvent::TurnCompleted {
+                turn_id: "first".into(),
+                status: agent::TurnStatus::Completed,
+                usage: None,
+            },
+        ];
+        for event in &events {
+            store.append_event(&meta.id, 1, event).unwrap();
+        }
+        let hits = search.search(sessions, " AUTH.RS ", 10);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| hit.entry_id.as_str())
+                .collect::<Vec<_>>(),
+            ["user", "command", "tool", "assistant"]
+        );
+        assert!(hits.iter().all(|hit| hit.session_id == meta.id
+            && hit.session_title == meta.title
+            && hit.turn == 0));
+        assert_eq!(hits[3].snippet, "I updated crates/runtime/src/auth.rs");
+        assert_eq!(search.search(sessions, "auth.rs", 2).len(), 2);
+        assert_eq!(
+            search.search(sessions, "diagram.png", 10)[0].entry_id,
+            "user"
+        );
+        for query in ["DO_NOT_INDEX", "obsolete draft", "  "] {
+            assert!(search.search(sessions, query, 10).is_empty(), "{query}");
+        }
+        assert!(search.search(sessions, "auth.rs", 0).is_empty());
+
         store
             .append_event(
                 &meta.id,
-                1,
+                2,
                 &AgentEvent::TurnStarted {
-                    turn_id: "turn-1".into(),
+                    turn_id: "second".into(),
                 },
             )
             .unwrap();
         store
             .append_event(
                 &meta.id,
-                2,
+                3,
                 &completed(
-                    "assistant",
+                    "next",
                     ItemContent::AssistantMessage {
-                        text: "I updated crates/runtime/src/auth.rs".into(),
+                        text: "auth.rs verified".into(),
                     },
                 )
                 .event,
             )
             .unwrap();
-
-        let hits = SessionSearch::new(store).search(&[meta.clone()], "auth.rs", 10);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].session_id, meta.id);
-        assert_eq!(hits[0].turn, 0);
-        assert!(hits[0].snippet.contains("auth.rs"));
-        let _ = fs::remove_dir_all(root);
+        let updated = search.search(sessions, "auth.rs", 10);
+        assert_eq!(updated.len(), 5);
+        assert_eq!(updated[4].entry_id, "next");
+        assert_eq!(updated[4].turn, 1);
+        fs::remove_file(root.join(format!("{}.jsonl", meta.id))).unwrap();
+        assert!(search.search(sessions, "auth.rs", 10).is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

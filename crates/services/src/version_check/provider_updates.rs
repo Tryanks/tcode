@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_compares_provider_outputs_through_check() {
+    fn check_normalizes_versions_and_announces_only_proven_upgrades() {
         let cases = [
             ("2.1.206 (Claude Code)", "2.1.207", true, "2.1.206"),
             ("codex-cli 0.144.1", "0.145.0", true, "0.144.1"),
@@ -121,10 +121,6 @@ mod tests {
             assert_eq!(assessment.update_available, available, "{installed}");
             assert_eq!(assessment.current.as_deref(), Some(normalized));
         }
-    }
-
-    #[test]
-    fn invalid_and_missing_outputs_are_unknown() {
         for (installed, latest) in [
             (None, Some("2.0.0")),
             (Some("1.0.0"), None),

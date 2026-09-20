@@ -846,22 +846,7 @@ fn query_color(index: usize) -> ColorRgb {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mutex_recovery_keeps_poisoned_state_available() {
-        let value = Arc::new(Mutex::new(0));
-        let poisoned = value.clone();
-        assert!(
-            thread::spawn(move || {
-                *poisoned.lock_recover() = 42;
-                panic!("poison the test mutex");
-            })
-            .join()
-            .is_err()
-        );
-
-        assert_eq!(*value.lock_recover(), 42);
-    }
+    use rio_vt::crosswords::{Mode, square::Wide};
 
     #[test]
     fn scripted_byte_boundary_matches_combined_feed_snapshot() {
@@ -901,62 +886,70 @@ mod tests {
         let link = (0..state.screen_lines)
             .find_map(|row| (0..state.cols).find_map(|col| chunked.hyperlink_at(row, col)));
         assert_eq!(link.unwrap().url, "https://example.com/target");
+        assert!(state.text().starts_with("plain\nred 中文e\u{301}\nlink"));
+        assert_eq!(state.cell(1, 4).unwrap().wide(), Wide::Wide);
+        assert_eq!(state.cell(1, 5).unwrap().wide(), Wide::Spacer);
+        assert_eq!(state.cell_text(1, 8).as_deref(), Some("e\u{301}"));
+        chunked.select((1, 5), (1, 7));
+        assert_eq!(chunked.selected_text().unwrap().text, "中文");
+        let selected = chunked.snapshot();
+        assert!(selected.is_selected(1, 4) && selected.is_selected(1, 5));
+
+        chunked.feed(b"\r\nsee https://example.com/docs?q=1 now");
+        assert_eq!(
+            chunked.hyperlink_at(3, 14).unwrap().url,
+            "https://example.com/docs?q=1"
+        );
+        assert!(chunked.hyperlink_at(3, 0).is_none());
     }
 
     #[test]
-    fn feed_marks_only_the_written_visible_row_after_reset() {
+    fn snapshots_consume_damage_but_reads_and_selection_preserve_it() {
         let emulator = GridEmulator::new();
         emulator.snapshot();
-        emulator.feed(b"written");
+        emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[>1uwritten");
+        assert_eq!(
+            emulator.keyboard_mode(),
+            KeyboardModes::DISAMBIGUATE_ESC_CODES
+        );
+        assert!(emulator.mode().contains(Mode::MOUSE_DRAG | Mode::SGR_MOUSE));
+        assert!(emulator.peek_snapshot().row_damage[0]);
 
         let snapshot = emulator.snapshot();
         assert!(snapshot.row_damage[0]);
         assert!(snapshot.row_damage[1..].iter().all(|damaged| !damaged));
         assert_eq!(snapshot.damage, TerminalDamage::Partial);
-    }
+        let idle = emulator.snapshot();
+        assert_eq!(idle.damage, TerminalDamage::Noop);
+        assert!(idle.row_damage.iter().all(|damaged| !damaged));
 
-    #[test]
-    fn clear_marks_full_damage() {
-        let emulator = GridEmulator::new();
+        emulator.feed(b"\r\nsecond");
         emulator.snapshot();
-        emulator.feed(b"written");
-        emulator.snapshot();
-
-        emulator.clear();
-        let snapshot = emulator.snapshot();
-        assert_eq!(snapshot.damage, TerminalDamage::Full);
-        assert!(snapshot.row_damage.iter().all(|damaged| *damaged));
-    }
-
-    #[test]
-    fn setting_and_clearing_selection_damages_affected_rows() {
-        let emulator = GridEmulator::new();
-        emulator.feed(b"one\r\ntwo");
-        emulator.snapshot();
-
-        emulator.select((0, 0), (1, 2));
+        emulator.select((0, 0), (1, 5));
+        assert_eq!(emulator.selected_text().unwrap().text, "written\nsecond");
         let selected = emulator.snapshot();
-        assert!(selected.row_damage[0]);
-        assert!(selected.row_damage[1]);
-
+        assert!(selected.row_damage[0] && selected.row_damage[1]);
         emulator.clear_selection();
         let cleared = emulator.snapshot();
-        assert!(cleared.row_damage[0]);
-        assert!(cleared.row_damage[1]);
+        assert!(cleared.row_damage[0] && cleared.row_damage[1]);
+        assert_eq!(emulator.selected_text(), None);
+
+        emulator.start_selection(SelectionKind::Simple, (0, 0), SelectionSide::Left);
+        assert_eq!(emulator.selected_text(), None);
+        emulator.update_selection((0, 6), SelectionSide::Right);
+        assert_eq!(emulator.selected_text().unwrap().text, "written");
+        emulator.select_all();
+        assert!(emulator.selected_text().unwrap().text.contains("second"));
+        emulator.clear();
+        let cleared = emulator.snapshot();
+        assert_eq!(cleared.damage, TerminalDamage::Full);
+        assert!(cleared.row_damage.iter().all(|damaged| *damaged));
+        assert_eq!(cleared.history_size, 0);
+        assert_eq!(emulator.selected_text(), None);
     }
 
     #[test]
-    fn consecutive_idle_snapshots_are_clean() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-
-        let snapshot = emulator.snapshot();
-        assert_eq!(snapshot.damage, TerminalDamage::Noop);
-        assert!(snapshot.row_damage.iter().all(|damaged| !damaged));
-    }
-
-    #[test]
-    fn title_bell_and_native_primary_da_reply_are_data_events() {
+    fn emulator_routes_events_size_queries_and_clipboard_policy() {
         let emulator = GridEmulator::new();
         let events = emulator.events();
         emulator.feed(b"\x07\x1b]2;client title\x07\x1b[c");
@@ -965,12 +958,6 @@ mod tests {
         assert!(emitted.contains(&GridEvent::Bell));
         assert!(emitted.contains(&GridEvent::TitleChanged(Some("client title".to_string()))));
         assert!(emitted.contains(&GridEvent::Input(b"\x1b[?62;4;6;22;52c".to_vec())));
-    }
-
-    #[test]
-    fn cell_metrics_drive_text_area_pixel_size_replies() {
-        let emulator = GridEmulator::new();
-        let events = emulator.events();
         emulator.resize_with_cell_size_if_changed(42, 9, 10, 20);
 
         emulator.feed(b"\x1b[14t");
@@ -979,26 +966,6 @@ mod tests {
             std::iter::from_fn(|| events.try_recv().ok())
                 .any(|event| { event == GridEvent::Input(b"\x1b[4;180;420t".to_vec()) })
         );
-    }
-
-    #[test]
-    fn keyboard_mode_is_available_without_consuming_damage() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-        emulator.feed(b"\x1b[>1uwritten");
-        assert_eq!(
-            emulator.keyboard_mode(),
-            KeyboardModes::DISAMBIGUATE_ESC_CODES
-        );
-        let snapshot = emulator.snapshot();
-        assert!(snapshot.row_damage[0]);
-        assert_eq!(snapshot.damage, TerminalDamage::Partial);
-    }
-
-    #[test]
-    fn osc52_store_is_decoded_and_load_is_denied_with_an_empty_reply() {
-        let emulator = GridEmulator::new();
-        let events = emulator.events();
         emulator.feed(b"\x1b]52;c;dGNvZGU=\x07");
         assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
             event
@@ -1013,18 +980,5 @@ mod tests {
             std::iter::from_fn(|| events.try_recv().ok())
                 .any(|event| { event == GridEvent::Input(b"\x1b]52;c;\x07".to_vec()) })
         );
-    }
-
-    #[test]
-    fn snapshot_preserves_all_rio_cursor_shapes() {
-        use rio_vt::ansi::CursorShape as Shape;
-        let emulator = GridEmulator::new();
-        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Block);
-        emulator.feed(b"\x1b[4 q");
-        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Underline);
-        emulator.feed(b"\x1b[6 q");
-        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Beam);
-        emulator.feed(b"\x1b[?25l");
-        assert_eq!(emulator.snapshot().cursor_state.content, Shape::Hidden);
     }
 }

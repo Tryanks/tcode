@@ -122,20 +122,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derives_folders_from_git_paths() {
-        let entries = entries_from_relpaths("src/main.rs\nsrc/ui/composer.rs\nREADME.md\n");
-        // Folders src, src/ui come first (dirs before files), then files.
-        assert!(entries.iter().any(|e| e.rel_path == "src" && e.is_dir));
-        assert!(entries.iter().any(|e| e.rel_path == "src/ui" && e.is_dir));
-        let composer = entries
-            .iter()
-            .find(|e| e.rel_path == "src/ui/composer.rs")
-            .unwrap();
-        assert!(!composer.is_dir);
-        assert_eq!(composer.basename, "composer.rs");
-        assert_eq!(composer.parent, "src/ui");
-        let readme = entries.iter().find(|e| e.rel_path == "README.md").unwrap();
-        assert_eq!(readme.basename, "README.md");
-        assert_eq!(readme.parent, "");
+    fn workspace_listing_respects_gitignore_and_falls_back_to_filtered_filesystem_walk() {
+        let root = std::env::temp_dir().join(format!("tcode-workspace-{}", uuid::Uuid::new_v4()));
+        for directory in ["src/ui", "node_modules", "target"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        for file in [
+            "src/main.rs",
+            "src/ui/composer.rs",
+            "README.md",
+            "node_modules/dependency.js",
+            "target/output",
+        ] {
+            std::fs::write(root.join(file), "fixture").unwrap();
+        }
+        for git in [false, true] {
+            if git {
+                let output = crate::process::command("git")
+                    .args(["-c", "init.templateDir=", "init", "-b", "main"])
+                    .current_dir(&root)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                std::fs::write(
+                    root.join(".gitignore"),
+                    "node_modules/\ntarget/\n.gitignore\n",
+                )
+                .unwrap();
+            }
+            let mut entries = list_workspace(&root);
+            entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| (entry.rel_path.as_str(), entry.is_dir))
+                    .collect::<Vec<_>>(),
+                [
+                    ("README.md", false),
+                    ("src", true),
+                    ("src/main.rs", false),
+                    ("src/ui", true),
+                    ("src/ui/composer.rs", false),
+                ],
+                "git={git}"
+            );
+            let composer = entries
+                .iter()
+                .find(|entry| entry.rel_path == "src/ui/composer.rs")
+                .unwrap();
+            assert_eq!(composer.basename, "composer.rs");
+            assert_eq!(composer.parent, "src/ui");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(list_workspace(&root).is_empty());
     }
 }
