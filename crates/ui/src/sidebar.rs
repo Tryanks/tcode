@@ -5009,8 +5009,23 @@ mod tests {
         });
         let sidebar = page.read_with(cx, |page, _| page.sidebar.clone());
         cx.simulate_resize(size(px(393.), px(852.)));
-        draw(cx);
-        let model = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone().unwrap());
+        // The host answers the index and status subscriptions on its own
+        // thread; each answer legitimately rebuilds the model. Let them all
+        // land before measuring, or a slow runner sees a rebuild that is not
+        // the scroll's. The model is settled once two draws share it.
+        let model = loop {
+            draw(cx);
+            let before = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            draw(cx);
+            let after = sidebar.read_with(cx, |sidebar, _| sidebar.compact_model.clone());
+            if let (Some(before), Some(after)) = (before, after)
+                && Rc::ptr_eq(&before, &after)
+                && after.rows.len() == 301
+            {
+                break after;
+            }
+        };
         assert_eq!(model.rows.len(), 301);
         for (index, selector) in [
             (0, "compact-row-virtual-0"),
