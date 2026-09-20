@@ -88,6 +88,9 @@ impl HostCx {
         smol::spawn(fut)
     }
 
+    /// The approved `smol::unblock` site for the runtime: blocking work is
+    /// scheduled here so the host owns every pool hand-off.
+    #[allow(clippy::disallowed_methods)]
     pub fn unblock<R, F>(&self, f: F) -> HostTask<R>
     where
         R: Send + 'static,
