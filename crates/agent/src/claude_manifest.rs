@@ -10,6 +10,10 @@
 //! model data before the next fetch. Invalid data never replaces a usable
 //! catalog, and no failure here ever fails `list_models`.
 //!
+//! Upstream data is adopted as is: there is no local override table, and a
+//! model Tcode wants to describe differently is corrected upstream. Refresh the
+//! bundle by copying the upstream file over `claude_model_manifest.json`.
+//!
 //! The catalog is process-shared state, as upstream: sessions resolve their
 //! launch flags and the UI resolves context windows against [`current`].
 

@@ -1,4 +1,4 @@
-//! Restart-continuity marker (`docs/computer-use.md` §Restart continuity).
+//! Restart-continuity marker for macOS permission grants that need a relaunch.
 //!
 //! macOS applies some TCC grants (notably Screen Recording) only after the app
 //! restarts, and may quit tcode from its own "Quit & Reopen" dialog. Before any

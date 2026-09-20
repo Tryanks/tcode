@@ -263,7 +263,7 @@ pub struct AppShell {
     _subscriptions: Vec<Subscription>,
 }
 
-/// The right panel's default width (`docs/DESIGN.md`).
+/// The right panel's default width.
 const RIGHT_PANEL_WIDTH: f32 = 560.;
 const SIDEBAR_WIDTH: f32 = 255.;
 /// Collapsed only: width of the window's left-edge activation region.
@@ -2110,8 +2110,7 @@ impl AppShell {
         // second group inside the chat panel does not shrink the chat: it keeps
         // its full width and the right panel is painted over it, clipping the
         // timeline and the composer mid-word. A flat group makes the chat a real
-        // flex sibling of the right panel, so it reflows — the guarantee
-        // `docs/DESIGN.md` makes for the chat column.
+        // flex sibling of the right panel, so it reflows instead of clipping.
         let chat_visible = !(diff_open && diff_expanded);
         // The right panel is the last of three panels (sidebar · chat · right),
         // and the sidebar is only a panel when it is expanded.

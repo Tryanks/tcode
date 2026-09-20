@@ -159,7 +159,24 @@ jobs:
           PLIST
           plutil -lint "$app/Contents/Info.plist"
 
-      # Signing credentials are optional; configure the complete set in docs/release-signing.md.
+      # Signing credentials are optional. With none of the six MACOS_* secrets the
+      # build ships unsigned; with all six it is signed, notarized and stapled; a
+      # partial set fails this step naming the missing secrets. They come from the
+      # maintainer's Apple Developer account (Developer ID Application certificate
+      # and a 10-character Team ID):
+      #   MACOS_CERTIFICATE          base64 of the Developer ID .p12 exported from
+      #                              Keychain Access "My Certificates" (includes the key)
+      #   MACOS_CERTIFICATE_PASSWORD password chosen for that .p12 export
+      #   MACOS_SIGN_IDENTITY        exact string from `security find-identity -v -p codesigning`
+      #   MACOS_NOTARY_APPLE_ID      Apple ID email used for notarization
+      #   MACOS_NOTARY_TEAM_ID       the Team ID
+      #   MACOS_NOTARY_PASSWORD      an app-specific password from account.apple.com
+      # Verify a signed release locally with
+      #   spctl -a -vvv -t open --context context:primary-signature tcode-*.dmg
+      #   xcrun stapler validate tcode-*.dmg
+      #   spctl -a -vvv -t exec /Applications/Tcode.app
+      #   xcrun stapler validate /Applications/Tcode.app
+      # Windows builds ship unsigned; there is no Sparkle-style updater.
       - name: Sign, notarize, and package macOS
         id: macos_sign
         if: matrix.platform == 'macos'
@@ -586,7 +603,7 @@ jobs:
           cargo install cargo-ndk --locked
 
       # Release profile, stripped native library, R8; signed with Gradle's debug
-      # keystore until a release key exists (see docs/android-apk-size.md).
+      # keystore until a release key exists, so the key may change between releases.
       - name: Build Android release APK
         run: crates/android/host/build.sh --release
 

@@ -72,9 +72,7 @@ configuration, including on other connected clients. It can also refresh an
 already selected default after editing its config or image.
 
 Defaults load when displayed, and refresh on reset, reconnect, or client
-restart. Tcode does not watch config or image files for live changes. Rendering,
-geometry and the picker's interaction contract are documented in
-[DESIGN.md](DESIGN.md#project-icons).
+restart. Tcode does not watch config or image files for live changes.
 
 ## Future configuration management
 

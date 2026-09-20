@@ -2,8 +2,11 @@
 
 Tcode runs on the machine that holds your projects, provider tools and terminal
 processes. You can open that machine from another desktop, a phone, a tablet or
-a browser over your LAN or overlay network. There is no relay service. For a
-shorter introduction, see
+a browser over your LAN or overlay network. This guide describes the current
+LAN transport. The planned replacement — iroh as the only transport, with the
+Traverse discovery and relay service as an optional fallback — is tracked in
+[#376](https://github.com/Tryanks/tcode/issues/376). For a shorter
+introduction, see
 [Use Tcode from other devices in the README](../README.md#use-tcode-from-other-devices).
 
 ## Concepts
@@ -265,8 +268,8 @@ same device data directory for `--pair` and `--connect`.
    You connect to one machine at a time.
 
 A tablet wide enough for the split gets the split, and rotating it back to
-portrait returns to the stack with the same thread and draft. See
-[the layout rule](DESIGN.md#one-shell-one-layout-rule).
+portrait returns to the stack with the same thread and draft. A desktop window
+never enters the stack, however narrow it is.
 
 ### From a browser
 
@@ -341,8 +344,9 @@ name, Android from the device model.
 
 Connect the machine and your other devices to the same LAN or overlay, such as
 Tailscale or EasyTier. Allow the listener through the machine's firewall and any
-overlay access rules. Tcode provides no relay or public discovery service. Treat
-nearby-machine search as LAN-only: it does not cross a normal overlay connection.
+overlay access rules. The current transport has no relay or public discovery
+service (see [#376](https://github.com/Tryanks/tcode/issues/376) for the
+planned one). Treat nearby-machine search as LAN-only: it does not cross a normal overlay connection.
 Enter the machine's overlay address and port when it does not appear nearby.
 Nearby-machine search advertises identity and address hints; it does not grant
 access. After either side changes network, native clients can recover an added
@@ -606,8 +610,7 @@ reported as unreachable.
   "open in editor" need a capability the device either has or does not; where it
   does not, the view says which machine can do it and offers what it can (open
   externally, copy, type the value). Prepare projects and provider installations
-  on the machine. See
-  [capability-appropriate UI](DESIGN.md#capability-appropriate-ui).
+  on the machine.
 - The Android arm64 APK is a release build signed with Gradle's debug key, so
   the key may change between releases; uninstall the previous build if an
   install is rejected. iOS is not published yet; build it from source with
@@ -694,8 +697,8 @@ with bounded history replay.
 A pairing identifies the machine independently of its current address. Native
 clients preserve the token and session subscriptions when moving between networks;
 recovery can find an address the client has never seen before. It still requires a
-reachable Tcode listener and compatible apps on both ends. It is not a relay or a
-promise to reach a machine across isolated networks.
+reachable Tcode listener and compatible apps on both ends. The current transport
+has no relay, so it cannot reach a machine across isolated networks.
 
 - **Address discovery.** Every connection attempt starts the saved origin first
   and also races saved candidates, addresses reported

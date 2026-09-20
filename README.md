@@ -4,10 +4,10 @@
 
 # Tcode
 
-**A native desktop app for the coding agents you already use.**
+**A native GUI for the terminal coding agents you already use.**
 
 Claude Code, Codex, pi, OpenCode, and any agent that speaks ACP — one window,
-one workflow.
+on your desktop, your phone, or in a browser.
 
 [Download](https://github.com/Tryanks/tcode/releases) ·
 [Getting started](#getting-started) ·
@@ -22,14 +22,17 @@ one workflow.
 
 ## What it is
 
-Tcode is a desktop layer over the agent CLIs already installed on your machine.
-It spawns them, speaks their native protocols, and provides persistent threads,
-rendered diffs, a readable approval panel, and native provider actions when the
-underlying CLI exposes them.
+Tcode is a native GUI proxy for the agent CLIs already installed on your
+machine. One Tcode is the *host*: it spawns the agents, speaks their native
+protocols, and keeps your threads, terminals and projects. Every other device —
+another desktop, a phone, a tablet, a browser tab — is a screen for that host.
 
-It does **not** replace your agent, proxy your API keys, or run a cloud service.
-Your accounts, subscriptions, models and tooling keep working exactly as they
-do today — Tcode just drives them.
+Tcode surfaces what each agent's own CLI can do: persistent threads, rendered
+diffs, a readable approval panel, and native provider actions when the
+underlying CLI exposes them. It does **not** replace your agent, proxy your API
+keys, or invent capabilities the agent lacks. Your accounts, subscriptions,
+models and tooling keep working exactly as they do today — Tcode just drives
+them, and anything it adds to what the model sees is shown to you.
 
 ## What you get
 
@@ -92,12 +95,16 @@ speaks ACP.
 
 Tcode runs on the machine that holds your projects, starts your agents, and
 keeps your threads. You can open that machine from another desktop, a phone or
-tablet, or a browser tab. Everything travels over your own LAN or overlay
-network (Tailscale, EasyTier); there is no relay service.
+tablet, or a browser tab. Today everything travels over your own LAN or overlay
+network (Tailscale, EasyTier). The planned replacement is direct, end-to-end
+encrypted connections over iroh, with an optional discovery and relay service,
+**Traverse**, that only introduces devices to each other and carries ciphertext
+when a direct connection fails; see
+[#376](https://github.com/Tryanks/tcode/issues/376).
 
-Every device shows the *same* app. There is no reduced phone build: the layout
-follows the window's width — under 900px it becomes a machines → threads →
-thread stack, and above it uses the desktop split. Some actions depend on the
+Every device shows the *same* app. There is no reduced phone build: a phone, or
+a tablet narrower than 900px, shows a machines → threads → thread stack; a
+wider tablet and every desktop window use the split layout. Some actions depend on the
 device in your hands, such as opening a native file dialog or driving the
 embedded preview browser.
 
@@ -115,7 +122,7 @@ tcode-headless serve --listen 0.0.0.0:47420 --name build-server
 tcode-headless pair      # prints a fresh connection code and QR code
 ```
 
-Release builds also serve the browser app at `http://<machine>:47420/`. Set a
+Headless release builds also serve the browser app at `http://<machine>:47420/`. Set a
 password on first open, or preset it with `TCODE_PASSWORD`. Saved browser tokens
 skip login on later visits.
 
@@ -145,7 +152,7 @@ WebView2; Linux needs the listed system libraries and a Vulkan driver.
 
 For an unsigned macOS build, remove quarantine after installing the app with
 `xattr -dr com.apple.quarantine /Applications/Tcode.app`. The embedded preview
-browser is available on macOS and Windows; voice input requires macOS 26 or later.
+browser is available on macOS, Windows and Android; voice input requires macOS 26 or later.
 
 Each release uses the native application icon format for its platform: `.icns`
 inside the macOS app bundle, an `.ico` resource embedded directly in the Windows
@@ -159,10 +166,10 @@ also include a `SHA256SUMS.txt` file.
 | Linux, x64 / arm64 | Desktop or headless `.tar.gz` |
 | Android, arm64 | `tcode-<version>-android-arm64.apk` — release build signed with a debug key; install with adb |
 | iOS / iPadOS, arm64 | Not published yet; build from source with `crates/ios/host/build.sh` |
-| Browser | Embedded in the headless release; open its HTTPS URL. No separate signed app package |
+| Browser | Embedded in the headless release; open the HTTP link it prints (HTTPS only through your own tunnel). No separate signed app package |
 
 **2. Have an agent installed.** Tcode drives the CLIs, it doesn't bundle them.
-Make sure `claude` or `codex` is on your `PATH` — or install an ACP agent from
+Make sure `claude`, `codex`, `pi` or `opencode` is on your `PATH` — or install an ACP agent from
 the marketplace once Tcode is running.
 
 **3. Add a project and start a thread.** Point Tcode at a directory, type, send.
@@ -205,9 +212,9 @@ that doesn't render well.
 
 ## Acknowledgements
 
-Tcode's design and interaction model are closely modeled on
-**[T3 Code](https://t3.gg)** by T3 Tools — think of it as a native,
-reduced-feature homage. All credit for the original UX goes to them.
+Tcode's interaction model was inspired by **[T3 Code](https://t3.gg)** by
+T3 Tools, and Tcode keeps borrowing good ideas from it: it reads T3 Code's
+`t3.json` project configuration and its Claude model manifest.
 
 Built with [GPUI](https://gpui.rs) and
 [gpui-kit](https://github.com/longbridge/gpui-kit).

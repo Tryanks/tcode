@@ -168,8 +168,8 @@ pub fn grouped(rows: Vec<gpui::AnyElement>, cx: &App) -> Div {
 /// rows on the page, not a card: 56pt of touch target at the page inset, with
 /// a hover fill on a pointer and a pressed tint everywhere.
 ///
-/// Settings-like forms use [`grouped`] instead; see the list-style rule in
-/// `docs/DESIGN.md`.
+/// Settings-like forms use [`grouped`] instead: plain rows for navigable
+/// content, grouped cards for settings-like forms.
 pub fn list_row(id: impl Into<ElementId>, label: SharedString, cx: &App) -> Stateful<Div> {
     accessible_clickable(gpui_base::h_flex(), id, Role::Button, label, cx)
         .w_full()

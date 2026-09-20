@@ -34,7 +34,7 @@ use crate::widgets::input::{Input, InputState};
 use crate::widgets::switch::Switch;
 
 /// A caption above one group of this settings-like page. Grouped cards, not
-/// the plain content-list rows Machines uses (`docs/DESIGN.md`, list style).
+/// the plain content-list rows Machines uses.
 fn section_caption(label: SharedString, cx: &App) -> AnyElement {
     div()
         .pl_3()
