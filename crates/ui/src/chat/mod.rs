@@ -2807,7 +2807,7 @@ impl Render for ChatView {
                 .flex_1()
                 .min_h_0()
                 .relative()
-                .py_4()
+                .py(timeline_inset(cx))
                 .child(crate::scroll::page_viewport(
                     "timeline-bounce",
                     crate::wheel_easing::Handle::List(self.list_state.clone()),
@@ -3050,6 +3050,19 @@ fn open_in_zed(cwd: &Path, window: &mut Window, cx: &mut App) {
         );
     }
 }
+
+/// The breathing room between the timeline and the header/composer. A phone
+/// has none: its rows already inset themselves and the screen is short.
+fn timeline_inset(cx: &App) -> gpui::Pixels {
+    if crate::window_seam::is_mobile(cx) {
+        px(0.)
+    } else {
+        px(TIMELINE_INSET)
+    }
+}
+
+/// Desktop timeline inset above and below the list, in pixels.
+const TIMELINE_INSET: f32 = 8.;
 
 #[cfg(test)]
 mod tests {
@@ -3974,8 +3987,10 @@ mod tests {
             }
         }
 
-        for running in [false, true] {
+        for (mobile, running) in [(false, false), (false, true), (true, false), (true, true)] {
             for (width, height) in [(393., 852.), (1024., 768.)] {
+                cx.update(|cx| crate::window_seam::override_mobile_for_test(cx, mobile));
+                let expected_gap = if mobile { 0. } else { super::TIMELINE_INSET };
                 let mut timeline = synthetic_markdown_timeline(30);
                 timeline.turn_running = running;
                 timeline.turns.last_mut().unwrap().running = running;
@@ -4001,8 +4016,8 @@ mod tests {
                 let composer = cx.debug_bounds("chat-composer").expect("composer");
                 let gap = f32::from(composer.top() - last.bottom());
                 assert!(
-                    (gap - 16.).abs() <= 1.,
-                    "{width}×{height}, running={running}: expected 16px gap, got {gap}px"
+                    (gap - expected_gap).abs() <= 1.,
+                    "{width}×{height}, running={running}, mobile={mobile}: expected {expected_gap}px gap, got {gap}px"
                 );
                 let card = cx
                     .debug_bounds("composer-card")
