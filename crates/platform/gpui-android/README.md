@@ -1,6 +1,6 @@
 # gpui-android
 
-Android platform backend for the `gpui-pre` 0.3.3 snapshot used by tcode. The
+Android platform backend for the `gpui-pre` 0.3.5 snapshot used by tcode. The
 crate is an ordinary Rust dependency on every target, but its implementation is
 compiled only for Android. Calling `platform()` elsewhere fails with a clear
 panic instead of pulling Android libraries into host builds.
@@ -18,7 +18,9 @@ The platform exposes one full-screen `PlatformWindow`. It owns the current
 `ANativeWindow`, a `gpui-pre-wgpu::WgpuRenderer`, and the shared `WgpuContext`.
 `InitWindow` creates or replaces the Vulkan surface. `TerminateWindow`
 unconfigures it before Android invalidates the native window, while preserving
-the device, pipelines, and sprite atlas for resume. Density converts Android
+the device, pipelines, and sprite atlas for resume. The surface's presence is
+also the window's `WindowVisibility`: `InitWindow` and `TerminateWindow`
+report the transition through `on_visibility_change`. Density converts Android
 device pixels into GPUI logical pixels. `uiMode` supplies light/dark appearance.
 
 `CosmicTextSystem` is populated from `/system/fonts` because fontdb does not
@@ -175,7 +177,7 @@ host address reachable from the device.
 The architecture and Android integration patterns were studied from
 `gpui-toolkit/crates/gpui-android` and its showcase host, copyright 2025 Pierre
 F. Aubert, licensed under the ISC license. This backend was written for the
-different `gpui-pre` 0.3.3 interfaces rather than vendoring that source. The
+different `gpui-pre` 0.3.5 interfaces rather than vendoring that source. The
 reference's ISC permission and warranty notice remain applicable to ideas and
 adapted integration patterns: use, copying, modification, and distribution are
 permitted with the copyright and permission notice retained; the software is
@@ -183,7 +185,7 @@ provided “AS IS” without warranty.
 
 ## Scroll target ownership
 
-The platform forwards actual touch coordinates unchanged. GPUI 0.3.3 owns the
+The platform forwards actual touch coordinates unchanged. GPUI 0.3.5 owns the
 private `TouchGestureRecognizer`, including slop, pan deltas, long presses,
 selection drags, velocity, and frame-driven momentum. Its `gestures.rs` emits
 pan start/move/end/cancel scroll positions at `ActiveTouch::start_position` and
