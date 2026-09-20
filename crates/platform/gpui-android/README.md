@@ -203,11 +203,13 @@ uses that hit-test list, not pointer capture; the `div` overflow listener also
 allows propagation after changing its offset. This does not implement exclusive
 child scrolling with ancestor takeover only at a limit.
 
-tcode implements element capture in
-[`tcode-ui::touch_scroll`](../../ui/src/touch_scroll.rs). The shell observes
-GPUI's unclaimed touch-down offer, selects a registered viewport, and intercepts
-recognized scroll events in the capture phase. It applies their deltas directly
-to the retained handle, including GPUI's existing momentum, and stops propagation
-before the default position-based listeners run. Native touch coordinates and
-GPUI's tap, long-press, and selection recognition remain unchanged. The UI
-registry owns the viewport identity; no second platform recognizer is needed.
+tcode does not add capture. Nesting is resolved per event by gpui-base's
+scrollable mask, composed in [`tcode-ui::scroll`](../../ui/src/scroll.rs): a
+bounded vertical area consumes the scroll events it can use in the capture
+phase and lets the rest bubble to its ancestor, so it chains to the ancestor
+at an edge; a horizontal strip owns horizontal movement even at its edges and
+leaves vertical movement to the view behind it. Page-level viewports scroll
+through GPUI's own handlers and stretch at their edges through gpui-base's
+`ScrollBounce`. Native touch coordinates and GPUI's tap, long-press, and
+selection recognition remain unchanged; no second platform recognizer is
+needed.

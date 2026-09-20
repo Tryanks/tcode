@@ -156,6 +156,6 @@ crate.
 
 Both mobile backends use GPUI's private gesture recognizer and scroll dispatch.
 See the [shared scroll ownership constraints](../gpui-android/README.md#scroll-target-ownership)
-for the distinction between its existing touch-down coordinate anchor and stable
-element capture. tcode's UI capture listener intercepts recognized scroll events while preserving
-UIKit's actual and predicted coordinates and GPUI's gesture recognition.
+for why nesting is resolved per event by gpui-base's scrollable mask rather
+than by element capture. UIKit's actual and predicted coordinates and GPUI's
+gesture recognition are preserved unchanged.
