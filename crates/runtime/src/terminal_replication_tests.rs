@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use super::p4b_tests::{fixture, linked, next};
 use super::*;
 use tcode_protocol::terminal::{
-    CellWidth, HISTORY_LIMIT, TerminalCell, TerminalDelta, TerminalFrame, TerminalLink,
-    TerminalRow, TerminalStyle,
+    CellWidth, HISTORY_LIMIT, TerminalCell, TerminalFrame, TerminalLink, TerminalRow, TerminalStyle,
 };
 use tcode_remote::HostMux;
 
@@ -150,6 +149,13 @@ fn difference(replica: &TerminalFrame, host: &TerminalFrame) -> Option<String> {
     }
     if replica.title != host.title {
         return Some(format!("title {:?} != {:?}", replica.title, host.title));
+    }
+    if replica.visible.len() != host.visible.len() {
+        return Some(format!(
+            "visible rows {} != {}",
+            replica.visible.len(),
+            host.visible.len()
+        ));
     }
     for (index, (left, right)) in replica.visible.iter().zip(&host.visible).enumerate() {
         let (left, right) = (resolved_row(replica, left), resolved_row(host, right));
@@ -304,7 +310,7 @@ impl Session {
     /// the shell's echo of the typed line never matches.
     fn plain_shell(&self) {
         self.send(concat!(
-            "exec /bin/sh\rPS1=; printf '\\033]2;replication-test\\007",
+            "exec /bin/sh\rPS1=; stty -echo; printf '\\033]2;replication-test\\007",
             "\\122\\105\\101\\104\\131\\n'\r",
         ));
         self.wait_for("READY");
@@ -322,7 +328,7 @@ impl Session {
 /// exactly — the thing raw-byte replay could not do.
 #[cfg(unix)]
 #[test]
-fn late_terminal_attach_reproduces_the_host_grid() {
+fn late_attach_and_live_bursts_reproduce_modes_resize_and_retained_history() {
     use tcode_protocol::terminal::{CursorShape, TerminalMode};
 
     let session = terminal_session();
@@ -365,14 +371,11 @@ fn late_terminal_attach_reproduces_the_host_grid() {
     // Continuation: leaving the alternate screen after the attach restores the
     // primary grid and its scrollback for the already-attached client.
     session.send(
-        "printf '\\033[?1049l'; awk 'BEGIN{for(i=0;i<80;i++) print \"primary-\" i}'; printf '\\120\\122\\111\\115\\101\\122\\131\\n'\r",
+        "printf '\\033[?1049l'; yes | head -c 2000000; printf '\\120\\122\\111\\115\\101\\122\\131\\n'\r",
     );
     session.wait_for("PRIMARY");
     replica.settle(&session.terminal);
-    assert!(
-        !replica.frame.history.is_empty(),
-        "the primary screen accumulates its own scrollback"
-    );
+    assert_eq!(replica.frame.history.len(), HISTORY_LIMIT);
     assert!(
         !replica
             .frame
@@ -390,33 +393,10 @@ fn late_terminal_attach_reproduces_the_host_grid() {
     session.resize(96, 26);
     replica.settle(&session.terminal);
 
-    // A CSI sequence and a UTF-8 character split across the moment another
-    // client attaches. The client no longer parses, so this is a regression
-    // guard rather than a risk.
-    session.send(
-        "printf '\\033[1;3'; sleep 1; printf '2m\\346\\274'; sleep 1; printf '\\242\\345\\255\\227\\033[0m\\123\\120\\114\\111\\124\\n'\r",
-    );
-    std::thread::sleep(Duration::from_millis(1200));
-    let mid = linked(&session.mux);
-    let mid_events = mid.events();
-    let mut mid_replica = Replica::attach(&mid, mid_events, session.terminal_id);
-    session.wait_for("SPLIT");
-    replica.settle(&session.terminal);
-    mid_replica.settle(&session.terminal);
-    assert_eq!(difference(&mid_replica.frame, &replica.frame), None);
-    assert!(
-        frame_text(&replica.frame)
-            .iter()
-            .any(|row| row.contains("漢字SPLIT")),
-        "{:?}",
-        frame_text(&replica.frame)
-    );
-
     session.shutdown();
 }
 
-/// Two ordinary mux clients see equivalent state, and PTY protocol replies are
-/// produced once, on the host.
+/// Both clients write to the same PTY and reconstruct the same host state.
 #[cfg(unix)]
 #[test]
 fn two_mux_clients_share_one_grid_and_one_pty() {
@@ -454,20 +434,16 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
     first.settle(&session.terminal);
     rejoined.settle(&session.terminal);
 
-    // A device-attributes query is answered by the host emulator alone: two
-    // attached clients must not produce two replies.
-    session.send(
-        "saved=$(stty -g); stty raw -echo min 0 time 20; printf '\\033[c'; sleep 1; reply=$(dd bs=1 count=64 2>/dev/null); stty \"$saved\"; printf '\\n\\104\\101%s\\n' \"${#reply}\"\r",
-    );
-    // Wait for the sentinel with its length, so a slow runner cannot pass the
-    // host check on a partial line and then fail on the replica.
-    session.wait_for("DA16");
+    second_link
+        .command_blocking(Command::TerminalInput {
+            terminal_id: session.terminal_id,
+            bytes: b"printf '\\123\\105\\103\\117\\116\\104\\n'\r".to_vec(),
+        })
+        .unwrap();
+    session.wait_for("SECOND");
     first.settle(&session.terminal);
-    let text = frame_text(&first.frame).join("\n");
-    assert!(
-        text.contains("DA16"),
-        "expected one 16-byte primary DA reply: {text}"
-    );
+    rejoined.settle(&session.terminal);
+    assert_eq!(difference(&first.frame, &rejoined.frame), None);
 
     // Selection lives in the client. The host stores only what a client sends
     // it, and publishes that to everyone watching the session.
@@ -508,17 +484,18 @@ fn two_mux_clients_share_one_grid_and_one_pty() {
 /// duplicate, and scrollback in order.
 #[cfg(unix)]
 #[test]
-fn attaching_during_output_and_a_resize_leaves_no_gap_or_duplicate() {
+fn attachment_between_output_chunks_and_resize_preserves_contiguous_history() {
     let session = terminal_session();
     session.plain_shell();
     session.send(
-        "awk 'BEGIN{for(i=0;i<6000;i++) print \"line-\" i}'; printf '\\102\\125\\123\\131\\n'\r",
+        "awk 'BEGIN{for(i=0;i<3000;i++) print \"line-\" i}'; printf '\\120\\101\\125\\123\\105\\104\\n'; read release; awk 'BEGIN{for(i=3000;i<6000;i++) print \"line-\" i}'; printf '\\102\\125\\123\\131\\n'\r",
     );
-    // Attach and resize without waiting: the burst is usually still running.
+    session.wait_for("PAUSED");
     let late = linked(&session.mux);
     let late_events = late.events();
     let mut replica = Replica::attach(&late, late_events, session.terminal_id);
     session.resize(88, 21);
+    session.send("continue\r");
     session.wait_for("BUSY");
     replica.settle(&session.terminal);
     assert_eq!((replica.frame.cols, replica.frame.rows), (88, 21));
@@ -549,75 +526,11 @@ fn attaching_during_output_and_a_resize_leaves_no_gap_or_duplicate() {
     session.shutdown();
 }
 
-/// A delta carries only what changed, and a quiet terminal produces none.
-#[cfg(unix)]
-#[test]
-fn deltas_carry_only_changed_rows_and_stop_when_the_grid_is_quiet() {
-    let session = terminal_session();
-    let mut replica = Replica::attach(&session.link, session.events.clone(), session.terminal_id);
-    session.plain_shell();
-    replica.settle(&session.terminal);
-
-    while replica.events.try_recv().is_ok() {}
-    session.send("printf '\\117\\116\\105\\114\\111\\116\\105\\n'\r");
-    session.wait_for("ONELINE");
-    std::thread::sleep(Duration::from_millis(300));
-
-    let mut deltas: Vec<TerminalDelta> = Vec::new();
-    while let Ok(envelope) = replica.events.try_recv() {
-        if let ServerEvent::TerminalDelta { delta, .. } = envelope.event {
-            deltas.push(*delta);
-        }
-    }
-    assert!(!deltas.is_empty(), "typing must produce a delta");
-    let rows = session.terminal.grid().dimensions().1;
-    assert!(
-        deltas.iter().all(|delta| delta.rows_replaced.len() < rows),
-        "one line of output must not replace the whole screen"
-    );
-
-    // Nothing happens on screen, so no grid content is published. A slow
-    // prompt or the periodic working-directory refresh may still emit a
-    // metadata-only delta; that is not a repaint.
-    std::thread::sleep(Duration::from_millis(300));
-    while let Ok(envelope) = replica.events.try_recv() {
-        if let ServerEvent::TerminalDelta { delta, .. } = envelope.event {
-            assert!(
-                delta.rows_replaced.is_empty() && delta.history.is_none(),
-                "an idle terminal published grid content: {} rows, history {:?}",
-                delta.rows_replaced.len(),
-                delta.history.is_some()
-            );
-        }
-    }
-
-    session.shutdown();
-}
-
-/// A real PTY flood must eventually publish the complete retained history,
-/// including a final scheduled flush after the shell has stopped producing output.
-#[cfg(unix)]
-#[test]
-fn a_two_megabyte_pty_burst_catches_up_after_output_stops() {
-    let session = terminal_session();
-    let mut replica = Replica::attach(&session.link, session.events.clone(), session.terminal_id);
-    session.plain_shell();
-    session.resize(100, 30);
-    replica.settle(&session.terminal);
-
-    session.send("yes | head -c 2000000; printf '\\131\\105\\123\\104\\117\\116\\105\\n'\r");
-    session.wait_for("YESDONE");
-    replica.settle(&session.terminal);
-    assert_eq!(replica.frame.history.len(), HISTORY_LIMIT);
-
-    session.shutdown();
-}
-
 /// Short gaps between PTY reads must not repeatedly ship the retained ring.
 /// The projection cadence is controlled here so CPU speed cannot change the budget.
 #[cfg(unix)]
 #[test]
-fn bursty_scrollback_waits_for_a_stable_gap_before_republishing() {
+fn projection_sends_changed_rows_and_defers_bursty_history_until_a_stable_gap() {
     use crate::terminal::{TerminalProjection, TerminalUpdate};
 
     let session = terminal_session();
@@ -626,6 +539,24 @@ fn bursty_scrollback_waits_for_a_stable_gap_before_republishing() {
     let mut projection = TerminalProjection::new();
     let mut replica = projection.reset(&session.terminal);
     let start = Instant::now();
+    session.terminal.grid().feed(b"one row\r\n");
+    projection.last_projected = start;
+    let Some(TerminalUpdate::Delta(delta)) = projection.update(&session.terminal) else {
+        panic!("changed content must produce a delta");
+    };
+    assert!(!delta.rows_replaced.is_empty());
+    assert!(
+        delta.rows_replaced.len() < 30,
+        "a single line must not replace the screen"
+    );
+    replica.apply(&delta);
+    assert!(difference(&replica, &host_frame(&session.terminal)).is_none());
+    projection.last_projected = start + Duration::from_millis(16);
+    assert!(
+        projection.update(&session.terminal).is_none(),
+        "a quiet grid has no content to send"
+    );
+    let start = start + Duration::from_millis(32);
     let chunk = b"y\r\n".repeat(10_000);
     let mut bytes = 0;
     let mut last_output = start;

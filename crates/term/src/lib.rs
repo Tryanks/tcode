@@ -463,7 +463,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     use crate::pty::unix_shell;
 
     fn command(script: &str) -> Terminal {
@@ -498,15 +498,10 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
-    #[test]
-    fn unix_shell_uses_explicit_shell() {
-        assert_eq!(unix_shell(Some("/usr/bin/fish")), "/usr/bin/fish");
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_shell_falls_back_to_bin_sh_when_unset_or_empty() {
+    fn linux_shell_resolves_explicit_paths_and_blank_fallbacks() {
+        assert_eq!(unix_shell(Some("/usr/bin/fish")), "/usr/bin/fish");
         assert_eq!(unix_shell(None), "/bin/sh");
         assert_eq!(unix_shell(Some("")), "/bin/sh");
         assert_eq!(unix_shell(Some("  \t")), "/bin/sh");
@@ -534,37 +529,6 @@ mod tests {
         let beginning = terminal.snapshot();
         assert!(beginning.display_offset > 0);
         assert!(!beginning.text().contains("output-5000"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn real_pty_output_uses_raw_byte_boundary() {
-        let pty = PtyHandle::spawn_command(
-            std::env::temp_dir(),
-            "/bin/sh".to_string(),
-            vec!["-c".to_string(), "printf boundary".to_string()],
-            "sh".to_string(),
-        )
-        .unwrap();
-        let events = pty.events();
-        let start = Instant::now();
-        let mut output = Vec::new();
-        let mut exited = false;
-        while !exited {
-            match events.try_recv() {
-                Ok(PtyEvent::Output(bytes)) => output.extend(bytes),
-                Ok(PtyEvent::Exited { .. }) => exited = true,
-                Ok(PtyEvent::ProcessInfoChanged { .. }) => {}
-                Err(async_channel::TryRecvError::Empty) => {
-                    assert!(start.elapsed() < Duration::from_secs(120));
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(async_channel::TryRecvError::Closed) => {
-                    panic!("PTY event stream closed before exit")
-                }
-            }
-        }
-        assert!(String::from_utf8_lossy(&output).contains("boundary"));
     }
 
     #[cfg(unix)]

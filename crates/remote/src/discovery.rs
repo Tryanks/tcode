@@ -461,33 +461,43 @@ mod tests {
     use super::*;
     #[test]
     fn txt_records_are_bounded_and_consistent() {
-        let props = [
-            ("host_id", "test"),
-            ("name", "Test host"),
-            ("port", "47420"),
-        ];
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            "test",
-            "test.local.",
-            "127.0.0.1",
-            47420,
-            &props[..],
-        )
-        .unwrap();
-        assert!(parse_txt(info.get_properties(), 47420, "127.0.0.1".into()).is_some());
-        assert!(parse_txt(info.get_properties(), 1, "127.0.0.1".into()).is_none());
-        let malformed = [("host_id", "test"), ("name", ""), ("port", "47420")];
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            "test",
-            "test.local.",
-            "127.0.0.1",
-            47420,
-            &malformed[..],
-        )
-        .unwrap();
-        assert!(parse_txt(info.get_properties(), 47420, "127.0.0.1".into()).is_none());
+        for (host_id, name, advertised_port, service_port, valid) in [
+            ("host", "Test host", "47420", 47420, true),
+            ("", "Test host", "47420", 47420, false),
+            ("host", "", "47420", 47420, false),
+            ("host", "Bad\nname", "47420", 47420, false),
+            ("host", "Test host", "47420", 1, false),
+            ("host", "Test host", "not-a-port", 47420, false),
+            ("host", "Test host", "0", 0, false),
+        ] {
+            let properties = [
+                ("host_id", host_id),
+                ("name", name),
+                ("port", advertised_port),
+            ];
+            let info = ServiceInfo::new(
+                SERVICE_TYPE,
+                "test",
+                "test.local.",
+                "192.168.1.2",
+                service_port,
+                &properties[..],
+            )
+            .unwrap();
+            let beacon = parse_txt(info.get_properties(), service_port, "192.168.1.2".into());
+            assert_eq!(beacon.is_some(), valid, "{properties:?}/{service_port}");
+            if let Some(beacon) = beacon {
+                assert_eq!(
+                    beacon,
+                    Beacon {
+                        host_id: "host".into(),
+                        name: "Test host".into(),
+                        addr: "192.168.1.2".into(),
+                        port: 47420
+                    }
+                );
+            }
+        }
     }
 
     #[test]
@@ -599,29 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn maximum_probe_round_wraps_pages_without_overflow() {
-        for (ip, prefix, expected) in [
-            ("10.20.30.40", 8, "10.148.30.1"),
-            ("172.20.30.40", 12, "172.28.30.1"),
-            ("192.168.30.40", 16, "192.168.158.1"),
-            ("192.168.30.40", 24, "192.168.30.1"),
-            ("192.168.30.42", 30, "192.168.30.41"),
-        ] {
-            let networks = [LocalNetwork {
-                name: "en0".into(),
-                ip: ip.parse().unwrap(),
-                prefix: Some(prefix),
-            }];
-            let origins = interface_probe_origins(&networks, 47420, u32::MAX);
-            assert!(
-                origins.contains(&format!("http://{expected}:47420")),
-                "wrong last-round page for {ip}/{prefix}"
-            );
-            assert!(!origins.contains(&format!("http://{ip}:47420")));
-        }
-    }
-
-    #[test]
     fn probe_groups_visit_every_interface_and_advance_every_network_page() {
         let networks: Vec<_> = (1..=9)
             .map(|id| LocalNetwork {
@@ -661,7 +648,26 @@ mod tests {
     }
 
     #[test]
-    fn subnet_pages_visit_both_neighbors_early_and_cover_a_full_cycle_without_repeats() {
+    fn subnet_pages_cover_neighbors_and_full_cycles_even_at_maximum_round() {
+        for (ip, prefix, expected) in [
+            ("10.20.30.40", 8, "10.148.30.1"),
+            ("172.20.30.40", 12, "172.28.30.1"),
+            ("192.168.30.40", 16, "192.168.158.1"),
+            ("192.168.30.40", 24, "192.168.30.1"),
+            ("192.168.30.42", 30, "192.168.30.41"),
+        ] {
+            let networks = [LocalNetwork {
+                name: "en0".into(),
+                ip: ip.parse().unwrap(),
+                prefix: Some(prefix),
+            }];
+            let origins = interface_probe_origins(&networks, 47420, u32::MAX);
+            assert!(
+                origins.contains(&format!("http://{expected}:47420")),
+                "wrong last-round page for {ip}/{prefix}"
+            );
+            assert!(!origins.contains(&format!("http://{ip}:47420")));
+        }
         let page = |origins: &[String]| {
             let ip: Ipv4Addr = url::Url::parse(&origins[0])
                 .unwrap()

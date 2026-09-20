@@ -904,10 +904,16 @@ mod tests {
     }
 
     #[test]
-    fn snapshots_report_damage_for_writes_selection_and_clear() {
+    fn snapshots_consume_damage_but_reads_and_selection_preserve_it() {
         let emulator = GridEmulator::new();
         emulator.snapshot();
-        emulator.feed(b"written");
+        emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[>1uwritten");
+        assert_eq!(
+            emulator.keyboard_mode(),
+            KeyboardModes::DISAMBIGUATE_ESC_CODES
+        );
+        assert!(emulator.mode().contains(Mode::MOUSE_DRAG | Mode::SGR_MOUSE));
+        assert!(emulator.peek_snapshot().row_damage[0]);
 
         let snapshot = emulator.snapshot();
         assert!(snapshot.row_damage[0]);
@@ -943,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn title_bell_and_native_primary_da_reply_are_data_events() {
+    fn emulator_routes_events_size_queries_and_clipboard_policy() {
         let emulator = GridEmulator::new();
         let events = emulator.events();
         emulator.feed(b"\x07\x1b]2;client title\x07\x1b[c");
@@ -952,12 +958,6 @@ mod tests {
         assert!(emitted.contains(&GridEvent::Bell));
         assert!(emitted.contains(&GridEvent::TitleChanged(Some("client title".to_string()))));
         assert!(emitted.contains(&GridEvent::Input(b"\x1b[?62;4;6;22;52c".to_vec())));
-    }
-
-    #[test]
-    fn cell_metrics_drive_text_area_pixel_size_replies() {
-        let emulator = GridEmulator::new();
-        let events = emulator.events();
         emulator.resize_with_cell_size_if_changed(42, 9, 10, 20);
 
         emulator.feed(b"\x1b[14t");
@@ -966,27 +966,6 @@ mod tests {
             std::iter::from_fn(|| events.try_recv().ok())
                 .any(|event| { event == GridEvent::Input(b"\x1b[4;180;420t".to_vec()) })
         );
-    }
-
-    #[test]
-    fn keyboard_mode_is_available_without_consuming_damage() {
-        let emulator = GridEmulator::new();
-        emulator.snapshot();
-        emulator.feed(b"\x1b[?1002h\x1b[?1006h\x1b[>1uwritten");
-        assert_eq!(
-            emulator.keyboard_mode(),
-            KeyboardModes::DISAMBIGUATE_ESC_CODES
-        );
-        assert!(emulator.mode().contains(Mode::MOUSE_DRAG | Mode::SGR_MOUSE));
-        let snapshot = emulator.snapshot();
-        assert!(snapshot.row_damage[0]);
-        assert_eq!(snapshot.damage, TerminalDamage::Partial);
-    }
-
-    #[test]
-    fn osc52_store_is_decoded_and_load_is_denied_with_an_empty_reply() {
-        let emulator = GridEmulator::new();
-        let events = emulator.events();
         emulator.feed(b"\x1b]52;c;dGNvZGU=\x07");
         assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
             event

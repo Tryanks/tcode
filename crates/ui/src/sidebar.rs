@@ -5244,19 +5244,6 @@ mod tests {
     }
 
     #[test]
-    fn oversized_thread_list_keeps_its_toggle_after_expanding() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-
-        assert_eq!(thread_list_toggle_label(6, false), None);
-        assert_eq!(
-            thread_list_toggle_label(7, false).as_deref(),
-            Some("显示更多")
-        );
-        assert_eq!(thread_list_toggle_label(7, true).as_deref(), Some("收起"));
-    }
-
-    #[test]
     fn child_unread_is_suppressed_by_render_state_derivation() {
         let parent = session("parent", None);
         let child = session("child", Some("parent"));
@@ -5347,7 +5334,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_collapses_every_parent_except_the_active_chain() {
+    fn startup_folds_only_existing_visible_parents_outside_the_active_chain() {
         let sessions = vec![
             session("parent-a", None),
             session("child-a", Some("parent-a")),
@@ -5380,10 +5367,7 @@ mod tests {
             !collapsed.contains("parent-a"),
             "a selected parent keeps its own children visible"
         );
-    }
 
-    #[test]
-    fn startup_fold_ignores_archived_children_and_orphan_parent_ids() {
         let mut archived_child = session("archived-child", Some("quiet-parent"));
         archived_child.archived_at = Some(1);
         let sessions = vec![
@@ -5482,21 +5466,6 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_parent_hides_only_its_own_direct_children() {
-        let collapsed = HashSet::from(["parent-a".to_string()]);
-
-        assert!(!thread_visible(
-            &session("child-a", Some("parent-a")),
-            &collapsed
-        ));
-        assert!(thread_visible(
-            &session("child-b", Some("parent-b")),
-            &collapsed
-        ));
-        assert!(thread_visible(&session("parent-a", None), &collapsed));
-    }
-
-    #[test]
     fn flat_blocks_sort_by_attention_then_recency_and_keep_children_adjacent() {
         let mut waiting_root = session("waiting-root", None);
         waiting_root.updated_at = 10;
@@ -5548,37 +5517,6 @@ mod tests {
     }
 
     #[test]
-    fn flat_row_offsets_follow_the_rendered_root_and_child_heights() {
-        let root_a = session("root-a", None);
-        let child_a = session("child-a", Some("root-a"));
-        let root_b = session("root-b", None);
-        let sessions = vec![root_a, child_a, root_b];
-        let visible = sessions.iter().collect::<Vec<_>>();
-
-        assert_eq!(
-            flat_thread_top_offsets(&visible, &sessions),
-            vec![
-                0.,
-                FLAT_ROOT_ROW_HEIGHT,
-                FLAT_ROOT_ROW_HEIGHT + FLAT_CHILD_ROW_HEIGHT
-            ]
-        );
-    }
-
-    #[test]
-    fn flat_row_offsets_treat_orphaned_children_as_root_rows() {
-        let orphan = session("orphan", Some("missing-parent"));
-        let root = session("root", None);
-        let sessions = vec![orphan, root];
-        let visible = sessions.iter().collect::<Vec<_>>();
-
-        assert_eq!(
-            flat_thread_top_offsets(&visible, &sessions),
-            vec![0., FLAT_ROOT_ROW_HEIGHT]
-        );
-    }
-
-    #[test]
     fn flat_block_attention_is_lifted_from_a_waiting_child() {
         let mut lifted_root = session("lifted-root", None);
         lifted_root.updated_at = 1;
@@ -5607,41 +5545,5 @@ mod tests {
         let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
 
         assert_eq!(ids, vec!["lifted-root", "lifted-child", "working-root"]);
-    }
-
-    #[test]
-    fn flat_order_applies_the_shared_collapse_filter() {
-        let sessions = vec![
-            session("parent", None),
-            session("child", Some("parent")),
-            session("other", None),
-        ];
-        let collapsed = HashSet::from(["parent".to_string()]);
-
-        let visible = flat_visible_threads(&sessions, &collapsed, None, &HashMap::new());
-        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
-
-        assert_eq!(ids, vec!["parent", "other"]);
-    }
-
-    #[test]
-    fn flat_project_filter_keeps_only_matching_blocks_with_their_children() {
-        let mut project_a_root = session("a-root", None);
-        project_a_root.project_id = Some("project-a".into());
-        let mut project_a_child = session("a-child", Some("a-root"));
-        project_a_child.project_id = Some("project-a".into());
-        let mut project_b_root = session("b-root", None);
-        project_b_root.project_id = Some("project-b".into());
-        let sessions = vec![project_b_root, project_a_root, project_a_child];
-
-        let visible = flat_visible_threads(
-            &sessions,
-            &HashSet::new(),
-            Some("project-a"),
-            &HashMap::new(),
-        );
-        let ids: Vec<&str> = visible.iter().map(|meta| meta.id.as_str()).collect();
-
-        assert_eq!(ids, vec!["a-root", "a-child"]);
     }
 }

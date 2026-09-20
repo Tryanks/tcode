@@ -84,7 +84,7 @@ fn claude_converter_maps_items_and_excludes_noise() {
 }
 
 #[test]
-fn codex_converter_maps_items_and_skips_harness_noise() {
+fn codex_converter_maps_external_history_and_excludes_harness_and_own_sessions() {
     let temp = TestDir::new();
     let file = temp.path().join("rollout.jsonl");
     write_lines(
@@ -111,12 +111,6 @@ fn codex_converter_maps_items_and_skips_harness_noise() {
     assert!(matches!(contents[3], ItemContent::ToolCall {
         name, input, output: Some(output), status: ItemStatus::Completed
     } if name == "read_file" && input == &json!({"path":"a.rs"}) && output == "file body"));
-}
-
-#[test]
-fn codex_converter_suppresses_tcode_origin() {
-    let temp = TestDir::new();
-    let file = temp.path().join("rollout.jsonl");
     write_lines(
         &file,
         &[json!({

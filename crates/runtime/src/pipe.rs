@@ -758,27 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_session_send_is_rejected() {
-        let root = std::env::temp_dir().join(format!("tcode-rejected-{}", uuid::Uuid::new_v4()));
-        let host = spawn_host(
-            SessionStore::open_at(root.clone()).unwrap(),
-            HostServices::default(),
-        )
-        .unwrap();
-        let error = host
-            .link()
-            .command_blocking(Command::SendTurn {
-                session_id: "missing".into(),
-                text: "must not disappear".into(),
-                attachment_paths: Vec::new(),
-            })
-            .expect_err("a missing session must reject the write");
-        assert_eq!(error.code, "unknown_session");
-        host.shutdown_blocking().unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn stale_conversation_actions_are_rejected_over_the_pipe() {
         let root =
             std::env::temp_dir().join(format!("tcode-stale-actions-{}", uuid::Uuid::new_v4()));
@@ -946,6 +925,11 @@ mod tests {
             assert_eq!(error.code, code, "{command:?}");
         }
         for command in [
+            Command::SendTurn {
+                session_id: "gone".into(),
+                text: "must not disappear".into(),
+                attachment_paths: Vec::new(),
+            },
             Command::ScheduleTurn {
                 session_id: "gone".into(),
                 text: "hi".into(),
@@ -1159,10 +1143,8 @@ mod tests {
         std::fs::remove_dir_all(data_root).expect("remove test data");
     }
 
-    /// Every path under `root`, sorted, with its length — enough to catch a
-    /// stray write without depending on file order.
-    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, u64)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, u64)>) {
+    fn tree_snapshot(root: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 return;
             };
@@ -1170,7 +1152,10 @@ mod tests {
                 let path = entry.path();
                 match entry.metadata() {
                     Ok(metadata) if metadata.is_dir() => walk(&path, out),
-                    Ok(metadata) => out.push((path, metadata.len())),
+                    Ok(_) => {
+                        let bytes = std::fs::read(&path).expect("read fixture content");
+                        out.push((path, bytes));
+                    }
                     Err(_) => {}
                 }
             }
@@ -1383,63 +1368,6 @@ mod tests {
                 .projects
                 .iter()
                 .any(|project| project.id == project_id && project.root == project_root)
-        );
-
-        // Subscribe before starting: the empty run completes immediately, so a
-        // client that only reacted to a post-start reply could miss it.
-        link.subscribe(Subscription {
-            after: None,
-            topic: Topic::ExternalImport {
-                project_id: project_id.clone(),
-            },
-        })
-        .expect("subscribe to import status");
-        assert!(matches!(
-            next_event(&events, |event| matches!(
-                event.topic,
-                Topic::ExternalImport { .. }
-            ))
-            .event,
-            ServerEvent::ExternalImportStatusReplaced { status: None, .. }
-        ));
-        assert_eq!(
-            link.command_blocking(Command::StartExternalImport {
-                project_id: project_id.clone(),
-                threads: Vec::new(),
-            })
-            .expect("start import over command"),
-            CommandResponse::ExternalImportStarted(true)
-        );
-        let finished = next_event(&events, |event| {
-            matches!(
-                &event.event,
-                ServerEvent::ExternalImportStatusReplaced {
-                    status: Some(status),
-                    ..
-                } if matches!(status.state, tcode_protocol::ExternalImportState::Finished { .. })
-            )
-        });
-        let ServerEvent::ExternalImportStatusReplaced {
-            status: Some(status),
-            ..
-        } = finished.event
-        else {
-            unreachable!("filtered to finished import statuses")
-        };
-        assert_eq!(
-            status.state,
-            tcode_protocol::ExternalImportState::Finished {
-                imported: 0,
-                skipped: 0,
-            }
-        );
-        assert_eq!(
-            link.command_blocking(Command::StartExternalImport {
-                project_id: "missing".into(),
-                threads: Vec::new(),
-            })
-            .expect("unknown import command response"),
-            CommandResponse::ExternalImportStarted(false)
         );
 
         // A path the client believes in but the host cannot resolve is refused

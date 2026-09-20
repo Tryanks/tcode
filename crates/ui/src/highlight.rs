@@ -537,39 +537,39 @@ mod tests {
     }
 
     #[test]
-    fn unknown_language_uses_a_single_default_styled_run() {
-        let src = "some source";
-        assert_eq!(
-            highlight_source(src, "unknown-language", &HighlightTheme::default_dark()),
-            vec![(0..src.len(), HighlightStyle::default())]
-        );
-    }
+    fn source_highlights_cover_utf8_ranges_and_preserve_unknown_language_text() {
+        {
+            let src = "fn ordinary() { let 名称 = \"中\"; }\n";
+            let theme = HighlightTheme::default_dark();
+            let runs = highlight_source(src, "rust", &theme);
+            let keyword_style = theme.style("keyword").expect("default theme has keywords");
 
-    #[test]
-    fn highlights_rust_with_ordered_in_bounds_runs() {
-        let src = "fn ordinary() {}\n";
-        let theme = HighlightTheme::default_dark();
-        let runs = highlight_source(src, "rust", &theme);
-        let keyword_style = theme.style("keyword").expect("default theme has keywords");
+            let fn_style = runs
+                .iter()
+                .find(|(range, _)| range.start == 0 && range.end >= 2)
+                .map(|(_, style)| *style)
+                .expect("fn is covered");
+            let identifier_start = src.find("ordinary").unwrap();
+            let identifier_style = runs
+                .iter()
+                .find(|(range, _)| range.start <= identifier_start && range.end > identifier_start)
+                .map(|(_, style)| *style)
+                .expect("identifier is covered");
 
-        let fn_style = runs
-            .iter()
-            .find(|(range, _)| range.start == 0 && range.end >= 2)
-            .map(|(_, style)| *style)
-            .expect("fn is covered");
-        let identifier_start = src.find("ordinary").unwrap();
-        let identifier_style = runs
-            .iter()
-            .find(|(range, _)| range.start <= identifier_start && range.end > identifier_start)
-            .map(|(_, style)| *style)
-            .expect("identifier is covered");
-
-        assert_eq!(fn_style.color, keyword_style.color);
-        assert_ne!(identifier_style, keyword_style);
-        assert!(
-            runs.iter()
-                .all(|(range, _)| range.start < range.end && range.end <= src.len())
-        );
-        assert!(runs.windows(2).all(|pair| pair[0].0.end <= pair[1].0.start));
+            assert_eq!(fn_style.color, keyword_style.color);
+            assert_ne!(identifier_style, keyword_style);
+            assert!(runs.iter().all(|(range, _)| range.start < range.end
+                && range.end <= src.len()
+                && src.is_char_boundary(range.start)
+                && src.is_char_boundary(range.end)));
+            assert!(runs.windows(2).all(|pair| pair[0].0.end <= pair[1].0.start));
+        }
+        {
+            let src = "some source";
+            assert_eq!(
+                highlight_source(src, "unknown-language", &HighlightTheme::default_dark()),
+                vec![(0..src.len(), HighlightStyle::default())]
+            );
+        }
     }
 }

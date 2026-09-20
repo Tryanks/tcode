@@ -706,6 +706,15 @@ mod tests {
             .split_whitespace()
             .find(|part| part.starts_with("@o"))
             .unwrap();
+        assert!(matches!(
+            store.read_output(output_ref, Some("other-state"), None),
+            Err(StateError::OutputOwnerMismatch { .. })
+        ));
+        for offset in [11, original.len() + 1] {
+            assert!(
+                matches!(store.read_output(output_ref, Some("S9"), Some(offset)), Err(StateError::InvalidOffset(actual)) if actual == offset)
+            );
+        }
         let mut rebuilt = visible
             .split("\n\n[output truncated")
             .next()

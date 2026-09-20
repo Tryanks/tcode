@@ -167,22 +167,71 @@ impl StderrTail {
 }
 
 #[cfg(test)]
+pub(crate) const TEST_ECHO_READY: &str = "TCODE_TEST_ECHO_READY";
+
+#[cfg(test)]
+pub(crate) fn test_echo_command() -> std::process::Command {
+    // Reuse the test executable so actor fixtures need no shell or PATH tools.
+    let mut child = command(std::env::current_exe().unwrap());
+    child
+        .args([
+            "--exact",
+            "process::tests::line_reader_preserves_record_framing_and_reports_invalid_utf8",
+            "--quiet",
+            "--nocapture",
+        ])
+        .env("TCODE_TEST_ECHO_CHILD", "1");
+    child
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn line_reader_preserves_unicode_separators_inside_json_records() {
+    fn line_reader_preserves_record_framing_and_reports_invalid_utf8() {
+        if std::env::var_os("TCODE_TEST_ECHO_CHILD").is_some() {
+            let mut output = std::io::stdout().lock();
+            writeln!(output, "{TEST_ECHO_READY}").unwrap();
+            output.flush().unwrap();
+            for line in std::io::stdin().lock().lines() {
+                writeln!(output, "{}", line.unwrap()).unwrap();
+                output.flush().unwrap();
+            }
+            return;
+        }
         let record = "{\"text\":\"a\u{2028}b\"}";
+        for skip_empty in [false, true] {
+            let (lines, spawned) = spawn_line_reader(
+                std::io::Cursor::new(format!("\n{record}\r\nlast").into_bytes()),
+                "test-json-lines",
+                None,
+                skip_empty,
+            );
+            spawned.unwrap();
+            if !skip_empty {
+                assert!(
+                    matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line.is_empty())
+                );
+            }
+            assert!(
+                matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == record)
+            );
+            assert!(
+                matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == "last")
+            );
+            assert!(matches!(lines.recv_blocking().unwrap(), ChildOutput::Eof));
+        }
         let (lines, spawned) = spawn_line_reader(
-            std::io::Cursor::new(format!("{record}\n").into_bytes()),
-            "test-json-lines",
-            None,
+            std::io::Cursor::new(vec![0xff, b'\n']),
+            "test-invalid-utf8",
+            Some("provider output"),
             true,
         );
         spawned.unwrap();
         assert!(
-            matches!(lines.recv_blocking().unwrap(), ChildOutput::Line(line) if line == record)
+            matches!(lines.recv_blocking().unwrap(), ChildOutput::Error(message) if message.starts_with("provider output:"))
         );
-        assert!(matches!(lines.recv_blocking().unwrap(), ChildOutput::Eof));
+        assert!(lines.recv_blocking().is_err());
     }
 }

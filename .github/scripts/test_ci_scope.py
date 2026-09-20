@@ -20,11 +20,7 @@ def rail_binary() -> str | None:
     configured = os.environ.get("CARGO_RAIL_BIN")
     if configured:
         return configured
-    found = shutil.which("cargo-rail")
-    if found:
-        return found
-    probe = Path("/tmp/tcode-rail-probe/cargo-rail")
-    return str(probe) if probe.is_file() else None
+    return shutil.which("cargo-rail")
 
 
 class Workspace:
@@ -215,9 +211,13 @@ class ScopeTests(unittest.TestCase):
         head = self.workspace.scenario(
             "event-docs", lambda: self.workspace.write("README.md", "docs\n")
         )
+        base = self.workspace.scenario(
+            "advanced-base",
+            lambda: self.workspace.write("crates/runtime/src/lib.rs", "pub fn changed() {}\n"),
+        )
         result, pull = self.workspace.classify_event(
             "pull_request",
-            {"pull_request": {"base": {"sha": self.workspace.baseline}, "head": {"sha": head}}},
+            {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(pull["base"], self.workspace.baseline)

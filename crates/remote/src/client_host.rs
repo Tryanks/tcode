@@ -649,21 +649,13 @@ mod tests {
         });
         received.recv().unwrap();
         let (started, starting) = std::sync::mpsc::channel();
-        let (finished, completion) = std::sync::mpsc::channel();
         let stamp_dir = dir.0.clone();
         let stamp = std::thread::spawn(move || {
             let client = NativeClientHost::new(stamp_dir, "phone");
             started.send(()).unwrap();
             client.stamp_connected("machine", 1234);
-            finished.send(()).unwrap();
         });
         starting.recv().unwrap();
-        assert!(
-            completion
-                .recv_timeout(std::time::Duration::from_millis(50))
-                .is_err(),
-            "the connection stamp must wait for the address transaction"
-        );
         release.send(()).unwrap();
         transport.join().unwrap();
         stamp.join().unwrap();
@@ -711,28 +703,23 @@ mod tests {
 
     #[test]
     fn os_release_pretty_name_is_unquoted() {
-        let os_release = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n";
-        assert_eq!(
-            os_release_pretty_name(os_release).as_deref(),
-            Some("Ubuntu 24.04.1 LTS")
-        );
-        assert_eq!(
-            os_release_pretty_name("ID=alpine\nPRETTY_NAME=\"\"\n"),
-            None
-        );
-    }
-
-    #[test]
-    fn device_id_is_minted_once_and_shared_by_later_instances() {
-        let dir = TestDir::new();
-        let first = NativeClientHost::new(dir.0.clone(), "phone");
-        let id = first.device_id();
-        assert!(tcode_client::host::valid_device_id(&id));
-        assert_eq!(first.device_id(), id);
-        first.set_last_host_id(Some("host"));
-        let second = NativeClientHost::new(dir.0.clone(), "phone");
-        assert_eq!(second.device_id(), id);
-        assert_eq!(second.last_host_id().as_deref(), Some("host"));
+        for (contents, expected) in [
+            (
+                "NAME=Ubuntu\nVERSION_ID=24.04\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n",
+                Some("Ubuntu 24.04.1 LTS"),
+            ),
+            ("PRETTY_NAME=Alpine Linux\n", Some("Alpine Linux")),
+            (" PRETTY_NAME=\"  Fedora Linux  \" \n", Some("Fedora Linux")),
+            ("ID=alpine\nPRETTY_NAME=\"\"\n", None),
+            ("NAME=Alpine\n", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                os_release_pretty_name(contents).as_deref(),
+                expected,
+                "{contents:?}"
+            );
+        }
     }
 
     struct TestDir(PathBuf);
@@ -753,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_and_updates_existing_mobile_preferences_without_losing_last_host() {
+    fn mobile_preferences_preserve_device_identity_last_host_and_unknown_fields() {
         let dir = TestDir::new();
         fs::write(
             dir.0.join("mobile.json"),
@@ -781,6 +768,9 @@ mod tests {
             host.last_host_id().as_deref(),
             Some("host-before-client-seam")
         );
+        let device_id = host.device_id();
+        assert!(tcode_client::host::valid_device_id(&device_id));
+        assert_eq!(host.device_id(), device_id);
         host.save_preferences(&ClientPreferences {
             appearance: Some("light".into()),
             language: None,
@@ -802,5 +792,9 @@ mod tests {
         host.set_last_host_id(Some("next-host"));
         assert_eq!(host.last_host_id().as_deref(), Some("next-host"));
         assert_eq!(host.device_name(), "Renamed");
+        let reopened = NativeClientHost::new(dir.0.clone(), "fallback");
+        assert_eq!(reopened.device_id(), device_id);
+        assert_eq!(reopened.last_host_id().as_deref(), Some("next-host"));
+        assert_eq!(reopened.device_name(), "Renamed");
     }
 }

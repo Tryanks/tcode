@@ -2850,10 +2850,7 @@ mod tests {
     fn discovery_completes_across_faster_retries_and_stops_when_connected(cx: &mut TestAppContext) {
         use std::{cell::Cell, rc::Rc};
         use tcode_client::{ConnectionFailure, ConnectionState, host::ClientHost as _};
-        let root = std::env::temp_dir().join(format!(
-            "tcode-discovery-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-discovery");
         let (results, discovered) = async_channel::unbounded();
         let calls = Rc::new(Cell::new(0));
         let observed = calls.clone();
@@ -3130,10 +3127,7 @@ mod tests {
 
     #[gpui::test]
     fn deleted_thread_keeps_its_pending_and_rejected_send_visible(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-deleted-pending-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-deleted-pending");
         let disk = SessionStore::open_at(root.clone()).unwrap();
         disk.upsert_project(&project_at("p", &root)).unwrap();
         disk.upsert_meta(&thread(&root, "deleted", "p", None))
@@ -3197,10 +3191,7 @@ mod tests {
     fn client_preferences_persist_and_override_host_settings_only_when_set() {
         use tcode_client::host::{ClientHost as _, ClientPreferences};
 
-        let root = std::env::temp_dir().join(format!(
-            "tcode-desktop-preferences-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-desktop-preferences");
         let client = tcode_remote::NativeClientHost::new(root.clone(), "fallback device");
         let host = Settings {
             theme_mode: ThemeMode::Dark,
@@ -3419,10 +3410,7 @@ mod tests {
 
     #[gpui::test]
     fn history_prefetch_keeps_one_bounded_page_in_flight(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-prefetch-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-prefetch-test");
         let host = test_host(SessionStore::open_at(root.clone()).unwrap());
         let status = smol::block_on(host.update_state_for_test(|state, cx| {
             let id = state.start_draft("history".into(), std::env::temp_dir(), cx);
@@ -3693,9 +3681,12 @@ mod tests {
     }
 
     fn scratch_root(label: &str) -> std::path::PathBuf {
+        static NEXT_ROOT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "tcode-{label}-{}",
-            tcode_services::store::now_millis()
+            "tcode-{label}-{}-{}-{}",
+            std::process::id(),
+            tcode_services::store::now_millis(),
+            NEXT_ROOT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 
@@ -3960,10 +3951,9 @@ mod tests {
         let empty_root = scratch_root("no-projects");
         let empty_host = test_host(SessionStore::open_at(empty_root.clone()).expect("open store"));
         let empty = cx.new(|cx| WorkspaceStore::new(empty_host.link(), cx));
-        for _ in 0..5 {
-            empty.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            cx.run_until_parked();
-        }
+        wait_until(cx, &empty, "empty workspace baseline", |cx| {
+            empty.read_with(cx, |store, _| store.baseline_ready())
+        });
         empty.read_with(cx, |store, _| {
             assert!(store.projects().is_empty());
             assert_eq!(
@@ -3979,10 +3969,7 @@ mod tests {
     fn reconnect_and_mismatched_tail_preserve_exactly_one_copy_of_each_record(
         cx: &mut TestAppContext,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "p4a-reconnect-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("p4a-reconnect");
         let disk = SessionStore::open_at(root.clone()).unwrap();
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
         meta.id = "reconnect".into();
@@ -4063,22 +4050,12 @@ mod tests {
             assert_eq!(subscription.after, Some(3));
         });
         shutdown_test_host(&host);
-        // Windows keeps the just-flushed JSONL handle briefly after shutdown;
-        // the directory is a temp dir, so retry and then give up quietly.
-        for _ in 0..20 {
-            if std::fs::remove_dir_all(&root).is_ok() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]
     fn session_replica_matches_live_timeline_for_synthetic_turn(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-session-replica-consistency-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-session-replica-consistency-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         let session_id = meta.id.clone();
@@ -4238,10 +4215,7 @@ mod tests {
 
     #[gpui::test]
     fn index_and_settings_replicas_follow_representative_commands(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-replica-consistency-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-replica-consistency-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let seed_project = Project::from_root(root.join("seed"));
         let mut seed_session =
@@ -4374,10 +4348,7 @@ mod tests {
     fn session_status_replica_matches_live_after_queue_and_interaction_mode_change(
         cx: &mut TestAppContext,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-session-status-replica-consistency-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-session-status-replica-consistency-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         let session_id = meta.id.clone();
@@ -4460,62 +4431,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn background_session_status_tracks_pending_user_input(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-background-user-input-status-test-{}",
-            tcode_services::store::now_millis()
-        ));
-        let session_store = SessionStore::open_at(root.clone()).expect("open test store");
-        let meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
-        let session_id = meta.id.clone();
-        session_store.upsert_meta(&meta).expect("persist session");
-
-        let host = test_host(session_store);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-        workspace.update(cx, |store, _| store.select_session(session_id.clone()));
-        wait_until(cx, &workspace, "selected session status", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store
-                    .session_status_replica
-                    .as_ref()
-                    .is_some_and(|status| status.session_id == session_id)
-            })
-        });
-
-        let background_session_id = "background-session".to_string();
-        workspace.update(cx, |store, cx| {
-            let mut status = store
-                .session_status_replica
-                .clone()
-                .expect("active session status");
-            status.session_id = background_session_id.clone();
-            status.pending_user_input = true;
-            store.apply_domain_event(
-                &EventEnvelope {
-                    request_id: None,
-                    topic: Topic::SessionStatus {
-                        session_id: background_session_id.clone(),
-                    },
-                    event: ServerEvent::SessionStatusReplaced(status),
-                },
-                cx,
-            );
-        });
-
-        assert!(workspace.read_with(cx, |store, _cx| {
-            store.pending_user_input_for(&background_session_id)
-        }));
-
-        shutdown_test_host(&host);
-        std::fs::remove_dir_all(root).expect("remove test data");
-    }
-
-    #[gpui::test]
-    fn active_session_handoff_preserves_parked_working_status(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-background-working-handoff-test-{}",
-            tcode_services::store::now_millis()
-        ));
+    fn active_session_handoff_preserves_and_reconciles_parked_status(cx: &mut TestAppContext) {
+        let root = scratch_root("tcode-background-working-handoff-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let first = SessionMeta::new(ProviderKind::Codex, root.join("first"), None);
         let second = SessionMeta::new(ProviderKind::Codex, root.join("second"), None);
@@ -4545,6 +4462,8 @@ mod tests {
                 .expect("first session status");
             parked.turn_running = true;
             parked.working = true;
+            parked.pending_user_input = true;
+            parked.pending_approval = true;
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4561,6 +4480,8 @@ mod tests {
             next.cwd = second.cwd.clone();
             next.turn_running = false;
             next.working = false;
+            next.pending_user_input = false;
+            next.pending_approval = false;
             store.apply_domain_event(
                 &EventEnvelope {
                     request_id: None,
@@ -4590,6 +4511,33 @@ mod tests {
             workspace.read_with(cx, |store, _cx| store.working_sessions_count()),
             1
         );
+        assert!(workspace.read_with(cx, |store, _| store.pending_user_input_for(&first.id)));
+        assert!(workspace.read_with(cx, |store, _| store.pending_approval_for(&first.id)));
+        assert!(!workspace.read_with(cx, |store, _| store.pending_user_input_for(&second.id)));
+        workspace.update(cx, |store, cx| {
+            let mut finished = store.session_statuses[&first.id].clone();
+            finished.turn_running = false;
+            finished.working = false;
+            finished.pending_user_input = false;
+            finished.pending_approval = false;
+            store.apply_domain_event(
+                &EventEnvelope {
+                    request_id: None,
+                    topic: Topic::SessionStatus {
+                        session_id: first.id.clone(),
+                    },
+                    event: ServerEvent::SessionStatusReplaced(finished),
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            workspace.read_with(cx, |store, _| store.working_sessions_count()),
+            0
+        );
+        assert!(!workspace.read_with(cx, |store, _| store.pending_user_input_for(&first.id)));
+        assert!(!workspace.read_with(cx, |store, _| store.pending_approval_for(&first.id)));
+        assert!(selected_status(cx, &workspace, &second.id));
 
         shutdown_test_host(&host);
         std::fs::remove_dir_all(root).expect("remove test data");
@@ -4597,10 +4545,7 @@ mod tests {
 
     #[gpui::test]
     fn native_rewind_prefill_events_remain_keyed_to_parked_sessions(cx: &mut TestAppContext) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-native-rewind-replica-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-native-rewind-replica-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let first = SessionMeta::new(ProviderKind::ClaudeCode, root.join("first"), None);
         let second = SessionMeta::new(ProviderKind::ClaudeCode, root.join("second"), None);
@@ -4677,10 +4622,7 @@ mod tests {
     fn classifier_stop_and_review_preserve_diagnostics_until_the_next_turn(
         cx: &mut TestAppContext,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-fallback-lifecycle-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-fallback-lifecycle-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let meta = SessionMeta::new(ProviderKind::ClaudeCode, root.join("worktree"), None);
         session_store.upsert_meta(&meta).expect("persist session");
@@ -4779,10 +4721,7 @@ mod tests {
     fn providers_and_git_replicas_match_live_after_representative_mutations(
         cx: &mut TestAppContext,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "tcode-provider-git-replica-consistency-test-{}",
-            tcode_services::store::now_millis()
-        ));
+        let root = scratch_root("tcode-provider-git-replica-consistency-test");
         let session_store = SessionStore::open_at(root.clone()).expect("open test store");
         let mut meta = SessionMeta::new(ProviderKind::Codex, root.join("worktree"), None);
         meta.id = "git-replica".into();
@@ -4879,94 +4818,68 @@ mod tests {
     /// takes the draft's `ConversationUiState` with it instead of stranding an
     /// entry keyed by the transient draft session id.
     #[gpui::test]
-    fn removing_a_project_clears_its_drafts_conversation_state(cx: &mut TestAppContext) {
-        let root = scratch_root("remove-project-draft-ui");
-        let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        for project in ["doomed", "kept"] {
-            disk.upsert_project(&project_at(project, &root))
-                .expect("persist project");
+    fn removing_a_project_clears_draft_state_and_reconciles_only_its_active_view(
+        cx: &mut TestAppContext,
+    ) {
+        for viewing_draft in [false, true] {
+            let root = scratch_root("remove-project-draft-ui");
+            let disk = SessionStore::open_at(root.clone()).expect("open test store");
+            for project in ["doomed", "kept"] {
+                disk.upsert_project(&project_at(project, &root))
+                    .expect("persist project");
+            }
+            disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
+                .expect("persist session");
+            let host = test_host(disk);
+            let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
+
+            workspace.update(cx, |store, cx| {
+                store.start_draft("doomed".into(), root.clone(), cx)
+            });
+            wait_until(cx, &workspace, "draft for the doomed project", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    store.session_status_replica.as_ref().is_some_and(|status| {
+                        status.draft && status.project_id.as_deref() == Some("doomed")
+                    })
+                })
+            });
+            mark_draft_state(cx, &workspace);
+
+            if !viewing_draft {
+                workspace.update(cx, |store, _| store.select_session("kept-thread".into()));
+                wait_until(cx, &workspace, "kept thread selected", |cx| {
+                    selected_status(cx, &workspace, "kept-thread")
+                });
+            }
+            workspace.update(cx, |store, _| store.delete_project("doomed".into()));
+            wait_until(cx, &workspace, "project removed", |cx| {
+                workspace.read_with(cx, |store, _| {
+                    !store
+                        .index_replica
+                        .1
+                        .iter()
+                        .any(|project| project.id == "doomed")
+                })
+            });
+            assert_no_draft_state(cx, &workspace);
+            if viewing_draft {
+                wait_until(cx, &workspace, "kept project's draft", |cx| {
+                    workspace.read_with(cx, |store, _| {
+                        store.session_status_replica.as_ref().is_some_and(|status| {
+                            status.draft && status.project_id.as_deref() == Some("kept")
+                        })
+                    })
+                });
+            } else {
+                assert!(
+                    selected_status(cx, &workspace, "kept-thread"),
+                    "deleting a background project moved the user"
+                );
+            }
+
+            shutdown_test_host(&host);
+            let _ = std::fs::remove_dir_all(&root);
         }
-        disk.upsert_meta(&thread(&root, "kept-thread", "kept", None))
-            .expect("persist session");
-        let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-
-        workspace.update(cx, |store, cx| {
-            store.start_draft("doomed".into(), root.clone(), cx)
-        });
-        wait_until(cx, &workspace, "draft for the doomed project", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.session_status_replica.as_ref().is_some_and(|status| {
-                    status.draft && status.project_id.as_deref() == Some("doomed")
-                })
-            })
-        });
-        mark_draft_state(cx, &workspace);
-
-        // The user leaves the draft standing and deletes its project while
-        // viewing another thread.
-        workspace.update(cx, |store, _| store.select_session("kept-thread".into()));
-        wait_until(cx, &workspace, "kept thread selected", |cx| {
-            selected_status(cx, &workspace, "kept-thread")
-        });
-        workspace.update(cx, |store, _| store.delete_project("doomed".into()));
-        wait_until(cx, &workspace, "project removed", |cx| {
-            workspace.read_with(cx, |store, _| {
-                !store
-                    .index_replica
-                    .1
-                    .iter()
-                    .any(|project| project.id == "doomed")
-            })
-        });
-        assert_no_draft_state(cx, &workspace);
-        assert!(
-            selected_status(cx, &workspace, "kept-thread"),
-            "deleting a background project moved the user"
-        );
-
-        shutdown_test_host(&host);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Deleting the project whose draft is on screen leaves nothing to draft
-    /// into, so the workspace falls back to another project's draft instead of
-    /// sitting on a conversation that no longer exists.
-    #[gpui::test]
-    fn removing_the_viewed_drafts_project_falls_back_to_another_draft(cx: &mut TestAppContext) {
-        let root = scratch_root("remove-viewed-project-draft-ui");
-        let disk = SessionStore::open_at(root.clone()).expect("open test store");
-        for project in ["doomed", "kept"] {
-            disk.upsert_project(&project_at(project, &root))
-                .expect("persist project");
-        }
-        let host = test_host(disk);
-        let workspace = cx.new(|cx| WorkspaceStore::new(host.link(), cx));
-
-        workspace.update(cx, |store, cx| {
-            store.start_draft("doomed".into(), root.clone(), cx)
-        });
-        wait_until(cx, &workspace, "draft for the doomed project", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.session_status_replica.as_ref().is_some_and(|status| {
-                    status.draft && status.project_id.as_deref() == Some("doomed")
-                })
-            })
-        });
-        mark_draft_state(cx, &workspace);
-
-        workspace.update(cx, |store, _| store.delete_project("doomed".into()));
-        wait_until(cx, &workspace, "the kept project's draft", |cx| {
-            workspace.read_with(cx, |store, _| {
-                store.session_status_replica.as_ref().is_some_and(|status| {
-                    status.draft && status.project_id.as_deref() == Some("kept")
-                })
-            })
-        });
-        assert_no_draft_state(cx, &workspace);
-
-        shutdown_test_host(&host);
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Committing a draft into a real session moves its client state from the
@@ -5003,6 +4916,13 @@ mod tests {
                 .right_panel_open = true;
         });
 
+        let provider = workspace.read_with(cx, |store, _| {
+            store.session_status_replica.as_ref().unwrap().provider
+        });
+        let scripted = tcode_runtime::app::scripted_provider(provider);
+        let launcher = scripted.launcher.clone();
+        update_host!(&host, move |state, _| state
+            .set_provider_launcher_for_test(launcher));
         command(
             &host,
             Command::SendTurn {

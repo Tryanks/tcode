@@ -202,6 +202,37 @@ mod tests {
         assert_eq!(usage.windows[0].used_percent, 88.0);
         assert_eq!(usage.windows[0].resets_at, Some(1_788_762_144));
 
+        let usage = parse_codex_rate_limits(
+            &json!({ "rateLimits": {
+                "primary": {"usedPercent": 50, "windowDurationMins": 10080, "resetsAt": "invalid"},
+                "secondary": {"usedPercent": 25, "windowDurationMins": 300, "resetsAt": 123}
+            }}),
+            44,
+        );
+        assert_eq!(
+            usage
+                .windows
+                .iter()
+                .map(|window| (window.kind, window.used_percent, window.resets_at))
+                .collect::<Vec<_>>(),
+            [
+                (UsageWindowKind::FiveHour, 25.0, Some(123)),
+                (UsageWindowKind::Weekly, 50.0, None),
+            ]
+        );
+        let usage = parse_codex_rate_limits(
+            &json!({ "rateLimits": {
+                "primary": {"usedPercent": "malformed", "windowDurationMins": 300},
+                "secondary": {"usedPercent": 10, "windowDurationMins": 60}
+            }}),
+            45,
+        );
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(
+            usage.windows[0].kind,
+            UsageWindowKind::Other { minutes: 60 }
+        );
+
         let usage = parse_codex_rate_limits(&json!({ "rateLimits": null }), 45);
         assert_eq!(usage.error.as_deref(), Some("no rate limits reported"));
         assert!(usage.windows.is_empty());
@@ -223,6 +254,27 @@ mod tests {
         assert_eq!(usage.windows[2].kind, UsageWindowKind::Weekly);
         assert_eq!(usage.windows[2].scope.as_deref(), Some("Fable"));
         assert_eq!(usage.windows[2].used_percent, 79.0);
+        let legacy = parse_claude_usage(
+            &json!({ "rate_limits": {
+                "seven_day_opus": {"utilization": 30},
+                "seven_day": {"utilization": 20},
+                "five_hour": {"utilization": 10},
+                "seven_day_sonnet": null
+            }}),
+            44,
+        );
+        assert_eq!(
+            legacy
+                .windows
+                .iter()
+                .map(|window| (window.kind, window.scope.as_deref(), window.used_percent))
+                .collect::<Vec<_>>(),
+            [
+                (UsageWindowKind::FiveHour, None, 10.0),
+                (UsageWindowKind::Weekly, None, 20.0),
+                (UsageWindowKind::Weekly, Some("Opus"), 30.0),
+            ]
+        );
         let usage = parse_claude_usage(
             &json!({ "subscription_type": null, "rate_limits_available": false }),
             44,

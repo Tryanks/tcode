@@ -746,29 +746,100 @@ mod tests {
     }
 
     #[test]
-    fn menu_items_disable_with_reasons() {
-        // Clean, no upstream, with remote: Commit disabled (no changes),
-        // Push disabled (no upstream), Publish enabled.
-        let s = GitStatus {
+    fn repository_menu_offers_applicable_actions_and_explains_unavailable_ones() {
+        let repo = GitStatus {
             is_repo: true,
             has_commits: true,
             has_origin_remote: true,
             branch: Some("main".into()),
             ..Default::default()
         };
-        let items = menu_items(&s, false);
-        let commit = items
-            .iter()
-            .find(|i| i.action == GitAction::Commit)
-            .unwrap();
-        assert!(commit.disabled && commit.hint == Some(GitHint::NoChanges));
-        let push = items.iter().find(|i| i.action == GitAction::Push).unwrap();
-        assert!(push.disabled && push.hint == Some(GitHint::NoUpstream));
-        let publish = items
-            .iter()
-            .find(|i| i.action == GitAction::PublishBranch)
-            .unwrap();
-        assert!(!publish.disabled);
+        for (label, status, expected) in [
+            (
+                "not a repo",
+                GitStatus::default(),
+                vec![(GitAction::InitializeGit, false, None)],
+            ),
+            (
+                "unpublished",
+                repo.clone(),
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::NoChanges)),
+                    (GitAction::Push, true, Some(GitHint::NoUpstream)),
+                    (GitAction::PublishBranch, false, None),
+                ],
+            ),
+            (
+                "dirty and ahead",
+                GitStatus {
+                    has_working_tree_changes: true,
+                    has_upstream: true,
+                    ahead: 2,
+                    ..repo.clone()
+                },
+                vec![
+                    (GitAction::Commit, false, None),
+                    (GitAction::Push, false, None),
+                    (GitAction::Pull, true, Some(GitHint::UpToDate)),
+                ],
+            ),
+            (
+                "behind",
+                GitStatus {
+                    has_upstream: true,
+                    behind: 2,
+                    ..repo.clone()
+                },
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::NoChanges)),
+                    (GitAction::Push, true, Some(GitHint::Behind)),
+                    (GitAction::Pull, false, None),
+                ],
+            ),
+            (
+                "diverged",
+                GitStatus {
+                    has_upstream: true,
+                    ahead: 1,
+                    behind: 2,
+                    ..repo.clone()
+                },
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::NoChanges)),
+                    (GitAction::Push, true, Some(GitHint::Diverged)),
+                    (GitAction::Pull, true, Some(GitHint::Diverged)),
+                ],
+            ),
+            (
+                "detached",
+                GitStatus {
+                    detached: true,
+                    branch: None,
+                    ..repo
+                },
+                vec![
+                    (GitAction::Commit, true, Some(GitHint::Detached)),
+                    (GitAction::Push, true, Some(GitHint::Detached)),
+                    (GitAction::PublishBranch, true, Some(GitHint::Detached)),
+                ],
+            ),
+        ] {
+            let items = menu_items(&status, false);
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|i| (i.action, i.disabled, i.hint))
+                    .collect::<Vec<_>>(),
+                expected,
+                "{label}"
+            );
+            let busy = menu_items(&status, true);
+            assert!(busy.iter().all(|i| i.disabled), "{label}");
+            assert_eq!(
+                busy.iter().map(|i| i.action).collect::<Vec<_>>(),
+                items.iter().map(|i| i.action).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -830,48 +901,62 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_dirty_ahead_behind() {
-        let porcelain = "\
-# branch.oid abc123
-# branch.head feature/x
-# branch.upstream origin/feature/x
-# branch.ab +2 -1
-1 .M N... 100644 100644 100644 abc def src/app.rs
-? new_file.txt
-";
-        let numstat = vec![("src/app.rs".to_string(), 5, 3)];
-        let s = parse_status(porcelain, &numstat, Some("main"), true);
-        assert!(s.has_commits && !s.detached);
-        assert_eq!(s.branch.as_deref(), Some("feature/x"));
-        assert!(s.has_upstream && s.has_working_tree_changes);
-        assert_eq!((s.ahead, s.behind), (2, 1));
-        assert!(!s.is_default_branch);
-        assert_eq!(s.changed_files.len(), 2);
-        let app = s
-            .changed_files
-            .iter()
-            .find(|f| f.path == "src/app.rs")
-            .unwrap();
-        assert_eq!((app.insertions, app.deletions), (5, 3));
-    }
-
-    #[test]
-    fn parse_status_initial_and_default_branch() {
-        let porcelain = "\
-# branch.oid (initial)
-# branch.head main
-";
-        let s = parse_status(porcelain, &[], None, false);
-        assert!(!s.has_commits);
-        assert!(s.is_default_branch, "main is default when no origin/HEAD");
-        assert!(!s.has_upstream);
-    }
-
-    #[test]
-    fn parse_status_detached() {
-        let porcelain = "# branch.oid abc\n# branch.head (detached)\n";
-        let s = parse_status(porcelain, &[], None, false);
-        assert!(s.detached);
-        assert_eq!(s.branch, None);
+    fn porcelain_status_preserves_branch_state_and_changed_paths() {
+        let porcelain = "# branch.oid abc123\n# branch.head feature/x\n# branch.upstream origin/feature/x\n# branch.ab +2 -1\n1 .M N... 100644 100644 100644 abc def src/app.rs\n? new file.txt\n? new file.txt\n";
+        let status = parse_status(
+            porcelain,
+            &[("src/app.rs".into(), 5, 3)],
+            Some("main"),
+            true,
+        );
+        assert_eq!(
+            status,
+            GitStatus {
+                is_repo: true,
+                has_commits: true,
+                detached: false,
+                branch: Some("feature/x".into()),
+                is_default_branch: false,
+                has_working_tree_changes: true,
+                has_origin_remote: true,
+                has_upstream: true,
+                ahead: 2,
+                behind: 1,
+                changed_files: vec![
+                    GitFileEntry {
+                        path: "new file.txt".into(),
+                        insertions: 0,
+                        deletions: 0
+                    },
+                    GitFileEntry {
+                        path: "src/app.rs".into(),
+                        insertions: 5,
+                        deletions: 3
+                    },
+                ],
+            }
+        );
+        for (head, oid, default, commits, detached, is_default) in [
+            ("main", "(initial)", None, false, false, true),
+            ("master", "abc", None, true, false, true),
+            ("trunk", "abc", Some("trunk"), true, false, true),
+            ("main", "abc", Some("trunk"), true, false, false),
+            ("(detached)", "abc", None, true, true, false),
+        ] {
+            let porcelain = format!("# branch.oid {oid}\n# branch.head {head}\n");
+            let status = parse_status(&porcelain, &[], default, false);
+            assert_eq!(
+                status,
+                GitStatus {
+                    is_repo: true,
+                    has_commits: commits,
+                    detached,
+                    branch: (!detached).then(|| head.into()),
+                    is_default_branch: is_default,
+                    ..Default::default()
+                },
+                "{head} against {default:?}"
+            );
+        }
     }
 }

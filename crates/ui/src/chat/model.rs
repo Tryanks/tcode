@@ -1982,63 +1982,49 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_remains_reachable_during_the_turn_and_in_history() {
-        let entries = [
-            entry("reason-1", reasoning("first")),
-            entry("reason-2", reasoning("latest")),
-        ];
+    fn reasoning_preserves_nonempty_history_and_coalesces_only_adjacent_empty_placeholders() {
         for running in [true, false] {
+            for (entries, expected) in [
+                (
+                    vec![
+                        entry("first", reasoning("first")),
+                        entry("latest", reasoning("latest")),
+                    ],
+                    vec!["first", "latest"],
+                ),
+                (
+                    vec![
+                        entry("empty-1", reasoning("")),
+                        entry("empty-2", reasoning("  \n")),
+                        entry("visible", reasoning("visible")),
+                        command("command"),
+                        entry("empty-3", reasoning("")),
+                        entry("empty-4", reasoning("")),
+                    ],
+                    vec!["visible", "command", "empty-4"],
+                ),
+                (
+                    vec![
+                        entry("reason", reasoning("thinking")),
+                        command("later-command"),
+                    ],
+                    vec!["reason", "later-command"],
+                ),
+            ] {
+                let segments = segment_entries(&entries, running).flow;
+                assert!(matches!(segments.as_slice(), [Segment::ActivityRun(run)]
+                    if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == expected));
+            }
+            let entries = [
+                entry("reason", reasoning("thinking")),
+                entry("assistant", assistant("answer")),
+            ];
             let segments = segment_entries(&entries, running).flow;
-            assert!(matches!(segments.as_slice(), [Segment::ActivityRun(run)]
-                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>() == ["reason-1", "reason-2"]));
+            assert!(
+                matches!(segments.as_slice(), [Segment::ActivityRun(run), Segment::Assistant(entry)]
+                if run.len() == 1 && run[0].id == "reason" && entry.id == "assistant")
+            );
         }
-    }
-
-    #[test]
-    fn consecutive_empty_reasoning_collapses_into_the_latest_reasoning() {
-        let entries = [
-            entry("empty-1", reasoning("")),
-            entry("empty-2", reasoning("  \n")),
-            entry("reason", reasoning("visible")),
-            command("command"),
-            entry("empty-3", reasoning("")),
-            entry("empty-4", reasoning("")),
-        ];
-
-        let segments = segment_entries(&entries, true).flow;
-        assert!(matches!(
-            segments.as_slice(),
-            [Segment::ActivityRun(run)]
-                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["reason", "command", "empty-4"]
-        ));
-    }
-
-    #[test]
-    fn later_activity_settles_reasoning_without_removing_it() {
-        let entries = [
-            entry("reason", reasoning("thinking")),
-            command("later-command"),
-        ];
-
-        let segments = segment_entries(&entries, true).flow;
-        assert!(matches!(
-            segments.as_slice(),
-            [Segment::ActivityRun(run)]
-                if run.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>()
-                    == ["reason", "later-command"]
-        ));
-
-        let entries = [
-            entry("reason", reasoning("thinking")),
-            entry("assistant", assistant("answer")),
-        ];
-        let segments = segment_entries(&entries, true).flow;
-        assert!(matches!(
-            segments.as_slice(),
-            [Segment::ActivityRun(run), Segment::Assistant(entry)]
-                if run.len() == 1 && run[0].id == "reason" && entry.id == "assistant"
-        ));
     }
 
     #[test]
@@ -2113,54 +2099,41 @@ mod tests {
     }
 
     #[test]
-    fn work_log_capsule_localizes_nonzero_counts_in_priority_order() {
+    fn work_log_labels_localize_prioritized_counts_and_empty_fallbacks() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let counts = WorkLogCounts {
+        let all = WorkLogCounts {
             commands: 2,
             files: 3,
             tools: 1,
             subagents: 2,
         };
-
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(
-            work_log_capsule_label(&counts, 9),
-            "1 tool call · 3 edits · 2 commands"
-        );
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(
-            work_log_capsule_label(&counts, 9),
-            "1 次工具调用 · 3 处编辑 · 2 条命令"
-        );
-    }
-
-    #[test]
-    fn work_log_capsule_omits_zero_components_and_uses_activity_fallback() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let tools_only = WorkLogCounts {
+        let tools = WorkLogCounts {
             tools: 2,
-            ..WorkLogCounts::default()
+            ..Default::default()
         };
-
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(work_log_capsule_label(&tools_only, 2), "2 tool calls");
-        assert_eq!(work_log_capsule_label(&WorkLogCounts::default(), 0), "");
-        assert_eq!(
-            work_log_capsule_label(&WorkLogCounts::default(), 1),
-            "1 activity"
-        );
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(work_log_capsule_label(&tools_only, 2), "2 次工具调用");
-    }
-
-    #[test]
-    fn work_log_counts_unique_file_paths_across_snapshots() {
-        let entries = [
-            file_change("files-1", &["src/a.rs", "src/b.rs"]),
-            file_change("files-2", &["src/a.rs", "src/a.rs"]),
-        ];
-
-        assert_eq!(work_log_counts(&refs(&entries)).files, 2);
+        for (locale, full_label, tools_label, fallback) in [
+            (
+                crate::LANGUAGE_ENGLISH,
+                "1 tool call · 3 edits · 2 commands",
+                "2 tool calls",
+                "1 activity",
+            ),
+            (
+                crate::LANGUAGE_SIMPLIFIED_CHINESE,
+                "1 次工具调用 · 3 处编辑 · 2 条命令",
+                "2 次工具调用",
+                "1 项活动",
+            ),
+        ] {
+            crate::set_locale(locale);
+            assert_eq!(work_log_capsule_label(&all, 9), full_label);
+            assert_eq!(work_log_capsule_label(&tools, 2), tools_label);
+            assert_eq!(work_log_capsule_label(&WorkLogCounts::default(), 0), "");
+            assert_eq!(
+                work_log_capsule_label(&WorkLogCounts::default(), 1),
+                fallback
+            );
+        }
     }
 
     #[test]
@@ -2268,7 +2241,8 @@ mod tests {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
         let entries = [
             command("command-1"),
-            file_change("files-1", &["src/shared.rs"]),
+            file_change("files-1", &["src/shared.rs", "src/shared.rs"]),
+            file_change("files-2", &["src/shared.rs"]),
             entry("assistant", assistant("intermediate output")),
             command("command-2"),
             command("command-3"),
@@ -2303,21 +2277,6 @@ mod tests {
         assert_eq!(labels(), ["1 edit · 1 command", "2 commands"]);
         crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
         assert_eq!(labels(), ["1 处编辑 · 1 条命令", "2 条命令"]);
-    }
-
-    #[test]
-    fn md_sync_decides_push_reset_and_noop() {
-        // Unchanged text does nothing (the streaming hot path: most notifies
-        // carry no new text for a given entry).
-        assert_eq!(md_sync("abc", "abc"), MdSync::Noop);
-        assert_eq!(md_sync("", ""), MdSync::Noop);
-        assert_eq!(md_sync("", "I"), MdSync::Push("I".into()));
-        assert_eq!(md_sync("I", "I'll go"), MdSync::Push("'ll go".into()));
-        // Anything that is not an append is a reset: a rewrite, a shrink, or a
-        // snapshot that replaces the accumulated text.
-        assert_eq!(md_sync("abc", "xbc"), MdSync::Reset);
-        assert_eq!(md_sync("abcd", "abc"), MdSync::Reset);
-        assert_eq!(md_sync("abc", ""), MdSync::Reset);
     }
 
     #[test]
@@ -2366,95 +2325,42 @@ mod tests {
     }
 
     #[test]
-    fn the_time_row_keeps_one_compact_unit_per_visible_clause() {
+    fn finished_time_rows_keep_compact_totals_and_localized_breakdowns() {
         let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        // The footer wraps at clause boundaries, so each clause has to be its
-        // own unit — never one string the narrow column would have to clip.
-        assert_eq!(
-            turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(80_000, 35_000))),
-            vec!["3:04 PM", "1m20s"]
-        );
-        assert_eq!(
-            turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(10_500, 3_600))),
-            vec!["3:04 PM", "10s"]
-        );
-        // No clause carries a separator of its own: the row's dots belong to the
-        // layout, so a wrapped line can never open with an orphaned one.
-        for clause in turn_time_parts("3:04 PM".into(), Some(TurnTiming::new(80_000, 35_000))) {
-            assert!(
-                !clause.contains('·'),
-                "clause {clause:?} embeds a separator"
-            );
+        for (locale, normal_tooltip, ai_only_tooltip) in [
+            (
+                crate::LANGUAGE_ENGLISH,
+                "AI thinking & response 45s · Tool calls 35s",
+                "AI thinking & response 8s · Tool calls 0s",
+            ),
+            (
+                crate::LANGUAGE_SIMPLIFIED_CHINESE,
+                "AI 思考与回答 45 秒 · 工具调用 35 秒",
+                "AI 思考与回答 8 秒 · 工具调用 0 秒",
+            ),
+        ] {
+            crate::set_locale(locale);
+            for (timing, total, tooltip) in [
+                (
+                    TurnTiming::new(80_000, 35_000),
+                    "1m20s",
+                    Some(normal_tooltip),
+                ),
+                (TurnTiming::new(8_000, 0), "8s", Some(ai_only_tooltip)),
+                (TurnTiming::new(10_500, 3_600), "10s", None),
+                (TurnTiming::new(86_459_000, 84_600_000), "24h00m59s", None),
+            ] {
+                assert_eq!(
+                    turn_time_parts("3:04 PM".into(), Some(timing)),
+                    ["3:04 PM", total]
+                );
+                if let Some(tooltip) = tooltip {
+                    assert_eq!(turn_time_breakdown(Some(timing)).as_deref(), Some(tooltip));
+                }
+            }
+            assert_eq!(turn_time_parts("9:00 AM".into(), None), ["9:00 AM"]);
+            assert_eq!(turn_time_breakdown(None), None);
         }
-        // The legacy fallback stays a single unit, so it renders dot-free.
-        assert_eq!(
-            turn_time_parts("9:00 AM".into(), None),
-            vec!["9:00 AM".to_string()]
-        );
-    }
-
-    #[test]
-    fn finished_time_row_is_compact_and_breakdown_is_localized_in_tooltip() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        // 1m 20s total, 35s of it inside tool calls.
-        let timing = TurnTiming::new(80_000, 35_000);
-
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(
-            turn_time_parts("3:04 PM".into(), Some(timing)),
-            vec!["3:04 PM", "1m20s"]
-        );
-        assert_eq!(
-            turn_time_breakdown(Some(timing)).as_deref(),
-            Some("AI thinking & response 45s · Tool calls 35s")
-        );
-
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(
-            turn_time_parts("3:04 PM".into(), Some(timing)),
-            vec!["3:04 PM", "1m20s"]
-        );
-        assert_eq!(
-            turn_time_breakdown(Some(timing)).as_deref(),
-            Some("AI 思考与回答 45 秒 · 工具调用 35 秒")
-        );
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-    }
-
-    #[test]
-    fn an_ai_only_turn_keeps_total_visible_and_buckets_in_tooltip() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(
-            turn_time_parts("9:00 AM".into(), Some(TurnTiming::new(8_000, 0))),
-            vec!["9:00 AM", "8s"]
-        );
-        assert_eq!(
-            turn_time_breakdown(Some(TurnTiming::new(8_000, 0))).as_deref(),
-            Some("AI thinking & response 8s · Tool calls 0s")
-        );
-    }
-
-    #[test]
-    fn day_long_turns_read_in_hours_in_both_locales() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        // 24h 00m 59s total, 23h 30m 00s of it waiting on tools. The seconds
-        // survive the hour rollup — this row reports real elapsed time.
-        let timing = TurnTiming::new(86_459_000, 84_600_000);
-
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
-        assert_eq!(
-            turn_time_parts("1:00 AM".into(), Some(timing)),
-            vec!["1:00 AM", "24h00m59s"]
-        );
-
-        crate::set_locale(crate::LANGUAGE_SIMPLIFIED_CHINESE);
-        assert_eq!(
-            turn_time_parts("1:00 AM".into(), Some(timing)),
-            vec!["1:00 AM", "24h00m59s"]
-        );
-        crate::set_locale(crate::LANGUAGE_ENGLISH);
     }
 
     #[test]

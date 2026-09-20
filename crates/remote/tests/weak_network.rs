@@ -47,7 +47,7 @@ impl Relay {
                             source
                                 .set_read_timeout(Some(Duration::from_millis(20)))
                                 .unwrap();
-                            dest.set_write_timeout(Some(Duration::from_millis(100)))
+                            dest.set_write_timeout(Some(Duration::from_secs(10)))
                                 .unwrap();
                             let mut bytes = [0; 16384];
                             while !s.load(Ordering::SeqCst)

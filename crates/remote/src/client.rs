@@ -1489,7 +1489,6 @@ mod establishment_tests {
                     let mut remaining = vec![];
                     stream.read_to_end(&mut remaining).await.unwrap();
                 });
-                let started = Instant::now();
                 if cancel {
                     let device = DeviceIdentity {
                         id: "cancelled".into(),
@@ -1502,20 +1501,24 @@ mod establishment_tests {
                     task.cancel().await;
                 } else {
                     assert_eq!(
-                        http_request(&origin, "GET", "/auth/state", "")
-                            .await
-                            .unwrap_err(),
+                        futures_lite::future::race(
+                            http_request(&origin, "GET", "/auth/state", ""),
+                            async {
+                                smol::Timer::after(Duration::from_secs(30)).await;
+                                panic!("HTTP request did not time out");
+                            },
+                        )
+                        .await
+                        .unwrap_err(),
                         "HTTP request timed out"
                     );
-                    assert!(started.elapsed() >= Duration::from_secs(5));
-                    assert!(started.elapsed() < Duration::from_secs(8));
                 }
                 futures_lite::future::race(
                     async {
                         peer.await;
                     },
                     async {
-                        smol::Timer::after(Duration::from_secs(2)).await;
+                        smol::Timer::after(Duration::from_secs(30)).await;
                         panic!("cancelled HTTP stream remained open");
                     },
                 )

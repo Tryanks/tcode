@@ -256,14 +256,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unicode_chunks_do_not_split_surrogate_pairs() {
-        let chunks = unicode_chunks("1234567890123456789🦀x", 20);
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks.iter().all(|chunk| chunk.len() <= 20));
-        let decoded: String = chunks
-            .into_iter()
-            .flat_map(|chunk| char::decode_utf16(chunk).map(Result::unwrap))
-            .collect();
-        assert_eq!(decoded, "1234567890123456789🦀x");
+    fn unicode_input_chunks_preserve_text_and_utf16_boundaries() {
+        for (text, limit, lengths) in [
+            ("", 20, vec![]),
+            ("plain", 20, vec![5]),
+            ("中文e\u{301}", 2, vec![2, 2]),
+            ("🦀🦀x", 2, vec![2, 2, 1]),
+            ("1234567890123456789🦀x", 20, vec![19, 3]),
+        ] {
+            let chunks = unicode_chunks(text, limit);
+            assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), lengths);
+            let decoded: String = chunks
+                .into_iter()
+                .flat_map(|chunk| char::decode_utf16(chunk).map(Result::unwrap))
+                .collect();
+            assert_eq!(decoded, text);
+        }
     }
 }

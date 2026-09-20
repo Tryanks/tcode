@@ -3087,81 +3087,83 @@ mod tests {
     static NEXT_RESIDENCY_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn latest_activity_stays_expanded_until_a_successor_appears() {
-        let mut expansions = AutoActivityExpansions::default();
+    fn activity_visibility_tracks_successors_and_the_remaining_minimum_window() {
         let first_seen = Instant::now();
-
-        let running = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            Latest,
-            first_seen,
-        );
-        assert!(running.expanded);
-        assert_eq!(running.collapse, None);
-
-        let completed = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            Latest,
-            first_seen + Duration::from_secs(1),
-        );
-        assert!(completed.expanded);
-        assert_eq!(completed.collapse, None);
-
-        let superseded = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            ImmediatelySuperseded,
-            first_seen + Duration::from_secs(1),
-        );
-        assert!(!superseded.expanded);
-        assert_eq!(superseded.collapse, None);
-    }
-
-    #[test]
-    fn early_successor_only_waits_for_remaining_minimum_visibility() {
-        let mut expansions = AutoActivityExpansions::default();
-        let first_seen = Instant::now();
-        expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            Latest,
-            first_seen,
-        );
-        let superseded = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            ImmediatelySuperseded,
-            first_seen + Duration::from_millis(200),
-        );
-
-        assert!(superseded.expanded);
-        let (generation, delay) = superseded
-            .collapse
-            .expect("early successor should schedule the remaining delay");
-        assert_eq!(delay, Duration::from_millis(300));
-        assert!(expansions.finish_collapse(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            generation
-        ));
-        assert!(
-            !expansions
-                .observe(
+        for (seen_as_latest, elapsed, delay) in [
+            (true, 200, Some(300)),
+            (true, 500, None),
+            (true, 1_000, None),
+            (false, 0, Some(500)),
+        ] {
+            let mut expansions = AutoActivityExpansions::default();
+            if seen_as_latest {
+                let latest = expansions.observe(
                     AUTO_ACTIVITY_TEST_SESSION,
-                    "activity-command",
+                    "activity",
+                    true,
+                    Latest,
+                    first_seen,
+                );
+                assert!(latest.expanded);
+                assert_eq!(latest.collapse, None);
+                let still_latest = expansions.observe(
+                    AUTO_ACTIVITY_TEST_SESSION,
+                    "activity",
+                    true,
+                    Latest,
+                    first_seen + Duration::from_millis(elapsed),
+                );
+                assert!(still_latest.expanded);
+                assert_eq!(still_latest.collapse, None);
+            }
+            let superseded = expansions.observe(
+                AUTO_ACTIVITY_TEST_SESSION,
+                "activity",
+                true,
+                ImmediatelySuperseded,
+                first_seen + Duration::from_millis(elapsed),
+            );
+            assert_eq!(superseded.expanded, delay.is_some());
+            assert_eq!(
+                superseded.collapse.map(|(_, delay)| delay),
+                delay.map(Duration::from_millis)
+            );
+            if let Some((generation, _)) = superseded.collapse {
+                let repeated = expansions.observe(
+                    AUTO_ACTIVITY_TEST_SESSION,
+                    "activity",
                     true,
                     ImmediatelySuperseded,
-                    first_seen + AUTO_ACTIVITY_MIN_VISIBILITY,
-                )
-                .expanded
-        );
+                    first_seen + Duration::from_millis(elapsed),
+                );
+                assert!(repeated.expanded);
+                assert_eq!(
+                    repeated.collapse, None,
+                    "a repaint must not enqueue a second timer"
+                );
+                assert!(expansions.finish_collapse(
+                    AUTO_ACTIVITY_TEST_SESSION,
+                    "activity",
+                    generation
+                ));
+                assert!(!expansions.finish_collapse(
+                    AUTO_ACTIVITY_TEST_SESSION,
+                    "activity",
+                    generation
+                ));
+                assert!(
+                    !expansions
+                        .observe(
+                            AUTO_ACTIVITY_TEST_SESSION,
+                            "activity",
+                            true,
+                            ImmediatelySuperseded,
+                            first_seen + Duration::from_secs(1)
+                        )
+                        .expanded
+                );
+            }
+        }
     }
 
     #[test]
@@ -3229,30 +3231,6 @@ mod tests {
             AUTO_ACTIVITY_TEST_SESSION,
             "activity-command-1",
             oldest_generation
-        ));
-    }
-
-    #[test]
-    fn activity_first_seen_immediately_superseded_gets_full_visibility_window() {
-        let mut expansions = AutoActivityExpansions::default();
-        let first_seen = Instant::now();
-        let observed = expansions.observe(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            true,
-            ImmediatelySuperseded,
-            first_seen,
-        );
-
-        assert!(observed.expanded);
-        let (generation, delay) = observed
-            .collapse
-            .expect("first observation should schedule a collapse");
-        assert_eq!(delay, AUTO_ACTIVITY_MIN_VISIBILITY);
-        assert!(expansions.finish_collapse(
-            AUTO_ACTIVITY_TEST_SESSION,
-            "activity-command",
-            generation
         ));
     }
 

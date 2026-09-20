@@ -423,7 +423,14 @@ fn resolve_cmd(dir: &Path, cmd: &str) -> Result<Command, RegistryError> {
         return Ok(Command::OnPath("node".to_string()));
     }
     let relative = cmd.strip_prefix("./").unwrap_or(cmd);
-    if relative.starts_with('/') || relative.contains("..") {
+    if relative.contains("..")
+        || Path::new(relative).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            )
+        })
+    {
         return Err(RegistryError::Install(format!(
             "the registry recipe wants to run `{cmd}`, which is not inside the downloaded archive"
         )));
@@ -447,6 +454,12 @@ fn resolve_cmd(dir: &Path, cmd: &str) -> Result<Command, RegistryError> {
             )));
         }
     };
+    let canonical_path = path.canonicalize()?;
+    if !canonical_path.starts_with(dir.canonicalize()?) || !canonical_path.is_file() {
+        return Err(RegistryError::Install(format!(
+            "the registry command `{cmd}` does not resolve to a file inside the downloaded archive"
+        )));
+    }
     make_executable(&path)?;
     Ok(Command::Path(path))
 }
@@ -628,6 +641,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(resolve_cmd(&dir, "/bin/sh").is_err());
         assert!(resolve_cmd(&dir, "../../../bin/sh").is_err());
+        assert!(resolve_cmd(&dir, "./").is_err());
+        #[cfg(windows)]
+        for command in [
+            r"C:\Windows\System32\cmd.exe",
+            r"C:cmd.exe",
+            r"\\server\share\agent.exe",
+        ] {
+            assert!(resolve_cmd(&dir, command).is_err(), "{command}");
+        }
         assert!(matches!(
             resolve_cmd(&dir, "node"),
             Ok(Command::OnPath(name)) if name == "node"
@@ -640,6 +662,27 @@ mod tests {
                 "expected a path inside the archive, got {:?}",
                 other.is_err()
             ),
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt as _, symlink};
+            let outside = dir.with_extension("outside");
+            std::fs::write(&outside, b"outside executable").unwrap();
+            std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+            symlink("agent", dir.join("local-link")).unwrap();
+            assert!(
+                matches!(resolve_cmd(&dir, "./local-link"), Ok(Command::Path(path)) if path == dir.join("local-link"))
+            );
+            symlink(&outside, dir.join("escape")).unwrap();
+            assert!(
+                resolve_cmd(&dir, "./escape").is_err(),
+                "symlink escaped archive"
+            );
+            assert_eq!(
+                std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            std::fs::remove_file(outside).unwrap();
         }
         let _ = std::fs::remove_dir_all(dir);
     }

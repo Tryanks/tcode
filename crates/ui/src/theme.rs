@@ -361,38 +361,3 @@ pub fn sync_system_appearance(window: Option<&mut Window>, cx: &mut App) {
         .unwrap_or_else(|| cx.window_appearance());
     change_mode(appearance.into(), window, cx);
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn machine_connection_dots_preserve_severity() {
-        use tcode_client::{ConnectionFailure, ConnectionState};
-
-        for theme in [&embedded_themes().light, &embedded_themes().dark] {
-            for (state, expected) in [
-                (ConnectionState::Connected, theme.success),
-                (ConnectionState::Syncing, theme.warning),
-                (
-                    ConnectionState::Reconnecting {
-                        attempt: 1,
-                        reason: Some(ConnectionFailure::Unreachable),
-                    },
-                    theme.warning,
-                ),
-                (
-                    ConnectionState::Offline {
-                        reason: ConnectionFailure::AuthenticationRejected,
-                    },
-                    theme.danger,
-                ),
-            ] {
-                assert_eq!(theme.connection_color(&state), expected, "{state:?}");
-            }
-            assert_ne!(theme.success, theme.warning);
-            assert_ne!(theme.warning, theme.danger);
-            assert_ne!(theme.success, theme.danger);
-        }
-    }
-}

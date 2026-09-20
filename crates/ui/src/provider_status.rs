@@ -419,11 +419,16 @@ mod tests {
 
     #[test]
     fn redacts_email_but_keeps_shape() {
-        let redacted = redact_email("developer@example.com");
-        assert!(redacted.starts_with('d'));
-        assert!(redacted.ends_with(".com"));
-        assert!(!redacted.contains("eveloper"));
-        assert!(!redacted.contains("example"));
+        for (email, expected) in [
+            ("developer@example.com", "d••••••••@•••••••.com"),
+            ("张三@例子.com", "张•@••.com"),
+            ("a@localhost", "a•@•••••••••"),
+            ("@", "•@•"),
+            ("invalid", "•••••••"),
+            ("", "•"),
+        ] {
+            assert_eq!(redact_email(email), expected, "{email}");
+        }
     }
 
     #[test]

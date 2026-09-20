@@ -1705,42 +1705,38 @@ mod tests {
     }
 
     #[test]
-    fn completed_file_operations_form_a_partial_turn_snapshot() {
-        let timeline = Timeline::fold_events([
-            user_msg("user-1", "edit it"),
-            AgentEvent::TurnStarted {
-                turn_id: "turn-1".into(),
-            },
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "edit-1".into(),
-                parent_item_id: None,
-                content: ItemContent::FileChange {
-                    changes: vec![FileChange {
-                        path: "src/lib.rs".into(),
-                        kind: FileChangeKind::Modify,
-                        diff: Some("-old\n+new\n".into()),
-                    }],
-                    status: ItemStatus::Completed,
-                },
-            }),
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "subagent-edit".into(),
-                parent_item_id: Some("spawn-1".into()),
-                content: ItemContent::FileChange {
-                    changes: vec![FileChange {
-                        path: "src/child.rs".into(),
-                        kind: FileChangeKind::Create,
-                        diff: Some("+child\n".into()),
-                    }],
-                    status: ItemStatus::Completed,
-                },
-            }),
-        ]);
-
-        let change_set = timeline.turns[0].changes.as_ref().unwrap();
-        assert_eq!(change_set.completeness, ChangeCompleteness::Partial);
-        assert_eq!(change_set.changes.len(), 1);
-        assert_eq!(change_set.changes[0].path, "src/lib.rs");
+    fn partial_turn_changes_include_only_successful_top_level_file_operations() {
+        for (label, parent, status, included) in [
+            ("completed", None, ItemStatus::Completed, true),
+            ("failed", None, ItemStatus::Failed, false),
+            ("in progress", None, ItemStatus::InProgress, false),
+            ("child", Some("spawn-1"), ItemStatus::Completed, false),
+        ] {
+            let timeline = Timeline::fold_events([
+                user_msg("user-1", "edit it"),
+                turn_started(),
+                AgentEvent::ItemCompleted(ThreadItem {
+                    id: "edit".into(),
+                    parent_item_id: parent.map(str::to_string),
+                    content: ItemContent::FileChange {
+                        changes: vec![FileChange {
+                            path: "src/lib.rs".into(),
+                            kind: FileChangeKind::Modify,
+                            diff: Some("-old\n+new\n".into()),
+                        }],
+                        status,
+                    },
+                }),
+            ]);
+            let changes = &timeline.turns[0].changes;
+            assert_eq!(changes.is_some(), included, "{label}");
+            if let Some(changes) = changes {
+                assert_eq!(changes.completeness, ChangeCompleteness::Partial);
+                assert_eq!(changes.changes.len(), 1);
+                assert_eq!(changes.changes[0].path, "src/lib.rs");
+                assert_eq!(changes.changes[0].diff.as_deref(), Some("-old\n+new\n"));
+            }
+        }
     }
 
     #[test]
@@ -1877,26 +1873,6 @@ mod tests {
             "first.txt"
         );
         assert!(timeline.turns[1].changes.is_none());
-    }
-
-    #[test]
-    fn failed_file_operations_are_not_attributed() {
-        let timeline = Timeline::fold_events([
-            user_msg("user-1", "edit it"),
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "edit-failed".into(),
-                parent_item_id: None,
-                content: ItemContent::FileChange {
-                    changes: vec![FileChange {
-                        path: "src/lib.rs".into(),
-                        kind: FileChangeKind::Modify,
-                        diff: None,
-                    }],
-                    status: ItemStatus::Failed,
-                },
-            }),
-        ]);
-        assert!(timeline.turns[0].changes.is_none());
     }
 
     /// Models a Claude-style trace: session init → streamed text deltas → full
@@ -2147,67 +2123,71 @@ mod tests {
         }
     }
 
-    fn assistant_snapshot(id: &str, text: &str) -> AgentEvent {
-        AgentEvent::ItemUpdated(ThreadItem {
-            id: id.into(),
-            parent_item_id: None,
-            content: ItemContent::AssistantMessage { text: text.into() },
-        })
-    }
-
-    fn assistant_text(timeline: &Timeline, id: &str) -> String {
-        timeline
-            .entries
-            .iter()
-            .find(|e| e.id == id)
-            .map(|e| match &e.content {
-                EntryContent::Item(ItemContent::AssistantMessage { text }) => text.clone(),
-                other => panic!("entry {id} is not assistant text: {other:?}"),
-            })
-            .unwrap_or_else(|| panic!("no entry {id}"))
-    }
-
-    /// An item snapshot must never be concatenated onto delta-accumulated text,
-    /// and a snapshot that *lags* the deltas (it carries only the text so far,
-    /// or nothing at all) must not shorten what is already there: shortening
-    /// makes the next delta look like a fresh append and duplicates the
-    /// overlapping paragraph.
     #[test]
-    fn fold_snapshot_never_duplicates_or_shortens_delta_text() {
-        let timeline = Timeline::fold_events(vec![
-            assistant_delta("msg", "Para one.\n\n"),
-            assistant_delta("msg", "Para two."),
-            // Snapshot lagging one delta behind: must not shorten.
-            assistant_snapshot("msg", "Para one.\n\n"),
-            assistant_delta("msg", " Tail."),
-            // Empty snapshot: must not clobber.
-            assistant_snapshot("msg", ""),
-            // Authoritative final snapshot: replaces, never concatenates.
-            AgentEvent::ItemCompleted(ThreadItem {
-                id: "msg".into(),
-                parent_item_id: None,
-                content: ItemContent::AssistantMessage {
-                    text: "Para one.\n\nPara two. Tail.".into(),
+    fn streamed_item_snapshots_preserve_partial_text_and_accept_rewrites() {
+        for kind in [
+            DeltaKind::AssistantText,
+            DeltaKind::ReasoningText,
+            DeltaKind::CommandOutput,
+        ] {
+            let snapshot = |text: &str| {
+                AgentEvent::ItemUpdated(ThreadItem {
+                    id: "msg".into(),
+                    parent_item_id: None,
+                    content: match kind {
+                        DeltaKind::AssistantText => {
+                            ItemContent::AssistantMessage { text: text.into() }
+                        }
+                        DeltaKind::ReasoningText => ItemContent::Reasoning { text: text.into() },
+                        DeltaKind::CommandOutput => ItemContent::CommandExecution {
+                            command: "echo hi".into(),
+                            output: text.into(),
+                            exit_code: Some(0),
+                            status: ItemStatus::Completed,
+                        },
+                    },
+                })
+            };
+            let mut timeline = Timeline::fold_events([
+                AgentEvent::Delta {
+                    item_id: "msg".into(),
+                    kind,
+                    text: "第一段\n".into(),
                 },
-            }),
-        ]);
-
-        assert_eq!(
-            assistant_text(&timeline, "msg"),
-            "Para one.\n\nPara two. Tail."
-        );
-    }
-
-    /// A snapshot whose text genuinely differs (the provider rewrote the
-    /// message) still wins outright.
-    #[test]
-    fn fold_snapshot_with_different_text_replaces_deltas() {
-        let timeline = Timeline::fold_events(vec![
-            assistant_delta("msg", "draft"),
-            assistant_snapshot("msg", "final answer"),
-        ]);
-
-        assert_eq!(assistant_text(&timeline, "msg"), "final answer");
+                AgentEvent::Delta {
+                    item_id: "msg".into(),
+                    kind,
+                    text: "second".into(),
+                },
+            ]);
+            for (incoming, expected) in [
+                ("第一段\n", "第一段\nsecond"),
+                ("", "第一段\nsecond"),
+                ("第一段\nsecond", "第一段\nsecond"),
+                ("rewritten", "rewritten"),
+            ] {
+                timeline.apply_at(None, &snapshot(incoming));
+                assert_eq!(timeline.entries.len(), 1);
+                let text = match &timeline.entries[0].content {
+                    EntryContent::Item(
+                        ItemContent::AssistantMessage { text } | ItemContent::Reasoning { text },
+                    ) => text,
+                    EntryContent::Item(ItemContent::CommandExecution {
+                        command,
+                        output,
+                        exit_code,
+                        status,
+                    }) => {
+                        assert_eq!(command, "echo hi");
+                        assert_eq!(*exit_code, Some(0));
+                        assert_eq!(*status, ItemStatus::Completed);
+                        output
+                    }
+                    other => panic!("unexpected item: {other:?}"),
+                };
+                assert_eq!(text, expected, "{kind:?}: snapshot {incoming:?}");
+            }
+        }
     }
 
     /// Modeled on crates/agent/tests/fixtures/codex/v2_messages.jsonl:
@@ -2338,51 +2318,6 @@ mod tests {
     }
 
     #[test]
-    fn command_snapshot_keeps_streamed_output_when_snapshot_output_empty() {
-        let mut timeline = Timeline::default();
-        timeline.apply_at(
-            None,
-            &AgentEvent::ItemStarted(ThreadItem {
-                id: "cmd-1".into(),
-                parent_item_id: None,
-                content: ItemContent::CommandExecution {
-                    command: "echo hi".into(),
-                    output: String::new(),
-                    exit_code: None,
-                    status: ItemStatus::InProgress,
-                },
-            }),
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::Delta {
-                item_id: "cmd-1".into(),
-                kind: DeltaKind::CommandOutput,
-                text: "hi\n".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::ItemCompleted(ThreadItem {
-                id: "cmd-1".into(),
-                parent_item_id: None,
-                content: ItemContent::CommandExecution {
-                    command: "echo hi".into(),
-                    output: String::new(),
-                    exit_code: Some(0),
-                    status: ItemStatus::Completed,
-                },
-            }),
-        );
-
-        assert!(matches!(
-            &timeline.entries[0].content,
-            EntryContent::Item(ItemContent::CommandExecution { command, output, exit_code: Some(0), status: ItemStatus::Completed })
-                if command == "echo hi" && output == "hi\n"
-        ));
-    }
-
-    #[test]
     fn timestamps_and_turn_grouping_fold_across_two_exchanges() {
         // Two user→assistant exchanges; timestamps thread through as envelopes.
         let stored = vec![
@@ -2475,132 +2410,89 @@ mod tests {
     }
 
     #[test]
-    fn implement_prompt_uses_plan_accept_prefix() {
-        assert_eq!(
-            implement_prompt("  # Plan\nDo the thing\n  "),
-            "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nDo the thing"
-        );
-    }
-
-    #[test]
-    fn proposed_plan_deltas_accumulate_then_finalize() {
-        let mut timeline = Timeline::default();
-        timeline.apply_at(
-            None,
-            &AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::ProposedPlanDelta {
-                item_id: "plan-1".into(),
-                text: "# Plan\n".into(),
-            },
-        );
-        timeline.apply_at(
-            None,
-            &AgentEvent::ProposedPlanDelta {
-                item_id: "plan-1".into(),
-                text: "step one".into(),
-            },
-        );
+    fn proposed_plan_lifecycle_distinguishes_streaming_final_and_resolved_items() {
+        let mut timeline = Timeline::fold_events([turn_started()]);
+        for text in ["# Plan\n", "step one"] {
+            timeline.apply_at(
+                None,
+                &AgentEvent::ProposedPlanDelta {
+                    item_id: "plan-1".into(),
+                    text: text.into(),
+                },
+            );
+        }
         let plan = timeline.proposed_plan.as_ref().unwrap();
         assert_eq!(plan.markdown, "# Plan\nstep one");
-        assert!(!plan.ready);
-        assert!(timeline.plan_ready().is_none());
         assert_eq!(plan.turn, 0);
+        assert!(timeline.plan_ready().is_none());
+        let mut interrupted = timeline.clone();
+        interrupted.apply_at(None, &turn_completed());
+        assert!(interrupted.proposed_plan.is_none());
+        interrupted = timeline.clone();
+        interrupted.mark_idle();
+        assert!(interrupted.proposed_plan.is_none());
 
-        // The final ProposedPlan replaces the accumulated text.
         timeline.apply_at(
             None,
             &AgentEvent::ProposedPlan {
                 item_id: "plan-1".into(),
-                markdown: "# Plan\nstep one\nstep two".into(),
+                markdown: "# Final plan".into(),
             },
         );
-        assert_eq!(
-            timeline.proposed_plan.as_ref().unwrap().markdown,
-            "# Plan\nstep one\nstep two"
-        );
-        assert!(timeline.proposed_plan.as_ref().unwrap().ready);
-        assert!(timeline.plan_ready().is_some());
-        // The proposed plan survives replay's mark_idle (it is the accept anchor).
+        timeline.apply_at(None, &turn_completed());
         timeline.mark_idle();
-        assert!(timeline.proposed_plan.is_some());
-    }
-
-    #[test]
-    fn unfinished_streaming_plan_is_discarded_when_turn_ends() {
-        let timeline = Timeline::fold_events([
-            AgentEvent::TurnStarted {
-                turn_id: "t1".into(),
+        assert_eq!(timeline.plan_ready().unwrap().markdown, "# Final plan");
+        for resolution in [
+            agent::PlanResolution::Implemented,
+            agent::PlanResolution::Dismissed,
+            agent::PlanResolution::HandedOff {
+                session_id: "fork".into(),
             },
-            AgentEvent::ProposedPlanDelta {
-                item_id: "plan-1".into(),
-                text: "# Truncated plan".into(),
-            },
-            AgentEvent::TurnCompleted {
-                turn_id: "t1".into(),
-                status: TurnStatus::Interrupted,
-                usage: None,
-            },
-        ]);
-
-        assert!(timeline.proposed_plan.is_none());
-    }
-
-    #[test]
-    fn implemented_plan_stays_resolved_after_event_log_replay() {
-        let timeline = Timeline::fold_events([
-            AgentEvent::TurnStarted {
-                turn_id: "plan-turn".into(),
-            },
-            AgentEvent::ProposedPlan {
-                item_id: "plan-1".into(),
-                markdown: "# Final plan".into(),
-            },
-            AgentEvent::TurnCompleted {
-                turn_id: "plan-turn".into(),
-                status: TurnStatus::Completed,
-                usage: None,
-            },
-            AgentEvent::PlanResolved {
-                item_id: "plan-1".into(),
-                resolution: agent::PlanResolution::Implemented,
-            },
-        ]);
-
-        assert!(timeline.proposed_plan.is_some());
-        assert!(timeline.plan_ready().is_none());
-    }
-
-    #[test]
-    fn resolved_plan_ignores_late_or_duplicate_provider_events() {
-        let timeline = Timeline::fold_events([
-            AgentEvent::ProposedPlan {
-                item_id: "plan-1".into(),
-                markdown: "# Final plan".into(),
-            },
-            AgentEvent::PlanResolved {
-                item_id: "plan-1".into(),
-                resolution: agent::PlanResolution::Dismissed,
-            },
-            AgentEvent::ProposedPlanDelta {
-                item_id: "plan-1".into(),
-                text: "\nlate delta".into(),
-            },
-            AgentEvent::ProposedPlan {
-                item_id: "plan-1".into(),
-                markdown: "# Duplicate plan".into(),
-            },
-        ]);
-
-        assert_eq!(
-            timeline.proposed_plan.as_ref().unwrap().markdown,
-            "# Final plan"
-        );
-        assert!(timeline.plan_ready().is_none());
+        ] {
+            let mut resolved = timeline.clone();
+            resolved.apply_at(
+                None,
+                &AgentEvent::PlanResolved {
+                    item_id: "another-plan".into(),
+                    resolution: resolution.clone(),
+                },
+            );
+            assert!(resolved.plan_ready().is_some());
+            resolved.apply_at(
+                None,
+                &AgentEvent::PlanResolved {
+                    item_id: "plan-1".into(),
+                    resolution,
+                },
+            );
+            resolved.apply_at(
+                None,
+                &AgentEvent::ProposedPlanDelta {
+                    item_id: "plan-1".into(),
+                    text: "late delta".into(),
+                },
+            );
+            resolved.apply_at(
+                None,
+                &AgentEvent::ProposedPlan {
+                    item_id: "plan-1".into(),
+                    markdown: "duplicate".into(),
+                },
+            );
+            assert_eq!(
+                resolved.proposed_plan.as_ref().unwrap().markdown,
+                "# Final plan"
+            );
+            assert!(resolved.plan_ready().is_none());
+            resolved.apply_at(
+                None,
+                &AgentEvent::ProposedPlan {
+                    item_id: "plan-2".into(),
+                    markdown: "# Next plan".into(),
+                },
+            );
+            assert_eq!(resolved.plan_ready().unwrap().markdown, "# Next plan");
+        }
     }
 
     #[test]
@@ -3034,46 +2926,30 @@ mod tests {
     }
 
     #[test]
-    fn sequential_tools_leave_the_remaining_span_to_the_model() {
-        let timing = timing_of(vec![
-            at(1_000, turn_started()),
-            started(2_000, running("a")),
-            completed(3_000, ran("a")),
-            started(5_000, running("b")),
-            completed(6_000, ran("b")),
-            at(10_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        assert_eq!(timing.total_ms, 9_000);
-        assert_eq!(timing.tool_ms, 2_000);
-    }
-
-    #[test]
-    fn overlapping_tools_count_as_a_union_not_a_sum() {
-        let timing = timing_of(vec![
-            at(0, turn_started()),
-            started(1_000, running("a")),
-            // A second tool starts while the first still runs, and a third
-            // opens and closes wholly inside their overlap.
-            started(1_500, subagent("b", ItemStatus::InProgress)),
-            started(1_800, running("c")),
-            completed(2_000, ran("c")),
-            completed(2_500, ran("a")),
-            completed(3_000, subagent("b", ItemStatus::Completed)),
-            at(4_000, turn_completed()),
-        ])
-        .expect("a fully timestamped turn has a breakdown");
-
-        // Summing the three intervals would give 1500 + 1500 + 200 = 3200ms;
-        // the union [1000, 3000] is 2000ms.
-        assert_eq!(timing.tool_ms, 2_000);
-        assert_eq!(timing.total_ms, 4_000);
-    }
-
-    #[test]
     fn tool_timing_follows_lifecycle_including_updates_failures_and_reused_ids() {
         for (label, activity, expected_tool_ms) in [
+            (
+                "sequential",
+                vec![
+                    started(1_000, running("a")),
+                    completed(2_000, ran("a")),
+                    started(3_000, running("b")),
+                    completed(4_000, ran("b")),
+                ],
+                2_000,
+            ),
+            (
+                "overlapping and nested",
+                vec![
+                    started(1_000, running("a")),
+                    started(1_500, subagent("b", ItemStatus::InProgress)),
+                    started(1_800, running("c")),
+                    completed(2_000, ran("c")),
+                    completed(2_500, ran("a")),
+                    completed(3_000, subagent("b", ItemStatus::Completed)),
+                ],
+                2_000,
+            ),
             (
                 "updates and reused id",
                 vec![
@@ -3136,35 +3012,93 @@ mod tests {
     }
 
     #[test]
-    fn legacy_events_without_timestamps_invent_no_breakdown() {
-        let legacy = Timeline::fold_events([
-            user_msg("u1", "hi"),
-            turn_started(),
-            AgentEvent::ItemStarted(running("a")),
-            AgentEvent::ItemCompleted(ran("a")),
-            turn_completed(),
-        ]);
-        assert_eq!(legacy.turns[0].timing, None);
-
-        // A turn whose bounds are timestamped but whose tool activity is not
-        // cannot be trusted either.
-        let mixed = timing_of(vec![
-            at(1_000, turn_started()),
-            AgentEvent::ItemStarted(running("a")).into(),
-            AgentEvent::ItemCompleted(ran("a")).into(),
-            at(9_000, turn_completed()),
-        ]);
-        assert_eq!(mixed, None);
-    }
-
-    #[test]
-    fn a_running_turn_has_no_breakdown_yet() {
-        let live = Timeline::fold_events(vec![
-            at(1_000, turn_started()),
-            started(2_000, running("a")),
-        ]);
-        assert!(live.turns[0].running);
-        assert_eq!(live.turns[0].timing, None);
+    fn unobserved_unfinished_or_inconsistent_turns_have_no_timing_breakdown() {
+        for (label, events) in [
+            (
+                "legacy",
+                vec![
+                    user_msg("u", "hi").into(),
+                    turn_started().into(),
+                    AgentEvent::ItemStarted(running("a")).into(),
+                    AgentEvent::ItemCompleted(ran("a")).into(),
+                    turn_completed().into(),
+                ],
+            ),
+            (
+                "untimed tool",
+                vec![
+                    at(1_000, turn_started()),
+                    AgentEvent::ItemStarted(running("a")).into(),
+                    AgentEvent::ItemCompleted(ran("a")).into(),
+                    at(9_000, turn_completed()),
+                ],
+            ),
+            (
+                "running",
+                vec![at(1_000, turn_started()), started(2_000, running("a"))],
+            ),
+            (
+                "no observed start",
+                vec![
+                    at(1_000, user_msg("u", "go")),
+                    started(2_000, running("a")),
+                    completed(3_000, ran("a")),
+                    at(9_000, turn_completed()),
+                ],
+            ),
+            (
+                "untimed start",
+                vec![
+                    at(1_000, user_msg("u", "go")),
+                    turn_started().into(),
+                    at(9_000, turn_completed()),
+                ],
+            ),
+            (
+                "no end timestamp",
+                vec![at(1_000, turn_started()), turn_completed().into()],
+            ),
+            (
+                "tool beyond end",
+                vec![
+                    at(0, turn_started()),
+                    started(1_000, running("a")),
+                    completed(2_000, ran("a")),
+                    started(19_000, running("b")),
+                    completed(25_000, ran("b")),
+                    at(20_000, turn_completed()),
+                ],
+            ),
+            (
+                "assistant beyond end",
+                vec![
+                    at(1_000, turn_started()),
+                    at(30_000, assistant("a", "late")),
+                    at(20_000, turn_completed()),
+                ],
+            ),
+            (
+                "reasoning beyond end",
+                vec![
+                    at(1_000, turn_started()),
+                    at(
+                        30_000,
+                        AgentEvent::Delta {
+                            item_id: "r".into(),
+                            kind: DeltaKind::ReasoningText,
+                            text: "late".into(),
+                        },
+                    ),
+                    at(20_000, turn_completed()),
+                ],
+            ),
+        ] {
+            assert_eq!(timing_of(events), None, "{label}");
+        }
+        let timeline =
+            Timeline::fold_events([at(1_000, user_msg("u", "go")), at(9_000, turn_completed())]);
+        assert_eq!(timeline.turns[0].start_ts, Some(1_000));
+        assert_eq!(timeline.turns[0].timing, None);
     }
 
     #[test]
@@ -3240,50 +3174,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_completing_after_the_turn_end_withholds_the_breakdown() {
-        // The wall clock regressed across the turn boundary: tool B is stamped
-        // as finishing 5s after the turn itself finished. Charging the union as
-        // recorded would report 7s of tool time against a 20s turn, and even
-        // clamping the aggregate to the total cannot fix the attribution — the
-        // 18s the model may actually have spent is unknowable. Withhold it.
-        let timing = timing_of(vec![
-            at(0, turn_started()),
-            started(1_000, running("a")),
-            completed(2_000, ran("a")),
-            started(19_000, running("b")),
-            completed(25_000, ran("b")),
-            at(20_000, turn_completed()),
-        ]);
-        assert_eq!(timing, None);
-    }
-
-    #[test]
-    fn a_model_item_stamped_after_the_turn_end_withholds_the_breakdown() {
-        // The watermark is not tool-only: an assistant or reasoning item stamped
-        // past the turn end regresses the clock just as badly.
-        for (label, item) in [
-            ("assistant", assistant("m1", "late answer")),
-            (
-                "reasoning",
-                AgentEvent::ItemCompleted(ThreadItem {
-                    id: "r1".into(),
-                    parent_item_id: None,
-                    content: ItemContent::Reasoning {
-                        text: "late thought".into(),
-                    },
-                }),
-            ),
-        ] {
-            let timing = timing_of(vec![
-                at(1_000, turn_started()),
-                at(30_000, item),
-                at(20_000, turn_completed()),
-            ]);
-            assert_eq!(timing, None, "{label}");
-        }
-    }
-
-    #[test]
     fn a_turn_finalized_without_a_timestamp_rejects_later_tool_transitions() {
         // A terminal status closes the turn even without an end timestamp.
         // A stray transition between turns must not enter the next turn's clock.
@@ -3302,34 +3192,6 @@ mod tests {
             .expect("the new turn is fully timestamped");
         assert_eq!(timing.total_ms, 6_000);
         assert_eq!(timing.tool_ms, 0);
-    }
-
-    #[test]
-    fn a_breakdown_needs_an_observed_timestamped_turn_start() {
-        // A user message seeds start_ts, but it is not an observed TurnStarted.
-        let no_turn_started = timing_of(vec![
-            at(1_000, user_msg("u1", "go")),
-            started(2_000, running("a")),
-            completed(3_000, ran("a")),
-            at(9_000, turn_completed()),
-        ]);
-        assert_eq!(no_turn_started, None);
-
-        // A TurnStarted that carries no timestamp is no anchor either.
-        let untimed_turn_started = timing_of(vec![
-            at(1_000, user_msg("u1", "go")),
-            turn_started().into(),
-            at(9_000, turn_completed()),
-        ]);
-        assert_eq!(untimed_turn_started, None);
-
-        // The user message's start_ts is untouched by any of this.
-        let timeline = Timeline::fold_events(vec![
-            at(1_000, user_msg("u1", "go")),
-            at(9_000, turn_completed()),
-        ]);
-        assert_eq!(timeline.turns[0].start_ts, Some(1_000));
-        assert_eq!(timeline.turns[0].timing, None);
     }
 
     #[test]

@@ -80,6 +80,12 @@ mod tests {
 
     #[test]
     fn custom_colors_fill_the_palette_before_reusing_slots() {
+        let known = ["acp:gemini", "work-claude"];
+        assert_eq!(palette_color("acp:gemini", &known), 0x14B8A6);
+        assert_eq!(palette_color("work-claude", &known), 0x6B7FD7);
+        // A deleted profile's threads keep their hashed color rather than none.
+        assert_eq!(palette_color("deleted-profile", &known), 0xF59E0B);
+
         let keys: Vec<String> = (0..PROVIDER_COLOR_PALETTE.len() + 3)
             .map(|i| format!("profile-{i:02}"))
             .collect();
@@ -94,16 +100,5 @@ mod tests {
                 .iter()
                 .all(|color| PROVIDER_COLOR_PALETTE.contains(color))
         );
-    }
-
-    /// Slots are pinned to independently computed FNV-1a values: changing the
-    /// hash or reordering the palette would recolor every user's threads.
-    #[test]
-    fn assignment_is_stable_and_unknown_keys_still_resolve() {
-        let known = ["acp:gemini", "work-claude"];
-        assert_eq!(palette_color("acp:gemini", &known), 0x14B8A6);
-        assert_eq!(palette_color("work-claude", &known), 0x6B7FD7);
-        // A deleted profile's threads keep their hashed color rather than none.
-        assert_eq!(palette_color("deleted-profile", &known), 0xF59E0B);
     }
 }

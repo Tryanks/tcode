@@ -841,38 +841,43 @@ mod tests {
     }
 
     #[test]
-    fn merge_back_fast_forwards_descendant() {
-        let (temp, root) = scratch_repo("tcode-merge-back-ff-test");
-        let created = provision_for_test(&root, "ff", &temp.join("worktrees"));
-        commit_file(&created.path, "feature.txt", "feature\n", "feature");
-
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Ok(MergeBackOutcome::FastForward)
-        );
-        assert_eq!(
-            run_git(&root, &["rev-parse", "HEAD"]).unwrap(),
-            run_git(&created.path, &["rev-parse", "HEAD"]).unwrap()
-        );
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn merge_back_creates_merge_commit_for_clean_divergence() {
-        let (temp, root) = scratch_repo("tcode-merge-back-diverged-test");
-        let created = provision_for_test(&root, "diverged", &temp.join("worktrees"));
-        commit_file(&created.path, "feature.txt", "feature\n", "feature");
-        commit_file(&root, "destination.txt", "destination\n", "destination");
-
-        assert_eq!(
-            merge_back(&root, &created.path, &created.branch),
-            Ok(MergeBackOutcome::MergeCommit)
-        );
-        let parents = run_git(&root, &["show", "-s", "--format=%P", "HEAD"]).unwrap();
-        assert_eq!(parents.split_whitespace().count(), 2);
-        remove(&root, &created.path).unwrap();
-        let _ = std::fs::remove_dir_all(temp);
+    fn merge_back_integrates_clean_descendant_or_divergent_branches() {
+        for diverged in [false, true] {
+            let (temp, root) = scratch_repo("tcode-merge-back");
+            let created = provision_for_test(&root, "feature", &temp.join("worktrees"));
+            commit_file(&created.path, "feature.txt", "feature\n", "feature");
+            if diverged {
+                commit_file(&root, "destination.txt", "destination\n", "destination");
+            }
+            let expected = if diverged {
+                MergeBackOutcome::MergeCommit
+            } else {
+                MergeBackOutcome::FastForward
+            };
+            assert_eq!(
+                merge_back(&root, &created.path, &created.branch),
+                Ok(expected)
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("feature.txt")).unwrap(),
+                "feature\n"
+            );
+            if diverged {
+                assert_eq!(
+                    std::fs::read_to_string(root.join("destination.txt")).unwrap(),
+                    "destination\n"
+                );
+                let parents = run_git(&root, &["show", "-s", "--format=%P", "HEAD"]).unwrap();
+                assert_eq!(parents.split_whitespace().count(), 2);
+            } else {
+                assert_eq!(
+                    run_git(&root, &["rev-parse", "HEAD"]).unwrap(),
+                    run_git(&created.path, &["rev-parse", "HEAD"]).unwrap()
+                );
+            }
+            remove(&root, &created.path).unwrap();
+            std::fs::remove_dir_all(temp).unwrap();
+        }
     }
 
     #[test]
@@ -951,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn seed_rejects_traversal_and_rolls_back() {
+    fn seed_rejects_traversal_before_creating_a_worktree() {
         let (temp, root) = scratch_repo("tcode-worktree-seed-traversal-test");
         std::fs::write(root.join(".worktreeinclude"), "../outside\n").unwrap();
         let worktrees = temp.join("worktrees");

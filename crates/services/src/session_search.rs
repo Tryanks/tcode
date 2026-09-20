@@ -267,6 +267,19 @@ mod tests {
         assert!(snippet.contains("AUTH.rs"));
         assert!(snippet.chars().count() <= 62); // up to two ellipses
         assert!(match_snippet(&text, "missing", 60).is_none());
+        for (text, query, expected) in [
+            ("  中文\nCAFÉ\t😀 ", " café ", Some("中文 CAFÉ 😀")),
+            ("İstanbul", "i\u{307}stan", Some("İstanbul")),
+            ("中文", "文", Some("中文")),
+            ("visible", "  ", None),
+            ("   ", "visible", None),
+        ] {
+            assert_eq!(
+                match_snippet(text, query, 60).as_deref(),
+                expected,
+                "{text:?}: {query:?}"
+            );
+        }
     }
 
     #[test]

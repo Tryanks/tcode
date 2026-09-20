@@ -402,9 +402,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_preserve_session_and_map_json_and_image_replies() {
+    async fn tools_preserve_session_and_map_replies_and_disconnects() {
         let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        let broker = broker(tx, std::time::Duration::from_secs(2));
+        let broker = broker(tx, std::time::Duration::from_secs(30));
         let resolver = tokio::spawn(async move {
             for (op, reply) in [
                 (
@@ -439,19 +439,10 @@ mod tests {
             if image.mime_type == "image/png" && image.data == "AAA")
         );
         resolver.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn broker_reports_disconnect_as_error() {
-        let (tx, rx) = async_channel::unbounded::<crate::BrokerRequest>();
-        drop(rx);
-        let broker = broker(tx, std::time::Duration::from_millis(200));
-        let tools = PreviewTools::new(broker, "session-a".into());
-        let result = tools.preview_status().await;
-        assert_eq!(result.is_error, Some(true));
+        let disconnected = tools.preview_status().await;
+        assert_eq!(disconnected.is_error, Some(true));
         assert!(
-            matches!(result.content.as_slice(), [ContentBlock::Text(text)]
-            if text.text == "preview UI is not available")
+            matches!(disconnected.content.as_slice(), [ContentBlock::Text(text)] if text.text == "preview UI is not available")
         );
     }
 }

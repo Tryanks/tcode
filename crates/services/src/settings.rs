@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_values_live_in_secrets_json_only() {
+    fn secrets_persist_privately_and_clear_only_the_selected_profile() {
         let root =
             std::env::temp_dir().join(format!("tcode-settings-secret-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -220,16 +220,6 @@ mod tests {
             )
             .unwrap();
         assert!(store.profile_secrets("claude").is_empty());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn profile_secrets_are_keyed_by_profile_id() {
-        let root =
-            std::env::temp_dir().join(format!("tcode-settings-profile-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let store = SettingsStore::new(root.clone());
-
         // A user profile "klaude-kode" stores its own key, isolated from the
         // built-in "claude" profile (which shares the provider_key id).
         store

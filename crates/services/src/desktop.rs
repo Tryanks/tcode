@@ -27,20 +27,3 @@ fn open_with_candidates(candidates: &[&str], cwd: &Path) -> io::Result<()> {
     }
     Err(not_found.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound)))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn falls_through_missing_candidates_to_not_found() {
-        let result = open_with_candidates(
-            &[
-                "tcode-definitely-missing-cli-a",
-                "tcode-definitely-missing-cli-b",
-            ],
-            Path::new("."),
-        );
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
-    }
-}

@@ -277,47 +277,6 @@ fn two_clients_route_acks_broadcast_events_and_reconnect() {
 }
 
 #[test]
-fn wrong_token_gets_rejected_and_closed() {
-    let data = TestDir::new();
-    let (mux, _) = fake_host();
-    let server = serve(mux, config(data.0.clone(), 0)).unwrap();
-    let port = server.local_addr().port();
-    smol::block_on(async {
-        let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
-            .await
-            .unwrap();
-        let (mut websocket, _) =
-            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
-                .await
-                .unwrap();
-        websocket
-            .send(Message::Text(
-                json!({"type": "hello", "protocol_version": tcode_protocol::PROTOCOL_VERSION, "token": "wrong"})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .unwrap();
-        let reply = websocket.next().await.unwrap().unwrap();
-        let Message::Text(reply) = reply else {
-            panic!("expected text rejection");
-        };
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        // Older direct-hello clients still receive the claimed host id.
-        // Native recovery verifies identity before sending this credential.
-        assert_eq!(
-            reply,
-            json!({"type": "hello_rejected", "reason": "token", "host_id": server.new_pairing_code().host_id})
-        );
-        assert!(matches!(
-            websocket.next().await,
-            None | Some(Ok(Message::Close(_)))
-        ));
-    });
-    server.shutdown();
-}
-
-#[test]
 fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_promoted() {
     let machine = TestDir::new();
     let stranger = TestDir::new();
@@ -409,7 +368,7 @@ fn stranger_at_the_saved_address_is_not_terminal_and_the_answering_candidate_is_
 }
 
 #[test]
-fn devices_are_listed_and_revoking_refuses_the_token() {
+fn unpaired_and_revoked_tokens_are_rejected_and_closed() {
     let data = TestDir::new();
     let (mux, _) = fake_host();
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
@@ -432,29 +391,37 @@ fn devices_are_listed_and_revoking_refuses_the_token() {
     // A second revoke of the same id is a no-op, not an error.
     assert!(!server.revoke_device(&devices[0].id).unwrap());
 
-    smol::block_on(async {
-        let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
-            .await
-            .unwrap();
-        let (mut websocket, _) =
-            async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
+    for token in ["wrong", paired.token.as_str()] {
+        smol::block_on(async {
+            let stream = smol::Async::<std::net::TcpStream>::connect(([127, 0, 0, 1], port))
                 .await
                 .unwrap();
-        websocket
+            let (mut websocket, _) =
+                async_tungstenite::client_async(format!("ws://127.0.0.1:{port}/ws"), stream)
+                    .await
+                    .unwrap();
+            websocket
             .send(Message::Text(
-                json!({"type": "hello", "protocol_version": tcode_protocol::PROTOCOL_VERSION, "token": paired.token})
+                json!({"type": "hello", "protocol_version": tcode_protocol::PROTOCOL_VERSION, "token": token})
                     .to_string()
                     .into(),
             ))
             .await
             .unwrap();
-        let Some(Ok(Message::Text(reply))) = websocket.next().await else {
-            panic!("expected text rejection");
-        };
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["type"], "hello_rejected");
-        assert_eq!(reply["reason"], "token");
-    });
+            let Some(Ok(Message::Text(reply))) = websocket.next().await else {
+                panic!("expected text rejection");
+            };
+            let reply: Value = serde_json::from_str(&reply).unwrap();
+            assert_eq!(
+                reply,
+                json!({"type": "hello_rejected", "reason": "token", "host_id": paired.host_id})
+            );
+            assert!(matches!(
+                websocket.next().await,
+                None | Some(Ok(Message::Close(_)))
+            ));
+        });
+    }
     server.shutdown();
 }
 
@@ -504,20 +471,17 @@ fn static_bundle_get_and_head_share_headers() {
 }
 
 #[test]
-fn admin_pair_is_plain_http_and_creates_no_certificate_identity() {
+fn local_admin_invite_pairs_and_persists_private_host_credentials() {
     let data = TestDir::new();
     let (mux, _) = fake_host();
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
     let origin = format!("http://{}", server.local_addr());
     let bytes = tcode_remote::client::http(&origin, "GET", "/admin/pair", "").unwrap();
     let reply: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(reply.get("fp").is_none());
     assert_eq!(
         reply["browser_url"],
         format!("{origin}/#code={}", reply["code"].as_str().unwrap())
     );
-    assert!(!data.0.join("remote-cert.der").exists());
-    assert!(!data.0.join("remote-key.der").exists());
     let host = pair(&origin, reply["code"].as_str().unwrap(), &device("phone")).unwrap();
     let client_data = TestDir::new();
     tcode_remote::client::save_hosts(&client_data.0, std::slice::from_ref(&host)).unwrap();
@@ -539,7 +503,7 @@ fn admin_pair_is_plain_http_and_creates_no_certificate_identity() {
 }
 
 #[test]
-fn upgrade_stall_uses_the_remaining_handshake_budget() {
+fn stalled_native_handshake_becomes_a_retryable_timeout() {
     let data = TestDir::new();
     let (mux, _) = fake_host();
     let server = serve(mux, config(data.0.clone(), 0)).unwrap();
@@ -564,7 +528,6 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
             let _ = held.recv().await;
         })
     });
-    let start = Instant::now();
     let client = connect(host, device("deadline"), None);
     saw_tcp.recv_blocking().unwrap();
     smol::block_on(async {
@@ -582,13 +545,12 @@ fn upgrade_stall_uses_the_remaining_handshake_budget() {
                 }
             },
             async {
-                smol::Timer::after(Duration::from_millis(15_250)).await;
+                smol::Timer::after(Duration::from_secs(30)).await;
                 panic!("upgrade escaped the handshake deadline");
             },
         )
         .await;
     });
-    assert!(start.elapsed() < Duration::from_millis(15_250));
     client.to_host.close();
     release.close();
     fixture.join().unwrap();

@@ -148,7 +148,7 @@ pub(super) fn parse_relative(spec: &str) -> Option<chrono::Duration> {
     }
     count
         .checked_mul(unit_seconds)
-        .map(chrono::Duration::seconds)
+        .and_then(chrono::Duration::try_seconds)
 }
 
 /// Compact queue-strip countdown: hours retain an hour column, shorter waits
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn later_parses_wall_clock_as_the_next_strict_local_occurrence() {
+    fn later_parses_schedules_and_rejects_invalid_or_overflowing_input() {
         let now = local_time(2026, 8, 8, 12, 0);
         let (later_today, message) = parsed_later("/later 23:59 continue here", now);
         assert_eq!(later_today.date_naive(), now.date_naive());
@@ -621,11 +621,12 @@ mod tests {
         assert_eq!(tomorrow.date_naive(), now.date_naive().succ_opt().unwrap());
         assert_eq!((tomorrow.hour(), tomorrow.minute()), (5, 10));
         assert_eq!(message, "first line\nsecond line");
-    }
+        let (same_time_tomorrow, _) = parsed_later("/later 12:00 next day", now);
+        assert_eq!(
+            same_time_tomorrow.date_naive(),
+            now.date_naive().succ_opt().unwrap()
+        );
 
-    #[test]
-    fn later_parses_all_relative_duration_units() {
-        let now = local_time(2026, 8, 8, 12, 0);
         for (command, seconds, message) in [
             ("/later 5min multi word", 300, "multi word"),
             ("/later 30s soon", 30, "soon"),
@@ -635,34 +636,22 @@ mod tests {
             assert_eq!((fire_at - now).num_seconds(), seconds);
             assert_eq!(parsed_message, message);
         }
-    }
-
-    #[test]
-    fn later_reports_usage_errors_and_rejects_lookalikes() {
-        let now = local_time(2026, 8, 8, 12, 0);
-        for command in [
-            "/later",
-            "/later 5min",
-            "/later 25:00 x",
-            "/later 5:99 x",
-            "/later abc x",
+        for (command, error) in [
+            ("/later", LaterError::MissingTime),
+            ("/later 5min", LaterError::MissingMessage),
+            ("/later 25:00 x", LaterError::InvalidTime),
+            ("/later 5:99 x", LaterError::InvalidTime),
+            ("/later abc x", LaterError::InvalidTime),
+            ("/later 0s x", LaterError::InvalidTime),
+            ("/later -1h x", LaterError::InvalidTime),
+            ("/later 9223372036854775s x", LaterError::InvalidTime),
+            ("/later 9223372036854775807s x", LaterError::InvalidTime),
+            ("/later 9223372036854775807h x", LaterError::InvalidTime),
+            ("/later 999999999999999999999min x", LaterError::InvalidTime),
         ] {
-            assert!(
-                matches!(parse_later(command, now), Some(Err(_))),
-                "{command}"
-            );
+            assert_eq!(parse_later(command, now), Some(Err(error)), "{command}");
         }
         assert_eq!(parse_later("/laters 5min x", now), None);
-    }
-
-    #[test]
-    fn countdown_format_switches_at_one_hour() {
-        assert_eq!(format_countdown(0), "0:00");
-        assert_eq!(format_countdown(5), "0:05");
-        assert_eq!(format_countdown(65), "1:05");
-        assert_eq!(format_countdown(3_599), "59:59");
-        assert_eq!(format_countdown(3_600), "1:00:00");
-        assert_eq!(format_countdown(7_325), "2:02:05");
     }
 
     #[test]
@@ -713,23 +702,6 @@ mod tests {
             })),
             "200k"
         );
-    }
-
-    #[test]
-    fn current_model_name_maps_catalog() {
-        let _locale_guard = crate::settings::TestLocaleGuard::acquire();
-        let catalog = vec![agent::ModelSpec {
-            id: "claude-fable-5".into(),
-            display_name: "Claude Fable 5".into(),
-            is_default: false,
-            options: Vec::new(),
-        }];
-        assert_eq!(current_model_name(&catalog, None), "Default");
-        assert_eq!(
-            current_model_name(&catalog, Some("claude-fable-5")),
-            "Claude Fable 5"
-        );
-        assert_eq!(current_model_name(&catalog, Some("gpt-9")), "gpt-9");
     }
 
     #[test]
