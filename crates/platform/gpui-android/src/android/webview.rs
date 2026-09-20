@@ -1,7 +1,9 @@
 //! JNI transport for activity-owned browser children. No GPUI entities cross threads.
 use futures::channel::{mpsc, oneshot};
 use jni::{
-    JNIEnv, JavaVM,
+    EnvUnowned, JavaVM,
+    errors::LogErrorAndDefault,
+    jni_sig, jni_str,
     objects::{JByteArray, JObject, JString, JValue},
     sys::{jint, jlong},
 };
@@ -125,23 +127,27 @@ fn dispatch(id: u64, request: u64, operation: String, value: String, bounds: [i3
     };
     let callback_app = app.clone();
     app.run_on_java_main_thread(Box::new(move || {
-        let result = (|| -> Result<(), String> {
-            // SAFETY: the AndroidApp retains the activity and its VM for this callback.
-            let vm = unsafe { JavaVM::from_raw(callback_app.vm_as_ptr().cast()) }
-                .map_err(|e| e.to_string())?;
-            let mut env = vm.get_env().map_err(|e| e.to_string())?;
-            let result = env.with_local_frame(16, |env| -> jni::errors::Result<()> {
+        // SAFETY: the AndroidApp retains the activity and its VM for this callback.
+        let vm = unsafe { JavaVM::from_raw(callback_app.vm_as_ptr().cast()) };
+        // The UI thread is already attached, so this only pushes a local frame.
+        let result = vm
+            .attach_current_thread(|env| -> jni::errors::Result<()> {
                 // SAFETY: this is the live NativeActivity instance; do not delete its reference.
-                let activity = unsafe { JObject::from_raw(callback_app.activity_as_ptr().cast()) };
+                let activity =
+                    unsafe { JObject::from_raw(env, callback_app.activity_as_ptr().cast()) };
                 let host = env
-                    .get_field(&activity, "previewHost", "Lcom/tryanks/tcode/PreviewHost;")?
+                    .get_field(
+                        &activity,
+                        jni_str!("previewHost"),
+                        jni_sig!("Lcom/tryanks/tcode/PreviewHost;"),
+                    )?
                     .l()?;
                 let operation = env.new_string(&operation)?;
                 let value = env.new_string(&value)?;
                 env.call_method(
                     host,
-                    "command",
-                    "(JJLjava/lang/String;Ljava/lang/String;IIII)V",
+                    jni_str!("command"),
+                    jni_sig!("(JJLjava/lang/String;Ljava/lang/String;IIII)V"),
                     &[
                         JValue::Long(id as i64),
                         JValue::Long(request as i64),
@@ -152,14 +158,11 @@ fn dispatch(id: u64, request: u64, operation: String, value: String, bounds: [i3
                         JValue::Int(bounds[2]),
                         JValue::Int(bounds[3]),
                     ],
-                )?;
+                )
+                .inspect_err(|_| env.exception_clear())?;
                 Ok(())
-            });
-            if result.is_err() {
-                let _ = env.exception_clear();
-            }
-            result.map_err(|e| e.to_string())
-        })();
+            })
+            .map_err(|e| e.to_string());
         if let Err(error) = result {
             failed(id, request, error);
         }
@@ -167,51 +170,57 @@ fn dispatch(id: u64, request: u64, operation: String, value: String, bounds: [i3
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_tryanks_tcode_PreviewHost_nativeResult(
-    mut env: JNIEnv,
-    _class: JObject,
+pub extern "system" fn Java_com_tryanks_tcode_PreviewHost_nativeResult<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
     request: jlong,
-    value: JString,
-    png: JByteArray,
-    error: JString,
+    value: JString<'local>,
+    png: JByteArray<'local>,
+    error: JString<'local>,
 ) {
-    let result = if !error.is_null() {
-        Err(env
-            .get_string(&error)
-            .map(String::from)
-            .unwrap_or_else(|e| e.to_string()))
-    } else if !png.is_null() {
-        env.convert_byte_array(&png)
-            .map(Reply::Png)
-            .map_err(|e| e.to_string())
-    } else {
-        env.get_string(&value)
-            .map(|value| Reply::Json(value.into()))
-            .map_err(|e| e.to_string())
-    };
-    complete(request as u64, result);
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let result = if !error.is_null() {
+            Err(error.try_to_string(env).unwrap_or_else(|e| e.to_string()))
+        } else if !png.is_null() {
+            env.convert_byte_array(&png)
+                .map(Reply::Png)
+                .map_err(|e| e.to_string())
+        } else {
+            value
+                .try_to_string(env)
+                .map(Reply::Json)
+                .map_err(|e| e.to_string())
+        };
+        complete(request as u64, result);
+        Ok(())
+    })
+    .resolve::<LogErrorAndDefault>()
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_tryanks_tcode_PreviewHost_nativeEvent(
-    mut env: JNIEnv,
-    _class: JObject,
+pub extern "system" fn Java_com_tryanks_tcode_PreviewHost_nativeEvent<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JObject<'local>,
     id: jlong,
     kind: jint,
-    url: JString,
-    title: JString,
+    url: JString<'local>,
+    title: JString<'local>,
     code: jint,
-    message: JString,
+    message: JString<'local>,
 ) {
-    let mut string = |value: &JString| env.get_string(value).map(String::from).unwrap_or_default();
-    let event = Event {
-        kind,
-        url: string(&url),
-        title: string(&title),
-        code,
-        message: string(&message),
-    };
-    if let Some(sender) = VIEWS.lock().get(&(id as u64)) {
-        let _ = sender.unbounded_send(event);
-    }
+    env.with_env(|env| -> jni::errors::Result<()> {
+        let string = |value: &JString| value.try_to_string(env).unwrap_or_default();
+        let event = Event {
+            kind,
+            url: string(&url),
+            title: string(&title),
+            code,
+            message: string(&message),
+        };
+        if let Some(sender) = VIEWS.lock().get(&(id as u64)) {
+            let _ = sender.unbounded_send(event);
+        }
+        Ok(())
+    })
+    .resolve::<LogErrorAndDefault>()
 }

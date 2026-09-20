@@ -2,8 +2,10 @@ use crate::text_input::TextInputState;
 use android_activity::AndroidApp;
 use gpui::TextInputConfiguration;
 use jni::{
-    JavaVM,
+    JavaVM, jni_sig, jni_str,
     objects::{JObject, JString, JValue},
+    signature::MethodSignature,
+    strings::JNIStr,
 };
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -61,9 +63,9 @@ enum OwnedArgument {
 }
 
 impl OwnedArgument {
-    fn as_jvalue<'a>(&self, text: &'a JObject<'a>) -> JValue<'a, 'a> {
+    fn as_jvalue<'a>(&self, text: &'a JObject<'a>) -> JValue<'a> {
         match self {
-            Self::Bool(value) => JValue::Bool(u8::from(*value)),
+            Self::Bool(value) => JValue::Bool(*value),
             Self::Int(value) => JValue::Int(*value),
             Self::Long(value) => JValue::Long(*value as i64),
             Self::Text(_) => JValue::Object(text),
@@ -71,63 +73,57 @@ impl OwnedArgument {
     }
 }
 
-fn with_activity(method: &'static str, signature: &'static str, args: Vec<OwnedArgument>) {
+fn with_activity(
+    method: &'static JNIStr,
+    signature: MethodSignature<'static, 'static>,
+    args: Vec<OwnedArgument>,
+) {
     let Some(app) = APP.lock().clone() else {
         return;
     };
     let callback_app = app.clone();
     app.run_on_java_main_thread(Box::new(move || {
         // SAFETY: Android owns this VM for the duration of the process.
-        let Ok(vm) = (unsafe { JavaVM::from_raw(callback_app.vm_as_ptr().cast()) }) else {
-            log::error!("unable to access Android JavaVM");
-            return;
-        };
-        let Ok(mut env) = vm.get_env() else {
-            log::error!("Android UI thread is not attached to JavaVM");
-            return;
-        };
-        // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
-        let activity = unsafe { JObject::from_raw(callback_app.activity_as_ptr().cast()) };
-        let strings = args
-            .iter()
-            .map(|arg| match arg {
-                OwnedArgument::Text(Some(text)) => env.new_string(text).map(JObject::from),
-                _ => Ok(JObject::null()),
-            })
-            .collect::<jni::errors::Result<Vec<_>>>();
-        let strings = match strings {
-            Ok(strings) => strings,
-            Err(error) => {
-                log::error!("JNI {method} string allocation failed: {error}");
-                let _ = env.exception_clear();
-                return;
-            }
-        };
-        let args = args
-            .iter()
-            .zip(&strings)
-            .map(|(arg, text)| arg.as_jvalue(text))
-            .collect::<Vec<_>>();
-        if let Err(error) = env.call_method(&activity, method, signature, &args) {
+        let vm = unsafe { JavaVM::from_raw(callback_app.vm_as_ptr().cast()) };
+        // The UI thread is already attached, so this only pushes a local frame.
+        let result = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
+            let activity = unsafe { JObject::from_raw(env, callback_app.activity_as_ptr().cast()) };
+            let strings = args
+                .iter()
+                .map(|arg| match arg {
+                    OwnedArgument::Text(Some(text)) => env.new_string(text).map(JObject::from),
+                    _ => Ok(JObject::null()),
+                })
+                .collect::<jni::errors::Result<Vec<_>>>()?;
+            let args = args
+                .iter()
+                .zip(&strings)
+                .map(|(arg, text)| arg.as_jvalue(text))
+                .collect::<Vec<_>>();
+            env.call_method(&activity, method, &signature, &args)
+                .inspect_err(|_| env.exception_clear())?;
+            Ok(())
+        });
+        if let Err(error) = result {
             log::error!("JNI {method} failed: {error}");
-            let _ = env.exception_clear();
         }
     }));
 }
 
 pub(crate) fn show_keyboard() {
-    with_activity("gpuiShowKeyboard", "()V", Vec::new());
+    with_activity(jni_str!("gpuiShowKeyboard"), jni_sig!("()V"), Vec::new());
 }
 
 pub(crate) fn hide_keyboard() {
-    with_activity("gpuiHideKeyboard", "()V", Vec::new());
+    with_activity(jni_str!("gpuiHideKeyboard"), jni_sig!("()V"), Vec::new());
 }
 
 pub(crate) fn configure_input(configuration: TextInputConfiguration) {
     // GPUI has no separate multiline flag; Enter explicitly requests a line break.
     with_activity(
-        "gpuiConfigureInput",
-        "(ZIZIZ)V",
+        jni_str!("gpuiConfigureInput"),
+        jni_sig!("(ZIZIZ)V"),
         vec![
             OwnedArgument::Bool(configuration.autocorrect),
             OwnedArgument::Int(configuration.autocapitalize as i32),
@@ -139,13 +135,13 @@ pub(crate) fn configure_input(configuration: TextInputConfiguration) {
 }
 
 pub(crate) fn finish_activity() {
-    with_activity("gpuiFinish", "()V", Vec::new());
+    with_activity(jni_str!("gpuiFinish"), jni_sig!("()V"), Vec::new());
 }
 
 pub(crate) fn open_url(url: &str) {
     with_activity(
-        "gpuiOpenUrl",
-        "(Ljava/lang/String;)V",
+        jni_str!("gpuiOpenUrl"),
+        jni_sig!("(Ljava/lang/String;)V"),
         vec![OwnedArgument::Text(Some(url.to_owned()))],
     );
 }
@@ -153,23 +149,31 @@ pub(crate) fn open_url(url: &str) {
 pub(crate) fn read_clipboard() -> Option<String> {
     let app = APP.lock().clone()?;
     // SAFETY: Android owns this VM for the duration of the process.
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }.ok()?;
-    let mut env = vm.attach_current_thread().ok()?;
-    // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
-    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-    let object = match env.call_method(&activity, "gpuiReadClipboard", "()Ljava/lang/String;", &[])
-    {
-        Ok(value) => value.l().ok()?,
-        Err(error) => {
-            log::error!("JNI gpuiReadClipboard failed: {error}");
-            let _ = env.exception_clear();
-            return None;
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| {
+        // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let object = env
+            .call_method(
+                &activity,
+                jni_str!("gpuiReadClipboard"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )
+            .inspect_err(|error| {
+                log::error!("JNI gpuiReadClipboard failed: {error}");
+                env.exception_clear();
+            })?
+            .l()?;
+        if object.is_null() {
+            return Ok(None);
         }
-    };
-    if object.is_null() {
-        return None;
-    }
-    env.get_string(&JString::from(object)).ok().map(Into::into)
+        JString::cast_local(env, object)?
+            .try_to_string(env)
+            .map(Some)
+    })
+    .ok()
+    .flatten()
 }
 
 pub(crate) fn write_clipboard(text: String) {
@@ -179,28 +183,22 @@ pub(crate) fn write_clipboard(text: String) {
     let callback_app = app.clone();
     app.run_on_java_main_thread(Box::new(move || {
         // SAFETY: Android owns this VM for the duration of the process.
-        let Ok(vm) = (unsafe { JavaVM::from_raw(callback_app.vm_as_ptr().cast()) }) else {
-            log::error!("unable to access Android JavaVM");
-            return;
-        };
-        let Ok(mut env) = vm.get_env() else {
-            log::error!("Android UI thread is not attached to JavaVM");
-            return;
-        };
-        // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
-        let activity = unsafe { JObject::from_raw(callback_app.activity_as_ptr().cast()) };
-        let Ok(text) = env.new_string(text) else {
-            log::error!("unable to allocate Android clipboard string");
-            return;
-        };
-        if let Err(error) = env.call_method(
-            &activity,
-            "gpuiWriteClipboard",
-            "(Ljava/lang/String;)V",
-            &[JValue::Object(text.as_ref())],
-        ) {
+        let vm = unsafe { JavaVM::from_raw(callback_app.vm_as_ptr().cast()) };
+        let result = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            // SAFETY: `activity_as_ptr` is the live NativeActivity instance.
+            let activity = unsafe { JObject::from_raw(env, callback_app.activity_as_ptr().cast()) };
+            let text = env.new_string(text)?;
+            env.call_method(
+                &activity,
+                jni_str!("gpuiWriteClipboard"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(text.as_ref())],
+            )
+            .inspect_err(|_| env.exception_clear())?;
+            Ok(())
+        });
+        if let Err(error) = result {
             log::error!("JNI gpuiWriteClipboard failed: {error}");
-            let _ = env.exception_clear();
         }
     }));
 }
@@ -233,8 +231,8 @@ pub(crate) fn sync_input(revision: u64, serial: u64, state: Option<TextInputStat
     let selection = state.as_ref().map_or(0..0, |state| state.selection.clone());
     let marked = state.as_ref().and_then(|state| state.marked.clone());
     with_activity(
-        "gpuiSyncInput",
-        "(JJLjava/lang/String;IIII)V",
+        jni_str!("gpuiSyncInput"),
+        jni_sig!("(JJLjava/lang/String;IIII)V"),
         vec![
             OwnedArgument::Long(revision),
             OwnedArgument::Long(serial),
@@ -277,29 +275,30 @@ pub(crate) fn rasterize_emoji(glyph: u32, size: f32) -> anyhow::Result<Option<Ve
         .clone()
         .ok_or_else(|| anyhow::anyhow!("Android host not initialized"))?;
     // SAFETY: Android owns the VM and live activity for the lifetime of this app handle.
-    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
-    let mut env = vm.attach_current_thread()?;
-    let result = env.with_local_frame(4, |env| -> anyhow::Result<Option<Vec<i32>>> {
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    vm.attach_current_thread(|env| -> anyhow::Result<Option<Vec<i32>>> {
         // SAFETY: the app handle keeps this NativeActivity alive.
-        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-        let object = env
-            .call_method(
-                &activity,
-                "gpuiRasterizeEmoji",
-                "(IF)[I",
-                &[JValue::Int(glyph.try_into()?), JValue::Float(size)],
-            )?
-            .l()?;
-        if object.is_null() {
-            return Ok(None);
+        let activity = unsafe { JObject::from_raw(env, app.activity_as_ptr().cast()) };
+        let result = (|| -> anyhow::Result<Option<Vec<i32>>> {
+            let object = env
+                .call_method(
+                    &activity,
+                    jni_str!("gpuiRasterizeEmoji"),
+                    jni_sig!("(IF)[I"),
+                    &[JValue::Int(glyph.try_into()?), JValue::Float(size)],
+                )?
+                .l()?;
+            if object.is_null() {
+                return Ok(None);
+            }
+            let array = env.cast_local::<jni::objects::JIntArray>(object)?;
+            let mut pixels = vec![0; array.len(env)?];
+            array.get_region(env, 0, &mut pixels)?;
+            Ok(Some(pixels))
+        })();
+        if result.is_err() {
+            env.exception_clear();
         }
-        let array = jni::objects::JIntArray::from(object);
-        let mut pixels = vec![0; env.get_array_length(&array)? as usize];
-        env.get_int_array_region(&array, 0, &mut pixels)?;
-        Ok(Some(pixels))
-    });
-    if result.is_err() {
-        let _ = env.exception_clear();
-    }
-    result
+        result
+    })
 }
