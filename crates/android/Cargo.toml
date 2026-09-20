@@ -21,4 +21,4 @@ async-channel = "2"
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 futures = "0.3"
-jni = "0.21"
+jni = "0.22"
