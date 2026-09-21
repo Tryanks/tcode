@@ -441,7 +441,11 @@ public final class GpuiActivity extends NativeActivity {
             outAttrs.initialSelStart = Selection.getSelectionStart(editable);
             outAttrs.initialSelEnd = Selection.getSelectionEnd(editable);
             if (connection != null) connection.closeConnection();
-            connection = new GpuiInputConnection(this, editable, this::publishInput) {
+            GpuiInputConnection.Clipboard clipboard = new GpuiInputConnection.Clipboard() {
+                @Override public String read() { return gpuiReadClipboard(); }
+                @Override public void write(String text) { gpuiWriteClipboard(text); }
+            };
+            connection = new GpuiInputConnection(this, editable, clipboard, this::publishInput) {
                 @Override public boolean commitText(CharSequence text, int cursor) {
                     if (getEditable() == null) return false;
                     if (!textEditable) nativeCommitText(text.toString());
