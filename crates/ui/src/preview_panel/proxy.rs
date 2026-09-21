@@ -1,4 +1,5 @@
-//! Desktop proxy configuration and platform authentication absent from wry's endpoint type.
+//! Desktop proxy configuration absent from wry's endpoint type. The bridge
+//! asks for no credentials: the paired connection is the authority.
 use tcode_remote::preview::ProxyEntry;
 
 pub(super) fn builder<'a>(
@@ -34,51 +35,4 @@ pub(super) fn builder<'a>(
             host.origin
         )))
     }
-}
-
-#[cfg(target_os = "windows")]
-pub(super) fn authenticate(raw: &wry::WebView, host: Option<&ProxyEntry>) -> Result<(), String> {
-    use webview2_com::{
-        BasicAuthenticationRequestedEventHandler,
-        Microsoft::Web::WebView2::Win32::ICoreWebView2_10, take_pwstr,
-    };
-    use windows_core::{HSTRING, Interface as _, PWSTR};
-    use wry::WebViewExtWindows as _;
-    let Some(host) = host.cloned() else {
-        return Ok(());
-    };
-    let webview = raw
-        .webview()
-        .cast::<ICoreWebView2_10>()
-        .map_err(|e| e.to_string())?;
-    let handler = BasicAuthenticationRequestedEventHandler::create(Box::new(move |_, args| {
-        let Some(args) = args else {
-            return Ok(());
-        };
-        // SAFETY: WebView2 owns the event arguments throughout this callback.
-        unsafe {
-            let mut uri = PWSTR::null();
-            args.Uri(&mut uri)?;
-            let uri = take_pwstr(uri);
-            let mut challenge = PWSTR::null();
-            args.Challenge(&mut challenge)?;
-            let challenge = take_pwstr(challenge);
-            if url::Url::parse(&uri)
-                .ok()
-                .is_some_and(|url| url.origin().ascii_serialization() == host.origin)
-                && challenge.contains("tcode-preview")
-            {
-                let response = args.Response()?;
-                response.SetUserName(&HSTRING::from("tcode"))?;
-                response.SetPassword(&HSTRING::from(&host.token))?;
-            } else {
-                args.SetCancel(true)?;
-            }
-        }
-        Ok(())
-    }));
-    let mut token = 0;
-    // SAFETY: the webview retains the callback until its owning view is destroyed.
-    unsafe { webview.add_BasicAuthenticationRequested(&handler, &mut token) }
-        .map_err(|e| e.to_string())
 }
