@@ -985,6 +985,11 @@ pub struct Settings {
     /// Ids of project groups the user has collapsed in the sidebar.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collapsed_projects: Vec<String>,
+    /// Ids of parent threads whose child rows are folded in the thread list.
+    /// Host-owned so every client shows the same list; reseeded at host
+    /// start so threads that already had children begin folded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed_threads: Vec<String>,
     /// Model ids the user has starred in the model picker (favorites float to
     /// the top and are shown first under the star filter).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1076,6 +1081,7 @@ impl Default for Settings {
             title_generation: TitleGenerationSettings::default(),
             fallback_review: FallbackReviewSettings::default(),
             collapsed_projects: Vec::new(),
+            collapsed_threads: Vec::new(),
             favorite_models: Vec::new(),
             project_sort: ProjectSort::default(),
             sidebar_layout: SidebarLayout::default(),

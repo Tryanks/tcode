@@ -30,6 +30,14 @@ impl AppState {
                     "This terminal is no longer available.",
                 ));
             }
+            Command::SetThreadCollapsed { session_id, .. }
+                if !self.sessions.iter().any(|meta| &meta.id == session_id) =>
+            {
+                return Err(error(
+                    "unknown_session",
+                    "This thread is no longer available on the host.",
+                ));
+            }
             Command::ToggleProjectCollapsed { project_id }
             | Command::SetProjectIcon { project_id, .. }
             | Command::DeleteProject { project_id }
