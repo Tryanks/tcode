@@ -31,7 +31,6 @@ fn main() {
         .expect("device identity")
         .with_options(EndpointOptions {
             official: relay_only,
-            lan_discovery: false,
         });
     device.set_details("example device".into(), None);
     println!("device id {}", device.endpoint_id());

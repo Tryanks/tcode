@@ -10,12 +10,11 @@ pub mod host;
 pub mod hosts;
 pub mod identity;
 pub mod manifest;
-mod mdns;
 pub mod mux;
 mod runtime;
 pub mod wire;
 
-pub use client::{NearbyHost, PairError, browse, browse_blocking, connect, pair, pair_blocking};
+pub use client::{PairError, connect, pair, pair_blocking};
 pub use host::{
     DeviceInfo, EndpointAddrSnapshot, HostConfig, LiveInfo, PairingCode, TraverseHost, TraverseMode,
 };

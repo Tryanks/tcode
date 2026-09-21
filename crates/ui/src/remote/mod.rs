@@ -220,20 +220,12 @@ impl RemotePanel {
     }
 
     fn discover(&mut self, cx: &mut Context<Self>) {
-        let Some(host) = self.client(cx) else {
+        if self.client(cx).is_none() {
             return;
-        };
+        }
         let generation = self.form.restart();
+        self.form.accept_browse(generation, Vec::new());
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let found = host.browse_hosts().await;
-            let _ = this.update(cx, |panel, cx| {
-                if panel.form.accept_browse(generation, found) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     /// Read an invite off the camera. The scanned link goes through the same
