@@ -1,5 +1,5 @@
-use tcode_client::host::{ClientHost, HostFuture, Transport, persistent_device_id};
-use tcode_client::pairing::{PairInvite, PairedHost};
+use tcode_client::host::{ClientHost, Transport, persistent_device_id};
+use tcode_client::pairing::PairedHost;
 use wasm_bindgen::{JsCast as _, JsValue};
 
 /// A browser tab served by a machine's browser listener. It is signed in
@@ -156,14 +156,9 @@ impl ClientHost for WebHost {
         }
     }
 
-    fn fixed_pairing_endpoint(&self) -> Option<String> {
-        window().location().origin().ok()
-    }
-
-    /// A browser reaches only the machine that served it, by password; a
-    /// second machine needs the Tcode app.
-    fn pair(&self, _invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
-        Box::pin(async { Err("browser pairing is password login only".into()) })
+    /// A second machine needs the Tcode app.
+    fn fixed_machine(&self) -> bool {
+        true
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {

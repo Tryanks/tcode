@@ -94,6 +94,19 @@ impl AuthStore {
         self.password.is_some()
     }
 
+    /// Whether a password is set in `data_dir`, without creating a store
+    /// there.
+    pub fn password_configured_at(data_dir: &Path) -> io::Result<bool> {
+        match fs::read(data_dir.join("remote.json")) {
+            Ok(bytes) => {
+                let store: Self = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                Ok(store.password_configured())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn set_password(&mut self, password: &str, revoke_tokens: bool) -> io::Result<()> {
         if password.chars().count() < 8 || password.len() > 1024 {
             return Err(io::Error::new(

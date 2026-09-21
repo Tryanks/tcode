@@ -7,13 +7,14 @@
 //! ```
 //!
 //! With `TRAVERSE_RELAY_ONLY=1` the device drops the invite's direct
-//! addresses and uses the official relay and lookup services instead, which
-//! exercises the same path a phone on another network takes.
+//! addresses and reaches the machine through its Traverse instance's relay
+//! and lookup, which exercises the same path a phone on another network
+//! takes.
 use std::time::{Duration, Instant};
 
 use tcode_client::ConnectionState;
 use tcode_client::pairing::parse_pair_url;
-use tcode_traverse::{DeviceIdentity, EndpointOptions};
+use tcode_traverse::DeviceIdentity;
 
 fn main() {
     env_logger::init();
@@ -27,11 +28,7 @@ fn main() {
         invite.addrs.clear();
     }
     let data_dir = std::env::temp_dir().join("tcode-traverse-example-device");
-    let device = DeviceIdentity::load_or_create(&data_dir)
-        .expect("device identity")
-        .with_options(EndpointOptions {
-            official: relay_only,
-        });
+    let device = DeviceIdentity::load_or_create(&data_dir).expect("device identity");
     device.set_details("example device".into(), None);
     println!("device id {}", device.endpoint_id());
     let started = Instant::now();

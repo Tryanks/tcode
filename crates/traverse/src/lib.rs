@@ -32,7 +32,7 @@ pub use client::{AttachmentTunnels, PairError, connect, pair, pair_blocking};
 pub use host::{
     DeviceInfo, EndpointAddrSnapshot, HostConfig, Invitation, TraverseHost, TraverseMode,
 };
-pub use identity::{DeviceIdentity, EndpointOptions};
+pub use identity::DeviceIdentity;
 pub use mux::{Connection, HostMux};
 #[cfg(feature = "native")]
 pub use native_host::NativeClientHost;

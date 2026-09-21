@@ -7,7 +7,6 @@ use crate::widgets::input::InputState;
 /// The form holds one thing: the invitation link a machine shows, scanned or
 /// pasted. The link is the whole secret, so there is nothing else to type.
 pub struct PairForm {
-    fixed_endpoint: Option<String>,
     /// Paired but waiting for the user to connect.
     pub paired: Option<PairedHost>,
     /// The `tcode://pair?…` link.
@@ -21,9 +20,7 @@ pub struct PairForm {
 }
 
 impl PairForm {
-    /// `fixed` is [`tcode_client::host::ClientHost::fixed_pairing_endpoint`]:
-    /// `Some` fixes the origin, which then takes only the link's secret.
-    pub fn new(fixed: Option<String>, window: &mut Window, cx: &mut App) -> Self {
+    pub fn new(window: &mut Window, cx: &mut App) -> Self {
         Self {
             paired: None,
             invitation: cx.new(|cx| {
@@ -33,31 +30,13 @@ impl PairForm {
             busy: false,
             error: None,
             generation: 0,
-            fixed_endpoint: fixed,
             listening: false,
         }
     }
 
-    /// Whether this client can only pair with one endpoint (a browser).
-    pub fn has_fixed_endpoint(&self) -> bool {
-        self.fixed_endpoint.is_some()
-    }
-
-    /// The invite in the field, once it is one. A fixed-origin client keeps
-    /// its own origin and adopts only the link's secret.
+    /// The invite in the field, once it is one.
     pub fn request(&self, cx: &App) -> Option<PairInvite> {
-        let invite = parse_pair_url(&self.invitation.read(cx).value())?;
-        if self.fixed_endpoint.is_some() {
-            return Some(PairInvite {
-                host_id: String::new(),
-                name: String::new(),
-                traverse: None,
-                relay: None,
-                addrs: Vec::new(),
-                ..invite
-            });
-        }
-        Some(invite)
+        parse_pair_url(&self.invitation.read(cx).value())
     }
 
     /// Whether the field holds something that is not an invitation, so the
@@ -136,42 +115,18 @@ impl PairForm {
     }
 }
 
-/// Interpret known transport reasons here, where the recovery advice can be
-/// localized. A lost reply cannot establish whether a single-use code was used.
+/// Interpret the transport's pairing failures here, where the recovery
+/// advice can be localized. The wording is `PairError`'s `Display` in
+/// `crates/traverse/src/client.rs`; anything else is shown as it is.
 pub fn pair_error(error: &str, address: &str) -> String {
     let lower = error.to_ascii_lowercase();
     match lower.trim() {
-        "could not authenticate the machine at any invited address"
-        | "pairing identity changed" => crate::tr!("hosts.pair.identity_error").into_owned(),
-        "invalid pairing invitation"
-        | "missing pairing identity"
-        | "invalid pairing identity"
-        | "invalid insecure pairing alternative"
-        | "invalid pairing request"
-        | "malformed pairing request" => crate::tr!("hosts.pair.bad_invite").into_owned(),
-        "incomplete pairing response"
-        | "pairing response timed out"
-        | "invalid pairing response"
-        | "incomplete http response"
-        | "invalid http response" => crate::tr!("hosts.pair.unconfirmed").into_owned(),
+        "invalid or expired invitation" => crate::tr!("hosts.pair.rejected").into_owned(),
+        "pairing_disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
         _ if lower.starts_with("invalid pairing response") => {
             crate::tr!("hosts.pair.unconfirmed").into_owned()
         }
-        "pairing_disabled" | "pairing disabled" => crate::tr!("hosts.pair.disabled").into_owned(),
-        "pairing rejected" => crate::tr!("hosts.pair.bad_code").into_owned(),
-        _ if lower.contains("403")
-            || lower.contains("401")
-            || lower.contains("expired")
-            || lower.contains("invalid code") =>
-        {
-            // Older HTTP clients retain only the status, so 403 cannot tell
-            // an expired code from a host that disabled new pairings.
-            crate::tr!("hosts.pair.bad_code").into_owned()
-        }
-        _ if ["timeout", "timed out", "refused", "connect", "dns"]
-            .iter()
-            .any(|needle| lower.contains(needle)) =>
-        {
+        _ if lower.starts_with("could not connect to the machine") => {
             crate::tr!("hosts.pair.network_error", address = address).into_owned()
         }
         _ => crate::tr!("hosts.pair.failed", reason = error).into_owned(),
@@ -186,52 +141,39 @@ mod tests {
 
     #[test]
     fn pairing_failures_preserve_the_recovery_action_instead_of_exposing_transport_wording() {
-        for (errors, key) in [
+        for (error, key) in [
+            ("invalid or expired invitation", "hosts.pair.rejected"),
+            ("pairing_disabled", "hosts.pair.disabled"),
             (
-                &[
-                    "could not authenticate the machine at any invited address",
-                    "pairing identity changed",
-                ][..],
-                "hosts.pair.identity_error",
-            ),
-            (
-                &[
-                    "invalid pairing invitation",
-                    "missing pairing identity",
-                    "invalid pairing identity",
-                    "invalid insecure pairing alternative",
-                    "malformed pairing request",
-                ][..],
-                "hosts.pair.bad_invite",
-            ),
-            (
-                &[
-                    "incomplete pairing response",
-                    "pairing response timed out",
-                    "invalid pairing response",
-                    "incomplete HTTP response",
-                ][..],
+                "invalid pairing response: unexpected reply Refused",
                 "hosts.pair.unconfirmed",
             ),
-            (&["pairing_disabled"][..], "hosts.pair.disabled"),
-            (
-                &[
-                    "HTTP/1.1 403 Forbidden",
-                    "HTTP 401",
-                    "invalid or expired pairing code",
-                    "pairing rejected",
-                ][..],
-                "hosts.pair.bad_code",
-            ),
         ] {
-            for error in errors {
-                assert_eq!(
-                    pair_error(error, "192.168.1.161:47420"),
-                    crate::tr!(key).into_owned(),
-                    "wrong recovery advice for {error}",
-                );
-            }
+            assert_eq!(
+                pair_error(error, "ab12cd34"),
+                crate::tr!(key).into_owned(),
+                "wrong recovery advice for {error}",
+            );
         }
+        assert_eq!(
+            pair_error(
+                "could not connect to the machine: connection timed out",
+                "ab12cd34"
+            ),
+            crate::tr!("hosts.pair.network_error", address = "ab12cd34").into_owned()
+        );
+        assert_eq!(
+            pair_error(
+                "the machine could not record the pairing; try again",
+                "ab12cd34"
+            ),
+            crate::tr!(
+                "hosts.pair.failed",
+                reason = "the machine could not record the pairing; try again"
+            )
+            .into_owned(),
+            "an unfamiliar reason is shown as it is"
+        );
     }
 
     fn invite() -> PairInvite {
@@ -249,7 +191,7 @@ mod tests {
     /// anything else in the field is flagged and never sent.
     #[gpui::test]
     fn a_pasted_link_is_the_whole_request_and_anything_else_is_flagged(cx: &mut TestAppContext) {
-        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(None, window, cx)));
+        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(window, cx)));
         let url = tcode_client::pairing::pair_url(&invite());
         cx.update(|window, cx| {
             form.update(cx, |holder, cx| {
@@ -293,64 +235,29 @@ mod tests {
         });
     }
 
-    /// A pasted invite cannot retarget the browser away from its serving
-    /// origin: it keeps the origin and takes only the link's secret.
-    #[gpui::test]
-    fn a_fixed_origin_keeps_its_endpoint(cx: &mut TestAppContext) {
-        let (form, cx) = cx.add_window_view(|window, cx| {
-            Holder(PairForm::new(
-                Some("https://app.example".into()),
-                window,
-                cx,
-            ))
-        });
-        let url = tcode_client::pairing::pair_url(&invite());
-        cx.update(|window, cx| {
-            form.update(cx, |holder, cx| {
-                assert!(holder.0.fill_invite(&url, window, cx), "valid invite");
-            });
-        });
-        form.read_with(cx, |holder, cx| {
-            let form = &holder.0;
-            assert!(form.has_fixed_endpoint());
-            assert_eq!(
-                form.request(cx),
-                Some(PairInvite {
-                    host_id: String::new(),
-                    name: String::new(),
-                    traverse: None,
-                    relay: None,
-                    addrs: Vec::new(),
-                    ..invite()
-                }),
-                "a browser pairs with its own origin and takes only the secret"
-            );
-        });
-    }
-
     /// Pairing outlives the attempt that started it. A reply from a
     /// superseded attempt is dropped, so reopening the form cannot be
     /// retargeted by an answer the user has already moved on from.
     #[gpui::test]
     fn results_from_a_superseded_attempt_are_dropped(cx: &mut TestAppContext) {
-        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(None, window, cx)));
+        let (form, cx) = cx.add_window_view(|window, cx| Holder(PairForm::new(window, cx)));
 
         let stale = form.update(cx, |holder, _| holder.0.restart());
         let current = form.update(cx, |holder, _| holder.0.restart());
         assert_ne!(stale, current);
 
         form.update(cx, |holder, _| {
+            let rejected = || Err("invalid or expired invitation".into());
             assert!(
-                !holder.0.finish_pair(stale, Err("HTTP 403".into()), "a:1"),
+                !holder.0.finish_pair(stale, rejected(), "a:1"),
                 "a pairing answer from the previous attempt must be dropped"
             );
             assert_eq!(holder.0.error, None);
 
-            assert!(holder.0.finish_pair(current, Err("HTTP 403".into()), "a:1"));
+            assert!(holder.0.finish_pair(current, rejected(), "a:1"));
             assert_eq!(
                 holder.0.error.as_deref(),
-                Some(crate::tr!("hosts.pair.bad_code").into_owned().as_str()),
-                "a status-only rejection cannot diagnose an expired or malformed code"
+                Some(crate::tr!("hosts.pair.rejected").into_owned().as_str())
             );
         });
     }
