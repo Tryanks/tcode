@@ -33,8 +33,9 @@ pub use wire::{
     decode_host_line, encode_line,
 };
 
-// Version 4 adds client-generated command deduplication keys.
-pub const PROTOCOL_VERSION: u32 = 4;
+// Version 4 adds client-generated command deduplication keys; version 5 moves
+// authentication into the transport, so hello carries no token.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 #[cfg(test)]
 mod tests;
