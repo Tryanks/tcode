@@ -8,7 +8,7 @@ use qrcode::render::unicode::Dense1x2;
 use tcode_client::pairing::{PairInvite, pair_url, parse_pair_url};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::SessionStore;
-use tcode_traverse::browser::{BrowserConfig, StaticBundle, serve, set_password};
+use tcode_traverse::browser::{BrowserConfig, StaticBundle, check_bind, serve, set_password};
 use tcode_traverse::identity::write_private;
 use tcode_traverse::native_host::default_device_name;
 use tcode_traverse::{HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
@@ -103,6 +103,8 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     {
         set_password(&remote_data_dir, &password, false).map_err(|error| error.to_string())?;
     }
+    // Nothing else starts for a bind the listener would refuse anyway.
+    check_bind(browser_listen, &remote_data_dir).map_err(|error| error.to_string())?;
     let mut services = HostServices {
         background_startup_probes: true,
         ai_title_generation: true,

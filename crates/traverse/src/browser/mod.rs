@@ -140,19 +140,25 @@ impl Drop for BrowserServer {
     }
 }
 
-/// Bind and serve. A bind beyond loopback is refused until a password
-/// exists, so a LAN never sees the first-open setup page.
-pub fn serve(mux: HostMux, config: BrowserConfig) -> io::Result<BrowserServer> {
-    let auth = AuthStore::open(&config.data_dir, &config.host_name)?;
-    if !config.listen.ip().is_loopback() && !auth.password_configured() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to listen on {} without a password; set one with --password or set-password, or keep the browser listener on loopback",
-                config.listen
-            ),
-        ));
+/// A bind beyond loopback is refused until a password exists in
+/// `data_dir`, so a LAN never sees the first-open setup page. [`serve`]
+/// enforces it; a host may ask earlier, before starting anything else.
+pub fn check_bind(listen: SocketAddr, data_dir: &Path) -> io::Result<()> {
+    if listen.ip().is_loopback() || AuthStore::password_configured_at(data_dir)? {
+        return Ok(());
     }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "refusing to listen on {listen} without a password; set one with --password or set-password, or keep the browser listener on loopback"
+        ),
+    ))
+}
+
+/// Bind and serve; see [`check_bind`].
+pub fn serve(mux: HostMux, config: BrowserConfig) -> io::Result<BrowserServer> {
+    check_bind(config.listen, &config.data_dir)?;
+    let auth = AuthStore::open(&config.data_dir, &config.host_name)?;
     let listener = std::net::TcpListener::bind(config.listen)?;
     listener.set_nonblocking(true)?;
     let local_addr = listener.local_addr()?;

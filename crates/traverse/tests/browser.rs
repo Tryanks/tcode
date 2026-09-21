@@ -493,7 +493,18 @@ fn a_bind_beyond_loopback_needs_a_password_first() {
     };
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(error.to_string().contains("--password"), "{error}");
+    assert!(
+        !dir.0.join("remote.json").exists(),
+        "a refused bind leaves nothing behind"
+    );
+    let early = tcode_traverse::browser::check_bind(lan().listen, &dir.0);
+    assert_eq!(
+        early.as_ref().map_err(|error| error.kind()),
+        Err(std::io::ErrorKind::InvalidInput),
+        "the same rule answers before anything is started"
+    );
     set_password(&dir.0, "secret password", false).unwrap();
+    tcode_traverse::browser::check_bind(lan().listen, &dir.0).unwrap();
     let server = serve(mux, lan()).unwrap();
     assert!(server.password_configured());
     server.shutdown();
