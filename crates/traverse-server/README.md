@@ -118,8 +118,9 @@ Desktop: **Settings → Other devices → Traverse → Self-hosted Traverse**, t
 the base URL, `https://traverse.example.org`. Headless:
 `tcode-headless serve --traverse https://traverse.example.org`. Devices take
 the URL from the machine's invitation, so nothing is configured on a phone.
-Clients accept `https` URLs only; a `--dev` instance is for the tests in this
-crate, not for a machine.
+The base URL may be `http` for development; the relay and pkarr URLs in the
+manifest must be `https`. A `--dev` instance is for the tests in this crate,
+not for a machine.
 
 ## Docker
 
