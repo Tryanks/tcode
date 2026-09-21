@@ -93,10 +93,12 @@ devices only; it does not serve the browser app.
    `--traverse official` (the default), `--traverse off`, or
    `--traverse https://traverse.example` selects the Traverse mode; see
    [Traverse](#traverse). `--browser-listen ADDR:PORT` binds the browser page
-   elsewhere (`--listen` is accepted as an alias). To preset the browser
-   password, supply `serve --password PASSWORD` or set `TCODE_PASSWORD` in the
-   service environment; the CLI option takes precedence. A preset updates the
-   password on startup and keeps existing browser tokens.
+   elsewhere (`--listen` is accepted as an alias); `serve` refuses a bind
+   beyond loopback until a password exists and exits before starting anything
+   else. To preset the browser password, supply `serve --password PASSWORD`
+   or set `TCODE_PASSWORD` in the service environment; the CLI option takes
+   precedence. A preset updates the password on startup and keeps existing
+   browser tokens.
 5. The headless machine binds its Traverse endpoint to a UDP port the operating
    system picks; the invitation and each device's saved record carry the
    current port, and a device learns a changed port from Traverse or from the
@@ -118,6 +120,8 @@ devices only; it does not serve the browser app.
 7. From a paired device (or the logged-in browser), **Settings → Other
    devices** shows this machine's invitation QR and link, creates a new
    invitation, lists connected devices with their path, and removes devices.
+   A native device sees the native devices; the browser also sees the
+   browsers logged in to this machine, listed after them.
    **Allow other devices** controls whether the machine accepts pairings; it
    defaults to on and is saved in `traverse.json`. Turning it off discards the
    current invitation and does not disconnect already paired devices.
@@ -298,9 +302,11 @@ relay; to reach a machine from elsewhere, use the native app.
 
 1. Open the `Browser:` link printed by `tcode-headless`. By default the page is
    served on `http://127.0.0.1:47420/`, reachable only from the machine. To
-   use it from another device on the LAN, set a password first, then start
-   with an explicit bind such as `--browser-listen 0.0.0.0:47420` and open
-   `http://<machine LAN address>:47420/`.
+   use it from another device on the LAN, start with an explicit bind such as
+   `--browser-listen 0.0.0.0:47420` and open
+   `http://<machine LAN address>:47420/`. `serve` refuses that bind until a
+   password exists (`--password`, `TCODE_PASSWORD` or `set-password`), so a
+   LAN never sees the first-open setup page.
 2. On first open, set a password with at least eight characters and confirm it.
    Later visits without a saved token show **Log in**. A successful login saves
    a browser token and opens Threads; a valid stored token skips the form.
@@ -310,7 +316,11 @@ relay; to reach a machine from elsewhere, use the native app.
 4. **Settings → Other devices** manages this machine's native pairing: **Allow
    other devices**, the current invitation QR and link, **New invitation**, and
    removing paired devices. Phones and other desktops always pair with an
-   invitation, never with the browser password.
+   invitation, never with the browser password. The device list shows the
+   native devices, then every browser logged in to this machine (browser ·
+   operating system, **Direct** while its tab is connected). **Remove** on a
+   browser invalidates its token and closes its socket; that tab returns to
+   the login form.
 5. The address is fixed to the page's origin: **Machines** lists the machine
    that served the page and offers no way to add another. Open another
    machine's URL to use that machine. Resizing the page switches between the
@@ -319,7 +329,10 @@ relay; to reach a machine from elsewhere, use the native app.
 The browser stores machines and tokens in this origin's `localStorage` under
 `tcode.hosts`, the last machine under `tcode.last_host`, its device id under
 `tcode.device_id` and pending writes under `tcode.outbox.<machine id>`.
-Clearing site data means you must log in with the password again. The page is
+Clearing site data means you must log in with the password again. The page
+and the listener ship together: the page opens its WebSocket with protocol
+version 5, and a listener of another version answers **Protocol mismatch**
+until the page is reloaded from the running `tcode-headless`. The page is
 plain HTTP and its WebSocket is `ws://`; anyone who can capture that LAN
 traffic can read the password, the token and the work. If you put a TLS
 proxy or tunnel in front of it, that is your own setup: the WebSocket follows
@@ -533,12 +546,15 @@ a trusted LAN.
 
 The machine's `traverse.json` holds its secret key, its name, the allow list
 (device id, name, operating system, first-connection time) and the **Allow
-other devices** switch. A machine upgraded from the previous transport keeps
-the identity seed found in its old `remote.json`, so its id does not change;
-devices must still pair again. `remote.json` holds the browser side: the
-password hash (randomly salted PBKDF2-HMAC-SHA256, 600,000 iterations), one
-record per logged-in browser with its token hash, and that legacy seed. The
-password and the raw tokens are never stored.
+other devices** switch. `remote.json` holds the browser side: the id and name
+browsers record this machine under, the password hash (randomly salted
+PBKDF2-HMAC-SHA256, 600,000 iterations) and one record per logged-in browser
+with its token hash. The password and the raw tokens are never stored, and
+nothing in `remote.json` is part of the machine's identity. A headless
+machine upgraded from the previous transport therefore gets a new machine id
+the first time it starts — the old `remote.json` seed is not adopted — and
+every device pairs again with a new invitation; the browser password and
+browser logins are kept.
 
 A device's `device.json` holds its secret key, name and platform. `hosts.json`
 holds the machines it paired with: id, name, Traverse URL, relay, direct
@@ -564,6 +580,13 @@ and a new connection from it is refused from that moment. The device shows
 **Access rejected · Pair again** and stops retrying. Pairing it again needs a
 new invitation.
 
+A browser logged in to a headless machine is listed after the native devices
+in the logged-in browser's **Settings → Other devices**; **Remove** there
+invalidates its token and closes its socket at the next message or
+keep-alive, and that tab returns to the login form. Native devices do not
+list browsers; `set-password --revoke-tokens` on the stopped host removes
+them all.
+
 **Remove** under **Your machines** on a device only forgets that device's
 record; it does not withdraw anything on the machine.
 
@@ -588,7 +611,8 @@ list in memory and writes it back.
 | `tcode-headless pair` says there is no valid invitation | The last one was used or expired, or `serve` is not running. Create a new invitation from a paired device's **Settings → Other devices**, or restart `serve`. |
 | `could not start Traverse` on a self-hosted URL | The instance's `relays.json` could not be fetched and nothing is cached. Check the URL, the instance and its certificate; Tcode does not fall back to the official service. |
 | Browser password is wrong or forgotten | After five wrong attempts, wait five minutes. To reset it, stop the host and use `set-password`; add `--revoke-tokens` if logged-in browsers should lose access. |
-| Browser page unreachable from another device | The listener binds `127.0.0.1:47420` by default. Start `serve --browser-listen 0.0.0.0:47420` (with a password set) and open the machine's LAN address. |
+| Browser page unreachable from another device | The listener binds `127.0.0.1:47420` by default. Start `serve --browser-listen 0.0.0.0:47420` and open the machine's LAN address; `serve` refuses that bind until a password is set. |
+| Browser shows **Protocol mismatch** | The page in the tab is from another build than the running `tcode-headless`. Reload the page. |
 | Browser shows 404 | Use a `tcode-headless` build with `web`. The desktop app and builds without the bundle do not serve the browser app. |
 | Preview cannot load a dev server | Check that the dev server runs on the machine, hosting is on, the device is still paired, and its WebView supports proxy routing. Use `localhost` for a machine-loopback server. If a request was interrupted by a network move, wait for the main connection to recover and use Reload. |
 
