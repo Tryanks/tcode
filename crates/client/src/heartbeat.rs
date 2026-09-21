@@ -7,6 +7,7 @@ pub const QUERY_TIMEOUT_MS: u64 = 15_000;
 pub const COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 pub struct Heartbeat {
+    idle_ms: u64,
     deadline_ms: u64,
     awaiting_reply: bool,
 }
@@ -20,14 +21,21 @@ pub enum Tick {
 
 impl Heartbeat {
     pub fn new(now_ms: u64) -> Self {
+        Self::with_idle(now_ms, BROWSER_IDLE_MS)
+    }
+
+    /// A heartbeat that probes after `idle_ms` of silence instead of the
+    /// browser default.
+    pub fn with_idle(now_ms: u64, idle_ms: u64) -> Self {
         Self {
-            deadline_ms: now_ms.saturating_add(BROWSER_IDLE_MS),
+            idle_ms,
+            deadline_ms: now_ms.saturating_add(idle_ms),
             awaiting_reply: false,
         }
     }
 
     pub fn received(&mut self, now_ms: u64) {
-        *self = Self::new(now_ms);
+        *self = Self::with_idle(now_ms, self.idle_ms);
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Tick {

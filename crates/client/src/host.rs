@@ -7,7 +7,10 @@ use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ConnectionState, pairing::PairedHost};
+use crate::{
+    ConnectionState,
+    pairing::{PairInvite, PairedHost},
+};
 
 /// A future which may remain on the thread that created it.
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -42,28 +45,18 @@ impl LiveHost {
     }
 }
 
-/// What the pairing form submits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PairRequest {
-    pub origin: String,
-    pub code: String,
-    pub host_id: Option<String>,
-    pub identity_key: Option<String>,
-    pub candidates: Vec<String>,
-}
-
-/// A host advertised on the client's local network.
+/// A host advertised on the client's local network: its `EndpointId` and the
+/// direct addresses it was seen at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredHost {
     pub host_id: String,
     pub name: String,
-    pub origin: String,
+    pub addrs: Vec<String>,
 }
 
 /// What a client says about itself when pairing and connecting. Serializes to
-/// the `device_id`, `device_name` and `platform` fields shared by `/pair`,
-/// `/auth/login` and the websocket hello; the host keeps one device record per
-/// `device_id` across repeated pairings.
+/// the `device_id`, `device_name` and `platform` fields shared by the browser
+/// login and the hello line; the host keeps one device record per `device_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeviceIdentity {
     #[serde(rename = "device_id")]
@@ -76,35 +69,21 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
-    /// The `/pair` request body for `code`.
-    pub fn pair_body(&self, code: &str) -> String {
-        #[derive(Serialize)]
-        struct PairBody<'a> {
-            code: &'a str,
-            #[serde(flatten)]
-            device: &'a DeviceIdentity,
-        }
-        serde_json::to_string(&PairBody { code, device: self }).expect("string fields serialize")
-    }
-
-    /// The first websocket line: the version-3 hello as the baseline with
-    /// version 4 advertised, the device token, and this identity.
-    pub fn hello_line(&self, token: &str) -> String {
+    /// The first line of a main stream: the current protocol version and this
+    /// identity. The transport already authenticated the device, so the line
+    /// carries no credential.
+    pub fn hello_line(&self) -> String {
         #[derive(Serialize)]
         struct Hello<'a> {
             #[serde(rename = "type")]
             kind: &'static str,
             protocol_version: u32,
-            supported_versions: [u32; 2],
-            token: &'a str,
             #[serde(flatten)]
             device: &'a DeviceIdentity,
         }
         serde_json::to_string(&Hello {
             kind: "hello",
-            protocol_version: 3,
-            supported_versions: [3, tcode_protocol::PROTOCOL_VERSION],
-            token,
+            protocol_version: tcode_protocol::PROTOCOL_VERSION,
             device: self,
         })
         .expect("string fields serialize")
@@ -142,7 +121,8 @@ pub struct ClientPreferences {
     pub navigation: Option<serde_json::Value>,
 }
 
-/// Parse bounded JSON supplied by platform discovery bridges.
+/// Parse bounded JSON supplied by platform discovery bridges: one object per
+/// advertisement with `host_id`, `name`, `addr` and `port`.
 pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
     if json.len() > 65_536 {
         return Vec::new();
@@ -153,40 +133,48 @@ pub fn parse_discovered_hosts(json: &str) -> Vec<DiscoveredHost> {
     let Some(hosts) = value.as_array() else {
         return Vec::new();
     };
-    let mut found: Vec<_> = hosts
-        .iter()
-        .take(128)
-        .filter_map(|value| {
-            let field = |name| {
-                value
-                    .get(name)?
-                    .as_str()
-                    .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
-                    .map(str::to_owned)
-            };
-            let port = u16::try_from(value.get("port")?.as_u64()?).ok()?;
-            if port == 0 {
-                return None;
+    let mut found: Vec<DiscoveredHost> = Vec::new();
+    for value in hosts.iter().take(128) {
+        let field = |name| {
+            value
+                .get(name)?
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control))
+                .map(str::to_owned)
+        };
+        let (Some(host_id), Some(name), Some(addr), Some(port)) = (
+            field("host_id"),
+            field("name"),
+            field("addr").and_then(|addr| addr.parse::<std::net::IpAddr>().ok()),
+            value
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port != 0),
+        ) else {
+            continue;
+        };
+        if addr.is_loopback() {
+            continue;
+        }
+        let addr = std::net::SocketAddr::new(addr, port).to_string();
+        // A machine may advertise Wi-Fi, virtual bridge and IPv6 addresses.
+        // Keep every distinct address so an unreachable first choice cannot
+        // hide it.
+        match found.iter_mut().find(|host| host.host_id == host_id) {
+            Some(host) => {
+                if !host.addrs.contains(&addr) && host.addrs.len() < crate::pairing::MAX_ADDRS {
+                    host.addrs.push(addr);
+                }
             }
-            Some(DiscoveredHost {
-                host_id: field("host_id")?,
-                name: field("name")?,
-                origin: crate::pairing::parse_origin(&crate::pairing::lan_origin(
-                    &field("addr")?,
-                    port,
-                ))
-                .ok()?,
-            })
-        })
-        .collect();
-    // A machine may advertise Wi-Fi, virtual bridge and IPv6 addresses. Keep
-    // every distinct origin so an unreachable first choice cannot hide it.
-    found.retain(|host| {
-        !host.origin.starts_with("http://127.") && !host.origin.starts_with("http://[::1]")
-    });
-    found.sort_by_key(|host| (host.host_id.clone(), host.origin.contains('[')));
-    let mut seen = std::collections::HashSet::new();
-    found.retain(|host| seen.insert((host.host_id.clone(), host.origin.clone())));
+            None => found.push(DiscoveredHost {
+                host_id,
+                name,
+                addrs: vec![addr],
+            }),
+        }
+    }
+    found.sort_by(|a, b| a.host_id.cmp(&b.host_id));
     found
 }
 
@@ -254,19 +242,14 @@ pub trait ClientHost: 'static {
         None
     }
 
-    fn pair(&self, request: PairRequest) -> HostFuture<'_, Result<PairedHost, String>>;
+    /// Exchange the invite's code for a pairing with exactly the machine the
+    /// invite names.
+    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>>;
 
     /// Open a reconnecting link. Dropping the returned channels ends it.
     fn connect(&self, host: &PairedHost) -> Transport;
 
     fn browse_hosts(&self) -> HostFuture<'_, Vec<DiscoveredHost>> {
-        Box::pin(async { Vec::new() })
-    }
-
-    /// LAN origins where the machine `host_id` currently advertises itself,
-    /// for the transport to verify and race after an unreachable reconnect
-    /// cycle. Browser adapters have a fixed page origin and report none.
-    fn discover_origins(&self, _host_id: &str) -> HostFuture<'_, Vec<String>> {
         Box::pin(async { Vec::new() })
     }
 
@@ -305,33 +288,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_and_hello_carry_the_device_fields_hosts_read() {
+    fn hello_carries_the_version_and_device_fields_hosts_read() {
         let device = DeviceIdentity {
             id: "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b".into(),
             name: "Xiaomi 15".into(),
-            platform: Some("Android 15".into()),
-        };
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&device.pair_body("123456")).unwrap(),
-            serde_json::json!({
-                "code": "123456",
-                "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
-                "device_name": "Xiaomi 15",
-                "platform": "Android 15",
-            })
-        );
-        let unknown_platform = DeviceIdentity {
             platform: None,
-            ..device
         };
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&unknown_platform.hello_line("token"))
-                .unwrap(),
+            serde_json::from_str::<serde_json::Value>(&device.hello_line()).unwrap(),
             serde_json::json!({
                 "type": "hello",
-                "protocol_version": 3,
-                "supported_versions": [3, 4],
-                "token": "token",
+                "protocol_version": 5,
                 "device_id": "3f2b8c6e-1d4a-4b9e-8c7d-2a1f0e9d8c7b",
                 "device_name": "Xiaomi 15",
             })
@@ -360,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn discovered_hosts_are_bounded_validated_and_deduplicated() {
+    fn discovered_hosts_are_bounded_validated_and_grouped_by_machine() {
         let json = serde_json::json!([
             {"host_id":"b","name":"IPv6","addr":"fd00::2","port":47420},
             {"host_id":"a","name":"Loopback","addr":"127.0.0.1","port":47420},
@@ -372,23 +339,15 @@ mod tests {
 
         assert_eq!(
             parse_discovered_hosts(&json.to_string()),
-            vec![
-                DiscoveredHost {
-                    host_id: "b".into(),
-                    name: "IPv4".into(),
-                    origin: "http://192.168.1.2:47420".into(),
-                },
-                DiscoveredHost {
-                    host_id: "b".into(),
-                    name: "Virtual bridge".into(),
-                    origin: "http://192.168.139.3:47420".into(),
-                },
-                DiscoveredHost {
-                    host_id: "b".into(),
-                    name: "IPv6".into(),
-                    origin: "http://[fd00::2]:47420".into(),
-                },
-            ]
+            vec![DiscoveredHost {
+                host_id: "b".into(),
+                name: "IPv6".into(),
+                addrs: vec![
+                    "[fd00::2]:47420".into(),
+                    "192.168.1.2:47420".into(),
+                    "192.168.139.3:47420".into()
+                ],
+            }]
         );
         assert!(parse_discovered_hosts("not json").is_empty());
         assert!(parse_discovered_hosts("{}").is_empty());

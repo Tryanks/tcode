@@ -1,3 +1,6 @@
+//! Fan one host pipe out to many client attachments. Transport-agnostic: the
+//! host side of any transport attaches one [`Connection`] per client stream
+//! and pumps NDJSON lines through it.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,9 +34,9 @@ impl HostMux {
     pub fn new(to_host: Sender<String>, from_host: Receiver<String>) -> Self {
         let (ingress, ingress_rx) = async_channel::unbounded();
         std::thread::Builder::new()
-            .name("tcode-remote-mux".into())
-            .spawn(move || smol::block_on(pump(to_host, from_host, ingress_rx)))
-            .expect("failed to spawn remote mux thread");
+            .name("tcode-mux".into())
+            .spawn(move || futures_lite::future::block_on(pump(to_host, from_host, ingress_rx)))
+            .expect("failed to spawn mux thread");
         Self {
             inner: Arc::new(Inner {
                 ingress,
@@ -49,7 +52,7 @@ impl HostMux {
         let ingress = self.inner.ingress.clone();
         let _ = ingress.try_send(Ingress::Add(connection_id, output_tx));
         std::thread::Builder::new()
-            .name(format!("tcode-remote-mux-{connection_id}"))
+            .name(format!("tcode-mux-{connection_id}"))
             .spawn(move || {
                 while let Ok(line) = client_rx.recv_blocking() {
                     if ingress
@@ -61,7 +64,7 @@ impl HostMux {
                 }
                 let _ = ingress.send_blocking(Ingress::Closed(connection_id));
             })
-            .expect("failed to spawn remote mux connection thread");
+            .expect("failed to spawn mux connection thread");
         Connection {
             to_host: client_tx,
             from_host: output_rx,
