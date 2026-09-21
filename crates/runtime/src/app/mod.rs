@@ -339,6 +339,9 @@ pub struct AppState {
     native_subagent_sessions: HashMap<(String, String), String>,
     /// Synthetic turn state survives eviction; false remembers a finished child.
     native_subagent_turns: HashMap<String, bool>,
+    /// Subagent items recorded inside mirrors, by (session, item id): the
+    /// spawns a nested mirror is created from once a grandchild item arrives.
+    nested_subagent_spawns: HashMap<(String, String), subagents::NestedSpawn>,
     pub settings: Settings,
     pub providers: ProviderCatalog,
     terminal_preferences_path: PathBuf,
@@ -509,6 +512,7 @@ impl AppState {
             pending_native_rewinds: HashMap::new(),
             native_subagent_sessions: HashMap::new(),
             native_subagent_turns: HashMap::new(),
+            nested_subagent_spawns: HashMap::new(),
             settings,
             providers: ProviderCatalog::new(model_catalogs, provider_secret_names),
             terminal_preferences_path,

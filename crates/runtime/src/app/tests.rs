@@ -424,6 +424,359 @@ fn native_mirror_keeps_one_turn_across_residency_late_items_and_parent_completio
         }
     }
 }
+
+fn subagent_item(
+    id: &str,
+    parent_item_id: Option<&str>,
+    agent_type: &str,
+    description: &str,
+    status: ItemStatus,
+) -> ThreadItem {
+    ThreadItem {
+        id: id.into(),
+        parent_item_id: parent_item_id.map(str::to_owned),
+        content: ItemContent::Subagent {
+            agent_type: agent_type.into(),
+            description: description.into(),
+            status,
+            summary: None,
+            model: None,
+            effort: None,
+        },
+    }
+}
+
+/// A subagent's transcript can itself spawn a subagent. The nested spawn is
+/// content of the child mirror, and once the grandchild's own transcript
+/// arrives it gets a titled mirror under the child mirror — never a nameless
+/// one on the root — whose turn closes with the nested spawn's terminal status.
+#[test]
+fn nested_subagent_items_open_a_titled_mirror_under_the_child_mirror_and_close_it() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-nested-native-mirror");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let (child_id, grandchild_id, second_id) = state.update(cx, |state, cx| {
+        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp"), None);
+        meta.id = "parent".into();
+        state.sessions.push(meta.clone());
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+        state.on_event(
+            "parent",
+            AgentEvent::ItemStarted(subagent_item(
+                "toolu_child",
+                None,
+                "general-purpose",
+                "Research hosting",
+                ItemStatus::InProgress,
+            )),
+            cx,
+        );
+        state.on_event(
+            "parent",
+            AgentEvent::ItemStarted(subagent_item(
+                "toolu_grandchild",
+                Some("toolu_child"),
+                "Explore",
+                "Research Workers limits\nwith sources",
+                ItemStatus::InProgress,
+            )),
+            cx,
+        );
+        let child_id = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_child"))
+            .unwrap()
+            .id
+            .clone();
+        assert!(
+            state
+                .sessions
+                .iter()
+                .all(|meta| meta.native_subagent.as_deref() != Some("toolu_grandchild")),
+            "a spawn item alone is content of the child mirror, not a mirror"
+        );
+        assert!(
+            state
+                .resident(&child_id)
+                .unwrap()
+                .timeline
+                .entries
+                .iter()
+                .any(|entry| {
+                    entry.id == "toolu_grandchild"
+                        && matches!(
+                            entry.content,
+                            EntryContent::Item(ItemContent::Subagent { .. })
+                        )
+                })
+        );
+
+        state.on_event(
+            "parent",
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "toolu_grandchild:user-1".into(),
+                parent_item_id: Some("toolu_grandchild".into()),
+                content: ItemContent::UserMessage {
+                    text: "Fetch the limits page.".into(),
+                    context_len: None,
+                    attachments: Vec::new(),
+                },
+            }),
+            cx,
+        );
+        let grandchild = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild"))
+            .cloned()
+            .expect("grandchild mirror");
+        assert_eq!(
+            grandchild.parent_session_id.as_deref(),
+            Some(child_id.as_str())
+        );
+        assert_eq!(grandchild.title, "Explore: Research Workers limits");
+        assert!(state.resident(&grandchild.id).unwrap().has_work());
+        assert!(state.resident(&child_id).unwrap().has_work());
+        assert_eq!(
+            state
+                .sessions
+                .iter()
+                .filter(|meta| meta.parent_session_id.as_deref() == Some("parent"))
+                .count(),
+            1,
+            "the root session owns only the child it spawned"
+        );
+
+        // The grandchild's terminal snapshot travels as child content too.
+        state.on_event(
+            "parent",
+            AgentEvent::ItemUpdated(subagent_item(
+                "toolu_grandchild",
+                Some("toolu_child"),
+                "Explore",
+                "Research Workers limits",
+                ItemStatus::Completed,
+            )),
+            cx,
+        );
+        assert!(!state.resident(&grandchild.id).unwrap().has_work());
+        assert!(state.resident(&child_id).unwrap().has_work());
+        state.on_event(
+            "parent",
+            AgentEvent::ItemCompleted(subagent_item(
+                "toolu_child",
+                None,
+                "general-purpose",
+                "Research hosting",
+                ItemStatus::Completed,
+            )),
+            cx,
+        );
+        assert!(!state.resident(&child_id).unwrap().has_work());
+        assert_eq!(state.resident("parent").unwrap().timeline.entries.len(), 1);
+
+        // A second nested spawn is still running when the root process closes:
+        // it belongs to that process, so it ends with it.
+        for event in [
+            AgentEvent::ItemStarted(subagent_item(
+                "toolu_grandchild_2",
+                Some("toolu_child"),
+                "Explore",
+                "Check pricing",
+                ItemStatus::InProgress,
+            )),
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "toolu_grandchild_2:msg:0".into(),
+                parent_item_id: Some("toolu_grandchild_2".into()),
+                content: ItemContent::AssistantMessage {
+                    text: "Fetching pricing.".into(),
+                },
+            }),
+        ] {
+            state.on_event("parent", event, cx);
+        }
+        let second = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_grandchild_2"))
+            .cloned()
+            .expect("second grandchild mirror");
+        assert_eq!(second.parent_session_id.as_deref(), Some(child_id.as_str()));
+        assert!(state.resident(&second.id).unwrap().has_work());
+        state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
+        assert!(
+            !state
+                .resident(&second.id)
+                .is_some_and(ActiveSession::has_work)
+        );
+        (child_id, grandchild.id, second.id)
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        let events = state.store.read_events(&grandchild_id);
+        assert!(matches!(
+            &events.first().unwrap().event,
+            AgentEvent::TurnStarted { turn_id } if turn_id == "toolu_grandchild"
+        ));
+        assert!(matches!(
+            &events.last().unwrap().event,
+            AgentEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &state.store.read_events(&second_id).last().unwrap().event,
+            AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
+                if turn_id == "toolu_grandchild_2"
+        ));
+        assert!(
+            state
+                .store
+                .read_events(&child_id)
+                .iter()
+                .all(|stored| match &stored.event {
+                    AgentEvent::ItemStarted(item)
+                    | AgentEvent::ItemUpdated(item)
+                    | AgentEvent::ItemCompleted(item) => item.parent_item_id.is_none(),
+                    _ => true,
+                })
+        );
+    });
+}
+
+/// A child item whose spawn this session never announced still gets a mirror,
+/// and the parent process closing ends it like every other running mirror.
+#[test]
+fn unknown_parent_mirror_closes_when_the_parent_session_closes() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-unknown-parent-native-mirror");
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    let mirror_id = state.update(cx, |state, cx| {
+        let mut meta = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp"), None);
+        meta.id = "parent".into();
+        state.sessions.push(meta.clone());
+        state.install_selected(ActiveSession::new(meta, false, Vec::new()));
+        state.on_event(
+            "parent",
+            AgentEvent::ItemCompleted(ThreadItem {
+                id: "toolu_orphan:msg:0".into(),
+                parent_item_id: Some("toolu_orphan".into()),
+                content: ItemContent::AssistantMessage {
+                    text: "working".into(),
+                },
+            }),
+            cx,
+        );
+        let mirror = state
+            .sessions
+            .iter()
+            .find(|meta| meta.native_subagent.as_deref() == Some("toolu_orphan"))
+            .cloned()
+            .expect("placeholder mirror");
+        assert_eq!(mirror.title, "subagent");
+        assert!(state.resident(&mirror.id).unwrap().has_work());
+        state.on_event("parent", AgentEvent::SessionClosed { reason: None }, cx);
+        assert!(
+            !state
+                .resident(&mirror.id)
+                .is_some_and(ActiveSession::has_work)
+        );
+        mirror.id
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        let events = state.store.read_events(&mirror_id);
+        assert!(matches!(
+            &events.last().unwrap().event,
+            AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
+                if turn_id == "toolu_orphan"
+        ));
+    });
+}
+
+/// A mirror persisted with an open turn by a host that stopped before the
+/// subagent settled: loading it after a restart ends the turn, because no
+/// live parent is tracking it and nothing else ever will.
+#[test]
+fn loading_a_mirror_with_an_open_turn_and_no_live_parent_ends_it() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-orphaned-native-mirror-repair");
+    let mut parent = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp"), None);
+    parent.id = "parent".into();
+    let mut mirror = SessionMeta::new(ProviderKind::ClaudeCode, PathBuf::from("/tmp"), None);
+    mirror.id = "mirror".into();
+    mirror.title = "subagent".into();
+    mirror.parent_session_id = Some("parent".into());
+    mirror.native_subagent = Some("toolu_zombie".into());
+    test_store.upsert_meta(&parent).unwrap();
+    test_store.upsert_meta(&mirror).unwrap();
+    let stored = [
+        AgentEvent::TurnStarted {
+            turn_id: "toolu_zombie".into(),
+        },
+        AgentEvent::ItemCompleted(ThreadItem {
+            id: "toolu_zombie:msg:0".into(),
+            parent_item_id: None,
+            content: ItemContent::AssistantMessage {
+                text: "Research complete.".into(),
+            },
+        }),
+    ];
+    for (i, event) in stored.iter().enumerate() {
+        test_store
+            .append_event("mirror", 1_000 + i as u64, event)
+            .unwrap();
+    }
+
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.update(cx, |state, cx| {
+        assert_eq!(state.sessions.len(), 2);
+        state.select_session("mirror", cx);
+    });
+    cx.run_until(|state| {
+        state
+            .resident("mirror")
+            .is_some_and(|mirror| mirror.timeline.turns.len() == 1)
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        let mirror = state.resident("mirror").unwrap();
+        assert!(!mirror.has_work());
+        assert!(!mirror.timeline.turn_running);
+        assert_eq!(
+            mirror.timeline.turns[0].status,
+            Some(TurnStatus::Interrupted)
+        );
+        assert_eq!(
+            mirror.timeline.last_turn_status,
+            Some(TurnStatus::Interrupted)
+        );
+        let events = state.store.read_events("mirror");
+        assert_eq!(events.len(), 3);
+        assert!(matches!(
+            &events[2].event,
+            AgentEvent::TurnCompleted { turn_id, status: TurnStatus::Interrupted, .. }
+                if turn_id == "toolu_zombie"
+        ));
+        assert_eq!(state.native_subagent_turns.get("mirror"), Some(&false));
+    });
+
+    // Reloading the repaired mirror leaves the closed turn alone.
+    let state = cx.new_entity(TestClientState::new((*test_store).clone()));
+    state.update(cx, |state, cx| state.select_session("mirror", cx));
+    cx.run_until(|state| {
+        state
+            .resident("mirror")
+            .is_some_and(|mirror| mirror.timeline.turns.len() == 1)
+    });
+    cx.run_until_parked();
+    state.update(cx, |state, _| {
+        assert_eq!(state.store.read_events("mirror").len(), 3);
+    });
+}
+
 #[test]
 fn settings_patches_preserve_top_level_and_nested_siblings_over_the_pipe() {
     let cx = &mut TestAppContext::default();

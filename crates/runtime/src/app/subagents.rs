@@ -1,4 +1,14 @@
+use super::sessions::descendant_session_ids;
 use super::*;
+
+/// A Subagent item recorded inside a mirror: where it was recorded and its
+/// latest snapshot, so the grandchild's mirror can be titled and settled once
+/// the grandchild's own transcript names it.
+#[derive(Clone)]
+pub(super) struct NestedSpawn {
+    mirror_id: String,
+    item: ThreadItem,
+}
 
 impl AppState {
     /// Reroute provider-native subagent transcript items into read-only mirror
@@ -14,11 +24,11 @@ impl AppState {
             return false;
         };
 
-        // Check child ownership before content: Codex child transcript items can
-        // themselves be Subagent-shaped, but they remain plain mirror content.
+        // Check child ownership before content: a Subagent item inside a mirror
+        // is content of that mirror, and only becomes a nested mirror of its
+        // own once a grandchild item names it as parent.
         if let Some(parent_item_id) = item.parent_item_id.as_deref() {
-            let mirror_id =
-                self.ensure_native_subagent_mirror(parent_session_id, parent_item_id, None, cx);
+            let mirror_id = self.child_item_mirror(parent_session_id, parent_item_id, cx);
             let Some(mirror_id) = mirror_id else {
                 log::warn!(
                     "dropping native subagent child item {}: parent session {} is missing",
@@ -37,15 +47,26 @@ impl AppState {
                 self.sync_mirror_turn(&mirror_id, true, parent_item_id, TurnStatus::Completed, cx);
             }
             self.record_event(&mirror_id, &strip_parent_item_id(event), cx);
+            if matches!(item.content, ItemContent::Subagent { .. }) {
+                self.nested_subagent_spawns.insert(
+                    (parent_session_id.to_string(), item.id.clone()),
+                    NestedSpawn {
+                        mirror_id,
+                        item: item.clone(),
+                    },
+                );
+                if let Some(grandchild_mirror_id) =
+                    self.find_native_subagent_mirror(parent_session_id, &item.id, cx)
+                {
+                    self.apply_subagent_snapshot(&grandchild_mirror_id, item, cx);
+                }
+            }
             return true;
         }
 
         let ItemContent::Subagent {
             agent_type,
             description,
-            status,
-            model,
-            effort,
             ..
         } = &item.content
         else {
@@ -55,58 +76,111 @@ impl AppState {
         if let Some(mirror_id) =
             self.ensure_native_subagent_mirror(parent_session_id, &item.id, Some(details), cx)
         {
-            let in_progress = matches!(status, ItemStatus::InProgress);
-            let title = mirror_title(agent_type, description);
-            let meta = self.resident_mut(&mirror_id).map(|mirror| {
-                let title_changed = mirror.meta.title == "subagent" && mirror.meta.title != title;
-                if title_changed {
-                    mirror.meta.title = title;
-                }
-                let mut settings_changed = false;
-                if let Some(model) = model
-                    && mirror.meta.model.as_ref() != Some(model)
-                {
-                    mirror.meta.model = Some(model.clone());
-                    settings_changed = true;
-                }
-                if let Some(effort) = effort {
-                    let value = serde_json::Value::String(effort.clone());
-                    if let Some(selection) = mirror
-                        .meta
-                        .option_selections
-                        .iter_mut()
-                        .find(|selection| selection.id == "reasoningEffort")
-                    {
-                        if selection.value != value {
-                            selection.value = value;
-                            settings_changed = true;
-                        }
-                    } else {
-                        mirror.meta.option_selections.push(OptionSelection {
-                            id: "reasoningEffort".into(),
-                            value,
-                        });
-                        settings_changed = true;
-                    }
-                }
-                if !in_progress || title_changed || settings_changed {
-                    mirror.meta.updated_at = now_secs();
-                    Some(mirror.meta.clone())
-                } else {
-                    None
-                }
-            });
-            if let Some(meta) = meta.flatten() {
-                self.persist_meta(&meta, cx);
-            }
-            let turn_status = match status {
-                ItemStatus::Failed | ItemStatus::Declined => TurnStatus::Failed,
-                ItemStatus::Interrupted => TurnStatus::Interrupted,
-                _ => TurnStatus::Completed,
-            };
-            self.sync_mirror_turn(&mirror_id, in_progress, &item.id, turn_status, cx);
+            self.apply_subagent_snapshot(&mirror_id, item, cx);
         }
         false
+    }
+
+    /// The mirror that receives items parented to `parent_item_id`: the
+    /// subagent's own mirror, a nested spawn's mirror under the mirror it was
+    /// spawned in, or — for a subagent this session never announced — a
+    /// placeholder that closes with the parent process.
+    fn child_item_mirror(
+        &mut self,
+        session_id: &str,
+        parent_item_id: &str,
+        cx: &mut HostCx,
+    ) -> Option<String> {
+        if let Some(id) = self.find_native_subagent_mirror(session_id, parent_item_id, cx) {
+            return Some(id);
+        }
+        let key = (session_id.to_string(), parent_item_id.to_string());
+        let Some(spawn) = self.nested_subagent_spawns.get(&key).cloned() else {
+            return self.ensure_native_subagent_mirror(session_id, parent_item_id, None, cx);
+        };
+        let ItemContent::Subagent {
+            agent_type,
+            description,
+            ..
+        } = &spawn.item.content
+        else {
+            return None;
+        };
+        let mirror_id = self.ensure_native_subagent_mirror(
+            &spawn.mirror_id,
+            parent_item_id,
+            Some((agent_type, description)),
+            cx,
+        )?;
+        self.native_subagent_sessions.insert(key, mirror_id.clone());
+        self.apply_subagent_snapshot(&mirror_id, &spawn.item, cx);
+        Some(mirror_id)
+    }
+
+    /// Fold a Subagent snapshot into its mirror: title, model and effort on
+    /// the metadata, and the synthesized turn from its status.
+    fn apply_subagent_snapshot(&mut self, mirror_id: &str, item: &ThreadItem, cx: &mut HostCx) {
+        let ItemContent::Subagent {
+            agent_type,
+            description,
+            status,
+            model,
+            effort,
+            ..
+        } = &item.content
+        else {
+            return;
+        };
+        let in_progress = matches!(status, ItemStatus::InProgress);
+        let title = mirror_title(agent_type, description);
+        let meta = self.resident_mut(mirror_id).map(|mirror| {
+            let title_changed = mirror.meta.title == "subagent" && mirror.meta.title != title;
+            if title_changed {
+                mirror.meta.title = title;
+            }
+            let mut settings_changed = false;
+            if let Some(model) = model
+                && mirror.meta.model.as_ref() != Some(model)
+            {
+                mirror.meta.model = Some(model.clone());
+                settings_changed = true;
+            }
+            if let Some(effort) = effort {
+                let value = serde_json::Value::String(effort.clone());
+                if let Some(selection) = mirror
+                    .meta
+                    .option_selections
+                    .iter_mut()
+                    .find(|selection| selection.id == "reasoningEffort")
+                {
+                    if selection.value != value {
+                        selection.value = value;
+                        settings_changed = true;
+                    }
+                } else {
+                    mirror.meta.option_selections.push(OptionSelection {
+                        id: "reasoningEffort".into(),
+                        value,
+                    });
+                    settings_changed = true;
+                }
+            }
+            if !in_progress || title_changed || settings_changed {
+                mirror.meta.updated_at = now_secs();
+                Some(mirror.meta.clone())
+            } else {
+                None
+            }
+        });
+        if let Some(meta) = meta.flatten() {
+            self.persist_meta(&meta, cx);
+        }
+        let turn_status = match status {
+            ItemStatus::Failed | ItemStatus::Declined => TurnStatus::Failed,
+            ItemStatus::Interrupted => TurnStatus::Interrupted,
+            _ => TurnStatus::Completed,
+        };
+        self.sync_mirror_turn(mirror_id, in_progress, &item.id, turn_status, cx);
     }
 
     /// Mirrors never receive provider Turn events, but the chat view derives
@@ -150,6 +224,38 @@ impl AppState {
         }
     }
 
+    /// The existing mirror for `subagent_item_id` anywhere under `session_id`:
+    /// a direct child, or a nested spawn's mirror under another mirror.
+    fn find_native_subagent_mirror(
+        &mut self,
+        session_id: &str,
+        subagent_item_id: &str,
+        cx: &mut HostCx,
+    ) -> Option<String> {
+        let key = (session_id.to_string(), subagent_item_id.to_string());
+        if let Some(id) = self.native_subagent_sessions.get(&key).cloned() {
+            return Some(id);
+        }
+        let descendants = descendant_session_ids(&self.sessions, session_id);
+        let meta = self
+            .sessions
+            .iter()
+            .find(|meta| {
+                meta.native_subagent.as_deref() == Some(subagent_item_id)
+                    && meta
+                        .parent_session_id
+                        .as_ref()
+                        .is_some_and(|parent| descendants.contains(parent))
+            })
+            .cloned()?;
+        let id = meta.id.clone();
+        if self.resident(&id).is_none() {
+            self.load_background_session(meta, cx);
+        }
+        self.native_subagent_sessions.insert(key, id.clone());
+        Some(id)
+    }
+
     fn ensure_native_subagent_mirror(
         &mut self,
         parent_session_id: &str,
@@ -157,27 +263,11 @@ impl AppState {
         details: Option<(&str, &str)>,
         cx: &mut HostCx,
     ) -> Option<String> {
-        let key = (parent_session_id.to_string(), subagent_item_id.to_string());
-        if let Some(id) = self.native_subagent_sessions.get(&key).cloned() {
-            return Some(id);
-        }
-
-        if let Some(meta) = self
-            .sessions
-            .iter()
-            .find(|meta| {
-                meta.parent_session_id.as_deref() == Some(parent_session_id)
-                    && meta.native_subagent.as_deref() == Some(subagent_item_id)
-            })
-            .cloned()
+        if let Some(id) = self.find_native_subagent_mirror(parent_session_id, subagent_item_id, cx)
         {
-            let id = meta.id.clone();
-            if self.resident(&id).is_none() {
-                self.load_background_session(meta, cx);
-            }
-            self.native_subagent_sessions.insert(key, id.clone());
             return Some(id);
         }
+        let key = (parent_session_id.to_string(), subagent_item_id.to_string());
 
         let parent = self.find_meta(parent_session_id)?.clone();
         let mut meta = SessionMeta::new(parent.provider, parent.cwd.clone(), parent.model.clone());
@@ -223,17 +313,20 @@ impl AppState {
     }
 
     /// The parent process is gone, so no Subagent status will ever close the
-    /// mirrors it was still running.
+    /// mirrors it was still running, nested ones included.
     pub(super) fn interrupt_native_subagent_work(
         &mut self,
         parent_session_id: &str,
         cx: &mut HostCx,
     ) {
+        self.nested_subagent_spawns
+            .retain(|(session_id, _), _| session_id != parent_session_id);
+        let descendants = descendant_session_ids(&self.sessions, parent_session_id);
         let running: Vec<_> = self
             .sessions
             .iter()
             .filter(|meta| {
-                meta.parent_session_id.as_deref() == Some(parent_session_id)
+                descendants.contains(&meta.id)
                     && self.native_subagent_turns.get(&meta.id) == Some(&true)
             })
             .filter_map(|meta| Some((meta.id.clone(), meta.native_subagent.clone()?)))
@@ -254,6 +347,42 @@ impl AppState {
                 self.persist_meta(&meta, cx);
             }
         }
+    }
+
+    /// A mirror loaded with its last turn still open, while no live parent is
+    /// tracking it as running, was orphaned by a host restart or a parent that
+    /// left without a close: end the turn so it stops reporting work nothing
+    /// can finish.
+    pub(super) fn repair_orphaned_mirror_turn(&mut self, mirror_id: &str, cx: &mut HostCx) {
+        if self.native_subagent_turns.get(mirror_id) == Some(&true) {
+            return;
+        }
+        let Some(mirror) = self.resident(mirror_id) else {
+            return;
+        };
+        let Some(subagent_item_id) = mirror.meta.native_subagent.clone() else {
+            return;
+        };
+        let Some(turn) = mirror
+            .timeline
+            .turns
+            .last()
+            .filter(|turn| turn.status.is_none())
+        else {
+            return;
+        };
+        let turn_id = turn.provider_turn_id.clone().unwrap_or(subagent_item_id);
+        self.native_subagent_turns
+            .insert(mirror_id.to_string(), false);
+        self.record_event(
+            mirror_id,
+            &AgentEvent::TurnCompleted {
+                turn_id,
+                status: TurnStatus::Interrupted,
+                usage: None,
+            },
+            cx,
+        );
     }
 }
 

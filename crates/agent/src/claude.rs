@@ -1124,7 +1124,34 @@ enum ToolItem {
         summary: Option<String>,
         model: Option<String>,
         effort: Option<String>,
+        /// The subagent this one was spawned from, for nested spawns.
+        parent_item_id: Option<String>,
     },
+}
+
+impl ToolItem {
+    fn subagent(content: &ItemContent, parent_item_id: Option<String>) -> Option<Self> {
+        let ItemContent::Subagent {
+            agent_type,
+            description,
+            status,
+            summary,
+            model,
+            effort,
+        } = content
+        else {
+            return None;
+        };
+        Some(ToolItem::Subagent {
+            agent_type: agent_type.clone(),
+            description: description.clone(),
+            status: *status,
+            summary: summary.clone(),
+            model: model.clone(),
+            effort: effort.clone(),
+            parent_item_id,
+        })
+    }
 }
 
 enum TailRequest {
@@ -1151,6 +1178,14 @@ struct PendingApproval {
     /// forwarded unchanged as `updatedPermissions` on `ApproveForSession` when
     /// the SDK supplied a non-empty array.
     suggestions: Option<Value>,
+}
+
+/// Where a child item's lifecycle stands, as far as the canonical stream has
+/// been told. An update keeps its snapshot so only a changed one passes.
+enum ChildItemStage {
+    Started,
+    Updated(ItemContent),
+    Completed,
 }
 
 struct PendingRewind {
@@ -1193,9 +1228,11 @@ pub(crate) struct Mapper {
     /// then, so the mirror's turn closes after the tail's final child items.
     tailed: HashSet<String>,
     pending_subagent_terminals: HashMap<String, AgentEvent>,
-    /// Child items already completed by either feed (stdout `parent_tool_use_id`
-    /// lines or the transcript tail); a stale start must not reopen them.
-    finished_child_items: HashSet<String>,
+    /// The last lifecycle stage each child item reached through either feed
+    /// (stdout `parent_tool_use_id` lines or the transcript tail); the other
+    /// feed's copy of the same stage is dropped and a stale start cannot
+    /// reopen a completed item.
+    child_items: HashMap<String, ChildItemStage>,
     pending_approvals: HashMap<String, PendingApproval>,
     /// Pending `AskUserQuestion` prompts: control request_id → the original
     /// `questions` array, echoed back verbatim in the allow response.
@@ -1295,7 +1332,7 @@ impl Mapper {
             tail_requests: Vec::new(),
             tailed: HashSet::new(),
             pending_subagent_terminals: HashMap::new(),
-            finished_child_items: HashSet::new(),
+            child_items: HashMap::new(),
             pending_approvals: HashMap::new(),
             pending_user_input: HashMap::new(),
             approval_mode,
@@ -1552,7 +1589,7 @@ impl Mapper {
                 .entry(parent_id.to_owned())
                 .or_insert_with(|| crate::subagent_tail::TranscriptMapper::new(parent_id))
                 .map_value(&msg);
-            events.extend(self.dedupe_child_events(child));
+            events.extend(self.fold_child_events(child));
             return events;
         }
         match msg.get("type").and_then(Value::as_str) {
@@ -1882,6 +1919,7 @@ impl Mapper {
             summary: saved_summary,
             model,
             effort,
+            parent_item_id,
         }) = self.tool_items.get_mut(tool_use_id)
         else {
             return Vec::new();
@@ -1892,7 +1930,7 @@ impl Mapper {
         *saved_status = status;
         let event = AgentEvent::ItemUpdated(ThreadItem {
             id: tool_use_id.to_owned(),
-            parent_item_id: None,
+            parent_item_id: parent_item_id.clone(),
             content: ItemContent::Subagent {
                 agent_type: agent_type.clone(),
                 description: description.clone(),
@@ -1921,17 +1959,64 @@ impl Mapper {
         }
     }
 
-    fn dedupe_child_events(&mut self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
-        let finished = &mut self.finished_child_items;
-        events.retain(|event| match event {
-            AgentEvent::ItemStarted(item) => !finished.contains(&item.id),
-            AgentEvent::ItemCompleted(item) => {
-                finished.insert(item.id.clone());
+    /// Fold one feed's child items into the canonical stream: drop the stage
+    /// the other feed already delivered, and give a nested spawn the same
+    /// `tool_items` lifecycle as a top-level one so its task events and tail
+    /// settle it.
+    fn fold_child_events(&mut self, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        for event in events {
+            if !self.advance_child_item(&event) {
+                continue;
+            }
+            match &event {
+                AgentEvent::ItemStarted(item)
+                    if matches!(item.content, ItemContent::Subagent { .. }) =>
+                {
+                    if let Some(tool) =
+                        ToolItem::subagent(&item.content, item.parent_item_id.clone())
+                    {
+                        self.tool_items.entry(item.id.clone()).or_insert(tool);
+                    }
+                    out.push(event);
+                }
+                AgentEvent::ItemCompleted(item)
+                    if matches!(item.content, ItemContent::Subagent { .. })
+                        && matches!(
+                            self.tool_items.get(&item.id),
+                            Some(ToolItem::Subagent { .. })
+                        ) =>
+                {
+                    let id = item.id.clone();
+                    self.tool_items.remove(&id);
+                    out.extend(self.gate_subagent_terminal(&id, event));
+                }
+                _ => out.push(event),
+            }
+        }
+        out
+    }
+
+    /// Record a child item's stage; false when this stage was already delivered.
+    fn advance_child_item(&mut self, event: &AgentEvent) -> bool {
+        let (item, stage) = match event {
+            AgentEvent::ItemStarted(item) => (item, ChildItemStage::Started),
+            AgentEvent::ItemUpdated(item) => (item, ChildItemStage::Updated(item.content.clone())),
+            AgentEvent::ItemCompleted(item) => (item, ChildItemStage::Completed),
+            _ => return true,
+        };
+        match (self.child_items.get(&item.id), &stage) {
+            (Some(ChildItemStage::Completed), _) | (Some(_), ChildItemStage::Started) => false,
+            (Some(ChildItemStage::Updated(previous)), ChildItemStage::Updated(content))
+                if previous == content =>
+            {
+                false
+            }
+            _ => {
+                self.child_items.insert(item.id.clone(), stage);
                 true
             }
-            _ => true,
-        });
-        events
+        }
     }
 
     /// Fold one batch from a subagent transcript tail: its child items, the
@@ -1942,7 +2027,7 @@ impl Mapper {
             Some((model, effort)) => self.note_subagent_model(&notice.parent_id, model, effort),
             None => Vec::new(),
         };
-        events.extend(self.dedupe_child_events(notice.events));
+        events.extend(self.fold_child_events(notice.events));
         if notice.stopped {
             self.tailed.remove(&notice.parent_id);
             events.extend(self.pending_subagent_terminals.remove(&notice.parent_id));
@@ -2293,38 +2378,9 @@ impl Mapper {
         }
 
         let (item, content) = if is_agent_tool(&name.to_lowercase()) {
-            let agent_type = input
-                .get("subagent_type")
-                .and_then(Value::as_str)
-                .unwrap_or("subagent")
-                .to_owned();
-            let description = subagent_description(&input);
-            // The Agent tool only carries a model alias when the caller picked
-            // one; the resolved model and effort arrive with the child's first
-            // assistant message.
-            let model = input
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|model| !model.is_empty())
-                .map(str::to_owned);
-            (
-                ToolItem::Subagent {
-                    agent_type: agent_type.clone(),
-                    description: description.clone(),
-                    status: ItemStatus::InProgress,
-                    summary: None,
-                    model: model.clone(),
-                    effort: None,
-                },
-                ItemContent::Subagent {
-                    agent_type,
-                    description,
-                    status: ItemStatus::InProgress,
-                    summary: None,
-                    model,
-                    effort: None,
-                },
-            )
+            let content = spawned_subagent(&input);
+            let item = ToolItem::subagent(&content, None).expect("a spawn snapshot is a Subagent");
+            (item, content)
         } else if name == "Bash" {
             let command = input
                 .get("command")
@@ -2439,6 +2495,7 @@ impl Mapper {
             } else {
                 ItemStatus::Completed
             };
+            let mut parent_item_id = None;
             let content = match item {
                 ToolItem::Command { command, .. } if background_task_id.is_some() => {
                     self.tool_items.insert(
@@ -2496,16 +2553,21 @@ impl Mapper {
                     summary,
                     model,
                     effort,
+                    parent_item_id: parent,
                     ..
-                } => ItemContent::Subagent {
-                    agent_type,
-                    description,
-                    status,
-                    summary: summary
-                        .or_else(|| (!output.trim().is_empty()).then(|| one_line_summary(&output))),
-                    model,
-                    effort,
-                },
+                } => {
+                    parent_item_id = parent;
+                    ItemContent::Subagent {
+                        agent_type,
+                        description,
+                        status,
+                        summary: summary.or_else(|| {
+                            (!output.trim().is_empty()).then(|| one_line_summary(&output))
+                        }),
+                        model,
+                        effort,
+                    }
+                }
             };
             let event = if matches!(
                 &content,
@@ -2521,7 +2583,7 @@ impl Mapper {
             let is_subagent = matches!(content, ItemContent::Subagent { .. });
             let event = event(ThreadItem {
                 id: tool_use_id.clone(),
-                parent_item_id: None,
+                parent_item_id,
                 content,
             });
             if is_subagent {
@@ -2865,7 +2927,7 @@ fn subagent_status(status: &str) -> ItemStatus {
     }
 }
 
-fn one_line_summary(text: &str) -> String {
+pub(crate) fn one_line_summary(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -2878,8 +2940,32 @@ enum ClaudeRequestType {
     ToolUse,
 }
 
-fn is_agent_tool(normalized: &str) -> bool {
-    normalized.contains("agent") || normalized == "task"
+/// The tools that spawn a subagent: `Agent` and its former name `Task`.
+/// Coordination tools such as `ListAgents` and `SendMessage` do not.
+pub(crate) fn is_agent_tool(normalized: &str) -> bool {
+    matches!(normalized, "agent" | "task")
+}
+
+/// The in-progress Subagent snapshot for an Agent tool call. The call only
+/// carries a model alias when the caller picked one; the resolved model and
+/// effort arrive with the child's first assistant message.
+pub(crate) fn spawned_subagent(input: &Value) -> ItemContent {
+    ItemContent::Subagent {
+        agent_type: input
+            .get("subagent_type")
+            .and_then(Value::as_str)
+            .unwrap_or("subagent")
+            .to_owned(),
+        description: subagent_description(input),
+        status: ItemStatus::InProgress,
+        summary: None,
+        model: input
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned),
+        effort: None,
+    }
 }
 
 fn subagent_description(input: &Value) -> String {
@@ -5415,6 +5501,181 @@ mod tests {
                 if id == "toolu_spawn_bg:msg-child-2:0" && text == "done"
         ));
         assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// A background subagent that itself spawns a background Agent: the
+    /// nested spawn is a Subagent item parented to the child, the
+    /// grandchild's transcript is parented to the nested spawn, and the
+    /// grandchild's task_notification settles it after its tail's final
+    /// flush. Both feeds carry every child record; each stage is emitted once.
+    #[test]
+    fn nested_background_subagent_settles_through_its_own_task_notification() {
+        let trace = include_str!("../tests/fixtures/claude/subagent_nested_trace.jsonl");
+        let mut mapper = Mapper::new();
+        let mut events = Vec::new();
+        for line in trace.lines() {
+            events.extend(feed(&mut mapper, line));
+        }
+        let subagent_snapshots = |events: &[AgentEvent], id: &str| -> Vec<ThreadItem> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ItemStarted(item)
+                    | AgentEvent::ItemUpdated(item)
+                    | AgentEvent::ItemCompleted(item)
+                        if item.id == id
+                            && matches!(item.content, ItemContent::Subagent { .. }) =>
+                    {
+                        Some(item.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let grandchild = subagent_snapshots(&events, "toolu_grandchild");
+        assert!(matches!(
+            &grandchild[0],
+            ThreadItem { parent_item_id: Some(parent), content: ItemContent::Subagent { agent_type, description, status: ItemStatus::InProgress, .. }, .. }
+                if parent == "toolu_child" && agent_type == "general-purpose" && description == "Research Workers limits"
+        ));
+        assert_eq!(
+            grandchild
+                .iter()
+                .filter(|item| matches!(
+                    item.content,
+                    ItemContent::Subagent {
+                        status: ItemStatus::InProgress,
+                        ..
+                    }
+                ))
+                .count(),
+            grandchild.len(),
+            "launch acknowledgement and task_notification wait for the grandchild's tail"
+        );
+        assert!(
+            grandchild
+                .iter()
+                .all(|item| item.parent_item_id.as_deref() == Some("toolu_child"))
+        );
+        assert!(grandchild.iter().any(|item| matches!(
+            &item.content,
+            ItemContent::Subagent { model: Some(model), effort: Some(effort), .. }
+                if model == "claude-sonnet-5" && effort == "high"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemCompleted(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::ToolCall { name, status: ItemStatus::Completed, .. }, .. })
+                if id == "toolu_grandchild:toolu_gc_fetch" && parent == "toolu_grandchild" && name == "WebFetch"
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::ItemStarted(ThreadItem { id, .. }) if id == "toolu_grandchild"))
+                .count(),
+            1
+        );
+        let requests = mapper.take_tail_requests();
+        assert!(requests.iter().any(|request| matches!(request, TailRequest::Start { parent_id, .. } if parent_id == "toolu_grandchild")));
+        assert!(requests.iter().any(|request| matches!(request, TailRequest::Stop { parent_id } if parent_id == "toolu_grandchild")));
+
+        // The child's tail replays the nested spawn and the grandchild's tail
+        // replays its transcript; neither reopens or repeats a delivered stage.
+        let mut child_tail = crate::subagent_tail::TranscriptMapper::new("toolu_child");
+        let mut grandchild_tail = crate::subagent_tail::TranscriptMapper::new("toolu_grandchild");
+        let mut child_events = Vec::new();
+        let mut grandchild_events = Vec::new();
+        for line in trace.lines() {
+            let value: Value = serde_json::from_str(line).unwrap();
+            match value.get("parent_tool_use_id").and_then(Value::as_str) {
+                Some("toolu_child") => child_events.extend(child_tail.map_value(&value)),
+                Some("toolu_grandchild") => {
+                    grandchild_events.extend(grandchild_tail.map_value(&value))
+                }
+                _ => {}
+            }
+        }
+        let flushed = mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: "toolu_grandchild".into(),
+            events: grandchild_events,
+            model: None,
+            stopped: true,
+        });
+        assert!(
+            matches!(
+                flushed.as_slice(),
+                [AgentEvent::ItemUpdated(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), model: Some(model), effort: Some(effort), .. }, .. })]
+                    if id == "toolu_grandchild" && parent == "toolu_child" && summary == "Agent \"Research Workers limits\" finished" && model == "claude-sonnet-5" && effort == "high"
+            ),
+            "{flushed:?}"
+        );
+        let flushed = mapper.on_tail_notice(SubagentTailNotice {
+            parent_id: "toolu_child".into(),
+            events: child_events,
+            model: None,
+            stopped: true,
+        });
+        assert!(
+            matches!(
+                flushed.as_slice(),
+                [AgentEvent::ItemUpdated(ThreadItem { id, parent_item_id: None, content: ItemContent::Subagent { status: ItemStatus::Completed, summary: Some(summary), .. }, .. })]
+                    if id == "toolu_child" && summary == "Hosting researched"
+            ),
+            "{flushed:?}"
+        );
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    /// A nested Agent that runs in the foreground settles with the child's
+    /// tool_result; a coordination tool is not a spawn.
+    #[test]
+    fn nested_foreground_subagent_completes_on_the_childs_tool_result() {
+        let mut mapper = Mapper::new();
+        let mut events = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-spawn","content":[{"type":"tool_use","id":"toolu_child","name":"Agent","input":{"description":"Audit","prompt":"Audit routing.","subagent_type":"Explore"}}]}}"#,
+        );
+        events.extend(feed(
+            &mut mapper,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_child","message":{"id":"msg-child-1","content":[{"type":"tool_use","id":"toolu_list","name":"ListAgents","input":{}},{"type":"tool_use","id":"toolu_nested","name":"Agent","input":{"description":"Check tests","prompt":"Check the tests.","subagent_type":"Explore"}}]}}"#,
+        ));
+        events.extend(feed(
+            &mut mapper,
+            r#"{"type":"user","parent_tool_use_id":"toolu_child","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_list","content":"none"},{"type":"tool_result","tool_use_id":"toolu_nested","content":[{"type":"text","text":"Tests   are\ngreen."}]}]}}"#,
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ItemStarted(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::ToolCall { name, .. }, .. })
+                if id == "toolu_child:toolu_list" && parent == "toolu_child" && name == "ListAgents"
+        )));
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::ItemCompleted(ThreadItem { id, parent_item_id: Some(parent), content: ItemContent::Subagent { agent_type, status: ItemStatus::Completed, summary: Some(summary), .. }, .. }))
+                    if id == "toolu_nested" && parent == "toolu_child" && agent_type == "Explore" && summary == "Tests are green."
+            ),
+            "{events:?}"
+        );
+        assert!(mapper.take_pending_subagent_terminals().is_empty());
+    }
+
+    #[test]
+    fn only_spawning_tools_are_agent_tools() {
+        for name in ["agent", "task"] {
+            assert!(is_agent_tool(name), "{name}");
+        }
+        for name in ["listagents", "sendmessage", "taskcreate", "subagent_run"] {
+            assert!(!is_agent_tool(name), "{name}");
+        }
+        let mut mapper = Mapper::new();
+        let events = feed(
+            &mut mapper,
+            r#"{"type":"assistant","message":{"id":"msg-list","content":[{"type":"tool_use","id":"toolu_list","name":"ListAgents","input":{}}]}}"#,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::ItemStarted(ThreadItem { content: ItemContent::ToolCall { name, .. }, .. })] if name == "ListAgents"
+        ));
     }
 
     /// The tail keeps the transcript discovery found; the notification's

@@ -7,13 +7,27 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::claude::{is_agent_tool, one_line_summary, spawned_subagent};
 use crate::{AgentEvent, ItemContent, ItemStatus, ThreadItem};
+
+enum ChildTool {
+    Tool {
+        name: String,
+        input: Value,
+    },
+    /// An `Agent` call inside the subagent: a nested subagent whose own
+    /// transcript arrives keyed by this tool_use id.
+    Subagent {
+        content: ItemContent,
+        background: bool,
+    },
+}
 
 /// Stateful mapper for one subagent transcript. Tool calls are retained until
 /// their matching result arrives so completion snapshots keep the original input.
 pub(crate) struct TranscriptMapper {
     parent_id: String,
-    tools: HashMap<String, (String, Value)>,
+    tools: HashMap<String, ChildTool>,
     next_user_id: u64,
     /// Latest model/effort seen on an assistant record, until taken.
     model: Option<(Option<String>, Option<String>)>,
@@ -90,8 +104,29 @@ impl TranscriptMapper {
                         .unwrap_or("tool")
                         .to_owned();
                     let input = block.get("input").cloned().unwrap_or(Value::Null);
-                    self.tools
-                        .insert(id.to_owned(), (name.clone(), input.clone()));
+                    if is_agent_tool(&name.to_lowercase()) {
+                        let content = spawned_subagent(&input);
+                        let background = input
+                            .get("run_in_background")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        self.tools.insert(
+                            id.to_owned(),
+                            ChildTool::Subagent {
+                                content: content.clone(),
+                                background,
+                            },
+                        );
+                        events.push(AgentEvent::ItemStarted(self.nested_subagent(id, content)));
+                        continue;
+                    }
+                    self.tools.insert(
+                        id.to_owned(),
+                        ChildTool::Tool {
+                            name: name.clone(),
+                            input: input.clone(),
+                        },
+                    );
                     events.push(AgentEvent::ItemStarted(self.item(
                         id,
                         ItemContent::ToolCall {
@@ -143,26 +178,63 @@ impl TranscriptMapper {
             let Some(id) = block.get("tool_use_id").and_then(Value::as_str) else {
                 continue;
             };
-            let Some((name, input)) = self.tools.remove(id) else {
+            let Some(tool) = self.tools.remove(id) else {
                 continue;
             };
             let failed = block
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            events.push(AgentEvent::ItemCompleted(self.item(
-                id,
-                ItemContent::ToolCall {
-                    name,
-                    input,
-                    output: Some(content_text(block.get("content"))),
-                    status: if failed {
-                        ItemStatus::Failed
-                    } else {
-                        ItemStatus::Completed
-                    },
-                },
-            )));
+            let output = content_text(block.get("content"));
+            let status = if failed {
+                ItemStatus::Failed
+            } else {
+                ItemStatus::Completed
+            };
+            match tool {
+                ChildTool::Tool { name, input } => {
+                    events.push(AgentEvent::ItemCompleted(self.item(
+                        id,
+                        ItemContent::ToolCall {
+                            name,
+                            input,
+                            output: Some(output),
+                            status,
+                        },
+                    )));
+                }
+                ChildTool::Subagent {
+                    content,
+                    background,
+                } => {
+                    // A background launch only acknowledges the spawn; the
+                    // nested subagent settles through its own task_notification.
+                    if background || launch_acknowledged(value, &output) {
+                        continue;
+                    }
+                    let ItemContent::Subagent {
+                        agent_type,
+                        description,
+                        model,
+                        effort,
+                        ..
+                    } = content
+                    else {
+                        continue;
+                    };
+                    events.push(AgentEvent::ItemCompleted(self.nested_subagent(
+                        id,
+                        ItemContent::Subagent {
+                            agent_type,
+                            description,
+                            status,
+                            summary: (!output.trim().is_empty()).then(|| one_line_summary(&output)),
+                            model,
+                            effort,
+                        },
+                    )));
+                }
+            }
         }
         events
     }
@@ -174,6 +246,26 @@ impl TranscriptMapper {
             content,
         }
     }
+
+    /// A nested spawn keeps its bare tool_use id: the grandchild's transcript
+    /// lines name it as their `parent_tool_use_id`.
+    fn nested_subagent(&self, tool_use_id: &str, content: ItemContent) -> ThreadItem {
+        ThreadItem {
+            id: tool_use_id.to_owned(),
+            parent_item_id: Some(self.parent_id.clone()),
+            content,
+        }
+    }
+}
+
+/// Whether a nested Agent result only reports an asynchronous launch. Claude
+/// writes `toolUseResult.status` for top-level agents but omits it from
+/// subagent transcripts, where the acknowledgement text is the only marker.
+fn launch_acknowledged(value: &Value, output: &str) -> bool {
+    ["/tool_use_result/status", "/toolUseResult/status"]
+        .iter()
+        .any(|pointer| value.pointer(pointer).and_then(Value::as_str) == Some("async_launched"))
+        || output.starts_with("Async agent launched successfully")
 }
 
 /// Incremental reader used both by the polling task and deterministic tests.
