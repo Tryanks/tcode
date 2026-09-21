@@ -560,6 +560,110 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  package-traverse:
+    name: Traverse ${{ matrix.label }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            os: macos-26
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: arm64
+          - label: macOS x64
+            os: macos-26
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x64
+          - label: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x64
+          - label: Windows arm64
+            os: windows-2022
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: arm64
+          - label: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+          - label: Linux arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      VERSION: ${{ needs.setup.outputs.version }}
+      TCODE_BUILD_VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.setup.outputs.tag }}
+
+      - name: Install stable Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-traverse-${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config
+
+      - name: Build Traverse server
+        shell: bash
+        run: cargo build -p tcode-traverse-server --release --locked --target "${{ matrix.target }}"
+
+      - name: Package Unix server
+        if: matrix.platform != 'windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/tcode-traverse" dist/tcode-traverse
+          chmod +x dist/tcode-traverse
+          if [[ "${{ matrix.platform }}" == "macos" ]]; then
+            (cd dist && zip -q "tcode-traverse-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}.zip" tcode-traverse)
+          else
+            tar -C dist -czf "dist/tcode-traverse-${VERSION}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz" tcode-traverse
+          fi
+          rm dist/tcode-traverse
+
+      - name: Package Windows server
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\tcode-traverse.exe" "dist\tcode-traverse.exe"
+          Compress-Archive -Path "dist\tcode-traverse.exe" -DestinationPath "dist\tcode-traverse-$env:VERSION-windows-${{ matrix.arch }}.zip"
+          Remove-Item "dist\tcode-traverse.exe"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-traverse-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
   package-android:
     name: Android arm64
     needs: setup
@@ -624,7 +728,7 @@ jobs:
 
   finalize:
     name: Publish release checksums
-    needs: [setup, package, package-headless, package-android]
+    needs: [setup, package, package-headless, package-traverse, package-android]
     runs-on: ubuntu-24.04
     steps:
       - name: Download all packages
