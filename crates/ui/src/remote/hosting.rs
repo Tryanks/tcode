@@ -1,4 +1,4 @@
-//! Hosting this machine: the Traverse endpoint, minted pairing codes and the
+//! Hosting this machine: the Traverse endpoint, minted invitations and the
 //! devices that have paired with it.
 //!
 //! [`RemoteController`] is the process-wide handle the composition root installs.
