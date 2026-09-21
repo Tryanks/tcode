@@ -1467,7 +1467,7 @@ impl AppState {
                 let git_branch = load_branch.then(|| read_git_branch(&cwd));
                 (timeline, folded, loaded, git_branch)
             };
-            host_cx.enqueue(move |state, _cx| {
+            host_cx.enqueue(move |state, cx| {
                 let generation_matches =
                     state.timeline_load_generations.get(&session_id).copied() == Some(generation);
                 let target_matches = match target {
@@ -1502,6 +1502,7 @@ impl AppState {
                         session.git_branch = git_branch;
                     }
                 }
+                state.repair_orphaned_mirror_turn(&session_id, cx);
             });
         });
     }

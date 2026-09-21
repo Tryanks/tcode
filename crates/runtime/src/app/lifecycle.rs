@@ -1,3 +1,4 @@
+use super::sessions::descendant_session_ids;
 use super::*;
 
 impl AppState {
@@ -520,10 +521,16 @@ impl AppState {
     }
 
     pub(super) fn close_orchestrator_children(&mut self, parent_id: &str, cx: &mut HostCx) {
+        // Nested subagent mirrors hang under other mirrors, yet they belong to
+        // the one provider process that just closed.
+        let descendants = descendant_session_ids(&self.sessions, parent_id);
         let child_ids: Vec<_> = self
             .sessions
             .iter()
-            .filter(|meta| meta.parent_session_id.as_deref() == Some(parent_id))
+            .filter(|meta| {
+                meta.parent_session_id.as_deref() == Some(parent_id)
+                    || (meta.native_subagent.is_some() && descendants.contains(&meta.id))
+            })
             .map(|meta| meta.id.clone())
             .collect();
         for child_id in child_ids {
