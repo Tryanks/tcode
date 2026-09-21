@@ -10,6 +10,9 @@ pub(crate) struct Request {
     pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
+    /// Empty for proxy requests, whose bodies stay in the stream; only the
+    /// browser listener reads one.
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
     pub body: Vec<u8>,
 }
 
@@ -167,6 +170,7 @@ where
     stream.flush().await
 }
 
+#[cfg(feature = "server")]
 pub(crate) fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",

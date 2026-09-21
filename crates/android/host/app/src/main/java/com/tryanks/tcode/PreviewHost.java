@@ -11,7 +11,6 @@ import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 import org.json.JSONObject;
-import java.net.URI;
 import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 
@@ -46,22 +45,14 @@ public final class PreviewHost implements Application.ActivityLifecycleCallbacks
                 String initialUrl = creation.optString("url", "about:blank");
                 JSONObject proxy = creation.optJSONObject("proxy");
                 String proxyOrigin = proxy == null ? null : proxy.getString("origin");
-                String proxyToken = proxy == null ? null : proxy.getString("token");
-                String proxyHost = proxyOrigin == null ? null : URI.create(proxyOrigin).getHost();
                 if (proxy != null && !WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))
-                    throw new IllegalStateException("This Android WebView does not support authenticated remote preview proxying");
+                    throw new IllegalStateException("This Android WebView does not support remote preview proxying");
                 TcodeWebView view = new TcodeWebView(activity);
                 view.getSettings().setJavaScriptEnabled(true);
                 view.getSettings().setDomStorageEnabled(true);
                 view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
                 view.getSettings().setAllowFileAccess(false);
                 view.setWebViewClient(new WebViewClient() {
-                    @Override public void onReceivedHttpAuthRequest(WebView v, HttpAuthHandler handler,
-                            String host, String realm) {
-                        if (proxyHost != null && proxyHost.equalsIgnoreCase(host)
-                                && "tcode-preview".equals(realm)) handler.proceed("tcode", proxyToken);
-                        else handler.cancel();
-                    }
                     @Override public void onPageStarted(WebView v, String url, Bitmap icon) {
                         event(id, 0, url, 0, "");
                     }
