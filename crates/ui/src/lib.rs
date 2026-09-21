@@ -46,6 +46,7 @@ pub mod remote;
 mod run;
 pub(crate) mod runtime_event;
 mod scroll;
+pub mod scroll_capture;
 pub mod settings;
 mod settings_page;
 mod shell;

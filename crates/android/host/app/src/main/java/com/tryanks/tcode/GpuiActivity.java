@@ -44,6 +44,8 @@ public final class GpuiActivity extends NativeActivity {
 
     public PreviewHost previewHost;
     private GpuiInputView inputView;
+    /** Android 12 and later only; null below, where scrolling capture does not exist. */
+    private ScrollCaptureBridge scrollCapture;
     private Boolean appBackgroundDark;
     private boolean keyboardVisible;
     private boolean keyboardShowPending;
@@ -76,6 +78,10 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeOnInsets(int left, int top, int right, int bottom, int imeBottom);
     private native void nativeOnBack(boolean enabled);
     private native void nativeQrScanCompleted(long requestId, int status, String value);
+    private native void nativeScrollCaptureSearch(long request);
+    private native void nativeScrollCaptureStart();
+    private native void nativeScrollCaptureImage(long request, int top);
+    private native void nativeScrollCaptureEnd();
 
     private native boolean nativeFirstFrameRendered();
 
@@ -96,6 +102,16 @@ public final class GpuiActivity extends NativeActivity {
         layout.gravity = Gravity.BOTTOM | Gravity.START;
         addContentView(inputView, layout);
         previewHost = new PreviewHost(this);
+        if (Build.VERSION.SDK_INT >= 31) {
+            scrollCapture = new ScrollCaptureBridge(this, getWindow(), new ScrollCaptureBridge.Host() {
+                @Override public void search(long request) { nativeScrollCaptureSearch(request); }
+                @Override public void start() { nativeScrollCaptureStart(); }
+                @Override public void image(long request, int top) { nativeScrollCaptureImage(request, top); }
+                @Override public void end() { nativeScrollCaptureEnd(); }
+            });
+            addContentView(scrollCapture, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        }
 
         View decor = getWindow().getDecorView();
         decor.setOnApplyWindowInsetsListener((view, insets) -> {
@@ -342,6 +358,16 @@ public final class GpuiActivity extends NativeActivity {
         } else {
             nativeQrScanCompleted(request, HOST_CANCELLED, "已取消扫描");
         }
+    }
+
+    /** Rust's answer to a scrolling-capture search: the timeline's window rectangle, empty to decline. */
+    public void gpuiScrollCaptureBounds(long request, int left, int top, int right, int bottom) {
+        if (scrollCapture != null) scrollCapture.onBounds(request, left, top, right, bottom);
+    }
+
+    /** Rust's answer to a scrolling-capture tile: how far the frame on screen is scrolled. */
+    public void gpuiScrollCaptureRendered(long request, boolean ok, int scrolled) {
+        if (scrollCapture != null) scrollCapture.onRendered(request, ok, scrolled);
     }
 
     public String gpuiReadClipboard() {

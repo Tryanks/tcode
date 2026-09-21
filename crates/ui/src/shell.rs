@@ -993,6 +993,32 @@ fn current_shell(cx: &App) -> Option<Entity<AppShell>> {
     cx.try_global::<ShellBackTarget>()?.shell.upgrade()
 }
 
+/// The window the platform's gestures arrive at, with its shell.
+pub(crate) fn current_window_shell(cx: &App) -> Option<(AnyWindowHandle, Entity<AppShell>)> {
+    let target = cx.try_global::<ShellBackTarget>()?;
+    Some((target.window, target.shell.upgrade()?))
+}
+
+impl AppShell {
+    /// The chat timeline while it is the page on screen with nothing layered
+    /// over it: a scrolling screenshot of anything else would read back the
+    /// palette, a dialog or another page.
+    pub(crate) fn capture_chat(&self, cx: &App) -> Option<Entity<ChatView>> {
+        let attachment = self.attachment.as_ref()?;
+        let state = self.window_state.read(cx);
+        let on_screen = if state.compact {
+            state.destination() == Destination::Thread
+        } else {
+            state.route() == Route::Chat
+        };
+        (on_screen
+            && !state.palette_open
+            && self.pending_navigation_restore.is_none()
+            && !gpui_base::GlobalState::is_in_deferred_context(cx))
+        .then(|| attachment.chat.clone())
+    }
+}
+
 /// App-level dispatch also reaches the shell when no child has keyboard focus.
 pub(crate) fn navigate_thread(action: &crate::shortcut::NavigateThread, cx: &mut App) {
     let Some(shell) = current_shell(cx) else {

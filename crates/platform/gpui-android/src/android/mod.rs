@@ -11,13 +11,35 @@ use std::{cell::RefCell, rc::Rc};
 
 pub(crate) use platform::AndroidPlatform;
 
+pub use host::{ScrollCaptureRequest, scroll_capture_bounds, scroll_capture_rendered};
 #[doc(hidden)]
 pub use host::{
     commit_text as jni_commit_text, delete_backward as jni_delete_backward,
     finish_composing_text as jni_finish_composing_text, input_state as jni_input_state,
     key_event as jni_key_event, on_back as jni_on_back, on_insets as jni_on_insets,
-    set_composing_text as jni_set_composing_text,
+    scroll_capture as jni_scroll_capture, set_composing_text as jni_set_composing_text,
 };
+
+/// Installs the observer for the system screenshot tool's scrolling capture.
+/// Without one, every capture search is declined.
+pub fn set_scroll_capture_callback(callback: impl FnMut(ScrollCaptureRequest) + 'static) {
+    PLATFORM.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .expect("gpui-android::init_platform() must be called first")
+            .set_scroll_capture_callback(Box::new(callback));
+    });
+}
+
+/// Runs `callback` on the GPUI thread once the next frame is presented.
+pub fn after_next_frame(callback: impl FnOnce() + 'static) {
+    PLATFORM.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .expect("gpui-android::init_platform() must be called first")
+            .after_next_frame(Box::new(callback));
+    });
+}
 
 thread_local! {
     static PLATFORM: RefCell<Option<Rc<AndroidPlatform>>> = const { RefCell::new(None) };

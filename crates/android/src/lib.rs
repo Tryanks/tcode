@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "android")]
 mod host;
+#[cfg(target_os = "android")]
+mod scroll_capture;
 
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
@@ -102,6 +104,17 @@ pub fn android_main(app: android_activity::AndroidApp) {
                             cx.quit();
                         }
                     });
+                }
+            })
+            .detach();
+
+            let (capture_sender, mut capture_receiver) = mpsc::unbounded();
+            gpui_android::set_scroll_capture_callback(move |request| {
+                let _ = capture_sender.unbounded_send(request);
+            });
+            cx.spawn(async move |cx| {
+                while let Some(request) = capture_receiver.next().await {
+                    cx.update(|cx| scroll_capture::handle(request, cx));
                 }
             })
             .detach();
@@ -233,6 +246,46 @@ mod jni_exports {
         if enabled {
             gpui_android::jni_on_back();
         }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeScrollCaptureSearch(
+        _env: EnvUnowned,
+        _activity: JObject,
+        request: jlong,
+    ) {
+        gpui_android::jni_scroll_capture(gpui_android::ScrollCaptureRequest::Search {
+            request: request as u64,
+        });
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeScrollCaptureStart(
+        _env: EnvUnowned,
+        _activity: JObject,
+    ) {
+        gpui_android::jni_scroll_capture(gpui_android::ScrollCaptureRequest::Start);
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeScrollCaptureImage(
+        _env: EnvUnowned,
+        _activity: JObject,
+        request: jlong,
+        top: jint,
+    ) {
+        gpui_android::jni_scroll_capture(gpui_android::ScrollCaptureRequest::Image {
+            request: request as u64,
+            top,
+        });
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_tryanks_tcode_GpuiActivity_nativeScrollCaptureEnd(
+        _env: EnvUnowned,
+        _activity: JObject,
+    ) {
+        gpui_android::jni_scroll_capture(gpui_android::ScrollCaptureRequest::End);
     }
 
     #[unsafe(no_mangle)]

@@ -372,6 +372,10 @@ pub struct ChatView {
     _copied_task: Option<Task<()>>,
     /// The live commit dialog entity while it is open (kept alive across frames).
     commit_dialog: Option<Entity<CommitDialog>>,
+    /// A system scrolling screenshot is driving the timeline: where it was
+    /// before the capture moved it. History paging and tail following stay
+    /// off until the capture ends so the origin keeps meaning the same pixel.
+    capture: Option<CaptureSession>,
     _subscriptions: Vec<Subscription>,
     #[cfg(test)]
     markdown_remeasured_turns: Vec<usize>,
@@ -394,6 +398,130 @@ fn jump_to_latest_visible(list: &ListState) -> bool {
     // been measured. Prepending shifts the extent and offset together.
     height > px(0.)
         && list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y > height
+}
+
+/// Pixels between the top of the content and the top of the viewport. A list
+/// anchored past its last row reports the whole content height; on screen it
+/// is scrolled no further than the end.
+fn capture_scrolled(list: &ListState) -> gpui::Pixels {
+    (-list.scroll_px_offset_for_scrollbar().y).min(list.max_offset_for_scrollbar().y)
+}
+
+struct CaptureSession {
+    anchor: ListOffset,
+    following: bool,
+    /// The row at the top of the viewport when the capture began; capture
+    /// offsets are measured from it. A row, not a pixel count: rows measured
+    /// for the first time during the capture change every pixel count above
+    /// them.
+    origin: ListOffset,
+}
+
+/// One tile's scroll, in pixels from the capture's starting top.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CaptureScroll {
+    /// The offset reached: smaller than asked past the end of the measured
+    /// content, larger above its start.
+    pub reached: gpui::Pixels,
+    /// Whether the scroll changed the list, so the frame on screen is stale.
+    pub moved: bool,
+}
+
+/// The timeline as the surface of the platform's scrolling screenshot.
+///
+/// The capturer works in pixels relative to the viewport at the start of the
+/// capture: it asks for the content that would sit `offset` below that top,
+/// the timeline scrolls there as far as measured content allows, and the
+/// platform reads back the next painted frame. The history reservation above
+/// the first turn is blank and never captured.
+impl ChatView {
+    /// The timeline's on-screen rectangle, when it has something to capture.
+    pub(crate) fn capture_viewport(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let bounds = self.list_state.viewport_bounds();
+        (!self.turn_items.is_empty() && bounds.size.height > px(0.) && bounds.size.width > px(0.))
+            .then_some(bounds)
+    }
+
+    pub(crate) fn capture_begin(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.capture_viewport().is_none() {
+            return false;
+        }
+        if self.capture.is_none() {
+            let list = &self.list_state;
+            let anchor = list.logical_scroll_top();
+            let following = list.is_following_tail();
+            // Layout re-arms tail following whenever the bottom comes into
+            // view, which the capture's last tile does; `Normal` keeps the
+            // list where the capture put it.
+            list.set_follow_mode(FollowMode::Normal);
+            // An anchor past the last row is laid out from the end, but
+            // `scroll_by` counts its pixel offset from the top of every row:
+            // a scroll relative to it would land a viewport short. Re-anchor
+            // at the row on screen first.
+            if anchor.item_ix >= list.item_count() {
+                list.scroll_by(-list.viewport_bounds().size.height);
+            }
+            self.capture = Some(CaptureSession {
+                anchor,
+                following,
+                origin: list.logical_scroll_top(),
+            });
+            cx.notify();
+        }
+        true
+    }
+
+    /// Scroll so the content `offset` pixels below the capture's starting top
+    /// is at the top of the viewport. `None` outside a capture.
+    pub(crate) fn capture_scroll(
+        &mut self,
+        offset: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<CaptureScroll> {
+        let session = self.capture.as_ref()?;
+        let list = &self.list_state;
+        let before = list.logical_scroll_top();
+        // Pixel counts are only comparable within one measurement of the
+        // rows, so the origin's is taken now, along with the target's.
+        list.scroll_to(session.origin);
+        // `scroll_by` counts from the top of every row even past the end,
+        // where layout shows the list scrolled no further than the end.
+        let origin = -list.scroll_px_offset_for_scrollbar().y;
+        let end = list.max_offset_for_scrollbar().y;
+        let target = (origin + offset)
+            .min(end)
+            .max(self.history_placeholder_height)
+            .max(px(0.));
+        list.scroll_by(target - origin);
+        let after = list.logical_scroll_top();
+        let moved =
+            after.item_ix != before.item_ix || after.offset_in_item != before.offset_in_item;
+        if moved {
+            cx.notify();
+        }
+        Some(CaptureScroll {
+            reached: capture_scrolled(list) - origin.min(end),
+            moved,
+        })
+    }
+
+    /// Whether a frame painted now shows the rows' content rather than a
+    /// Markdown placeholder still being built.
+    pub(crate) fn capture_settled(&self) -> bool {
+        self.pending_md_builds.is_empty()
+    }
+
+    pub(crate) fn capture_end(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.capture.take() else {
+            return;
+        };
+        let list = &self.list_state;
+        list.set_follow_mode(FollowMode::Tail);
+        if !session.following {
+            list.scroll_to(session.anchor);
+        }
+        cx.notify();
+    }
 }
 
 impl ChatView {
@@ -499,6 +627,7 @@ impl ChatView {
             copied: None,
             _copied_task: None,
             commit_dialog: None,
+            capture: None,
             _subscriptions: subscriptions,
             #[cfg(test)]
             markdown_remeasured_turns: Vec::new(),
@@ -586,6 +715,12 @@ impl ChatView {
                 let anchor = self.list_state.logical_scroll_top();
                 let following = self.list_state.is_following_tail();
                 self.list_state.splice(0..0, count);
+                // A page requested before a capture began still lands during
+                // it; the capture's anchor names the same turn as before.
+                if let Some(capture) = &mut self.capture {
+                    capture.anchor.item_ix += count;
+                    capture.origin.item_ix += count;
+                }
                 if self.history_placeholder_height > px(0.) {
                     // The reservation moves to the new first turn. Remove it
                     // from the former first turn without moving its content.
@@ -2593,7 +2728,9 @@ impl Render for ChatView {
         }
         let show_jump_to_latest = jump_to_latest_visible(&self.list_state);
         self.sync_markdown_scroll_position(cx);
-        if let Some((expected, distance)) = self.reservation_scroll_back.take() {
+        if self.capture.is_none()
+            && let Some((expected, distance)) = self.reservation_scroll_back.take()
+        {
             let chat = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {
                 let _ = chat.update(cx, |chat, cx| {
@@ -2614,8 +2751,9 @@ impl Render for ChatView {
         let chat = cx.entity().downgrade();
         window.on_next_frame(move |_, cx| {
             let _ = chat.update(cx, |chat, cx| {
-                if let Some(screens) =
-                    history_screens_covered(&chat.list_state, chat.history_placeholder_height)
+                if chat.capture.is_none()
+                    && let Some(screens) =
+                        history_screens_covered(&chat.list_state, chat.history_placeholder_height)
                 {
                     chat.workspace_store.update(cx, |store, cx| {
                         store.update_history_window(screens, cx);
@@ -4513,6 +4651,107 @@ mod tests {
             "the same turn must remain visible after 20 earlier turns"
         );
         assert_eq!(anchor.offset_in_item, px(7.));
+        assert!(!list.is_following_tail());
+    }
+
+    /// A scrolling screenshot moves the timeline tile by tile from wherever it
+    /// was, learns how far it really moved once layout has settled, and leaves
+    /// it where it was.
+    #[gpui::test]
+    fn scrolling_capture_moves_the_timeline_within_its_content_and_restores_it(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{FollowMode, ListOffset, px};
+        let (store, window_state, _) = seed_chat(cx, synthetic_markdown_timeline(60));
+        let (view, cx) =
+            cx.add_window_view(|window, cx| ChatView::new(store, window_state, window, cx));
+        cx.simulate_resize(gpui::size(px(393.), px(852.)));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        // The rows on screen are built and measured before a capture starts.
+        for _ in 0..4 {
+            draw(cx);
+            cx.run_until_parked();
+        }
+        assert!(view.read_with(cx, |chat, _| chat.capture_settled()));
+        let list = view.read_with(cx, |chat, _| chat.list_state.clone());
+        assert!(list.is_following_tail());
+        assert!(
+            super::capture_scrolled(&list) > px(852.),
+            "sixty turns scroll well past one screen"
+        );
+        // Rows measured for the first time move the list; the capturer scrolls
+        // again after each frame until nothing moves.
+        let settle = |offset: gpui::Pixels, cx: &mut gpui::VisualTestContext| {
+            for _ in 0..8 {
+                let scroll = view
+                    .update(cx, |chat, cx| chat.capture_scroll(offset, cx))
+                    .expect("a capture is in progress");
+                if !scroll.moved {
+                    return scroll.reached;
+                }
+                draw(cx);
+            }
+            panic!("the timeline kept moving");
+        };
+
+        // Following the tail: the capture starts at the bottom.
+        assert!(view.update(cx, |chat, cx| chat.capture_begin(cx)));
+        let viewport = view.read_with(cx, |chat, _| chat.capture_viewport());
+        assert!(viewport.is_some_and(|bounds| bounds.size.height > px(0.)));
+        assert!(
+            !list.is_following_tail(),
+            "layout must not snap back to the end"
+        );
+        assert_eq!(
+            settle(px(0.), cx),
+            px(0.),
+            "the first tile is the screen itself"
+        );
+        assert_eq!(settle(px(-400.), cx), px(-400.));
+        assert!(
+            list.logical_scroll_top().item_ix < 56,
+            "a screen above the last turns"
+        );
+        assert_eq!(
+            settle(px(400.), cx),
+            px(0.),
+            "nothing lies below the end of the content"
+        );
+        let top = settle(px(-1.0e6), cx);
+        assert!(
+            top < px(-852.) && top > px(-1.0e6),
+            "the tile above the first turn stops at the top: {top:?}"
+        );
+        assert_eq!(list.logical_scroll_top().item_ix, 0);
+        view.update(cx, |chat, cx| chat.capture_end(cx));
+        assert!(list.is_following_tail());
+        assert_eq!(
+            view.update(cx, |chat, cx| chat.capture_scroll(px(0.), cx)),
+            None,
+            "tiles after the end are refused"
+        );
+
+        // Reading in the middle: the anchor comes back exactly, still paused.
+        list.set_follow_mode(FollowMode::Normal);
+        let anchor = ListOffset {
+            item_ix: 10,
+            offset_in_item: px(7.),
+        };
+        list.scroll_to(anchor);
+        view.update(cx, |_, cx| cx.notify());
+        draw(cx);
+        assert!(view.update(cx, |chat, cx| chat.capture_begin(cx)));
+        assert_eq!(settle(px(0.), cx), px(0.));
+        assert_eq!(settle(px(300.), cx), px(300.));
+        assert!(list.logical_scroll_top().item_ix >= 10);
+        view.update(cx, |chat, cx| chat.capture_end(cx));
+        let restored = list.logical_scroll_top();
+        assert_eq!(restored.item_ix, anchor.item_ix);
+        assert_eq!(restored.offset_in_item, anchor.offset_in_item);
         assert!(!list.is_following_tail());
     }
 
