@@ -170,7 +170,7 @@ fn browser_invite(code: String) -> PairInvite {
     PairInvite {
         host_id: String::new(),
         name: String::new(),
-        code,
+        secret: code,
         traverse: None,
         relay: None,
         addrs: Vec::new(),

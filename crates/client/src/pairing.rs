@@ -2,6 +2,8 @@
 //!
 //! A machine is identified by its iroh `EndpointId`; every other field is a
 //! routing hint that discovery services may extend but never replace.
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -39,13 +41,16 @@ pub fn remember_host(hosts: &mut Vec<PairedHost>, host: PairedHost) {
 }
 
 /// What a `tcode://pair` link carries: the machine identity, where to reach
-/// it, and the single-use code. A browser leaves `host_id` empty and pairs
-/// with the origin that served it.
+/// it, and the single-use secret that admits the device. First contact is
+/// always by scanning or pasting the link, so the link itself is the secret;
+/// there is no separate code. A browser leaves `host_id` empty and pairs with
+/// the origin that served it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairInvite {
     pub host_id: String,
     pub name: String,
-    pub code: String,
+    /// [`SECRET_BYTES`] random bytes as unpadded base64url.
+    pub secret: String,
     pub traverse: Option<String>,
     pub relay: Option<String>,
     pub addrs: Vec<String>,
@@ -69,6 +74,24 @@ impl PairInvite {
 /// An `EndpointId` as printed by iroh: 64 hex characters.
 pub fn valid_host_id(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Entropy of an invitation secret.
+pub const SECRET_BYTES: usize = 16;
+/// Length of an encoded secret: 16 bytes as unpadded base64url.
+pub const SECRET_LEN: usize = 22;
+
+/// Encode random bytes as the secret a link carries.
+pub fn encode_secret(bytes: &[u8; SECRET_BYTES]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Whether `secret` is the canonical encoding of [`SECRET_BYTES`] bytes.
+pub fn valid_invitation_secret(secret: &str) -> bool {
+    secret.len() == SECRET_LEN
+        && URL_SAFE_NO_PAD
+            .decode(secret)
+            .is_ok_and(|bytes| bytes.len() == SECRET_BYTES)
 }
 
 fn valid_addr(addr: &str) -> bool {
@@ -100,8 +123,8 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
     if !valid_host_id(&host_id) {
         return None;
     }
-    let code = field("code")?;
-    if !is_pairing_code(&code) {
+    let secret = field("secret")?;
+    if !valid_invitation_secret(&secret) {
         return None;
     }
     let traverse = field("traverse");
@@ -126,7 +149,7 @@ pub fn parse_pair_url(value: &str) -> Option<PairInvite> {
     Some(PairInvite {
         host_id,
         name: field("name")?,
-        code,
+        secret,
         traverse,
         relay,
         addrs,
@@ -139,7 +162,7 @@ pub fn pair_url(invite: &PairInvite) -> String {
     query
         .append_pair("v", "2")
         .append_pair("id", &invite.host_id)
-        .append_pair("code", &invite.code)
+        .append_pair("secret", &invite.secret)
         .append_pair("name", &invite.name);
     if let Some(traverse) = &invite.traverse {
         query.append_pair("traverse", traverse);
@@ -152,10 +175,6 @@ pub fn pair_url(invite: &PairInvite) -> String {
     }
     drop(query);
     url.into()
-}
-
-pub fn is_pairing_code(code: &str) -> bool {
-    code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -203,10 +222,30 @@ mod tests {
         assert_eq!(minimal.last_connected_unix, None);
     }
 
+    const SECRET: &str = "AAECAwQFBgcICQoLDA0ODw";
+
+    #[test]
+    fn secrets_are_sixteen_bytes_as_unpadded_base64url() {
+        assert_eq!(encode_secret(&std::array::from_fn(|i| i as u8)), SECRET);
+        assert!(valid_invitation_secret(SECRET));
+        assert!(valid_invitation_secret("__-_AAAAAAAAAAAAAAAAAA"));
+        for bad in [
+            "",
+            "123456",
+            "AAECAwQFBgcICQoLDA0OD",    // 15 bytes and a half
+            "AAECAwQFBgcICQoLDA0ODw==", // padded
+            "AAECAwQFBgcICQoLDA0ODx",   // non-canonical trailing bits
+            "AAECAwQFBgcICQoLDA0OD+",   // standard alphabet
+            "AAECAwQFBgcICQoLDA0ODwAA", // 18 bytes
+        ] {
+            assert!(!valid_invitation_secret(bad), "{bad:?}");
+        }
+    }
+
     #[test]
     fn invitations_round_trip_and_reject_malformed_fields() {
         let wire = format!(
-            "tcode://pair?v=2&id={ID}&code=123456&name=Desk&traverse=https%3A%2F%2Ftraverse.example%2F&relay=https%3A%2F%2Frelay.example%2F&addr=192.168.1.2%3A47420&addr=%5Bfd00%3A%3A2%5D%3A47420"
+            "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&traverse=https%3A%2F%2Ftraverse.example%2F&relay=https%3A%2F%2Frelay.example%2F&addr=192.168.1.2%3A47420&addr=%5Bfd00%3A%3A2%5D%3A47420"
         );
         let invite = parse_pair_url(&wire).unwrap();
         assert_eq!(
@@ -214,7 +253,7 @@ mod tests {
             PairInvite {
                 host_id: ID.into(),
                 name: "Desk".into(),
-                code: "123456".into(),
+                secret: SECRET.into(),
                 traverse: Some("https://traverse.example/".into()),
                 relay: Some("https://relay.example/".into()),
                 addrs: vec!["192.168.1.2:47420".into(), "[fd00::2]:47420".into()],
@@ -222,7 +261,7 @@ mod tests {
         );
         assert_eq!(pair_url(&invite), wire);
         let lan_only = parse_pair_url(&format!(
-            "tcode://pair?v=2&id={ID}&code=123456&name=Desk&addr=10.0.0.4%3A5000&addr=10.0.0.4%3A5000"
+            "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk&addr=10.0.0.4%3A5000&addr=10.0.0.4%3A5000"
         ))
         .unwrap();
         assert_eq!(lan_only.addrs, ["10.0.0.4:5000"]);
@@ -230,8 +269,13 @@ mod tests {
         for (field, replacement) in [
             ("v=2", "v=1"),
             ("tcode://", "https://"),
-            ("code=123456", "code=12345"),
-            ("code=123456", "code=12x456"),
+            // A link from before the secret carried a six-digit code.
+            (&format!("secret={SECRET}"), "code=123456"),
+            (&format!("secret={SECRET}"), "secret=123456"),
+            (
+                &format!("secret={SECRET}"),
+                "secret=AAECAwQFBgcICQoLDA0ODw%3D%3D",
+            ),
             (&format!("id={ID}"), "id=desk"),
             ("addr=192.168.1.2%3A47420", "addr=192.168.1.2"),
             ("addr=192.168.1.2%3A47420", "addr=192.168.1.2%3A0"),
@@ -251,7 +295,7 @@ mod tests {
             .collect();
         assert!(
             parse_pair_url(&format!(
-                "tcode://pair?v=2&id={ID}&code=123456&name=Desk{many}"
+                "tcode://pair?v=2&id={ID}&secret={SECRET}&name=Desk{many}"
             ))
             .is_none()
         );

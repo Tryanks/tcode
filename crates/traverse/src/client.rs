@@ -1,16 +1,21 @@
 //! The device side: one iroh endpoint per [`DeviceIdentity`], pairing over
 //! `tcode/pair/1` and a reconnecting main-stream [`Transport`] over `tcode/1`.
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     io,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use crate::{
+    identity::DeviceIdentity,
+    manifest::{Manifest, ManifestLoader, ManifestSource, live},
+    runtime::{block_on, runtime},
+    wire::{self, ClientLine, HelloRejection, HostLine, LineReader, PairRejection},
+};
 use async_channel::Sender;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr,
-    address_lookup::{AddressLookupBuilder as _, PkarrResolver},
     endpoint::{Connection, ConnectionError, SendStream, presets},
 };
 use tcode_client::{
@@ -20,13 +25,6 @@ use tcode_client::{
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     pairing::{MAX_ADDRS, PairInvite, PairedHost},
     recovery::{Backoff, Wake},
-};
-use url::Url;
-
-use crate::{
-    identity::DeviceIdentity,
-    runtime::{block_on, runtime},
-    wire::{self, ClientLine, HelloRejection, HostLine, LineReader, PairRejection},
 };
 
 /// Budget for dialing and completing the QUIC handshake.
@@ -40,8 +38,42 @@ pub(crate) struct ClientEndpoint {
     endpoint: Endpoint,
     /// Transports to probe when the network changes.
     transports: Mutex<Vec<Outgoing>>,
-    /// Traverse instances whose resolvers are already installed.
-    resolvers: Mutex<HashSet<Url>>,
+    lookups: Arc<Mutex<Lookups>>,
+}
+
+/// The manifests whose resolvers the endpoint carries: the official one when
+/// the device uses the official service, plus one per self-hosted instance a
+/// paired machine publishes to. The device only resolves; it never publishes.
+struct Lookups {
+    endpoint: Endpoint,
+    loaders: HashMap<ManifestSource, ManifestLoader>,
+    /// What is installed right now, so a refresh of one manifest rebuilds
+    /// the services with every other one intact.
+    installed: HashMap<ManifestSource, Arc<Manifest>>,
+    refreshers: Vec<tokio::task::AbortHandle>,
+}
+
+impl Lookups {
+    /// Rebuild the lookup services with `manifest` in place of what `source`
+    /// had. Returns the official manifest it replaced: the endpoint's relay
+    /// map was built from that one and moves with it.
+    fn apply(&mut self, source: &ManifestSource, manifest: Arc<Manifest>) -> Option<Arc<Manifest>> {
+        let previous = self.installed.insert(source.clone(), manifest);
+        live::install_lookups(
+            &self.endpoint,
+            self.installed.values().map(Arc::as_ref),
+            false,
+        );
+        previous.filter(|_| *source == ManifestSource::Official)
+    }
+}
+
+impl Drop for Lookups {
+    fn drop(&mut self) {
+        for refresher in &self.refreshers {
+            refresher.abort();
+        }
+    }
 }
 
 impl DeviceIdentity {
@@ -53,26 +85,46 @@ impl DeviceIdentity {
             .get_or_try_init(|| async {
                 let options = *inner.options.lock().unwrap();
                 let secret_key = inner.secret_key.clone();
-                // Resolve machines through the official services without
-                // publishing this device anywhere; the machine is what gets
-                // looked up. A relay of our own still helps hole punching.
-                let mut builder = if options.official {
-                    Endpoint::builder(presets::Minimal)
-                        .relay_mode(iroh::endpoint::default_relay_mode())
-                        .address_lookup(PkarrResolver::n0_dns())
-                        .address_lookup(iroh::address_lookup::DnsAddressLookup::n0_dns())
-                } else {
-                    Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled)
+                // Resolve machines through the official manifest's services
+                // without publishing this device anywhere; the machine is
+                // what gets looked up. A relay of our own still helps hole
+                // punching.
+                let official = options.official.then(|| {
+                    let loader = ManifestLoader::new(ManifestSource::Official, &inner.data_dir);
+                    let manifest = loader.current().expect("the official manifest is bundled");
+                    (loader, manifest)
+                });
+                let mut builder = match &official {
+                    Some((_, manifest)) => Endpoint::builder(presets::Minimal)
+                        .relay_mode(iroh::RelayMode::Custom(manifest.relay_map())),
+                    None => {
+                        Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled)
+                    }
                 };
                 builder = builder
                     .secret_key(secret_key.clone())
                     .transport_config(wire::transport_config());
                 let endpoint = builder.bind().await.map_err(io::Error::other)?;
-                Ok(ClientEndpoint {
-                    endpoint,
+                let client = ClientEndpoint {
+                    endpoint: endpoint.clone(),
                     transports: Mutex::new(Vec::new()),
-                    resolvers: Mutex::new(HashSet::new()),
-                })
+                    lookups: Arc::new(Mutex::new(Lookups {
+                        endpoint,
+                        loaders: HashMap::new(),
+                        installed: HashMap::new(),
+                        refreshers: Vec::new(),
+                    })),
+                };
+                if let Some((loader, manifest)) = official {
+                    client
+                        .lookups
+                        .lock()
+                        .unwrap()
+                        .loaders
+                        .insert(ManifestSource::Official, loader.clone());
+                    client.adopt(loader, manifest);
+                }
+                Ok(client)
             })
             .await
     }
@@ -94,38 +146,70 @@ impl DeviceIdentity {
 }
 
 impl ClientEndpoint {
-    /// Make a machine's Traverse instance resolvable. Missing manifests are
-    /// logged: the stored relay and addresses may still reach the machine.
-    fn install_resolvers(&self, device: &DeviceIdentity, traverse: Option<&str>) {
-        let Some(base) = traverse.and_then(|base| Url::parse(base).ok()) else {
+    /// Make the machine's Traverse instance resolvable before dialing it:
+    /// the manifest in hand is installed at once and refreshed in the
+    /// background; with nothing in hand yet, one fetch is awaited. A
+    /// manifest that stays unavailable is logged: the stored relay and
+    /// addresses may still reach the machine.
+    async fn ensure_lookups(&self, device: &DeviceIdentity, traverse: Option<&str>) {
+        let Some(source) = ManifestSource::from_traverse(traverse) else {
             return;
         };
-        if !self.resolvers.lock().unwrap().insert(base.clone()) {
+        if source == ManifestSource::Official {
+            // Installed with the endpoint, or deliberately absent.
             return;
         }
-        let manifest = match crate::manifest::load(device.data_dir(), &base) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                log::warn!("Traverse manifest for {base} unavailable: {error}");
+        let loader = {
+            let mut lookups = self.lookups.lock().unwrap();
+            if lookups.loaders.contains_key(&source) {
                 return;
             }
+            // Claim the source before awaiting, so a concurrent dial to
+            // the same instance does not fetch twice.
+            let loader = ManifestLoader::new(source.clone(), device.data_dir());
+            lookups.loaders.insert(source.clone(), loader.clone());
+            loader
         };
-        let Ok(services) = self.endpoint.address_lookup() else {
-            return;
-        };
-        for pkarr in manifest.pkarr_urls() {
-            match PkarrResolver::builder(pkarr.clone()).into_address_lookup(&self.endpoint) {
-                Ok(resolver) => services.add(resolver),
-                Err(error) => log::warn!("could not add pkarr resolver {pkarr}: {error}"),
+        match loader.startup().await {
+            Ok(manifest) => self.adopt(loader, manifest),
+            Err(error) => {
+                log::warn!("Traverse manifest unavailable: {error}");
+                self.lookups.lock().unwrap().loaders.remove(&source);
             }
         }
+    }
+
+    /// Install `manifest`'s resolvers now and each time a refresh changes
+    /// them.
+    fn adopt(&self, loader: ManifestLoader, manifest: Arc<Manifest>) {
+        let source = loader.source().clone();
+        let lookups = self.lookups.clone();
+        lookups.lock().unwrap().apply(&source, manifest);
+        let refresher = loader.spawn_refresh(move |manifest| {
+            let lookups = lookups.clone();
+            let source = source.clone();
+            async move {
+                log::info!("applying the refreshed Traverse manifest for {source:?}");
+                let (endpoint, previous) = {
+                    let mut lookups = lookups.lock().unwrap();
+                    (
+                        lookups.endpoint.clone(),
+                        lookups.apply(&source, manifest.clone()),
+                    )
+                };
+                if let Some(previous) = previous {
+                    live::sync_relays(&endpoint, &previous, &manifest).await;
+                }
+            }
+        });
+        self.lookups.lock().unwrap().refreshers.push(refresher);
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairError {
-    /// Wrong, expired or already used code.
-    Code,
+    /// Wrong, expired or already used invitation.
+    Invalid,
     Disabled,
     Busy,
     Unreachable(String),
@@ -136,7 +220,7 @@ pub enum PairError {
 impl std::fmt::Display for PairError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Code => f.write_str("invalid or expired pairing code"),
+            Self::Invalid => f.write_str("invalid or expired invitation"),
             Self::Disabled => f.write_str("pairing_disabled"),
             Self::Busy => f.write_str("the machine could not record the pairing; try again"),
             Self::Unreachable(error) => write!(f, "could not connect to the machine: {error}"),
@@ -163,19 +247,18 @@ fn dial_addr(host_id: &str, relay: Option<&str>, addrs: &[String]) -> Option<End
     Some(EndpointAddr::from_parts(id, transport_addrs))
 }
 
-/// Exchange `code` for a pairing with exactly `invite.host_id`.
-pub async fn pair(
-    invite: &PairInvite,
-    code: &str,
-    device: &DeviceIdentity,
-) -> Result<PairedHost, PairError> {
+/// Exchange the invitation's secret for a pairing with exactly
+/// `invite.host_id`.
+pub async fn pair(invite: &PairInvite, device: &DeviceIdentity) -> Result<PairedHost, PairError> {
     let client = device
         .client()
         .await
         .map_err(|error| PairError::Unreachable(error.to_string()))?;
     let addr = dial_addr(&invite.host_id, invite.relay.as_deref(), &invite.addrs)
         .ok_or_else(|| PairError::Protocol("invalid machine id".into()))?;
-    client.install_resolvers(device, invite.traverse.as_deref());
+    client
+        .ensure_lookups(device, invite.traverse.as_deref())
+        .await;
     let connection = tokio::time::timeout(
         CONNECT_BUDGET,
         client.endpoint.connect(addr, wire::ALPN_PAIR),
@@ -191,7 +274,7 @@ pub async fn pair(
         wire::write_line(
             &mut send,
             &ClientLine::Pair {
-                code: code.to_owned(),
+                secret: invite.secret.clone(),
                 device: device.claim(),
             },
         )
@@ -200,14 +283,15 @@ pub async fn pair(
         send.finish()
             .map_err(|error| PairError::Unreachable(error.to_string()))?;
         let mut reader = wire::reader(recv);
-        // Never resubmit a possibly consumed code after losing its response.
+        // Never resubmit a possibly consumed invitation after losing its
+        // response.
         match wire::read_control::<HostLine>(&mut reader)
             .await
             .map_err(|error| PairError::Protocol(error.to_string()))?
         {
             HostLine::Paired { host_name } => Ok(invite.paired(host_name)),
             HostLine::PairRejected { reason } => Err(match reason {
-                PairRejection::Code => PairError::Code,
+                PairRejection::Invalid => PairError::Invalid,
                 PairRejection::Disabled => PairError::Disabled,
                 PairRejection::Busy => PairError::Busy,
             }),
@@ -223,10 +307,9 @@ pub async fn pair(
 /// [`pair`] from a thread outside the runtime.
 pub fn pair_blocking(
     invite: &PairInvite,
-    code: &str,
     device: &DeviceIdentity,
 ) -> Result<PairedHost, PairError> {
-    block_on(pair(invite, code, device))
+    block_on(pair(invite, device))
 }
 
 /// Preview tunnels of one attachment: opened on whichever connection the
@@ -480,7 +563,9 @@ async fn establish(
     })?;
     let addr = dial_addr(&host.host_id, host.relay.as_deref(), &host.addrs)
         .ok_or(ConnectionFailure::Unreachable)?;
-    client.install_resolvers(device, host.traverse.as_deref());
+    client
+        .ensure_lookups(device, host.traverse.as_deref())
+        .await;
     let connection = match tokio::time::timeout(
         CONNECT_BUDGET,
         client.endpoint.connect(addr, wire::ALPN_MAIN),

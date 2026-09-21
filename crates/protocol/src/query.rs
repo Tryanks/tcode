@@ -260,20 +260,24 @@ pub const MAX_SESSION_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub enum HostingAction {
     State,
     SetEnabled(bool),
-    NewCode,
+    /// Mint an invitation, replacing the current one.
+    #[serde(alias = "new_code")]
+    NewInvitation,
     RevokeDevice(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostingState {
     pub enabled: bool,
-    pub code: Option<String>,
+    /// Seconds until `invite` expires; `0` without one.
+    #[serde(default)]
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
     /// The `tcode://pair?…` link for the active invitation, with where the
-    /// machine is reachable right now. A client shows it as a QR or copies
-    /// it; it never takes it apart.
+    /// machine is reachable right now. The link is the secret — there is no
+    /// separate code. A client shows it as a QR or copies it; it never takes
+    /// it apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite: Option<String>,
     pub devices: Vec<HostedDevice>,

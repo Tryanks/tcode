@@ -855,9 +855,10 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
 }
 
 /// The hosting reply is read by browsers and phones that may be older or
-/// newer than the machine: a machine without the invite link or device paths
-/// must still be understood, and a machine that has them sends the link whole
-/// so a scanner needs nothing else to reach it off the LAN.
+/// newer than the machine: a machine from the six-digit-code era (its
+/// `code` field is ignored) or without device paths must still be
+/// understood, and a machine that has the link sends it whole so a scanner
+/// needs nothing else to reach it off the LAN.
 #[test]
 fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     let older: HostingState = serde_json::from_value(json!({
@@ -871,10 +872,17 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     .unwrap();
     assert_eq!(older.invite, None);
     assert_eq!(older.devices[0].path, None);
+    assert_eq!(
+        serde_json::from_value::<HostingAction>(json!({"type": "new_code"})).unwrap(),
+        HostingAction::NewInvitation
+    );
+    assert_eq!(
+        serde_json::to_value(HostingAction::NewInvitation).unwrap(),
+        json!({"type": "new_invitation"})
+    );
 
     let state = HostingState {
         enabled: true,
-        code: Some("123456".into()),
         expires_in_secs: 280,
         host_id: "ab".repeat(32),
         host_name: "Studio".into(),
@@ -903,7 +911,6 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
         serde_json::to_value(&state).unwrap(),
         json!({
             "enabled": true,
-            "code": "123456",
             "expires_in_secs": 280,
             "host_id": "ab".repeat(32),
             "host_name": "Studio",

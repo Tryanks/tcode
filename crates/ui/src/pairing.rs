@@ -238,7 +238,7 @@ mod tests {
         PairInvite {
             host_id: "ab".repeat(32),
             name: "Studio".into(),
-            code: "123456".into(),
+            secret: "AAECAwQFBgcICQoLDA0ODw".into(),
             traverse: Some("https://traverse.example/".into()),
             relay: Some("https://relay.example/".into()),
             addrs: vec!["10.0.0.4:47420".into()],
@@ -264,6 +264,10 @@ mod tests {
         });
         for rejected in [
             "tcode://pair?v=1&id=abc&code=123456",
+            &format!(
+                "tcode://pair?v=2&id={}&code=123456&name=Studio",
+                "ab".repeat(32)
+            ),
             &"ab".repeat(32),
             "https://example.com/pair",
         ] {
