@@ -290,7 +290,7 @@ pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
             tunnels,
             Arc::new(outgoing),
             incoming,
-            state_tx,
+            StateSender::new(state_tx),
         )
         .await;
     });
@@ -308,14 +308,64 @@ struct Established {
     reader: LineReader,
 }
 
+/// The state channel, remembering whether the last state it carried was
+/// `Connected`. A path change is published by repeating `Connected`, which
+/// is the only wake the UI has and is idempotent for it; repeating any other
+/// state would restart a sync, so before the first host line it stays quiet.
+struct StateSender {
+    tx: Sender<ConnectionState>,
+    connected: std::sync::atomic::AtomicBool,
+}
+
+impl StateSender {
+    fn new(tx: Sender<ConnectionState>) -> Self {
+        Self {
+            tx,
+            connected: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    async fn send(
+        &self,
+        state: ConnectionState,
+    ) -> Result<(), async_channel::SendError<ConnectionState>> {
+        self.connected.store(
+            state == ConnectionState::Connected,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.tx.send(state).await
+    }
+
+    async fn republish_connected(&self) {
+        if self.connected.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = self.tx.send(ConnectionState::Connected).await;
+        }
+    }
+}
+
+/// Keep `live` telling the truth about how the connection is carried: the
+/// selected path at connect time, then every change until the connection
+/// closes.
+async fn watch_paths(connection: Connection, live: LiveHost, state: Arc<StateSender>) {
+    use futures_lite::StreamExt as _;
+    let mut events = connection.path_events();
+    live.set_path(Some(crate::host::path_info(&connection)));
+    while events.next().await.is_some() {
+        if live.set_path(Some(crate::host::path_info(&connection))) {
+            state.republish_connected().await;
+        }
+    }
+}
+
 async fn connection_loop(
     device: DeviceIdentity,
     live: LiveHost,
     tunnels: AttachmentTunnels,
     outgoing: Arc<OutgoingReceiver>,
     incoming: Sender<String>,
-    state: Sender<ConnectionState>,
+    state: StateSender,
 ) {
+    let state = Arc::new(state);
     let mut host = live.snapshot();
     let mut buffered = VecDeque::<String>::new();
     let mut subscriptions = HashMap::<String, String>::new();
@@ -362,6 +412,11 @@ async fn connection_loop(
                 // Tunnels are available by the time Syncing is observable.
                 tunnels.set(Some(established.connection.clone()));
                 let _ = state.send(ConnectionState::Syncing).await;
+                let paths = tokio::spawn(watch_paths(
+                    established.connection.clone(),
+                    live.clone(),
+                    state.clone(),
+                ));
                 let started = Instant::now();
                 let lost = relay_connected(
                     established,
@@ -372,6 +427,8 @@ async fn connection_loop(
                     &mut buffered,
                 )
                 .await;
+                paths.abort();
+                live.set_path(None);
                 tunnels.set(None);
                 if lost.healthy {
                     stable_ms = started.elapsed().as_millis() as u64;
@@ -569,7 +626,7 @@ async fn relay_connected(
     established: Established,
     outgoing: &Arc<OutgoingReceiver>,
     incoming: &Sender<String>,
-    state: &Sender<ConnectionState>,
+    state: &StateSender,
     subscriptions: &mut HashMap<String, String>,
     buffered: &mut VecDeque<String>,
 ) -> Lost {
@@ -598,12 +655,15 @@ async fn relay_connected(
     let writer_outgoing = outgoing.clone();
     let writer_task = tokio::spawn(async move {
         let mut unsent = Vec::new();
+        let ping = ping_line();
         while let Ok(line) = wire_rx.recv().await {
             if wire::write_raw_line(&mut send, &line).await.is_err() {
                 unsent.push(line);
                 break;
             }
-            if subscription_key(&line).is_none() {
+            // The heartbeat is the transport's own line: the outbox never
+            // charged for it, so it must not be credited either.
+            if line != ping && subscription_key(&line).is_none() {
                 writer_outgoing.sent(&line);
             }
         }
