@@ -17,7 +17,7 @@ use iroh::{
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use tcode_client::pairing::{PairInvite, encode_secret, pair_url};
+use tcode_client::pairing::{PairInvite, TRAVERSE_OFF, encode_secret, pair_url};
 use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
 use url::Url;
 
@@ -115,7 +115,9 @@ struct Shared {
     endpoint: Endpoint,
     mux: HostMux,
     state: Mutex<State>,
-    traverse: Option<Url>,
+    /// What invitations say about this machine's Traverse instance; see
+    /// [`PairInvite::traverse`].
+    traverse: Option<String>,
     allow_pairing: bool,
 }
 
@@ -132,8 +134,9 @@ impl TraverseHost {
         let identity = HostIdentity::load_or_create(&config.data_dir, &config.host_name)?;
         let secret_key = identity.secret_key().clone();
         let traverse = match &config.traverse {
-            TraverseMode::Custom(url) => Some(url.clone()),
-            TraverseMode::Official | TraverseMode::Off => None,
+            TraverseMode::Official => None,
+            TraverseMode::Custom(url) => Some(url.to_string()),
+            TraverseMode::Off => Some(TRAVERSE_OFF.to_owned()),
         };
         block_on(async move {
             let loader = match &config.traverse {
@@ -200,7 +203,8 @@ impl TraverseHost {
                         std::mem::replace(&mut *applied.lock().unwrap(), manifest.clone());
                     async move {
                         log::info!("applying the refreshed Traverse manifest");
-                        live::sync_relays(&endpoint, &previous, &manifest).await;
+                        live::sync_relays(&endpoint, &previous.relay_map(), &manifest.relay_map())
+                            .await;
                         live::install_lookups(&endpoint, [manifest.as_ref()], true);
                     }
                 })
@@ -309,7 +313,7 @@ impl Shared {
                 host_id: addr.id,
                 name: state.identity.host_name.clone(),
                 secret: encode_secret(&random),
-                traverse: self.traverse.as_ref().map(ToString::to_string),
+                traverse: self.traverse.clone(),
                 relay: addr.relays.first().cloned(),
                 addrs: addr.addrs,
             },

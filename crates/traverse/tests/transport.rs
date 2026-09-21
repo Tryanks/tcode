@@ -9,9 +9,7 @@ use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
 use tcode_client::pairing::PairInvite;
 use tcode_client::{ConnectionFailure, ConnectionState};
-use tcode_traverse::{
-    DeviceIdentity, EndpointOptions, HostConfig, HostMux, PairError, TraverseHost, TraverseMode,
-};
+use tcode_traverse::{DeviceIdentity, HostConfig, HostMux, PairError, TraverseHost, TraverseMode};
 
 struct TestDir(PathBuf);
 
@@ -110,9 +108,7 @@ fn start_host(mux: HostMux, dir: &TestDir, bind_port: Option<u16>) -> TraverseHo
 }
 
 fn device(dir: &TestDir, name: &str) -> DeviceIdentity {
-    let device = DeviceIdentity::load_or_create(&dir.0)
-        .unwrap()
-        .with_options(EndpointOptions { official: false });
+    let device = DeviceIdentity::load_or_create(&dir.0).unwrap();
     device.set_details(name.into(), None);
     device
 }
@@ -242,6 +238,97 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
         Err(PairError::Disabled)
     );
     host.shutdown();
+}
+
+fn wait_relays(device: &DeviceIdentity, wanted: &[&str]) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen = device.relays();
+    while seen != wanted && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+        seen = device.relays();
+    }
+    assert_eq!(seen, wanted);
+}
+
+/// A device's relays are those of its machines' Traverse instances: a
+/// device whose only machine is Off carries none, a machine on the official
+/// service brings the official relays, and removing the last such machine
+/// takes them away again. Nothing is contacted for this: the official
+/// manifest is a cache newer than the bundle, fetched just now.
+#[test]
+fn device_relays_follow_the_traverse_instances_of_its_machines() {
+    let off_dir = TestDir::new("relays-off-host");
+    let (mux, _, _) = fake_host();
+    let off_host = start_host(mux, &off_dir, None);
+    let official_dir = TestDir::new("relays-official-host");
+    let (mux, _, _) = fake_host();
+    let official_host = start_host(mux, &official_dir, None);
+    let dir = TestDir::new("relays-phone");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    std::fs::write(
+        dir.0.join("traverse-manifest-official.json"),
+        json!({
+            "fetchedAtMs": now_ms,
+            "manifest": {
+                "version": 1,
+                "updatedAt": "2999-01-01T00:00:00Z",
+                "relays": [{"url": "https://official.relay.test/"}],
+                "pkarr": ["https://official.lookup.test/pkarr"]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let phone = device(&dir, "phone");
+
+    let minted = off_host.new_invitation();
+    assert_eq!(
+        minted.invite.traverse.as_deref(),
+        Some(tcode_client::pairing::TRAVERSE_OFF),
+        "an Off machine says so in its invitation"
+    );
+    let off = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    tcode_traverse::hosts::save_hosts(&dir.0, std::slice::from_ref(&off)).unwrap();
+    phone.hosts_changed();
+    wait_relays(&phone, &[]);
+
+    // The test machine runs Off; its invitation is rewritten to claim the
+    // official service, which the machine never checks.
+    let minted = official_host.new_invitation();
+    let invite = PairInvite {
+        traverse: None,
+        ..minted.invite
+    };
+    let official = tcode_traverse::pair_blocking(&invite, &phone).unwrap();
+    assert_eq!(official.traverse, None);
+    wait_relays(&phone, &["https://official.relay.test/"]);
+    tcode_traverse::hosts::save_hosts(&dir.0, &[off.clone(), official]).unwrap();
+    phone.hosts_changed();
+    // Reconciling runs in the background; give it time to get it wrong.
+    std::thread::sleep(Duration::from_millis(200));
+    wait_relays(&phone, &["https://official.relay.test/"]);
+
+    tcode_traverse::hosts::save_hosts(&dir.0, &[off]).unwrap();
+    phone.hosts_changed();
+    wait_relays(&phone, &[]);
+
+    // A pairing that fails leaves nothing of the instance it tried behind.
+    let minted = official_host.new_invitation();
+    let wrong = PairInvite {
+        traverse: None,
+        secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        ..minted.invite
+    };
+    assert_eq!(
+        tcode_traverse::pair_blocking(&wrong, &phone),
+        Err(PairError::Invalid)
+    );
+    wait_relays(&phone, &[]);
+    off_host.shutdown();
+    official_host.shutdown();
 }
 
 /// The heartbeat is the transport's own line, never charged to the outbox.
