@@ -58,7 +58,6 @@ impl Machine {
                 data_dir: dir.0.clone(),
                 traverse: TraverseMode::Off,
                 pairing_enabled: true,
-                lan_discovery: false,
                 bind_port: None,
             },
         )
@@ -93,10 +92,7 @@ fn attach(machine: &Machine) -> Device {
     let dir = TestDir::new("device");
     let device = DeviceIdentity::load_or_create(&dir.0)
         .unwrap()
-        .with_options(EndpointOptions {
-            official: false,
-            lan_discovery: false,
-        });
+        .with_options(EndpointOptions { official: false });
     device.set_details("phone".into(), None);
     let minted = machine.host().new_pairing_code();
     let paired: PairedHost =

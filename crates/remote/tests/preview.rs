@@ -58,7 +58,6 @@ impl Machine {
                 data_dir: host_dir.0.clone(),
                 traverse: TraverseMode::Off,
                 pairing_enabled: true,
-                lan_discovery: false,
                 bind_port: None,
             },
         )
@@ -66,10 +65,7 @@ impl Machine {
         let device_dir = TestDir::new("device");
         let device = DeviceIdentity::load_or_create(&device_dir.0)
             .unwrap()
-            .with_options(EndpointOptions {
-                official: false,
-                lan_discovery: false,
-            });
+            .with_options(EndpointOptions { official: false });
         device.set_details("laptop".into(), None);
         let minted = host.new_pairing_code();
         let paired = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &device).unwrap();
