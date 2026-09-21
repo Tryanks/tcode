@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["remote", "desktop"]
-# Hosting this machine: the Traverse endpoint, minted pairing codes and
+# Hosting this machine: the Traverse endpoint, minted invitations and
 # device revocation. Off for wasm targets, which cannot listen or advertise.
 # Client pairing (saved hosts, the pair form, authentication repair) is *not* here:
 # it is shared UI over `tcode_client` and compiles everywhere.
