@@ -6,17 +6,12 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use tcode_client::host::{ClientHost, ClientPreferences, DiscoveredHost, HostFuture, Transport};
+use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
 use tcode_traverse::DeviceIdentity;
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
-type HostBrowser = dyn Fn() -> HostFuture<'static, Vec<DiscoveredHost>>;
-type MulticastLock = dyn Fn(bool) + Send + Sync;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
-
-/// How long a LAN browse listens for machines.
-const BROWSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Native clients share hosts.json, mobile.json, device.json, pairing, and
 /// transport policy.
@@ -25,8 +20,6 @@ pub struct NativeClientHost {
     default_device_name: String,
     platform: Option<String>,
     qr_scanner: Option<Box<QrScanner>>,
-    browser: Option<Box<HostBrowser>>,
-    multicast_lock: Option<Arc<MulticastLock>>,
     editor: Option<Box<EditorOpener>>,
     device: OnceLock<Result<DeviceIdentity, String>>,
 }
@@ -40,8 +33,6 @@ impl NativeClientHost {
             default_device_name: device_name.into(),
             platform: default_device_platform(),
             qr_scanner: None,
-            browser: None,
-            multicast_lock: None,
             editor: None,
             device: OnceLock::new(),
         }
@@ -101,19 +92,6 @@ impl NativeClientHost {
         scanner: impl Fn() -> HostFuture<'static, Result<String, String>> + 'static,
     ) -> Self {
         self.qr_scanner = Some(Box::new(scanner));
-        self
-    }
-
-    pub fn with_multicast_lock(mut self, lock: impl Fn(bool) + Send + Sync + 'static) -> Self {
-        self.multicast_lock = Some(Arc::new(lock));
-        self
-    }
-
-    pub fn with_browser(
-        mut self,
-        browser: impl Fn() -> HostFuture<'static, Vec<DiscoveredHost>> + 'static,
-    ) -> Self {
-        self.browser = Some(Box::new(browser));
         self
     }
 
@@ -309,42 +287,6 @@ impl ClientHost for NativeClientHost {
                 }
             }
         }
-    }
-
-    fn browse_hosts(&self) -> HostFuture<'_, Vec<DiscoveredHost>> {
-        if let Some(browser) = &self.browser {
-            return browser();
-        }
-        let Ok(device) = self.device() else {
-            return Box::pin(async { Vec::new() });
-        };
-        let lock = self.multicast_lock.clone();
-        let (sender, receiver) = async_channel::bounded(1);
-        tcode_traverse::runtime().spawn(async move {
-            struct Guard(Option<Arc<MulticastLock>>);
-            impl Drop for Guard {
-                fn drop(&mut self) {
-                    if let Some(lock) = &self.0 {
-                        lock(false);
-                    }
-                }
-            }
-            if let Some(lock) = &lock {
-                lock(true);
-            }
-            let _guard = Guard(lock);
-            let hosts = tcode_traverse::browse(&device, BROWSE_TIMEOUT)
-                .await
-                .into_iter()
-                .map(|nearby| DiscoveredHost {
-                    name: nearby.name.unwrap_or_else(|| nearby.id.clone()),
-                    host_id: nearby.id,
-                    addrs: nearby.addrs,
-                })
-                .collect();
-            let _ = sender.send(hosts).await;
-        });
-        Box::pin(async move { receiver.recv().await.unwrap_or_default() })
     }
 
     fn supports_qr(&self) -> bool {

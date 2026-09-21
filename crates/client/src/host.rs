@@ -192,10 +192,6 @@ pub trait ClientHost: 'static {
     /// Open a reconnecting link. Dropping the returned channels ends it.
     fn connect(&self, host: &PairedHost) -> Transport;
 
-    fn browse_hosts(&self) -> HostFuture<'_, Vec<DiscoveredHost>> {
-        Box::pin(async { Vec::new() })
-    }
-
     fn supports_qr(&self) -> bool {
         false
     }

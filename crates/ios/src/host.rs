@@ -9,7 +9,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use tcode_client::host::{DiscoveredHost, HostFuture};
+use tcode_client::host::HostFuture;
 use tcode_remote::NativeClientHost;
 
 type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
@@ -56,20 +56,8 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (Rc<NativeClientHost>, Option<S
     })
     .filter(|locale| !locale.trim().is_empty());
 
-    // LAN browsing reports nothing on iOS; pairing goes through invites.
-    // Machines advertise `<base32 EndpointId>._tcode._udp.local.` through
-    // iroh's mDNS lookup (swarm-discovery), which answers a PTR query with
-    // SRV, TXT and A/AAAA records but never a PTR record, so Bonjour
-    // (`NWBrowser`/`NetServiceBrowser`, which browse by PTR) cannot list
-    // these machines. Running `tcode_traverse::browse` here instead needs the
-    // `com.apple.developer.networking.multicast` entitlement, which is not
-    // decided; until then an empty list is preferred to a browser that never
-    // finds anything.
     let host = NativeClientHost::from_env_with_device_name(device_name)
         .with_platform(platform)
-        .with_browser(|| -> HostFuture<'static, Vec<DiscoveredHost>> {
-            Box::pin(async { Vec::new() })
-        })
         .with_qr_scanner(|| -> HostFuture<'static, Result<String, String>> {
             let (sender, receiver) = async_channel::bounded(1);
             let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);

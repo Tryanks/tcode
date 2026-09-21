@@ -42,7 +42,8 @@ pub enum TraverseMode {
     /// A self-hosted instance described by its manifest; see
     /// [`crate::manifest`] for how the manifest is obtained.
     Custom(Url),
-    /// No relay and no wide-area lookup: LAN discovery and invite addresses only.
+    /// No relay and no wide-area lookup: invite addresses and the direct
+    /// addresses iroh learns afterwards only.
     Off,
 }
 
@@ -53,9 +54,6 @@ pub struct HostConfig {
     /// Whether this host may pair devices at all. The user's persisted
     /// pairing switch applies on top of it.
     pub pairing_enabled: bool,
-    /// Advertise on the local network and let nearby devices find this
-    /// machine by name.
-    pub lan_discovery: bool,
     /// A fixed UDP port instead of a random one, so invite addresses and
     /// firewall rules survive restarts.
     pub bind_port: Option<u16>,
@@ -127,11 +125,10 @@ pub struct TraverseHost {
 }
 
 impl TraverseHost {
-    /// Bind the endpoint, start accepting and, when asked, advertise on the LAN.
+    /// Bind the endpoint and start accepting connections.
     pub fn start(mux: HostMux, config: HostConfig) -> io::Result<TraverseHost> {
         let identity = HostIdentity::load_or_create(&config.data_dir, &config.host_name)?;
         let secret_key = identity.secret_key().clone();
-        let host_name = identity.host_name.clone();
         let traverse = match &config.traverse {
             TraverseMode::Custom(url) => Some(url.clone()),
             TraverseMode::Official | TraverseMode::Off => None,
@@ -161,11 +158,6 @@ impl TraverseHost {
                 builder = builder
                     .secret_key(secret_key.clone())
                     .transport_config(wire::transport_config());
-                if config.lan_discovery {
-                    let lan =
-                        crate::mdns::LanLookup::new(secret_key.public(), true, Some(&host_name))?;
-                    builder = builder.address_lookup(lan);
-                }
                 if let Some(port) = config.bind_port {
                     let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
                     let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));

@@ -57,7 +57,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). --traverse selects the relay and\ndiscovery service: official (default), off (LAN and invite addresses only),\nor the base URL of a self-hosted instance.\n\npair prints the pairing code and QR that serve wrote to {PAIRING_FILE} while\nthey are still valid; a new code needs a restart or the hosting page.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). --traverse selects the relay and\ndiscovery service: official (default), off (invite addresses only),\nor the base URL of a self-hosted instance.\n\npair prints the pairing code and QR that serve wrote to {PAIRING_FILE} while\nthey are still valid; a new code needs a restart or the hosting page.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -131,7 +131,6 @@ fn serve_command(args: &[String]) -> Result<(), String> {
                 data_dir: remote_data_dir.clone(),
                 traverse,
                 pairing_enabled: true,
-                lan_discovery: true,
                 bind_port: None,
             },
         )

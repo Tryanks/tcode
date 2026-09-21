@@ -101,7 +101,6 @@ fn start_host(mux: HostMux, dir: &TestDir, bind_port: Option<u16>) -> TraverseHo
             data_dir: dir.0.clone(),
             traverse: TraverseMode::Off,
             pairing_enabled: true,
-            lan_discovery: false,
             bind_port,
         },
     )
@@ -111,10 +110,7 @@ fn start_host(mux: HostMux, dir: &TestDir, bind_port: Option<u16>) -> TraverseHo
 fn device(dir: &TestDir, name: &str) -> DeviceIdentity {
     let device = DeviceIdentity::load_or_create(&dir.0)
         .unwrap()
-        .with_options(EndpointOptions {
-            official: false,
-            lan_discovery: false,
-        });
+        .with_options(EndpointOptions { official: false });
     device.set_details(name.into(), None);
     device
 }

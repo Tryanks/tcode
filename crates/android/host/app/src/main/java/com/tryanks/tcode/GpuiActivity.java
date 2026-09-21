@@ -53,7 +53,6 @@ public final class GpuiActivity extends NativeActivity {
     private boolean keyboardVisible;
     private boolean keyboardShowPending;
     private long cameraRequest;
-    private android.net.wifi.WifiManager.MulticastLock multicastLock;
     private ConnectivityManager.NetworkCallback networkCallback;
 
     /**
@@ -112,21 +111,6 @@ public final class GpuiActivity extends NativeActivity {
             getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
         if (connectivity != null) connectivity.unregisterNetworkCallback(networkCallback);
         networkCallback = null;
-    }
-
-    /** Called by the Rust browse worker; reference counting allows overlapping browses. */
-    public synchronized void gpuiMulticastLock(boolean acquire) {
-        if (acquire) {
-            if (multicastLock == null) {
-                android.net.wifi.WifiManager wifi = (android.net.wifi.WifiManager)
-                    getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-                multicastLock = wifi.createMulticastLock("tcode-discovery");
-                multicastLock.setReferenceCounted(true);
-            }
-            multicastLock.acquire();
-        } else if (multicastLock != null && multicastLock.isHeld()) {
-            multicastLock.release();
-        }
     }
 
 
