@@ -449,48 +449,15 @@ fn animate_flat_thread_position(
     )
 }
 
-/// Startup fold state: every thread with visible direct children begins
-/// collapsed, except the active thread and its ancestors so the restored
-/// selection stays on screen (and, when it is itself a parent, open).
-fn initial_collapsed_parents(sessions: &[SessionMeta], active_id: Option<&str>) -> HashSet<String> {
-    let visible: Vec<&SessionMeta> = sessions
-        .iter()
-        .filter(|meta| meta.archived_at.is_none())
-        .collect();
-    let mut collapsed: HashSet<String> = visible
-        .iter()
-        .filter(|meta| {
-            visible
-                .iter()
-                .any(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
-        })
-        .map(|meta| meta.id.clone())
-        .collect();
-    let mut current = active_id;
-    let mut walked = HashSet::new();
-    while let Some(id) = current {
-        // A cyclic parent chain in a corrupt index must not hang startup.
-        if !walked.insert(id) {
-            break;
-        }
-        collapsed.remove(id);
-        current = visible
-            .iter()
-            .find(|meta| meta.id == id)
-            .and_then(|meta| meta.parent_session_id.as_deref());
-    }
-    collapsed
-}
-
+/// Clicking an already selected parent toggles its fold; the new fold state
+/// to send to the host, if the click toggles at all.
 fn toggle_parent_for_row_click(
-    collapsed_parents: &mut HashSet<String>,
+    collapsed_parents: &HashSet<String>,
     parent_id: &str,
     is_selected: bool,
     has_direct_children: bool,
-) {
-    if is_selected && has_direct_children && !collapsed_parents.remove(parent_id) {
-        collapsed_parents.insert(parent_id.to_string());
-    }
+) -> Option<bool> {
+    (is_selected && has_direct_children).then(|| !collapsed_parents.contains(parent_id))
 }
 
 // Thread-row context-menu actions (each carries the target session id, so a
@@ -623,8 +590,6 @@ pub struct SessionsSidebar {
     expanded_groups: HashSet<String>,
     expanded_settled: HashSet<String>,
     last_selected: Option<String>,
-    /// Parent session ids whose direct child rows are folded away.
-    collapsed_parents: HashSet<String>,
     /// Optional project id filter for the session-local flat list.
     project_filter: Option<String>,
     /// The thread currently being renamed inline, if any.
@@ -679,16 +644,17 @@ impl SessionsSidebar {
         active: &'a [SessionMeta],
         settled: &'a [SessionMeta],
         flags: &HashMap<String, ThreadFlags>,
+        collapsed_parents: &HashSet<String>,
     ) -> ThreadRows<'a> {
         let active = flat_visible_threads(
             active,
-            &self.collapsed_parents,
+            collapsed_parents,
             self.project_filter.as_deref(),
             flags,
         );
         let mut settled = flat_visible_threads(
             settled,
-            &self.collapsed_parents,
+            collapsed_parents,
             self.project_filter.as_deref(),
             flags,
         );
@@ -711,8 +677,9 @@ impl SessionsSidebar {
         active: &'a [SessionMeta],
         settled: &'a [SessionMeta],
         collapsed: bool,
+        collapsed_parents: &HashSet<String>,
     ) -> ThreadRows<'a> {
-        let mut active = visible_threads(active, &self.collapsed_parents);
+        let mut active = visible_threads(active, collapsed_parents);
         let active_count = active.len();
         let settled_count = settled.len();
         if collapsed {
@@ -721,7 +688,7 @@ impl SessionsSidebar {
             active.truncate(THREADS_COLLAPSED_LIMIT);
         }
         let settled = if !collapsed && self.expanded_settled.contains(project_id) {
-            visible_threads(settled, &self.collapsed_parents)
+            visible_threads(settled, collapsed_parents)
         } else {
             Vec::new()
         };
@@ -755,7 +722,8 @@ impl SessionsSidebar {
                 let sessions = store.flat_sessions();
                 let flags = session_flags(&sessions, store);
                 let (active, settled) = partition_settled(&sessions);
-                let rows = self.flat_thread_rows(&active, &settled, &flags);
+                let rows =
+                    self.flat_thread_rows(&active, &settled, &flags, &store.collapsed_threads());
                 ids.extend(
                     rows.active
                         .into_iter()
@@ -772,6 +740,7 @@ impl SessionsSidebar {
                         &active,
                         &settled,
                         store.is_project_collapsed(project_id),
+                        &store.collapsed_threads(),
                     );
                     ids.extend(
                         rows.active
@@ -891,18 +860,12 @@ impl SessionsSidebar {
             });
         })
         .detach();
-        let collapsed_parents = {
-            let sessions = store.read(cx).sidebar_sessions();
-            let active_id = store.read(cx).active_session_id();
-            initial_collapsed_parents(&sessions, active_id.as_deref())
-        };
         Self {
             store,
             window_state,
             expanded_groups: HashSet::new(),
             expanded_settled: HashSet::new(),
             last_selected: None,
-            collapsed_parents,
             project_filter: None,
             renaming: None,
             auto_archive_notice: None,
@@ -1253,11 +1216,13 @@ impl SessionsSidebar {
             return;
         }
         self.last_selected = selected.clone();
-        if let Some(meta) = sessions
+        let Some(meta) = sessions
             .iter()
             .find(|meta| Some(&meta.id) == selected.as_ref())
-            && meta.settled_at.is_some()
-        {
+        else {
+            return;
+        };
+        if meta.settled_at.is_some() {
             self.expanded_settled.insert("recent".into());
             if let Some(project_id) = &meta.project_id {
                 self.expanded_settled.insert(project_id.clone());
@@ -1268,20 +1233,26 @@ impl SessionsSidebar {
                     });
                 }
             }
-            let mut parent = meta.parent_session_id.as_ref();
-            let mut visited = HashSet::new();
-            while let Some(id) = parent {
-                if !visited.insert(id) {
-                    break;
-                }
-                self.collapsed_parents.remove(id);
-                parent = sessions
-                    .iter()
-                    .find(|meta| &meta.id == id)
-                    .and_then(|meta| meta.parent_session_id.as_ref());
-            }
-            self.compact_model_dirty = true;
         }
+        // The selected thread's ancestors unfold on the host, so its row is on
+        // screen on every client and stays so after a restore.
+        let collapsed = self.store.read(cx).collapsed_threads();
+        let mut parent = meta.parent_session_id.as_ref();
+        let mut visited = HashSet::new();
+        while let Some(id) = parent {
+            if !visited.insert(id) {
+                break;
+            }
+            if collapsed.contains(id) {
+                self.store
+                    .update(cx, |store, _| store.set_thread_collapsed(id.clone(), false));
+            }
+            parent = sessions
+                .iter()
+                .find(|meta| &meta.id == id)
+                .and_then(|meta| meta.parent_session_id.as_ref());
+        }
+        self.compact_model_dirty = true;
     }
 
     fn render_settled_header(
@@ -1905,7 +1876,13 @@ impl SessionsSidebar {
 
         let expanded = self.expanded_groups.contains(&project_id);
         let (active, settled) = partition_settled(&group.sessions);
-        let rows = self.group_thread_rows(&project_id, &active, &settled, collapsed);
+        let rows = self.group_thread_rows(
+            &project_id,
+            &active,
+            &settled,
+            collapsed,
+            &self.store.read(cx).collapsed_threads(),
+        );
         let total = rows.active_count;
 
         let header_toggle_id = project_id.clone();
@@ -2136,7 +2113,7 @@ impl SessionsSidebar {
         let own_flags = flags.get(&session_id).copied().unwrap_or_default();
         let render_state = derive_thread_render_state(meta, sessions, flags);
         ThreadRowState {
-            children_collapsed: self.collapsed_parents.contains(&session_id),
+            children_collapsed: self.store.read(cx).is_thread_collapsed(&session_id),
             renaming: self
                 .renaming
                 .as_ref()
@@ -2233,13 +2210,16 @@ impl SessionsSidebar {
         .on_click(cx.listener(move |this, _, _, cx| {
             let session_id = session_id.clone();
             this.compact_model_dirty = true;
-            toggle_parent_for_row_click(
-                &mut this.collapsed_parents,
+            let fold = toggle_parent_for_row_click(
+                &this.store.read(cx).collapsed_threads(),
                 &session_id,
                 is_active,
                 has_direct_children,
             );
             this.store.update(cx, |store, cx| {
+                if let Some(collapsed) = fold {
+                    store.set_thread_collapsed(session_id.clone(), collapsed);
+                }
                 store.select_session(session_id.clone());
                 cx.notify();
             });
@@ -2943,7 +2923,7 @@ impl SessionsSidebar {
                 .as_ref()
                 .is_none_or(|model| model.locale.as_str() != &*locale)
         {
-            let (groups, collapsed_projects, sessions, flags, layout) = {
+            let (groups, collapsed_projects, collapsed_parents, sessions, flags, layout) = {
                 let store = self.store.read(cx);
                 let sessions = store
                     .sidebar_sessions()
@@ -2957,7 +2937,14 @@ impl SessionsSidebar {
                     .filter(|group| store.is_project_collapsed(&group.project.id))
                     .map(|group| group.project.id.clone())
                     .collect::<HashSet<_>>();
-                (groups, collapsed, sessions, flags, store.sidebar_layout())
+                (
+                    groups,
+                    collapsed,
+                    store.collapsed_threads(),
+                    sessions,
+                    flags,
+                    store.sidebar_layout(),
+                )
             };
 
             let mut rows = Vec::new();
@@ -3006,8 +2993,8 @@ impl SessionsSidebar {
             };
             let grouped_rows = |project: Option<&str>, recent: bool, key: &str| {
                 let (active, settled) = partition_settled(&sessions);
-                let active = compact_visible_threads(&active, &self.collapsed_parents, project);
-                let settled = compact_visible_threads(&settled, &self.collapsed_parents, project);
+                let active = compact_visible_threads(&active, &collapsed_parents, project);
+                let settled = compact_visible_threads(&settled, &collapsed_parents, project);
                 let mut rows = thread_rows(active, recent);
                 if !settled.is_empty() {
                     rows.push(CompactListRow::Settled {
@@ -3027,7 +3014,7 @@ impl SessionsSidebar {
                 for group in &groups {
                     let visible = compact_visible_threads(
                         &sessions,
-                        &self.collapsed_parents,
+                        &collapsed_parents,
                         Some(&group.project.id),
                     );
                     let count = visible.len();
@@ -3435,6 +3422,7 @@ impl SessionsSidebar {
         let status = compact_status_line(state, working, cx);
         let click_id = session_id.clone();
         let disclosure_id = session_id.clone();
+        let children_collapsed = state.children_collapsed;
         let unavailable = meta.parent_session_id.is_some() && !state.is_child;
         let mark = self.provider_mark(
             meta,
@@ -3573,9 +3561,9 @@ impl SessionsSidebar {
                     .text_color(cx.theme().muted_foreground)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        if !this.collapsed_parents.remove(&disclosure_id) {
-                            this.collapsed_parents.insert(disclosure_id.clone());
-                        }
+                        this.store.update(cx, |store, _| {
+                            store.set_thread_collapsed(disclosure_id.clone(), !children_collapsed)
+                        });
                         this.compact_model_dirty = true;
                         cx.notify();
                     }))
@@ -3704,6 +3692,7 @@ impl Render for SessionsSidebar {
             flat_sessions,
             projects,
             collapsed_projects,
+            collapsed_parents,
             flags,
         ) = {
             let store = self.store.read(cx);
@@ -3715,6 +3704,7 @@ impl Render for SessionsSidebar {
                 .filter(|group| store.is_project_collapsed(&group.project.id))
                 .map(|group| group.project.id.clone())
                 .collect::<HashSet<_>>();
+            let collapsed_parents = store.collapsed_threads();
             (
                 store.sidebar_layout(),
                 store.active_session_id(),
@@ -3723,6 +3713,7 @@ impl Render for SessionsSidebar {
                 store.flat_sessions(),
                 store.projects(),
                 collapsed_projects,
+                collapsed_parents,
                 flags,
             )
         };
@@ -3769,7 +3760,7 @@ impl Render for SessionsSidebar {
                     settled: settled_visible,
                     settled_count,
                     ..
-                } = self.flat_thread_rows(&active, &settled, &flags);
+                } = self.flat_thread_rows(&active, &settled, &flags, &collapsed_parents);
                 if visible.is_empty() && settled_count == 0 {
                     // An active project filter can empty the list while threads
                     // exist; that state gets its own hint, not the no-projects one.
@@ -4007,6 +3998,48 @@ mod tests {
         }
     }
 
+    /// Play the host for a fake transport: acknowledge every command (the
+    /// client holds later retained writes until the earlier one is acked)
+    /// and return the thread-fold requests seen, oldest first.
+    fn ack_commands_and_fold_requests(
+        outgoing: &async_channel::Receiver<String>,
+        incoming: &async_channel::Sender<String>,
+        cx: &mut VisualTestContext,
+    ) -> Vec<(String, bool)> {
+        use tcode_protocol::{
+            ClientPayload, Command, CommandResponse, HostMessage, decode_client_line, encode_line,
+        };
+        let mut requests = Vec::new();
+        loop {
+            cx.run_until_parked();
+            let Ok(line) = outgoing.try_recv() else {
+                break;
+            };
+            let Ok(message) = decode_client_line(&line) else {
+                continue;
+            };
+            if let ClientPayload::Command(command) = &message.payload {
+                if let Command::SetThreadCollapsed {
+                    session_id,
+                    collapsed,
+                } = command
+                {
+                    requests.push((session_id.clone(), *collapsed));
+                }
+                incoming
+                    .try_send(
+                        encode_line(&HostMessage::Ack {
+                            id: message.id,
+                            result: Ok(CommandResponse::Unit),
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+        requests
+    }
+
     fn draw(cx: &mut VisualTestContext) {
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -4236,6 +4269,11 @@ mod tests {
                     } else {
                         Vec::new()
                     },
+                    collapsed_threads: if children_collapsed {
+                        vec!["one".into()]
+                    } else {
+                        Vec::new()
+                    },
                     auto_archive_disabled: true,
                     ..Default::default()
                 }),
@@ -4244,10 +4282,6 @@ mod tests {
                 sidebar.expanded_groups.clear();
                 if expanded {
                     sidebar.expanded_groups.insert("project".into());
-                }
-                sidebar.collapsed_parents.clear();
-                if children_collapsed {
-                    sidebar.collapsed_parents.insert("one".into());
                 }
                 sidebar.project_filter = filter.map(str::to_string);
                 cx.notify();
@@ -4396,6 +4430,7 @@ mod tests {
         smol::block_on(host.update_state_for_test(move |state, _| {
             state.settings.sidebar_layout = SidebarLayout::Grouped;
             state.settings.auto_archive_disabled = true;
+            state.settings.collapsed_threads = vec!["a-0".into(), "b-0".into()];
             for project in &projects {
                 for index in 0..8 {
                     let parent = format!("{}-0", project.id);
@@ -4417,7 +4452,7 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
         cx.simulate_resize(size(px(320.), px(1400.)));
         draw(cx);
-        let folds = sidebar.read_with(cx, |sidebar, _| sidebar.collapsed_parents.clone());
+        let folds = store.read_with(cx, |store, _| store.collapsed_threads());
         assert_eq!(folds.len(), 2);
         for compact in [false, true] {
             // Expand both lists through their production controls before testing
@@ -4476,8 +4511,12 @@ mod tests {
                         .all(|id| sidebar.expanded_groups.contains(id)),
                     "other project expansions survive"
                 );
-                assert_eq!(sidebar.collapsed_parents, folds, "child folds survive");
             });
+            assert_eq!(
+                store.read_with(cx, |store, _| store.collapsed_threads()),
+                folds,
+                "child folds survive"
+            );
             let header = cx.debug_bounds(selector).unwrap();
             cx.simulate_click(header.center(), gpui::Modifiers::default());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -4512,8 +4551,11 @@ mod tests {
         draw(cx);
         sidebar.read_with(cx, |sidebar, _| {
             assert!(!sidebar.expanded_groups.contains(&expanded_id));
-            assert_eq!(sidebar.collapsed_parents, folds);
         });
+        assert_eq!(
+            store.read_with(cx, |store, _| store.collapsed_threads()),
+            folds
+        );
         assert!(!store.read_with(cx, |store, _| store.is_project_collapsed(&expanded_id)));
         host.shutdown_blocking().unwrap();
         let _ = std::fs::remove_dir_all(root);
@@ -5400,12 +5442,105 @@ mod tests {
     }
 
     #[gpui::test]
+    fn host_folds_hide_child_rows_and_selecting_a_child_unfolds_on_the_host(
+        cx: &mut TestAppContext,
+    ) {
+        use tcode_protocol::{
+            EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
+        };
+        cx.update(crate::theme::init);
+        let (to_host, outgoing) = async_channel::unbounded();
+        let (incoming, from_host) = async_channel::unbounded();
+        let project = Project::from_root(PathBuf::from("/project"));
+        let sessions = [("parent", None), ("child", Some("parent")), ("other", None)]
+            .into_iter()
+            .map(|(id, parent)| {
+                let mut meta = session(id, parent);
+                meta.project_id = Some(project.id.clone());
+                meta
+            })
+            .collect();
+        let send = |topic, event| {
+            incoming
+                .try_send(
+                    encode_line(&HostMessage::Event(EventEnvelope {
+                        request_id: None,
+                        topic,
+                        event,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        send(
+            Topic::Settings,
+            ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                collapsed_threads: vec!["parent".into()],
+                ..Default::default()
+            }),
+        );
+        send(
+            Topic::Index,
+            ServerEvent::IndexSnapshot(IndexSnapshot {
+                title_generating: Default::default(),
+                sessions,
+                projects: vec![project],
+                activity: HashMap::new(),
+            }),
+        );
+        let link = tcode_client::HostLink::new(to_host, from_host);
+        let pump_link = link.clone();
+        let executor = cx.background_executor.clone();
+        let _pump = cx.background_executor.spawn(async move {
+            pump_link
+                .pump_with_timer(|| executor.timer(std::time::Duration::from_millis(25)))
+                .await;
+        });
+        let store = cx.new(|cx| {
+            WorkspaceStore::new_attached(
+                link,
+                crate::store::WorkspaceAttachment::Local,
+                None,
+                None,
+                false,
+                cx,
+            )
+        });
+        // A selection keeps the store from opening a draft against a host
+        // this fake transport never answers.
+        store.update(cx, |store, _| store.select_session("other".into()));
+        let window_state = cx.new(|_| WindowState::new(false).with_compact(true));
+        let (sidebar, cx) = cx
+            .add_window_view(|_, cx| SessionsSidebar::new(store.clone(), window_state.clone(), cx));
+        cx.simulate_resize(size(px(393.), px(852.)));
+        cx.run_until_parked();
+        store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+        draw(cx);
+        assert!(cx.debug_bounds("compact-row-parent").is_some());
+        assert!(
+            cx.debug_bounds("compact-row-child").is_none(),
+            "a fold the host holds hides the child on this client too"
+        );
+        ack_commands_and_fold_requests(&outgoing, &incoming, cx);
+
+        store.update(cx, |store, _| store.select_session("child".into()));
+        sidebar.update(cx, |_, cx| cx.notify());
+        draw(cx);
+        assert_eq!(
+            ack_commands_and_fold_requests(&outgoing, &incoming, cx),
+            vec![("parent".to_string(), false)],
+            "restoring a hidden child asks the host to unfold its parent \
+             instead of unfolding locally"
+        );
+    }
+
+    #[gpui::test]
     fn compact_families_keep_activity_order_indent_and_collapse(cx: &mut TestAppContext) {
         use tcode_protocol::{
             EventEnvelope, HostMessage, IndexSnapshot, ServerEvent, Topic, encode_line,
         };
         cx.update(crate::theme::init);
-        let (to_host, _outgoing) = async_channel::unbounded();
+        let (to_host, outgoing) = async_channel::unbounded();
         let (incoming, from_host) = async_channel::unbounded();
         let project = Project::from_root(PathBuf::from("/project"));
         let mut sessions = Vec::new();
@@ -5477,15 +5612,13 @@ mod tests {
         for layout in [SidebarLayout::Flat, SidebarLayout::Grouped] {
             let settings = tcode_core::settings::Settings {
                 sidebar_layout: layout,
+                collapsed_threads: vec!["archived".into(), "missing".into()],
                 ..Default::default()
             };
             send(Topic::Settings, ServerEvent::SettingsSnapshot(settings));
             cx.run_until_parked();
             store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.collapsed_parents = HashSet::from(["archived".into(), "missing".into()]);
-                cx.notify();
-            });
+            sidebar.update(cx, |_, cx| cx.notify());
             draw(cx);
             assert!(store.read_with(cx, |store, _| store.turn_running_for("running-child")));
             let parent = cx.debug_bounds("compact-row-parent").unwrap();
@@ -5520,9 +5653,34 @@ mod tests {
                 cx.debug_bounds("compact-row-missing-parent-child")
                     .is_some()
             );
+            // The disclosure asks the host to fold; the rows follow the
+            // host's settings, which every client shares.
+            let fold_request = |cx: &mut VisualTestContext| {
+                ack_commands_and_fold_requests(&outgoing, &incoming, cx).pop()
+            };
+            let host_folds = |folded: bool, cx: &mut VisualTestContext| {
+                let mut collapsed_threads = vec!["archived".to_string(), "missing".to_string()];
+                if folded {
+                    collapsed_threads.push("parent".into());
+                }
+                send(
+                    Topic::Settings,
+                    ServerEvent::SettingsSnapshot(tcode_core::settings::Settings {
+                        sidebar_layout: layout,
+                        collapsed_threads,
+                        ..Default::default()
+                    }),
+                );
+                cx.run_until_parked();
+                store.update(cx, |store, cx| store.drain_host_events_for_test(cx));
+                draw(cx);
+            };
+            fold_request(cx);
             let disclosure = cx.debug_bounds("compact-children-parent").unwrap();
             cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
             draw(cx);
+            assert_eq!(fold_request(cx), Some(("parent".to_string(), true)));
+            host_folds(true, cx);
             assert!(cx.debug_bounds("compact-row-running-child").is_none());
             assert!(cx.debug_bounds("compact-row-older-child").is_none());
             assert!(
@@ -5538,6 +5696,8 @@ mod tests {
             );
             cx.simulate_click(disclosure.center(), gpui::Modifiers::default());
             draw(cx);
+            assert_eq!(fold_request(cx), Some(("parent".to_string(), false)));
+            host_folds(false, cx);
             assert!(cx.debug_bounds("compact-row-running-child").is_some());
         }
     }
@@ -5633,72 +5793,29 @@ mod tests {
     }
 
     #[test]
-    fn startup_folds_only_existing_visible_parents_outside_the_active_chain() {
-        let sessions = vec![
-            session("parent-a", None),
-            session("child-a", Some("parent-a")),
-            session("parent-b", None),
-            session("child-b", Some("parent-b")),
-            session("grandchild-b", Some("child-b")),
-            session("plain", None),
-        ];
-
-        let collapsed = initial_collapsed_parents(&sessions, None);
-        assert_eq!(
-            collapsed,
-            HashSet::from([
-                "parent-a".to_string(),
-                "parent-b".to_string(),
-                "child-b".to_string()
-            ]),
-            "with no selection, every parent starts folded and leaves do not"
-        );
-
-        let collapsed = initial_collapsed_parents(&sessions, Some("grandchild-b"));
-        assert!(collapsed.contains("parent-a"));
-        assert!(
-            !collapsed.contains("parent-b") && !collapsed.contains("child-b"),
-            "the selected thread's ancestor chain stays open"
-        );
-
-        let collapsed = initial_collapsed_parents(&sessions, Some("parent-a"));
-        assert!(
-            !collapsed.contains("parent-a"),
-            "a selected parent keeps its own children visible"
-        );
-
-        let mut archived_child = session("archived-child", Some("quiet-parent"));
-        archived_child.archived_at = Some(1);
-        let sessions = vec![
-            session("quiet-parent", None),
-            archived_child,
-            session("orphan", Some("missing-parent")),
-        ];
-
-        let collapsed = initial_collapsed_parents(&sessions, None);
-        assert!(
-            !collapsed.contains("quiet-parent"),
-            "archived children do not make their parent fold"
-        );
-        assert!(
-            !collapsed.contains("missing-parent"),
-            "a nonexistent parent id must never enter the fold set, or its \
-             orphaned children would be hidden with no row to toggle"
-        );
-    }
-
-    #[test]
     fn repeat_click_on_selected_parent_toggles_direct_child_rows() {
-        let mut collapsed = HashSet::new();
+        let open = HashSet::new();
+        let folded = HashSet::from(["parent".to_string()]);
 
-        toggle_parent_for_row_click(&mut collapsed, "parent", false, true);
-        assert!(!collapsed.contains("parent"), "first click only selects");
-
-        toggle_parent_for_row_click(&mut collapsed, "parent", true, true);
-        assert!(collapsed.contains("parent"));
-
-        toggle_parent_for_row_click(&mut collapsed, "parent", true, true);
-        assert!(!collapsed.contains("parent"), "repeat click restores rows");
+        assert_eq!(
+            toggle_parent_for_row_click(&open, "parent", false, true),
+            None,
+            "first click only selects"
+        );
+        assert_eq!(
+            toggle_parent_for_row_click(&open, "parent", true, false),
+            None,
+            "a leaf has nothing to fold"
+        );
+        assert_eq!(
+            toggle_parent_for_row_click(&open, "parent", true, true),
+            Some(true)
+        );
+        assert_eq!(
+            toggle_parent_for_row_click(&folded, "parent", true, true),
+            Some(false),
+            "repeat click restores rows"
+        );
     }
 
     #[test]

@@ -417,6 +417,27 @@ fn permission_relaunch_marker(
     marker.filter(|marker| marker.reopen_settings != "computer_use" || permissions.screen_recording)
 }
 
+/// Host start folds every thread that already has a visible child, so a long
+/// list opens compact on every client; the client unfolds the thread it
+/// restores. A parent with only archived children, or an id no session
+/// carries, must not enter the set: its rows would be hidden with nothing to
+/// unfold them.
+pub(crate) fn startup_collapsed_threads(sessions: &[SessionMeta]) -> Vec<String> {
+    let visible: Vec<&SessionMeta> = sessions
+        .iter()
+        .filter(|meta| meta.archived_at.is_none())
+        .collect();
+    visible
+        .iter()
+        .filter(|meta| {
+            visible
+                .iter()
+                .any(|child| child.parent_session_id.as_deref() == Some(meta.id.as_str()))
+        })
+        .map(|meta| meta.id.clone())
+        .collect()
+}
+
 impl AppState {
     pub fn new(store: SessionStore) -> Self {
         Self::with_ai_titles(store, false)
@@ -432,7 +453,8 @@ impl AppState {
         sessions.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         let projects = file.projects;
         let settings_store = SettingsStore::new(store.root().clone());
-        let settings = settings_store.load();
+        let mut settings = settings_store.load();
+        settings.collapsed_threads = startup_collapsed_threads(&sessions);
         let provider_secret_names = provider_secret_names(&settings, &settings_store);
         // Push the loaded computer-use config to the (already-running) MCP layer
         // so the tools honor the persisted image-mode / allow-input choices from

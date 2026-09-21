@@ -1734,6 +1734,22 @@ impl WorkspaceStore {
             .any(|id| id == project_id)
     }
 
+    pub fn is_thread_collapsed(&self, session_id: &str) -> bool {
+        self.settings_replica
+            .collapsed_threads
+            .iter()
+            .any(|id| id == session_id)
+    }
+
+    /// Parent thread ids whose child rows are folded, as the host holds them.
+    pub fn collapsed_threads(&self) -> HashSet<String> {
+        self.settings_replica
+            .collapsed_threads
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn active_session_id(&self) -> Option<String> {
         self.selected_session_id.clone()
     }
