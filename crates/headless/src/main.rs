@@ -6,14 +6,14 @@ use std::time::Duration;
 use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use tcode_client::pairing::{PairInvite, pair_url, parse_pair_url};
-use tcode_remote::client_host::default_device_name;
-use tcode_remote::{HostMux, RemoteConfig, serve};
 use tcode_runtime::pipe::{HostServices, spawn_host};
 use tcode_services::store::SessionStore;
-use tcode_traverse::{HostConfig, Invitation, TraverseHost, TraverseMode};
+use tcode_traverse::browser::{BrowserConfig, StaticBundle, serve, set_password};
+use tcode_traverse::native_host::default_device_name;
+use tcode_traverse::{HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
 
 #[cfg(feature = "web")]
-const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = Some(&[
+const STATIC_BUNDLE: Option<StaticBundle> = Some(&[
     ("/index.html", include_bytes!("../../web/dist/index.html")),
     ("/auth.mjs", include_bytes!("../../web/dist/auth.mjs")),
     (
@@ -26,7 +26,7 @@ const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = Some(&[
     ),
 ]);
 #[cfg(not(feature = "web"))]
-const STATIC_BUNDLE: Option<tcode_remote::StaticBundle> = None;
+const STATIC_BUNDLE: Option<StaticBundle> = None;
 
 /// The browser listener stays on loopback unless asked otherwise; devices
 /// reach the machine through Traverse.
@@ -57,7 +57,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
 fn print_usage() {
     println!(
-        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). --traverse selects the relay and\ndiscovery service: official (default), off (invite addresses only),\nor the base URL of a self-hosted instance.\n\npair reprints the invitation link and QR that serve wrote to {INVITATION_FILE}\nwhile it is still valid. Scanning or pasting the link is the whole pairing;\nan invitation lasts five minutes and admits one device. A new one needs a\nrestart or the hosting page.\n\nOptions:\n  -h, --help    Print this help"
+        "Usage:\n  tcode-headless serve [--name NAME] [--data-dir DIR] [--traverse official|off|URL] [--browser-listen ADDR:PORT] [--password PASSWORD]\n  tcode-headless set-password [--data-dir DIR] [--password PASSWORD] [--revoke-tokens]\n  tcode-headless pair [--data-dir DIR]\n\nserve starts this machine on Traverse for native devices and, for browsers,\na plain HTTP listener on {DEFAULT_BROWSER_LISTEN} (--browser-listen binds it\nelsewhere; --listen is accepted as an alias). The browser signs in with a\npassword, set on first open or with --password / TCODE_PASSWORD; a bind\nbeyond loopback is refused until one exists. --traverse selects the relay and\ndiscovery service: official (default), off (invite addresses only),\nor the base URL of a self-hosted instance.\n\npair reprints the invitation link and QR that serve wrote to {INVITATION_FILE}\nwhile it is still valid. Scanning or pasting the link is the whole pairing;\nan invitation lasts five minutes and admits one device. A new one needs a\nrestart or the hosting page.\n\nOptions:\n  -h, --help    Print this help"
     );
 }
 
@@ -100,8 +100,7 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     if let Some(password) =
         option_value(args, "--password").or_else(|| std::env::var("TCODE_PASSWORD").ok())
     {
-        tcode_remote::server::set_password(&remote_data_dir, &password, false)
-            .map_err(|error| error.to_string())?;
+        set_password(&remote_data_dir, &password, false).map_err(|error| error.to_string())?;
     }
     let mut services = HostServices {
         background_startup_probes: true,
@@ -139,12 +138,11 @@ fn serve_command(args: &[String]) -> Result<(), String> {
     let hosting = traverse_host.clone();
     let server = serve(
         mux.clone(),
-        RemoteConfig {
+        BrowserConfig {
             listen: browser_listen,
             host_name: name,
             data_dir: remote_data_dir.clone(),
             static_bundle: STATIC_BUNDLE,
-            browser_password: true,
             hosting: Some(Arc::new(move |action| hosting.hosting(action))),
         },
     )
@@ -223,8 +221,7 @@ fn set_password_command(args: &[String]) -> Result<(), String> {
         None => SessionStore::open_default(),
     }
     .map_err(|error| error.to_string())?;
-    tcode_remote::server::set_password(store.root(), &password, revoke)
-        .map_err(|error| error.to_string())?;
+    set_password(store.root(), &password, revoke).map_err(|error| error.to_string())?;
     println!(
         "Password changed. {}",
         if revoke {

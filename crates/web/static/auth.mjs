@@ -1,5 +1,5 @@
-// Password authentication belongs to the serving browser origin. Native clients
-// continue exchanging six-digit codes through /pair.
+// The browser signs in to the machine that served it with that machine's
+// password; native devices pair over Traverse instead.
 export async function authenticate(api, password, configured, device) {
   if (!configured) await api('/auth/setup', { password });
   return api('/auth/login', { password, ...device });
@@ -35,11 +35,6 @@ export async function authorizeBrowser() {
     return response.json();
   };
   const state = await api('/auth/state');
-  if (state.mode !== 'password') return;
-  document.documentElement.dataset.authMode = 'password';
-  // A code fragment must never sign this browser in, even if it is valid for
-  // a native device. Tokens previously paired by this browser remain usable.
-  history.replaceState(null, '', location.pathname + location.search);
   let hosts = [];
   try { hosts = JSON.parse(localStorage.getItem('tcode.hosts') || '[]'); } catch { /* damaged site data */ }
   const last = localStorage.getItem('tcode.last_host');

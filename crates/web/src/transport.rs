@@ -261,21 +261,17 @@ async fn connection_loop(
                         let failure = if hello["type"].as_str() == Some("hello_rejected") {
                             Some(ConnectionFailure::hello_rejected(hello["reason"].as_str()))
                         } else if hello["type"].as_str() == Some("hello_ok")
-                            && !matches!(hello["protocol_version"].as_u64(), Some(3 | 4))
+                            && hello["protocol_version"].as_u64()
+                                != Some(u64::from(tcode_protocol::PROTOCOL_VERSION))
                         {
                             Some(ConnectionFailure::ProtocolMismatch)
                         } else {
                             None
                         };
                         if let Some(failure) = failure {
-                            if failure == ConnectionFailure::AuthenticationRejected
-                                && crate::host::window()
-                                    .document()
-                                    .and_then(|document| document.document_element())
-                                    .and_then(|root| root.get_attribute("data-auth-mode"))
-                                    .as_deref()
-                                    == Some("password")
-                            {
+                            // A revoked or stale token: forget the machine so
+                            // the login page takes over on reload.
+                            if failure == ConnectionFailure::AuthenticationRejected {
                                 if let Ok(Some(storage)) = crate::host::window().local_storage() {
                                     let _ = storage.remove_item("tcode.last_host");
                                 }
@@ -289,9 +285,7 @@ async fn connection_loop(
                             reason = Some(failure);
                             break;
                         }
-                        if hello["type"].as_str() != Some("hello_ok")
-                            || !matches!(hello["protocol_version"].as_u64(), Some(3 | 4))
-                        {
+                        if hello["type"].as_str() != Some("hello_ok") {
                             break;
                         }
                         let _ = state.try_send(ConnectionState::Syncing);
@@ -400,15 +394,16 @@ fn remember(
     }
 }
 
-/// The browser listener still authenticates by bearer token: a version-3
-/// hello with version 4 advertised, the token, and the device fields.
+/// The browser listener authenticates by the bearer token login issued;
+/// the device fields name this browser in the machine's device list.
 fn browser_hello(device: &DeviceIdentity, token: &str) -> String {
-    let mut hello = serde_json::to_value(device).expect("string fields serialize");
-    hello["type"] = "hello".into();
-    hello["protocol_version"] = 3.into();
-    hello["supported_versions"] = serde_json::json!([3, 4]);
-    hello["token"] = token.into();
-    hello.to_string()
+    serde_json::json!({
+        "type": "hello",
+        "protocol_version": tcode_protocol::PROTOCOL_VERSION,
+        "token": token,
+        "device": {"name": device.name, "platform": device.platform},
+    })
+    .to_string()
 }
 
 fn now_ms() -> u64 {

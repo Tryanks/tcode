@@ -1,6 +1,6 @@
 //! Desktop proxy configuration absent from wry's endpoint type. The bridge
 //! asks for no credentials: the paired connection is the authority.
-use tcode_remote::preview::ProxyEntry;
+use tcode_traverse::preview::ProxyEntry;
 
 pub(super) fn builder<'a>(
     builder: wry::WebViewBuilder<'a>,

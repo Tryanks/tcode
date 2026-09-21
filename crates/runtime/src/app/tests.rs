@@ -6769,7 +6769,7 @@ fn mux_clients_target_independent_drafts_and_receive_only_their_session_tail() {
         host.update_state_for_test(move |state, _| state.set_provider_launcher_for_test(launcher)),
     )
     .unwrap();
-    let mux = tcode_remote::HostMux::new(host.to_host.clone(), host.from_host.clone());
+    let mux = tcode_traverse::HostMux::new(host.to_host.clone(), host.from_host.clone());
     let connect = || {
         let connection = mux.attach();
         let link = HostLink::new(connection.to_host, connection.from_host);

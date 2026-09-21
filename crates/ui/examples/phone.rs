@@ -29,7 +29,7 @@ fn main() {
             } else {
                 size(px(393.), px(852.))
             };
-            let host: Rc<dyn ClientHost> = Rc::new(tcode_remote::NativeClientHost::from_env());
+            let host: Rc<dyn ClientHost> = Rc::new(tcode_traverse::NativeClientHost::from_env());
             tcode_ui::run_shell(
                 cx,
                 host.clone(),

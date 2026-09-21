@@ -853,10 +853,7 @@ mod tests {
             "tcode-stale-pairing-{}",
             tcode_services::store::now_millis()
         ));
-        let client = Rc::new(tcode_remote::client_host::NativeClientHost::new(
-            root.clone(),
-            "phone",
-        ));
+        let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         cx.update(|cx| cx.set_global(ClientAttachment::new(client.clone(), false, |_, _, _| {})));
         let (probe, cx) = cx.add_window_view(|window, cx| {
             let state = cx.new(|_| WindowState::new(false));
