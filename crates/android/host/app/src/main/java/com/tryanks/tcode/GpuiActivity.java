@@ -12,6 +12,9 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -51,6 +54,65 @@ public final class GpuiActivity extends NativeActivity {
     private boolean keyboardShowPending;
     private long cameraRequest;
     private android.net.wifi.WifiManager.MulticastLock multicastLock;
+    private ConnectivityManager.NetworkCallback networkCallback;
+
+    /**
+     * Tells the Traverse endpoint to rebind and probe when the default network
+     * changes. {@code onCapabilitiesChanged} also fires for signal-strength
+     * updates, so only a change of transport or validation counts; the
+     * callback runs on the connectivity thread and the native side forwards
+     * to the GPUI thread.
+     */
+    private void watchDefaultNetwork() {
+        ConnectivityManager connectivity = (ConnectivityManager)
+            getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivity == null) return;
+        networkCallback = new ConnectivityManager.NetworkCallback() {
+            private Network current;
+            private int transports = -1;
+            private boolean validated;
+
+            @Override public void onAvailable(Network network) {
+                current = network;
+                transports = -1;
+                nativeNetworkChanged();
+            }
+
+            @Override public void onLost(Network network) {
+                if (network.equals(current)) current = null;
+                nativeNetworkChanged();
+            }
+
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) {
+                int bits = transportBits(capabilities);
+                boolean valid = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                if (bits == transports && valid == validated) return;
+                boolean first = transports == -1;
+                transports = bits;
+                validated = valid;
+                // onAvailable already reported the network; its first
+                // capabilities are not a second change.
+                if (!first) nativeNetworkChanged();
+            }
+        };
+        connectivity.registerDefaultNetworkCallback(networkCallback);
+    }
+
+    private static int transportBits(NetworkCapabilities capabilities) {
+        int bits = 0;
+        for (int transport = 0; transport < 32; transport++) {
+            if (capabilities.hasTransport(transport)) bits |= 1 << transport;
+        }
+        return bits;
+    }
+
+    private void unwatchDefaultNetwork() {
+        if (networkCallback == null) return;
+        ConnectivityManager connectivity = (ConnectivityManager)
+            getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivity != null) connectivity.unregisterNetworkCallback(networkCallback);
+        networkCallback = null;
+    }
 
     /** Called by the Rust browse worker; reference counting allows overlapping browses. */
     public synchronized void gpuiMulticastLock(boolean acquire) {
@@ -78,6 +140,7 @@ public final class GpuiActivity extends NativeActivity {
     private native void nativeOnInsets(int left, int top, int right, int bottom, int imeBottom);
     private native void nativeOnBack(boolean enabled);
     private native void nativeQrScanCompleted(long requestId, int status, String value);
+    private native void nativeNetworkChanged();
     private native void nativeScrollCaptureSearch(long request);
     private native void nativeScrollCaptureStart();
     private native void nativeScrollCaptureImage(long request, int top);
@@ -119,11 +182,21 @@ public final class GpuiActivity extends NativeActivity {
             return insets;
         });
         decor.requestApplyInsets();
+        watchDefaultNetwork();
+    }
+
+    @Override
+    protected void onDestroy() {
+        unwatchDefaultNetwork();
+        super.onDestroy();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        // The network may have changed while the activity was stopped without
+        // the callback being delivered; the endpoint probes on every return.
+        nativeNetworkChanged();
         View decor = getWindow().getDecorView();
         decor.post(() -> {
             WindowInsets insets = decor.getRootWindowInsets();
