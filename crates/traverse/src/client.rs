@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     io,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -15,7 +16,7 @@ use crate::{
 };
 use async_channel::Sender;
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayUrl, TransportAddr,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl, TransportAddr,
     endpoint::{Connection, ConnectionError, SendStream, presets},
 };
 use tcode_client::{
@@ -38,93 +39,235 @@ pub(crate) struct ClientEndpoint {
     endpoint: Endpoint,
     /// Transports to probe when the network changes.
     transports: Mutex<Vec<Outgoing>>,
-    lookups: Arc<Mutex<Lookups>>,
+    lookups: Arc<Lookups>,
 }
 
-/// The manifests whose resolvers the endpoint carries: the official one when
-/// the device uses the official service, plus one per self-hosted instance a
-/// paired machine publishes to. The device only resolves; it never publishes.
+/// The Traverse instances the endpoint resolves machines through and relays
+/// from: one per instance a saved machine publishes to, plus the instance of
+/// an invitation being paired right now. The relay map is the union of their
+/// manifests, so a device whose machines are all Off carries no relay and a
+/// device with no machine on the official service never loads its manifest.
+/// The device only resolves; it never publishes.
 struct Lookups {
     endpoint: Endpoint,
-    loaders: HashMap<ManifestSource, ManifestLoader>,
-    /// What is installed right now, so a refresh of one manifest rebuilds
-    /// the services with every other one intact.
-    installed: HashMap<ManifestSource, Arc<Manifest>>,
-    refreshers: Vec<tokio::task::AbortHandle>,
+    data_dir: PathBuf,
+    sources: Mutex<HashMap<ManifestSource, Source>>,
+    /// The relay map the endpoint was bound with. iroh shares it with the
+    /// endpoint, so it always reads as what the endpoint dials from; the
+    /// lock serializes syncs so two cannot undo each other's changes.
+    relays: tokio::sync::Mutex<RelayMap>,
 }
 
-impl Lookups {
-    /// Rebuild the lookup services with `manifest` in place of what `source`
-    /// had. Returns the official manifest it replaced: the endpoint's relay
-    /// map was built from that one and moves with it.
-    fn apply(&mut self, source: &ManifestSource, manifest: Arc<Manifest>) -> Option<Arc<Manifest>> {
-        let previous = self.installed.insert(source.clone(), manifest);
-        live::install_lookups(
-            &self.endpoint,
-            self.installed.values().map(Arc::as_ref),
-            false,
-        );
-        previous.filter(|_| *source == ManifestSource::Official)
-    }
+struct Source {
+    loader: ManifestLoader,
+    /// `None` while the first fetch is in flight.
+    manifest: Option<Arc<Manifest>>,
+    /// Pairings in flight through this instance; they keep a source no
+    /// saved machine names yet.
+    pinned: usize,
+    refresher: Option<tokio::task::AbortHandle>,
 }
 
-impl Drop for Lookups {
+impl Drop for Source {
     fn drop(&mut self) {
-        for refresher in &self.refreshers {
+        if let Some(refresher) = &self.refresher {
             refresher.abort();
         }
     }
 }
 
+/// The instances the saved machines publish to.
+fn saved_sources(data_dir: &Path) -> Vec<ManifestSource> {
+    let hosts = crate::hosts::load_hosts(data_dir).unwrap_or_else(|error| {
+        log::error!("could not read hosts.json: {error}");
+        Vec::new()
+    });
+    let mut sources = Vec::new();
+    for host in &hosts {
+        if let Some(source) = ManifestSource::from_traverse(host.traverse.as_deref())
+            && !sources.contains(&source)
+        {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
+impl Lookups {
+    fn manifests(&self) -> Vec<Arc<Manifest>> {
+        self.sources
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|source| source.manifest.clone())
+            .collect()
+    }
+
+    /// Bring the endpoint in line with the manifests in hand: the relay map
+    /// becomes their union and the lookup services their resolvers.
+    async fn apply(&self) {
+        let relays = self.relays.lock().await;
+        let manifests = self.manifests();
+        let wanted = RelayMap::empty();
+        for manifest in &manifests {
+            wanted.extend(&manifest.relay_map());
+        }
+        live::install_lookups(&self.endpoint, manifests.iter().map(Arc::as_ref), false);
+        live::sync_relays(&self.endpoint, &relays, &wanted).await;
+    }
+
+    /// Make `source` resolvable: the manifest in hand is installed at once
+    /// and refreshed in the background; with nothing in hand yet, one fetch
+    /// is awaited. A manifest that stays unavailable is logged and the
+    /// source dropped, so the next dial fetches again: the stored relay and
+    /// addresses may still reach the machine. `pin` marks a pairing in
+    /// flight, released with [`Self::unpin`].
+    async fn ensure(self: &Arc<Self>, source: &ManifestSource, pin: bool) {
+        let loader = {
+            let mut sources = self.sources.lock().unwrap();
+            if let Some(known) = sources.get_mut(source) {
+                known.pinned += usize::from(pin);
+                // Installed, or claimed by a fetch already under way.
+                return;
+            }
+            // Claim the source before awaiting, so a concurrent dial to
+            // the same instance does not fetch twice.
+            let loader = ManifestLoader::new(source.clone(), &self.data_dir);
+            sources.insert(
+                source.clone(),
+                Source {
+                    loader: loader.clone(),
+                    manifest: None,
+                    pinned: usize::from(pin),
+                    refresher: None,
+                },
+            );
+            loader
+        };
+        match loader.startup().await {
+            Ok(manifest) => self.adopt(source, manifest).await,
+            Err(error) => {
+                log::warn!("Traverse manifest unavailable: {error}");
+                self.sources.lock().unwrap().remove(source);
+            }
+        }
+    }
+
+    fn unpin(&self, source: &ManifestSource) {
+        if let Some(known) = self.sources.lock().unwrap().get_mut(source) {
+            known.pinned = known.pinned.saturating_sub(1);
+        }
+    }
+
+    /// Install `manifest` for a claimed `source` now and each time a
+    /// refresh changes it.
+    async fn adopt(self: &Arc<Self>, source: &ManifestSource, manifest: Arc<Manifest>) {
+        {
+            let mut sources = self.sources.lock().unwrap();
+            let Some(known) = sources.get_mut(source) else {
+                return;
+            };
+            known.manifest = Some(manifest);
+            let lookups = self.clone();
+            let refreshed = source.clone();
+            known.refresher = Some(known.loader.spawn_refresh(move |manifest| {
+                let lookups = lookups.clone();
+                let source = refreshed.clone();
+                async move {
+                    log::info!("applying the refreshed Traverse manifest for {source:?}");
+                    let installed = match lookups.sources.lock().unwrap().get_mut(&source) {
+                        Some(known) => {
+                            known.manifest = Some(manifest);
+                            true
+                        }
+                        None => false,
+                    };
+                    if installed {
+                        lookups.apply().await;
+                    }
+                }
+            }));
+        }
+        self.apply().await;
+    }
+
+    /// The saved machines changed: drop the instances none of them and no
+    /// pairing in flight names, and load the ones that are new.
+    async fn reconcile(self: &Arc<Self>) {
+        let wanted = saved_sources(&self.data_dir);
+        let dropped = {
+            let mut sources = self.sources.lock().unwrap();
+            let before = sources.len();
+            sources.retain(|source, known| known.pinned > 0 || wanted.contains(source));
+            sources.len() != before
+        };
+        if dropped {
+            self.apply().await;
+        }
+        for source in &wanted {
+            self.ensure(source, false).await;
+        }
+    }
+}
+
 impl DeviceIdentity {
-    /// The endpoint, bound on first use. Must run on the runtime.
+    /// The endpoint, bound on first use with the relays of the saved
+    /// machines' Traverse instances. Must run on the runtime.
     pub(crate) async fn client(&self) -> io::Result<&ClientEndpoint> {
         let inner = self.inner();
         inner
             .endpoint
             .get_or_try_init(|| async {
-                let options = *inner.options.lock().unwrap();
                 let secret_key = inner.secret_key.clone();
-                // Resolve machines through the official manifest's services
-                // without publishing this device anywhere; the machine is
-                // what gets looked up. A relay of our own still helps hole
-                // punching.
-                let official = options.official.then(|| {
-                    let loader = ManifestLoader::new(ManifestSource::Official, &inner.data_dir);
-                    let manifest = loader.current().expect("the official manifest is bundled");
-                    (loader, manifest)
-                });
-                let mut builder = match &official {
-                    Some((_, manifest)) => Endpoint::builder(presets::Minimal)
-                        .relay_mode(iroh::RelayMode::Custom(manifest.relay_map())),
-                    None => {
-                        Endpoint::builder(presets::Minimal).relay_mode(iroh::RelayMode::Disabled)
+                // Manifests in hand shape the endpoint at bind; the rest are
+                // fetched once it is up.
+                let mut in_hand = Vec::new();
+                let mut to_fetch = Vec::new();
+                let relays = RelayMap::empty();
+                for source in saved_sources(&inner.data_dir) {
+                    let loader = ManifestLoader::new(source.clone(), &inner.data_dir);
+                    match loader.current() {
+                        Ok(manifest) => {
+                            relays.extend(&manifest.relay_map());
+                            in_hand.push((source, loader, manifest));
+                        }
+                        Err(_) => to_fetch.push(source),
                     }
-                };
-                builder = builder
-                    .secret_key(secret_key.clone())
-                    .transport_config(wire::transport_config());
-                let endpoint = builder.bind().await.map_err(io::Error::other)?;
-                let client = ClientEndpoint {
-                    endpoint: endpoint.clone(),
-                    transports: Mutex::new(Vec::new()),
-                    lookups: Arc::new(Mutex::new(Lookups {
-                        endpoint,
-                        loaders: HashMap::new(),
-                        installed: HashMap::new(),
-                        refreshers: Vec::new(),
-                    })),
-                };
-                if let Some((loader, manifest)) = official {
-                    client
-                        .lookups
-                        .lock()
-                        .unwrap()
-                        .loaders
-                        .insert(ManifestSource::Official, loader.clone());
-                    client.adopt(loader, manifest);
                 }
-                Ok(client)
+                let endpoint = Endpoint::builder(presets::Minimal)
+                    .relay_mode(iroh::RelayMode::Custom(relays.clone()))
+                    .secret_key(secret_key)
+                    .transport_config(wire::transport_config())
+                    .bind()
+                    .await
+                    .map_err(io::Error::other)?;
+                let lookups = Arc::new(Lookups {
+                    endpoint: endpoint.clone(),
+                    data_dir: inner.data_dir.clone(),
+                    sources: Mutex::new(HashMap::new()),
+                    relays: tokio::sync::Mutex::new(relays),
+                });
+                for (source, loader, manifest) in in_hand {
+                    lookups.sources.lock().unwrap().insert(
+                        source.clone(),
+                        Source {
+                            loader,
+                            manifest: None,
+                            pinned: 0,
+                            refresher: None,
+                        },
+                    );
+                    lookups.adopt(&source, manifest).await;
+                }
+                for source in to_fetch {
+                    let lookups = lookups.clone();
+                    runtime().spawn(async move { lookups.ensure(&source, false).await });
+                }
+                Ok(ClientEndpoint {
+                    endpoint,
+                    transports: Mutex::new(Vec::new()),
+                    lookups,
+                })
             })
             .await
     }
@@ -143,66 +286,41 @@ impl DeviceIdentity {
             transport.wake(Wake::Probe);
         }
     }
+
+    /// `hosts.json` changed: the endpoint's relays and lookups follow the
+    /// machines saved now. Before the endpoint is bound there is nothing to
+    /// update; it reads the file when it binds.
+    pub fn hosts_changed(&self) {
+        let Some(client) = self.inner().endpoint.get() else {
+            return;
+        };
+        let lookups = client.lookups.clone();
+        runtime().spawn(async move { lookups.reconcile().await });
+    }
+
+    /// The relay URLs the endpoint dials from right now; empty before the
+    /// endpoint is bound.
+    pub fn relays(&self) -> Vec<String> {
+        let Some(client) = self.inner().endpoint.get() else {
+            return Vec::new();
+        };
+        let relays = block_on(async { client.lookups.relays.lock().await.clone() });
+        let mut urls: Vec<String> = relays
+            .urls::<Vec<_>>()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        urls.sort();
+        urls
+    }
 }
 
 impl ClientEndpoint {
-    /// Make the machine's Traverse instance resolvable before dialing it:
-    /// the manifest in hand is installed at once and refreshed in the
-    /// background; with nothing in hand yet, one fetch is awaited. A
-    /// manifest that stays unavailable is logged: the stored relay and
-    /// addresses may still reach the machine.
-    async fn ensure_lookups(&self, device: &DeviceIdentity, traverse: Option<&str>) {
-        let Some(source) = ManifestSource::from_traverse(traverse) else {
-            return;
-        };
-        if source == ManifestSource::Official {
-            // Installed with the endpoint, or deliberately absent.
-            return;
+    /// Make the machine's Traverse instance resolvable before dialing it.
+    async fn ensure_lookups(&self, traverse: Option<&str>) {
+        if let Some(source) = ManifestSource::from_traverse(traverse) {
+            self.lookups.ensure(&source, false).await;
         }
-        let loader = {
-            let mut lookups = self.lookups.lock().unwrap();
-            if lookups.loaders.contains_key(&source) {
-                return;
-            }
-            // Claim the source before awaiting, so a concurrent dial to
-            // the same instance does not fetch twice.
-            let loader = ManifestLoader::new(source.clone(), device.data_dir());
-            lookups.loaders.insert(source.clone(), loader.clone());
-            loader
-        };
-        match loader.startup().await {
-            Ok(manifest) => self.adopt(loader, manifest),
-            Err(error) => {
-                log::warn!("Traverse manifest unavailable: {error}");
-                self.lookups.lock().unwrap().loaders.remove(&source);
-            }
-        }
-    }
-
-    /// Install `manifest`'s resolvers now and each time a refresh changes
-    /// them.
-    fn adopt(&self, loader: ManifestLoader, manifest: Arc<Manifest>) {
-        let source = loader.source().clone();
-        let lookups = self.lookups.clone();
-        lookups.lock().unwrap().apply(&source, manifest);
-        let refresher = loader.spawn_refresh(move |manifest| {
-            let lookups = lookups.clone();
-            let source = source.clone();
-            async move {
-                log::info!("applying the refreshed Traverse manifest for {source:?}");
-                let (endpoint, previous) = {
-                    let mut lookups = lookups.lock().unwrap();
-                    (
-                        lookups.endpoint.clone(),
-                        lookups.apply(&source, manifest.clone()),
-                    )
-                };
-                if let Some(previous) = previous {
-                    live::sync_relays(&endpoint, &previous, &manifest).await;
-                }
-            }
-        });
-        self.lookups.lock().unwrap().refreshers.push(refresher);
     }
 }
 
@@ -256,9 +374,28 @@ pub async fn pair(invite: &PairInvite, device: &DeviceIdentity) -> Result<Paired
         .map_err(|error| PairError::Unreachable(error.to_string()))?;
     let addr = dial_addr(&invite.host_id, invite.relay.as_deref(), &invite.addrs)
         .ok_or_else(|| PairError::Protocol("invalid machine id".into()))?;
-    client
-        .ensure_lookups(device, invite.traverse.as_deref())
-        .await;
+    // The machine's instance is held for the exchange; the caller saves the
+    // machine on success, which keeps it, and a failure lets it go again.
+    let source = ManifestSource::from_traverse(invite.traverse.as_deref());
+    if let Some(source) = &source {
+        client.lookups.ensure(source, true).await;
+    }
+    let result = pair_exchange(client, addr, invite, device).await;
+    if let Some(source) = &source {
+        client.lookups.unpin(source);
+        if result.is_err() {
+            client.lookups.reconcile().await;
+        }
+    }
+    result
+}
+
+async fn pair_exchange(
+    client: &ClientEndpoint,
+    addr: EndpointAddr,
+    invite: &PairInvite,
+    device: &DeviceIdentity,
+) -> Result<PairedHost, PairError> {
     let connection = tokio::time::timeout(
         CONNECT_BUDGET,
         client.endpoint.connect(addr, wire::ALPN_PAIR),
@@ -563,9 +700,7 @@ async fn establish(
     })?;
     let addr = dial_addr(&host.host_id, host.relay.as_deref(), &host.addrs)
         .ok_or(ConnectionFailure::Unreachable)?;
-    client
-        .ensure_lookups(device, host.traverse.as_deref())
-        .await;
+    client.ensure_lookups(host.traverse.as_deref()).await;
     let connection = match tokio::time::timeout(
         CONNECT_BUDGET,
         client.endpoint.connect(addr, wire::ALPN_MAIN),

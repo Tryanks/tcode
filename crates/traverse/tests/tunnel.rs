@@ -15,7 +15,7 @@ use tcode_client::{
     pairing::PairedHost,
 };
 use tcode_traverse::{
-    DeviceIdentity, EndpointOptions, HostConfig, HostMux, TraverseHost, TraverseMode,
+    DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode,
     wire::{self, ClientLine, DeviceClaim, HostLine},
 };
 
@@ -90,9 +90,7 @@ struct Device {
 
 fn attach(machine: &Machine) -> Device {
     let dir = TestDir::new("device");
-    let device = DeviceIdentity::load_or_create(&dir.0)
-        .unwrap()
-        .with_options(EndpointOptions { official: false });
+    let device = DeviceIdentity::load_or_create(&dir.0).unwrap();
     device.set_details("phone".into(), None);
     let minted = machine.host().new_invitation();
     let paired: PairedHost = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();

@@ -11,7 +11,7 @@ use std::{
 
 use tcode_client::{ConnectionState, host::Transport, host::TunnelOpener, pairing::PairedHost};
 use tcode_traverse::{
-    DeviceIdentity, EndpointOptions, HostConfig, HostMux, TraverseHost, TraverseMode,
+    DeviceIdentity, HostConfig, HostMux, TraverseHost, TraverseMode,
     preview::{NativeProxy, PreviewEndpoint, PreviewRoutes},
 };
 
@@ -62,9 +62,7 @@ impl Machine {
         )
         .unwrap();
         let device_dir = TestDir::new("device");
-        let device = DeviceIdentity::load_or_create(&device_dir.0)
-            .unwrap()
-            .with_options(EndpointOptions { official: false });
+        let device = DeviceIdentity::load_or_create(&device_dir.0).unwrap();
         device.set_details("laptop".into(), None);
         let minted = host.new_invitation();
         let paired = tcode_traverse::pair_blocking(&minted.invite, &device).unwrap();

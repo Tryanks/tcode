@@ -340,8 +340,13 @@ A machine has one Traverse setting: **Official**, **Self-hosted** (a base
 URL) or **Off**. On the desktop it is in **Settings → Other devices →
 Traverse**; headless uses `serve --traverse official|off|<url>`. Devices need
 no Traverse setting: the invitation carries the machine's Traverse URL (absent
-for the official service), and each saved machine keeps its own, so one phone
-can use an official-Traverse machine and a self-hosted one at the same time.
+for the official service, `off` for none), and each saved machine keeps its
+own, so one phone can use an official-Traverse machine and a self-hosted one
+at the same time. A device's own endpoint uses the relays and lookups of the
+instances its saved machines publish to, and of a machine it is pairing with:
+a device whose machines are all Off has no relay and contacts no service, and
+the official manifest is loaded only while some machine uses the official
+service. Adding or removing a machine applies this to the running endpoint.
 
 A Traverse instance describes itself with a JSON manifest: a list of relays
 (`url`, optional `quic_port`, `region`, `home_rtt_max_ms`), a list of pkarr
@@ -354,9 +359,9 @@ added, lookup services rebuilt.
 
 | Mode | Machine | Devices | The service sees |
 | --- | --- | --- | --- |
-| **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's lookup service (`https://dns.iroh.link/pkarr`, DNS origin `dns.iroh.link.`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device's own endpoint also uses the bundled relay list for its home relay and the bundled lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
-| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch and fails to start if the instance is unreachable; it never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's lookup to what it already has. Its own home relay still comes from the bundled official list. | Your instance sees what the official one would. The official relays still see the device's end of the connection; the official lookup service is not used for this machine. |
-| **Off** | No relay and no lookup: the endpoint publishes nothing and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections. Its own endpoint still has the official relay list for its side. | Nothing about this machine. |
+| **Official** (default) | Uses the manifest bundled with Tcode, refreshed from the repository. At the time of writing it lists n0's public relays (`*.relay.n0.iroh.link`, regions `na-east`, `na-west`, `eu`, `ap`, QUIC port 7842) and n0's lookup service (`https://dns.iroh.link/pkarr`, DNS origin `dns.iroh.link.`). These are n0's infrastructure: n0 states that the public relays are rate-limited and offer no uptime guarantee, and that the lookup service is fine for production when its performance is acceptable. | A device with a machine on the official service uses the same relay list for its own home relay and the same lookup service to resolve machines. There is no device-side switch. | Relays see machine and device ids, the encrypted connection and its volume. The lookup service stores, per machine id, the machine's signed record: its relay URL only, republished every five minutes; direct addresses are filtered out before publication and are exchanged over the encrypted connection instead. Anyone who knows a machine id can read that record. Devices publish nothing. |
+| **Self-hosted** | Fetches `<base>/relays.json` from your instance and uses its relays and pkarr store. With nothing cached yet, hosting waits for one fetch and fails to start if the instance is unreachable; it never falls back to the official service. | A device takes the base URL from the invitation, fetches the same manifest, and adds that instance's relays and lookup to what its other machines brought. Its home relay is chosen among all of them; a device whose machines are all self-hosted never contacts the official service. | Your instance sees what the official one would. The official service is not used for this machine; it sees the device's end only if the device also has a machine on it. |
+| **Off** | No relay and no lookup: the endpoint publishes nothing and dials nothing but direct addresses. The invitation carries only the machine's current addresses (`Relay: none (LAN only)`). | The device dials the addresses from the invitation and the ones it learned on later connections. This machine brings no relay to the device's endpoint; with no other machine on a service, the device has none. | Nothing about this machine. |
 
 A device that connected successfully saves how it reached the machine —
 the direct addresses that worked, newest first, up to 16, and the relay —

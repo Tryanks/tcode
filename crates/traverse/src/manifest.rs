@@ -32,6 +32,7 @@ use std::{
 use iroh::{RelayConfig, RelayMap, RelayUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tcode_client::pairing::TRAVERSE_OFF;
 use url::Url;
 
 pub const OFFICIAL_MANIFEST_URL: &str = "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/traverse/src/traverse_manifest.json";
@@ -182,10 +183,12 @@ pub enum ManifestSource {
 }
 
 impl ManifestSource {
-    /// What a device stores per machine: `None` is the official service.
+    /// What a device stores per machine: `None` is the official service,
+    /// [`TRAVERSE_OFF`] no service at all.
     pub fn from_traverse(base: Option<&str>) -> Option<Self> {
         match base {
             None => Some(Self::Official),
+            Some(TRAVERSE_OFF) => None,
             Some(base) => Url::parse(base).ok().map(Self::Custom),
         }
     }
@@ -499,7 +502,7 @@ pub(crate) mod live {
     use std::sync::Arc;
 
     use iroh::{
-        Endpoint,
+        Endpoint, RelayMap,
         address_lookup::{
             AddressLookupBuilder as _, DnsAddressLookup, PkarrPublisher, PkarrResolver,
         },
@@ -507,17 +510,18 @@ pub(crate) mod live {
 
     use super::Manifest;
 
-    /// Move the endpoint's relay map from `previous` to `manifest`: relays
-    /// no longer listed are removed, the rest inserted or replaced.
-    pub(crate) async fn sync_relays(endpoint: &Endpoint, previous: &Manifest, manifest: &Manifest) {
-        let wanted = manifest.relay_map();
-        for url in previous.relay_map().urls::<Vec<_>>() {
+    /// Move the endpoint's relay map from `previous` to `wanted`: relays no
+    /// longer listed are removed, new or changed ones inserted.
+    pub(crate) async fn sync_relays(endpoint: &Endpoint, previous: &RelayMap, wanted: &RelayMap) {
+        for url in previous.urls::<Vec<_>>() {
             if !wanted.contains(&url) {
                 endpoint.remove_relay(&url).await;
             }
         }
         for config in wanted.relays::<Vec<Arc<_>>>() {
-            endpoint.insert_relay(config.url.clone(), config).await;
+            if previous.get(&config.url).as_ref() != Some(&config) {
+                endpoint.insert_relay(config.url.clone(), config).await;
+            }
         }
     }
 
@@ -709,6 +713,7 @@ mod tests {
             ManifestSource::from_traverse(None),
             Some(ManifestSource::Official)
         );
+        assert_eq!(ManifestSource::from_traverse(Some(TRAVERSE_OFF)), None);
         assert_eq!(ManifestSource::from_traverse(Some("not a url")), None);
     }
 
