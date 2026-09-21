@@ -38,7 +38,7 @@ jobs:
       - name: Build
         run: cargo build --locked --bin tcode
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tcode-windows-x64-debug
           path: |
