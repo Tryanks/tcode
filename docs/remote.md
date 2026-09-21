@@ -363,20 +363,22 @@ the address bar, redirects, scripts and `preview_status`. No dev-server port
 needs to be exposed to the LAN. Open-in-system-browser still opens on this
 device and cannot use the embedded preview's routing.
 
-The forward proxy runs whenever hosting is enabled, on the same configured TCP
-port as pairing and WebSockets (default `47420`). It requires
-`Proxy-Authorization: Basic` with username `tcode` and the paired device token
-as password. Plain HTTP is forwarded; HTTPS uses opaque CONNECT tunnels with
-certificate validation performed by the client webview, without TLS interception.
-The machine connects directly to destinations; OS routing and global TUNs apply.
-Tcode does not read upstream-proxy environment variables or system proxy settings.
-There is nothing new to configure in hosting settings.
+Preview traffic rides the attachment's own Traverse connection: each browser
+connection becomes one tunnel stream that names its `host:port`, and the
+machine dials that address the way any local program would. There is no
+separate proxy port, no proxy credential and nothing to configure in hosting
+settings; the paired, end-to-end encrypted connection is the authority. Plain
+HTTP is forwarded; HTTPS stays an opaque tunnel with certificate validation
+performed by the client webview, without TLS interception. The machine
+connects directly to destinations; OS routing and global TUNs apply. Tcode
+does not read upstream-proxy environment variables or system proxy settings.
 
-The listener admits at most 256 concurrent connections, including WebSockets.
-Proxy connection setup times out after 10 seconds, and traffic idle for 60 seconds
-is closed. Revoked proxy tokens are rechecked every five seconds; stopping hosting
-closes tunnels. Connection logs contain destination host/port, never
-request bodies or tokens. For headless diagnostics use `RUST_LOG=tcode_remote=info`.
+One attachment holds at most 56 tunnels at once. Dialling a destination times
+out after 10 seconds, and a tunnel idle for 60 seconds is closed. Revoking a
+device or stopping hosting closes its connection and every tunnel on it; when
+the attachment reconnects after a network change, open tunnels end and new
+ones use the new connection. Connection logs contain destination host/port,
+never request bodies. For headless diagnostics use `RUST_LOG=tcode_traverse=info`.
 
 Android requires WebView's `PROXY_OVERRIDE` capability. It removes implicit
 localhost bypasses, waits for the override before navigation, and clears it when
@@ -385,7 +387,7 @@ preview views belong to one attachment.
 
 macOS attached Preview uses per-port forwarding for HTTP(S) loopback URLs:
 `localhost`, IPv4 loopback addresses and `::1`. The requested host and port are
-sent unchanged to the paired host's existing CONNECT service. The viewing Mac
+sent unchanged in the tunnel's opening line. The viewing Mac
 allocates its own loopback port, so a viewer service at the remote port cannot
 collide with it. `localhost` reserves both IPv4 and IPv6 listeners at that port.
 Numeric loopback URLs need that same address to be bindable on the viewing Mac;
@@ -428,15 +430,18 @@ Navigation, transport and authentication failures use Preview's existing error
 surface and automation errors. Local macOS Preview retains ordinary direct
 networking and its existing store.
 
-Windows uses WebView2's proxy configuration and proxy authentication callback, with implicit
-loopback bypass disabled. Unsupported proxy facilities fail closed; there is no
-unauthenticated IP allowlist or direct-network fallback. Windows and Android use
-an attachment-owned loopback bridge to the paired HTTP(S) origin. After machine
-identity verification, it forwards the existing proxy bytes and authentication
-unchanged; closing the attachment cancels the listener and active connections.
-The native authentication callback uses this local proxy origin and the existing
-paired token. macOS keeps its per-browser URL mapping and uses the same native
-HTTP(S) connection establishment.
+Windows uses WebView2's proxy configuration with implicit loopback bypass
+disabled; Android uses the WebView proxy override. Both point the engine at
+an attachment-owned loopback HTTP proxy that speaks `CONNECT host:port` and
+absolute-form requests. The proxy opens one tunnel per browser connection,
+rewrites an absolute-form request line to origin form, drops its own
+hop-by-hop headers and copies everything else verbatim, WebSocket upgrades
+included. It serves one request per connection and answers ambiguous
+framing (chunked plus `Content-Length`, unknown transfer codings, origin-form
+requests) with `400`. Unsupported proxy facilities fail closed; there is no
+direct-network fallback. Closing the attachment cancels the listener and
+active connections. macOS keeps its per-browser URL mapping over the same
+tunnels.
 
 When the main connection authenticates a replacement address, it publishes the
 attachment's current pairing in memory before notifying Preview. Existing
@@ -445,21 +450,11 @@ file is restart storage, not the live route source. Their local proxy/forwarding
 ports, URLs, history and website stores survive. Connections to the previous
 entry are cancelled, and new connections use the replacement. Tcode does not
 replay interrupted requests or reload pages automatically: use the existing Reload
-action if a page was interrupted. Learning an identity key also retires the older
-connections. Another machine, a replacement token, a changed pinned key or an
-HTTPS-to-HTTP downgrade cannot retarget an existing attachment's Preview.
-
-For a pinned machine, native Preview first completes an identity challenge on the
-same HTTP connection that will carry CONNECT or proxy traffic. A LAN pairing that
-has no saved key uses token-derived proof; it does not send the bearer token to an
-unverified address. Saved HTTPS or loopback origins without a key retain legacy
-compatibility. HTTP reverse-proxy tunnels must support that persistent identity
-exchange, forward-proxy requests and CONNECT to carry paired Preview traffic;
-ordinary website forwarding is insufficient. These checks identify the peer;
-they do not encrypt plain HTTP or prevent an active plaintext relay.
+action if a page was interrupted. Another machine cannot retarget an existing
+attachment's Preview.
 
 The iOS embedded preview remains unsupported. A future backend can use
-WKWebView `proxyConfigurations` on iOS 17+ with the same paired credential and
+WKWebView `proxyConfigurations` on iOS 17+ with the same loopback proxy and
 attachment lifetime. The browser client cannot override its browser's proxy.
 
 ## Security

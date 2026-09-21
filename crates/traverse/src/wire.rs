@@ -7,10 +7,15 @@
 //! terminated by `\n`, at most [`MAX_CONTROL_LINE`] bytes, and must arrive
 //! within [`CONTROL_TIMEOUT`].
 //!
-//! Reserved: a further bi stream on `tcode/1` opening with
-//! `{"type":"connect","host":..,"port":..}` will carry one Preview TCP tunnel
-//! to `host:port` on the machine (Traverse preview streams). It requires a
-//! completed hello on the same connection and is refused until implemented.
+//! After hello, a further bi stream on `tcode/1` opening with
+//! `{"type":"connect","host":..,"port":..}` carries one Preview TCP tunnel:
+//! the machine dials `host:port` the way any local program would (loopback
+//! included), answers `connected` or `connect_failed` before any tunnel
+//! byte, and from then on both directions are opaque bytes. Finishing the
+//! device's send side shuts down the machine's write half to the service;
+//! the service closing is a finished stream back; a reset closes both. A
+//! `connect` before hello is refused, and one connection holds at most
+//! [`MAX_TUNNELS`] tunnels at once.
 use std::{io, time::Duration};
 
 use iroh::endpoint::{QuicTransportConfig, RecvStream, SendStream};
@@ -28,6 +33,14 @@ pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_LINE: usize = 16 * 1024 * 1024;
 /// Bi streams one connection may hold open at once.
 pub const MAX_STREAMS: u32 = 64;
+/// Preview tunnels one connection may hold open at once, leaving streams for
+/// the main stream and for answering refusals.
+pub const MAX_TUNNELS: usize = MAX_STREAMS as usize - 8;
+/// How long the machine dials a tunnel target before answering
+/// `connect_failed`.
+pub const TUNNEL_CONNECT: Duration = Duration::from_secs(10);
+/// A tunnel with no bytes in either direction for this long is closed.
+pub const TUNNEL_IDLE: Duration = Duration::from_secs(60);
 
 pub const KEEP_ALIVE: Duration = Duration::from_secs(10);
 pub const MAX_IDLE: Duration = Duration::from_secs(30);
@@ -86,11 +99,22 @@ pub enum ClientLine {
         protocol_version: u32,
         device: DeviceClaim,
     },
-    /// Reserved for Preview tunnels; see the module documentation.
+    /// Open a Preview tunnel; see the module documentation.
     Connect {
         host: String,
         port: u16,
     },
+}
+
+/// Whether a `connect` line names something the machine will dial: a host
+/// name or IP literal without brackets, and a real port.
+pub fn valid_tunnel_target(host: &str, port: u16) -> bool {
+    port != 0
+        && !host.is_empty()
+        && host.len() <= 253
+        && !host
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '[' | ']' | '/'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +151,12 @@ pub enum HostLine {
     },
     HelloRejected {
         reason: HelloRejection,
+    },
+    /// The tunnel target accepted the connection; tunnel bytes follow.
+    Connected,
+    /// The tunnel target could not be reached; the stream ends here.
+    ConnectFailed {
+        reason: String,
     },
     /// A stream whose first line the machine does not serve.
     Refused {
@@ -255,6 +285,31 @@ mod tests {
             .unwrap(),
             serde_json::json!({"type":"hello_ok","host_name":"Desk","protocol_version":5})
         );
+        assert_eq!(
+            serde_json::from_str::<ClientLine>(
+                r#"{"type":"connect","host":"localhost","port":5173}"#
+            )
+            .unwrap(),
+            ClientLine::Connect {
+                host: "localhost".into(),
+                port: 5173
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(HostLine::Connected).unwrap(),
+            serde_json::json!({"type":"connected"})
+        );
+        assert_eq!(
+            serde_json::to_value(HostLine::ConnectFailed {
+                reason: "refused".into()
+            })
+            .unwrap(),
+            serde_json::json!({"type":"connect_failed","reason":"refused"})
+        );
+        assert!(valid_tunnel_target("::1", 80));
+        assert!(!valid_tunnel_target("[::1]", 80));
+        assert!(!valid_tunnel_target("localhost", 0));
+        assert!(!valid_tunnel_target("", 80));
         assert!(
             !DeviceClaim {
                 name: " ".into(),

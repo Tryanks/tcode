@@ -13,9 +13,12 @@ pub mod manifest;
 mod mdns;
 pub mod mux;
 mod runtime;
+mod tunnel;
 pub mod wire;
 
-pub use client::{NearbyHost, PairError, browse, browse_blocking, connect, pair, pair_blocking};
+pub use client::{
+    AttachmentTunnels, NearbyHost, PairError, browse, browse_blocking, connect, pair, pair_blocking,
+};
 pub use host::{
     DeviceInfo, EndpointAddrSnapshot, HostConfig, LiveInfo, PairingCode, TraverseHost, TraverseMode,
 };

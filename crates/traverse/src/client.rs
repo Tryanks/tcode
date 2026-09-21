@@ -17,7 +17,7 @@ use iroh::{
 use tcode_client::{
     ConnectionFailure, ConnectionState,
     heartbeat::{Heartbeat, LIVENESS_REPLY_MS, NATIVE_IDLE_MS, Tick},
-    host::{LiveHost, Transport},
+    host::{LiveHost, Transport, Tunnel, TunnelFuture, TunnelOpener},
     outgoing::{Outgoing, OutgoingReceiver, subscription_key},
     pairing::{MAX_ADDRS, PairInvite, PairedHost},
     recovery::{Backoff, Wake},
@@ -248,14 +248,54 @@ pub fn pair_blocking(
     block_on(pair(invite, code, device))
 }
 
+/// Preview tunnels of one attachment: opened on whichever connection the
+/// main stream currently runs on, and none while it is reconnecting. The
+/// transport publishes it through `LiveHost::tunnels` on its `current_host`.
+#[derive(Clone, Default)]
+pub struct AttachmentTunnels {
+    current: Arc<Mutex<Option<Connection>>>,
+}
+
+impl AttachmentTunnels {
+    fn set(&self, connection: Option<Connection>) {
+        *self.current.lock().unwrap() = connection;
+    }
+}
+
+impl TunnelOpener for AttachmentTunnels {
+    fn open(&self, host: &str, port: u16) -> TunnelFuture {
+        let current = self.current.lock().unwrap().clone();
+        let host = host.to_owned();
+        Box::pin(async move {
+            let connection = current.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotConnected, "not connected to the machine")
+            })?;
+            // The handshake needs the runtime's timers; the caller may be on
+            // any executor.
+            let (done, result) = async_channel::bounded::<io::Result<Tunnel>>(1);
+            runtime().spawn(async move {
+                let _ = done
+                    .send(crate::tunnel::open(&connection, &host, port).await)
+                    .await;
+            });
+            result
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(io::Error::other("tunnel opener stopped")))
+        })
+    }
+}
+
 /// Open a reconnecting link to `host`. Dropping the returned channels ends
 /// it. The stored relay and addresses are refreshed in `hosts.json` after
-/// each authenticated connection.
+/// each authenticated connection. The transport's `current_host` carries
+/// the attachment's [`AttachmentTunnels`].
 pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
     let (to_host, outgoing) = tcode_client::outgoing::channel();
     let (incoming, from_host) = async_channel::unbounded();
     let (state_tx, state) = async_channel::unbounded();
-    let current_host = LiveHost::new(host.clone());
+    let tunnels = AttachmentTunnels::default();
+    let current_host = LiveHost::with_tunnels(host.clone(), Arc::new(tunnels.clone()));
     let live = current_host.clone();
     let device = device.clone();
     let registered = to_host.clone();
@@ -263,7 +303,15 @@ pub fn connect(host: &PairedHost, device: &DeviceIdentity) -> Transport {
         if let Ok(client) = device.client().await {
             client.transports.lock().unwrap().push(registered);
         }
-        connection_loop(device, live, Arc::new(outgoing), incoming, state_tx).await;
+        connection_loop(
+            device,
+            live,
+            tunnels,
+            Arc::new(outgoing),
+            incoming,
+            state_tx,
+        )
+        .await;
     });
     Transport {
         to_host,
@@ -282,6 +330,7 @@ struct Established {
 async fn connection_loop(
     device: DeviceIdentity,
     live: LiveHost,
+    tunnels: AttachmentTunnels,
     outgoing: Arc<OutgoingReceiver>,
     incoming: Sender<String>,
     state: Sender<ConnectionState>,
@@ -329,6 +378,8 @@ async fn connection_loop(
                 learn_addresses(&mut host, &established.connection);
                 live.authenticated(&host);
                 persist_addresses(&device, &host);
+                // Tunnels are available by the time Syncing is observable.
+                tunnels.set(Some(established.connection.clone()));
                 let _ = state.send(ConnectionState::Syncing).await;
                 let started = Instant::now();
                 let lost = relay_connected(
@@ -340,6 +391,7 @@ async fn connection_loop(
                     &mut buffered,
                 )
                 .await;
+                tunnels.set(None);
                 if lost.healthy {
                     stable_ms = started.elapsed().as_millis() as u64;
                 }
