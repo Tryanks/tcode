@@ -1,7 +1,7 @@
 use super::{
     dispatcher::AndroidDispatcher,
     display::AndroidDisplay,
-    host::{self, HostEvent},
+    host::{self, HostEvent, ScrollCaptureRequest},
     text::AndroidTextSystem,
     window::{AndroidWindow, AndroidWindowInner, KeyResult},
 };
@@ -44,6 +44,7 @@ struct PlatformCallbacks {
     thermal: Option<Box<dyn FnMut()>>,
     keyboard_layout: Option<Box<dyn FnMut()>>,
     process_back: Option<Box<dyn FnMut()>>,
+    scroll_capture: Option<Box<dyn FnMut(ScrollCaptureRequest)>>,
 }
 
 type ActionCallback = Box<dyn FnMut(&dyn Action)>;
@@ -122,6 +123,32 @@ impl AndroidPlatform {
 
     pub(crate) fn set_process_back_callback(&self, callback: Box<dyn FnMut()>) {
         self.callbacks.borrow_mut().process_back = Some(callback);
+    }
+
+    pub(crate) fn set_scroll_capture_callback(
+        &self,
+        callback: Box<dyn FnMut(ScrollCaptureRequest)>,
+    ) {
+        self.callbacks.borrow_mut().scroll_capture = Some(callback);
+    }
+
+    /// Run `callback` once the next frame has been presented; a frame is
+    /// forced if nothing else requests one.
+    pub(crate) fn after_next_frame(&self, callback: Box<dyn FnOnce()>) {
+        match self.window() {
+            Some(window) => window.after_next_frame(callback),
+            None => callback(),
+        }
+    }
+
+    fn emit_scroll_capture(&self, request: ScrollCaptureRequest) {
+        let callback = self.callbacks.borrow_mut().scroll_capture.take();
+        if let Some(mut callback) = callback {
+            callback(request);
+            self.callbacks.borrow_mut().scroll_capture = Some(callback);
+        } else if let ScrollCaptureRequest::Search { request } = request {
+            host::scroll_capture_bounds(request, None);
+        }
     }
 
     fn window(&self) -> Option<AndroidWindow> {
@@ -209,12 +236,14 @@ impl AndroidPlatform {
             let Some(window) = self.window() else {
                 continue;
             };
-            if matches!(event, HostEvent::Back) {
-                if !window.handle_back() {
-                    self.emit_process_back();
+            match event {
+                HostEvent::Back => {
+                    if !window.handle_back() {
+                        self.emit_process_back();
+                    }
                 }
-            } else {
-                window.handle_host_event(event);
+                HostEvent::ScrollCapture(request) => self.emit_scroll_capture(request),
+                event => window.handle_host_event(event),
             }
         }
     }

@@ -16,9 +16,10 @@ mod android;
 
 #[cfg(target_os = "android")]
 pub use android::{
-    init_platform, jni_commit_text, jni_delete_backward, jni_finish_composing_text,
-    jni_input_state, jni_key_event, jni_on_back, jni_on_insets, jni_set_composing_text,
-    set_back_callback, webview,
+    ScrollCaptureRequest, after_next_frame, init_platform, jni_commit_text, jni_delete_backward,
+    jni_finish_composing_text, jni_input_state, jni_key_event, jni_on_back, jni_on_insets,
+    jni_scroll_capture, jni_set_composing_text, scroll_capture_bounds, scroll_capture_rendered,
+    set_back_callback, set_scroll_capture_callback, webview,
 };
 
 /// Returns the process-wide Android platform created by [`init_platform`].
