@@ -35,6 +35,29 @@ pub(crate) enum HostEvent {
         ime_bottom: i32,
     },
     Back,
+    ScrollCapture(ScrollCaptureRequest),
+}
+
+/// One step of the system screenshot tool's scrolling capture, in physical
+/// window pixels. The activity drives the sequence: one `Search`, then for a
+/// chosen target `Start`, any number of `Image` requests and `End`. `Search`
+/// and `Image` each wait for their reply from the UI thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollCaptureRequest {
+    /// Which rectangle of the window scrolls; answered by
+    /// [`scroll_capture_bounds`].
+    Search {
+        request: u64,
+    },
+    Start,
+    /// The tile starting `top` pixels below the rectangle's top at `Start`;
+    /// answered by [`scroll_capture_rendered`] once a frame showing it has
+    /// been presented.
+    Image {
+        request: u64,
+        top: i32,
+    },
+    End,
 }
 
 pub(super) static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
@@ -266,6 +289,42 @@ pub fn on_insets(left: i32, top: i32, right: i32, bottom: i32, ime_bottom: i32) 
 
 pub fn on_back() {
     enqueue(HostEvent::Back);
+}
+
+pub fn scroll_capture(request: ScrollCaptureRequest) {
+    enqueue(HostEvent::ScrollCapture(request));
+}
+
+/// Answer a [`ScrollCaptureRequest::Search`]: the scrolling rectangle in
+/// physical window pixels, or `None` to decline the capture.
+pub fn scroll_capture_bounds(request: u64, bounds: Option<[i32; 4]>) {
+    let [left, top, right, bottom] = bounds.unwrap_or_default();
+    with_activity(
+        jni_str!("gpuiScrollCaptureBounds"),
+        jni_sig!("(JIIII)V"),
+        vec![
+            OwnedArgument::Long(request),
+            OwnedArgument::Int(left),
+            OwnedArgument::Int(top),
+            OwnedArgument::Int(right),
+            OwnedArgument::Int(bottom),
+        ],
+    );
+}
+
+/// Answer a [`ScrollCaptureRequest::Image`]: the presented frame shows the
+/// content starting `scrolled` physical pixels below the rectangle's top at
+/// `Start`, or `None` when the timeline is no longer being captured.
+pub fn scroll_capture_rendered(request: u64, scrolled: Option<i32>) {
+    with_activity(
+        jni_str!("gpuiScrollCaptureRendered"),
+        jni_sig!("(JZI)V"),
+        vec![
+            OwnedArgument::Long(request),
+            OwnedArgument::Bool(scrolled.is_some()),
+            OwnedArgument::Int(scrolled.unwrap_or_default()),
+        ],
+    );
 }
 
 /// Rasterize on the calling render thread; a software Canvas needs no UI-thread hop.

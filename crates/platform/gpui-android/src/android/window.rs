@@ -109,6 +109,8 @@ pub(crate) struct AndroidWindowInner {
     callbacks: RefCell<Callbacks>,
     frame_requested: Cell<bool>,
     forced_frame_requested: Cell<bool>,
+    /// Run once the next frame has been presented.
+    after_frame: RefCell<Vec<Box<dyn FnOnce()>>>,
     reported_visibility: Cell<Option<WindowVisibility>>,
     keyboard_tap: Cell<Option<Point<Pixels>>>,
     input_sync: RefCell<crate::text_input::InputSync>,
@@ -166,6 +168,7 @@ impl AndroidWindow {
             callbacks: RefCell::new(Callbacks::default()),
             frame_requested: Cell::new(true),
             forced_frame_requested: Cell::new(true),
+            after_frame: RefCell::new(Vec::new()),
             reported_visibility: Cell::new(None),
             keyboard_tap: Cell::new(None),
             input_sync: RefCell::new(Default::default()),
@@ -417,9 +420,8 @@ impl AndroidWindow {
                 bottom,
                 ime_bottom,
             } => self.update_insets(left, top, right, bottom, ime_bottom),
-            host::HostEvent::Back => {
-                self.handle_back();
-            }
+            // The platform answers these itself; a window handler is never asked.
+            host::HostEvent::Back | host::HostEvent::ScrollCapture(_) => {}
         }
     }
 
@@ -647,6 +649,10 @@ impl AndroidWindow {
             });
             self.0.callbacks.borrow_mut().request_frame = Some(callback);
         }
+        // `request_frame` presents synchronously, so the frame is on screen.
+        for callback in std::mem::take(&mut *self.0.after_frame.borrow_mut()) {
+            callback();
+        }
         self.sync_input_state(false);
         if let Some(position) = self.0.keyboard_tap.take() {
             self.with_input_handler(|handler| {
@@ -665,6 +671,11 @@ impl AndroidWindow {
     pub(crate) fn schedule_forced_frame(&self) {
         self.0.forced_frame_requested.set(true);
         self.schedule_frame();
+    }
+
+    pub(crate) fn after_next_frame(&self, callback: Box<dyn FnOnce()>) {
+        self.0.after_frame.borrow_mut().push(callback);
+        self.schedule_forced_frame();
     }
 
     fn dispatch_input(&self, input: PlatformInput) -> DispatchEventResult {
