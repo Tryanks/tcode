@@ -3,8 +3,9 @@
 //! This contract deliberately contains no UI-runtime types. Adapters await the
 //! returned local futures and marshal their results onto their own UI thread.
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, io, pin::Pin};
 
+use futures_lite::{AsyncRead, AsyncWrite};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -27,22 +28,65 @@ pub struct Transport {
 
 /// The transport publishes its current pairing before emitting Syncing.
 /// Consumers take an atomic snapshot; saved hosts are only restart storage.
+/// A transport that can carry raw tunnels to the machine attaches its
+/// [`TunnelOpener`] here, so Preview reaches the machine over the same
+/// authenticated link as the protocol.
 #[derive(Clone)]
-pub struct LiveHost(std::sync::Arc<std::sync::Mutex<PairedHost>>);
+pub struct LiveHost {
+    host: std::sync::Arc<std::sync::Mutex<PairedHost>>,
+    tunnels: Option<std::sync::Arc<dyn TunnelOpener>>,
+}
 
 impl LiveHost {
     pub fn new(host: PairedHost) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(host)))
+        Self {
+            host: std::sync::Arc::new(std::sync::Mutex::new(host)),
+            tunnels: None,
+        }
+    }
+
+    pub fn with_tunnels(host: PairedHost, tunnels: std::sync::Arc<dyn TunnelOpener>) -> Self {
+        Self {
+            tunnels: Some(tunnels),
+            ..Self::new(host)
+        }
     }
 
     pub fn snapshot(&self) -> PairedHost {
-        self.0.lock().unwrap().clone()
+        self.host.lock().unwrap().clone()
     }
 
     /// Called by the owning transport only after authenticating the endpoint.
     pub fn authenticated(&self, host: &PairedHost) {
-        *self.0.lock().unwrap() = host.clone();
+        *self.host.lock().unwrap() = host.clone();
     }
+
+    pub fn tunnels(&self) -> Option<std::sync::Arc<dyn TunnelOpener>> {
+        self.tunnels.clone()
+    }
+}
+
+/// One raw byte tunnel to a TCP service on the paired machine. Closing the
+/// write half tells the machine to shut down its write side to the service;
+/// end of stream on the read half means the service closed its side.
+pub struct Tunnel {
+    pub read: Box<dyn AsyncRead + Send + Unpin>,
+    pub write: Box<dyn AsyncWrite + Send + Unpin>,
+}
+
+impl std::fmt::Debug for Tunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Tunnel")
+    }
+}
+
+pub type TunnelFuture = Pin<Box<dyn Future<Output = io::Result<Tunnel>> + Send>>;
+
+/// Opens tunnels to `host:port` as dialled from the paired machine, over the
+/// attachment's current connection. Fails at once while the attachment is
+/// reconnecting; tunnels opened on an earlier connection end with it.
+pub trait TunnelOpener: Send + Sync {
+    fn open(&self, host: &str, port: u16) -> TunnelFuture;
 }
 
 /// A host advertised on the client's local network: its `EndpointId` and the
