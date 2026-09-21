@@ -855,11 +855,11 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
 }
 
 /// The hosting reply is read by browsers and phones that may be older or
-/// newer than the machine: a machine without the invite hints or device paths
-/// must still be understood, and a machine that has them must omit nothing a
-/// scanner needs to reach it off the LAN.
+/// newer than the machine: a machine without the invite link or device paths
+/// must still be understood, and a machine that has them sends the link whole
+/// so a scanner needs nothing else to reach it off the LAN.
 #[test]
-fn hosting_state_keeps_older_machines_readable_and_carries_the_full_invite() {
+fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
     let older: HostingState = serde_json::from_value(json!({
         "enabled": true,
         "code": "123456",
@@ -869,9 +869,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_full_invite() {
         "devices": [{"id": "cd".repeat(32), "name": "Phone", "created_unix": 1}]
     }))
     .unwrap();
-    assert_eq!(older.traverse, None);
-    assert_eq!(older.relay, None);
-    assert!(older.addrs.is_empty());
+    assert_eq!(older.invite, None);
     assert_eq!(older.devices[0].path, None);
 
     let state = HostingState {
@@ -880,9 +878,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_full_invite() {
         expires_in_secs: 280,
         host_id: "ab".repeat(32),
         host_name: "Studio".into(),
-        traverse: Some("https://traverse.example/".into()),
-        relay: Some("https://relay.example/".into()),
-        addrs: vec!["192.168.1.9:47420".into()],
+        invite: Some("tcode://pair?v=2&id=abab".into()),
         devices: vec![
             HostedDevice {
                 id: "cd".repeat(32),
@@ -911,9 +907,7 @@ fn hosting_state_keeps_older_machines_readable_and_carries_the_full_invite() {
             "expires_in_secs": 280,
             "host_id": "ab".repeat(32),
             "host_name": "Studio",
-            "traverse": "https://traverse.example/",
-            "relay": "https://relay.example/",
-            "addrs": ["192.168.1.9:47420"],
+            "invite": "tcode://pair?v=2&id=abab",
             "devices": [
                 {
                     "id": "cd".repeat(32),

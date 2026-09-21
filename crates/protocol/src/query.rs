@@ -271,16 +271,11 @@ pub struct HostingState {
     pub expires_in_secs: u64,
     pub host_id: String,
     pub host_name: String,
-    /// Base URL of a self-hosted Traverse instance the machine publishes to;
-    /// `None` for the official service or with Traverse off.
+    /// The `tcode://pair?…` link for the active invitation, with where the
+    /// machine is reachable right now. A client shows it as a QR or copies
+    /// it; it never takes it apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub traverse: Option<String>,
-    /// The machine's home relay, when it has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay: Option<String>,
-    /// Direct `ip:port` addresses the machine is reachable at right now.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub addrs: Vec<String>,
+    pub invite: Option<String>,
     pub devices: Vec<HostedDevice>,
 }
 

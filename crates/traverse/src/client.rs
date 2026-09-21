@@ -655,12 +655,15 @@ async fn relay_connected(
     let writer_outgoing = outgoing.clone();
     let writer_task = tokio::spawn(async move {
         let mut unsent = Vec::new();
+        let ping = ping_line();
         while let Ok(line) = wire_rx.recv().await {
             if wire::write_raw_line(&mut send, &line).await.is_err() {
                 unsent.push(line);
                 break;
             }
-            if subscription_key(&line).is_none() {
+            // The heartbeat is the transport's own line: the outbox never
+            // charged for it, so it must not be credited either.
+            if line != ping && subscription_key(&line).is_none() {
                 writer_outgoing.sent(&line);
             }
         }

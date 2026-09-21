@@ -109,15 +109,6 @@ pub trait TunnelOpener: Send + Sync {
     fn open(&self, host: &str, port: u16) -> TunnelFuture;
 }
 
-/// A host advertised on the client's local network: its `EndpointId` and the
-/// direct addresses it was seen at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredHost {
-    pub host_id: String,
-    pub name: String,
-    pub addrs: Vec<String>,
-}
-
 /// What a client says about itself when pairing and connecting. Serializes to
 /// the `device_id`, `device_name` and `platform` fields shared by the browser
 /// login and the hello line; the host keeps one device record per `device_id`.

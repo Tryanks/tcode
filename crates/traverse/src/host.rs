@@ -18,7 +18,7 @@ use iroh::{
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use tcode_client::pairing::PairInvite;
+use tcode_client::pairing::{PairInvite, pair_url};
 use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
 use url::Url;
 
@@ -387,26 +387,32 @@ impl Shared {
         let addr = self.snapshot();
         let state = self.state.lock().unwrap();
         let enabled = self.allow_pairing && state.identity.pairing_enabled;
-        let (code, expires_in_secs) = state
+        let (code, invite, expires_in_secs) = state
             .pairing
             .as_ref()
             .filter(|active| enabled && !active.code.remaining().is_zero())
             .map(|active| {
+                // Addresses as of now, not as of the mint: the endpoint may
+                // have found its relay since.
+                let invite = PairInvite {
+                    relay: addr.relays.first().cloned(),
+                    addrs: addr.addrs.clone(),
+                    ..active.code.invite.clone()
+                };
                 (
                     Some(active.code.code.clone()),
+                    Some(pair_url(&invite)),
                     active.code.remaining().as_secs(),
                 )
             })
-            .unwrap_or((None, 0));
+            .unwrap_or((None, None, 0));
         HostingState {
             enabled,
             code,
             expires_in_secs,
             host_id: addr.id,
             host_name: state.identity.host_name.clone(),
-            traverse: self.traverse.as_ref().map(ToString::to_string),
-            relay: addr.relays.first().cloned(),
-            addrs: addr.addrs,
+            invite,
             devices: state
                 .identity
                 .devices
