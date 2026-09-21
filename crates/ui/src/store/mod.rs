@@ -2781,10 +2781,7 @@ mod tests {
             std::process::id(),
             tcode_services::store::now_millis()
         ));
-        let client = Rc::new(tcode_remote::client_host::NativeClientHost::new(
-            root.clone(),
-            "phone",
-        ));
+        let client = Rc::new(tcode_traverse::NativeClientHost::new(root.clone(), "phone"));
         let mut host = tcode_client::pairing::PairedHost {
             host_id: "machine".into(),
             name: "Machine".into(),
@@ -3080,7 +3077,7 @@ mod tests {
         use tcode_client::host::{ClientHost as _, ClientPreferences};
 
         let root = scratch_root("tcode-desktop-preferences");
-        let client = tcode_remote::NativeClientHost::new(root.clone(), "fallback device");
+        let client = tcode_traverse::NativeClientHost::new(root.clone(), "fallback device");
         let host = Settings {
             theme_mode: ThemeMode::Dark,
             language: Some(crate::LANGUAGE_SIMPLIFIED_CHINESE.into()),
@@ -3098,7 +3095,7 @@ mod tests {
             device_name: Some("Desk client".into()),
             ..Default::default()
         });
-        let reloaded = tcode_remote::NativeClientHost::new(root.clone(), "different fallback");
+        let reloaded = tcode_traverse::NativeClientHost::new(root.clone(), "different fallback");
         let preferences = reloaded.load_preferences();
         let effective = effective_client_settings(&host, &preferences);
         assert_eq!(effective.theme_mode, ThemeMode::Light);

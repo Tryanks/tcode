@@ -1,33 +1,14 @@
-use tcode_client::host::{ClientHost, DeviceIdentity, HostFuture, Transport, persistent_device_id};
+use tcode_client::host::{ClientHost, HostFuture, Transport, persistent_device_id};
 use tcode_client::pairing::{PairInvite, PairedHost};
 use wasm_bindgen::{JsCast as _, JsValue};
-use wasm_bindgen_futures::JsFuture;
 
+/// A browser tab served by a machine's browser listener. It is signed in
+/// with that machine's password before the shell starts (`auth.mjs`), so
+/// the one record in `tcode.hosts` is the machine that served the page.
 pub struct WebHost;
 
 pub(crate) fn window() -> web_sys::Window {
     web_sys::window().expect("tcode-web requires a browser window")
-}
-
-pub(crate) fn take_pairing_code() -> Result<Option<String>, String> {
-    let window = window();
-    let location = window.location();
-    let hash = location.hash().map_err(js_error)?;
-    let params =
-        web_sys::UrlSearchParams::new_with_str(hash.trim_start_matches('#')).map_err(js_error)?;
-    let Some(code) = params.get("code") else {
-        return Ok(None);
-    };
-    let clean_url = format!(
-        "{}{}",
-        location.pathname().map_err(js_error)?,
-        location.search().map_err(js_error)?
-    );
-    window
-        .history()
-        .and_then(|history| history.replace_state_with_url(&JsValue::NULL, "", Some(&clean_url)))
-        .map_err(js_error)?;
-    Ok(Some(code))
 }
 
 fn js_error(error: JsValue) -> String {
@@ -39,9 +20,10 @@ fn storage() -> Option<web_sys::Storage> {
 }
 
 /// `tcode.hosts` as the login page writes it: one record per machine with
-/// the bearer token the browser presents in hello. The shared
-/// [`PairedHost`] carries no token, so the raw records are kept here and
-/// merged back on every save.
+/// the bearer token the browser presents in hello and the origin that
+/// issued it, which the login page checks before skipping the form. The
+/// shared [`PairedHost`] carries neither, so the raw records are kept here
+/// and merged back on every save.
 fn raw_hosts() -> Vec<serde_json::Value> {
     storage()
         .and_then(|storage| storage.get_item("tcode.hosts").ok().flatten())
@@ -145,12 +127,15 @@ impl ClientHost for WebHost {
             .iter()
             .filter_map(|host| {
                 let mut record = serde_json::to_value(host).ok()?;
-                if let Some(token) = existing
+                if let Some(fields) = existing
                     .iter()
                     .find(|record| record["host_id"].as_str() == Some(host.host_id.as_str()))
-                    .and_then(|record| record.get("token"))
+                    .and_then(serde_json::Value::as_object)
                 {
-                    record["token"] = token.clone();
+                    let record = record.as_object_mut()?;
+                    for (key, value) in fields {
+                        record.entry(key).or_insert_with(|| value.clone());
+                    }
                 }
                 Some(record)
             })
@@ -175,9 +160,10 @@ impl ClientHost for WebHost {
         window().location().origin().ok()
     }
 
-    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
-        let device = self.device_identity();
-        Box::pin(async move { pair(&invite.secret, &device).await })
+    /// A browser reaches only the machine that served it, by password; a
+    /// second machine needs the Tcode app.
+    fn pair(&self, _invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
+        Box::pin(async { Err("browser pairing is password login only".into()) })
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {
@@ -215,65 +201,6 @@ fn download(name: &str, mime: &str, bytes: &[u8]) -> Result<(), JsValue> {
     anchor.click();
     web_sys::Url::revoke_object_url(&url)?;
     Ok(())
-}
-
-/// The `/pair` request body: the code plus the device fields the host reads.
-fn pair_body(code: &str, device: &DeviceIdentity) -> String {
-    let mut body = serde_json::to_value(device).expect("string fields serialize");
-    body["code"] = code.into();
-    body.to_string()
-}
-
-async fn pair(code: &str, device: &DeviceIdentity) -> Result<PairedHost, String> {
-    async fn fetch(code: &str, device: &DeviceIdentity) -> Result<PairedHost, JsValue> {
-        let options = web_sys::RequestInit::new();
-        options.set_method("POST");
-        options.set_body(&JsValue::from_str(&pair_body(code, device)));
-        let request = web_sys::Request::new_with_str_and_init("/pair", &options)?;
-        request.headers().set("Content-Type", "application/json")?;
-        let response: web_sys::Response = JsFuture::from(window().fetch_with_request(&request))
-            .await?
-            .dyn_into()?;
-        if !response.ok() {
-            return Err(JsValue::from_str(&format!(
-                "Pairing failed (HTTP {})",
-                response.status()
-            )));
-        }
-        let text = JsFuture::from(response.text()?)
-            .await?
-            .as_string()
-            .unwrap_or_default();
-        let value: serde_json::Value =
-            serde_json::from_str(&text).map_err(|error| JsValue::from_str(&error.to_string()))?;
-        let field = |key: &str| {
-            value[key]
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| JsValue::from_str(&format!("Pairing response missing {key}")))
-        };
-        let paired = PairedHost {
-            host_id: field("host_id")?,
-            name: field("host_name")?,
-            traverse: None,
-            relay: None,
-            addrs: Vec::new(),
-            last_connected_unix: None,
-        };
-        // Keep the token where the login page keeps it, next to the record.
-        let mut records = raw_hosts();
-        records.retain(|record| record["host_id"].as_str() != Some(paired.host_id.as_str()));
-        let mut record =
-            serde_json::to_value(&paired).map_err(|error| JsValue::from_str(&error.to_string()))?;
-        record["token"] = serde_json::Value::String(field("token")?);
-        record["origin"] = serde_json::Value::String(WebHost.fixed_pairing_endpoint().unwrap());
-        records.push(record);
-        write_raw_hosts(&records);
-        Ok(paired)
-    }
-    fetch(code, device)
-        .await
-        .map_err(|error| error.as_string().unwrap_or_else(|| format!("{error:?}")))
 }
 
 struct WebOutbox(String);

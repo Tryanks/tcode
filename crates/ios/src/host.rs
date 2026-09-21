@@ -10,7 +10,7 @@ use std::{
 };
 
 use tcode_client::host::HostFuture;
-use tcode_remote::NativeClientHost;
+use tcode_traverse::NativeClientHost;
 
 type ScanDone = Box<dyn FnOnce(Result<String, String>)>;
 
