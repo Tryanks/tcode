@@ -6,6 +6,7 @@ members = [
     "crates/client",
     "crates/remote",
     "crates/traverse",
+    "crates/traverse-server",
     "crates/headless",
     "crates/web",
     "crates/services",
