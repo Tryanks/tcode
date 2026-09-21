@@ -176,6 +176,10 @@ crates/runtime           session and provider lifecycle, queues, orchestration,
                          through serialized protocol messages
 crates/remote            remote transport, pairing, discovery, multi-client mux,
                          preview proxy
+crates/traverse          iroh transport: endpoint ownership, invitations, tunnels,
+                         Traverse manifest
+crates/traverse-server   tcode-traverse, the self-hostable Traverse instance
+                         (relay, pkarr store, manifest)
 crates/ui                the one GPUI shell every client opens via `run_shell`;
                          owns localization (crates/ui/src/i18n.rs) and presentation
 crates/app/src/main.rs   desktop binary and composition root (default `cargo run`)
