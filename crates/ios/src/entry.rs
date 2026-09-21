@@ -23,7 +23,7 @@ pub extern "C" fn tcode_ios_start() {
             .with_assets(tcode_ui::assets::Assets)
             .run_embedded(|cx| {
                 let (native_host, system_locale) = crate::host::native_host(cx);
-                let host: Rc<dyn ClientHost> = Rc::new(native_host);
+                let host: Rc<dyn ClientHost> = native_host;
                 tcode_ui::run_shell(
                     cx,
                     host.clone(),
