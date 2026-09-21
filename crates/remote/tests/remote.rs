@@ -138,7 +138,9 @@ fn browser_password_login_hello_hosting_query_and_lockout() {
         seen.lock().unwrap().push(format!("{action:?}"));
         tcode_protocol::HostingState {
             enabled: true,
-            invite: Some("tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host".into()),
+            invite: Some(
+                "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host".into(),
+            ),
             expires_in_secs: 299,
             host_id: "machine".into(),
             host_name: "Test Host".into(),

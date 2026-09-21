@@ -18,7 +18,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tcode_client::pairing::{PairInvite, encode_secret, pair_url};
-use tcode_protocol::{HostedDevice, HostingAction, HostingState};
+use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
 use url::Url;
 
 use crate::{
@@ -86,14 +86,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub platform: Option<String>,
     pub created_unix: u64,
-    pub live: Option<LiveInfo>,
-}
-
-/// How a connected device currently reaches this machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveInfo {
-    pub direct: bool,
-    pub relay: Option<String>,
+    /// How the device reaches this machine while connected; `None` offline.
+    pub live: Option<PathInfo>,
 }
 
 /// This machine's addresses at one moment, for invites.
@@ -143,9 +137,10 @@ impl TraverseHost {
         };
         block_on(async move {
             let loader = match &config.traverse {
-                TraverseMode::Official => {
-                    Some(ManifestLoader::new(ManifestSource::Official, &config.data_dir))
-                }
+                TraverseMode::Official => Some(ManifestLoader::new(
+                    ManifestSource::Official,
+                    &config.data_dir,
+                )),
                 TraverseMode::Custom(base) => Some(ManifestLoader::new(
                     ManifestSource::Custom(base.clone()),
                     &config.data_dir,
@@ -201,7 +196,8 @@ impl TraverseHost {
                 let applied = Mutex::new(applied);
                 loader.spawn_refresh(move |manifest| {
                     let endpoint = endpoint.clone();
-                    let previous = std::mem::replace(&mut *applied.lock().unwrap(), manifest.clone());
+                    let previous =
+                        std::mem::replace(&mut *applied.lock().unwrap(), manifest.clone());
                     async move {
                         log::info!("applying the refreshed Traverse manifest");
                         live::sync_relays(&endpoint, &previous, &manifest).await;
@@ -258,12 +254,13 @@ impl TraverseHost {
         self.shared.mint()
     }
 
-    /// The active invitation and its remaining lifetime.
+    /// The active invitation and its remaining lifetime, carrying where the
+    /// machine is reachable right now: the endpoint may have found its
+    /// relay since the mint. `None` while pairing is disabled.
     pub fn invitation(&self) -> Option<(Invitation, Duration)> {
+        let addr = self.shared.snapshot();
         let state = self.shared.state.lock().unwrap();
-        let active = state.invitation.as_ref()?;
-        let remaining = active.invitation.remaining();
-        (!remaining.is_zero()).then(|| (active.invitation.clone(), remaining))
+        self.shared.current_invitation(&state, &addr)
     }
 
     pub fn pairing_enabled(&self) -> bool {
@@ -325,6 +322,32 @@ impl Shared {
         invitation
     }
 
+    /// The unexpired invitation with `addr` as its routing hints. The
+    /// secret never changes; only where the link says to dial does.
+    fn current_invitation(
+        &self,
+        state: &State,
+        addr: &EndpointAddrSnapshot,
+    ) -> Option<(Invitation, Duration)> {
+        if !self.allow_pairing || !state.identity.pairing_enabled {
+            return None;
+        }
+        let active = state.invitation.as_ref()?;
+        let remaining = active.invitation.remaining();
+        if remaining.is_zero() {
+            return None;
+        }
+        let invitation = Invitation {
+            invite: PairInvite {
+                relay: addr.relays.first().cloned(),
+                addrs: addr.addrs.clone(),
+                ..active.invitation.invite.clone()
+            },
+            expires_at: active.invitation.expires_at,
+        };
+        Some((invitation, remaining))
+    }
+
     fn snapshot(&self) -> EndpointAddrSnapshot {
         let endpoint = &self.endpoint;
         let addr = endpoint.addr();
@@ -376,7 +399,7 @@ impl Shared {
                     .ok()
                     .and_then(|id| state.live.get(&id))
                     .and_then(|connections| connections.first())
-                    .map(live_info);
+                    .map(path_info);
                 DeviceInfo {
                     id: device.id.clone(),
                     name: device.name.clone(),
@@ -421,25 +444,19 @@ impl Shared {
             }
             HostingAction::RevokeDevice(id) => self.revoke(&id),
         }
+        let addr = self.snapshot();
         let state = self.state.lock().unwrap();
         let enabled = self.allow_pairing && state.identity.pairing_enabled;
-        let (invite, expires_in_secs) = state
-            .invitation
-            .as_ref()
-            .filter(|active| enabled && !active.invitation.remaining().is_zero())
-            .map(|active| {
-                (
-                    Some(active.invitation.url()),
-                    active.invitation.remaining().as_secs(),
-                )
-            })
+        let (invite, expires_in_secs) = self
+            .current_invitation(&state, &addr)
+            .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
             .unwrap_or((None, 0));
         HostingState {
             enabled,
-            invite,
             expires_in_secs,
-            host_id: self.endpoint.id().to_string(),
+            host_id: addr.id,
             host_name: state.identity.host_name.clone(),
+            invite,
             devices: state
                 .identity
                 .devices
@@ -449,6 +466,13 @@ impl Shared {
                     name: device.name.clone(),
                     created_unix: device.created_unix,
                     platform: device.platform.clone(),
+                    path: device
+                        .id
+                        .parse::<EndpointId>()
+                        .ok()
+                        .and_then(|id| state.live.get(&id))
+                        .and_then(|connections| connections.first())
+                        .map(path_info),
                 })
                 .collect(),
         }
@@ -562,22 +586,23 @@ impl Shared {
     }
 }
 
-fn live_info(connection: &Connection) -> LiveInfo {
+/// How `connection` is carried right now, judged by its selected path.
+pub(crate) fn path_info(connection: &Connection) -> PathInfo {
     let paths = connection.paths();
     let selected = paths
         .iter()
         .find(|path| path.is_selected())
         .or_else(|| paths.iter().next());
     match selected.map(|path| path.remote_addr().clone()) {
-        Some(TransportAddr::Ip(_)) => LiveInfo {
+        Some(TransportAddr::Ip(_)) => PathInfo {
             direct: true,
             relay: None,
         },
-        Some(TransportAddr::Relay(url)) => LiveInfo {
+        Some(TransportAddr::Relay(url)) => PathInfo {
             direct: false,
             relay: Some(url.to_string()),
         },
-        _ => LiveInfo {
+        _ => PathInfo {
             direct: false,
             relay: None,
         },

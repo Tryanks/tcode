@@ -7,6 +7,7 @@ use std::{future::Future, io, pin::Pin};
 
 use futures_lite::{AsyncRead, AsyncWrite};
 use serde::{Deserialize, Serialize};
+pub use tcode_protocol::PathInfo;
 
 use crate::{
     ConnectionState,
@@ -26,14 +27,15 @@ pub struct Transport {
     pub current_host: Option<LiveHost>,
 }
 
-/// The transport publishes its current pairing before emitting Syncing.
-/// Consumers take an atomic snapshot; saved hosts are only restart storage.
-/// A transport that can carry raw tunnels to the machine attaches its
-/// [`TunnelOpener`] here, so Preview reaches the machine over the same
-/// authenticated link as the protocol.
+/// The transport publishes its current pairing before emitting Syncing, and
+/// how the link is carried while it is up. Consumers take an atomic snapshot;
+/// saved hosts are only restart storage. A transport that can carry raw
+/// tunnels to the machine attaches its [`TunnelOpener`] here, so Preview
+/// reaches the machine over the same authenticated link as the protocol.
 #[derive(Clone)]
 pub struct LiveHost {
     host: std::sync::Arc<std::sync::Mutex<PairedHost>>,
+    path: std::sync::Arc<std::sync::Mutex<Option<PathInfo>>>,
     tunnels: Option<std::sync::Arc<dyn TunnelOpener>>,
 }
 
@@ -41,6 +43,7 @@ impl LiveHost {
     pub fn new(host: PairedHost) -> Self {
         Self {
             host: std::sync::Arc::new(std::sync::Mutex::new(host)),
+            path: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tunnels: None,
         }
     }
@@ -59,6 +62,23 @@ impl LiveHost {
     /// Called by the owning transport only after authenticating the endpoint.
     pub fn authenticated(&self, host: &PairedHost) {
         *self.host.lock().unwrap() = host.clone();
+    }
+
+    /// How the current connection reaches the host; `None` between
+    /// connections or on a transport that cannot tell.
+    pub fn path(&self) -> Option<PathInfo> {
+        self.path.lock().unwrap().clone()
+    }
+
+    /// Set by the owning transport when a connection comes up or its
+    /// selected path changes. Returns whether anything changed.
+    pub fn set_path(&self, path: Option<PathInfo>) -> bool {
+        let mut current = self.path.lock().unwrap();
+        if *current == path {
+            return false;
+        }
+        *current = path;
+        true
     }
 
     pub fn tunnels(&self) -> Option<std::sync::Arc<dyn TunnelOpener>> {
@@ -87,15 +107,6 @@ pub type TunnelFuture = Pin<Box<dyn Future<Output = io::Result<Tunnel>> + Send>>
 /// reconnecting; tunnels opened on an earlier connection end with it.
 pub trait TunnelOpener: Send + Sync {
     fn open(&self, host: &str, port: u16) -> TunnelFuture;
-}
-
-/// A host advertised on the client's local network: its `EndpointId` and the
-/// direct addresses it was seen at.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscoveredHost {
-    pub host_id: String,
-    pub name: String,
-    pub addrs: Vec<String>,
 }
 
 /// What a client says about itself when pairing and connecting. Serializes to

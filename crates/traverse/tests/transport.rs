@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tcode_client::heartbeat::NATIVE_IDLE_MS;
 use tcode_client::host::Transport;
 use tcode_client::pairing::PairInvite;
 use tcode_client::{ConnectionFailure, ConnectionState};
@@ -172,7 +173,9 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
         "the invite names the loopback socket: {:?}",
         invite.addrs
     );
-    assert!(tcode_client::pairing::valid_invitation_secret(&invite.secret));
+    assert!(tcode_client::pairing::valid_invitation_secret(
+        &invite.secret
+    ));
     let link = tcode_client::pairing::parse_pair_url(&minted.url()).unwrap();
     assert_eq!(&link, invite, "the link carries the whole invitation");
     let wrong = PairInvite {
@@ -201,7 +204,10 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
         Err(PairError::Invalid),
         "a new invitation replaces the old one"
     );
-    assert_eq!(host.invitation().map(|(active, _)| active.invite), Some(minted.invite.clone()));
+    assert_eq!(
+        host.invitation().map(|(active, _)| active.invite),
+        Some(minted.invite.clone())
+    );
     let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     assert_eq!(paired.host_id, host.endpoint_id());
     assert_eq!(paired.name, "Test Host");
@@ -235,6 +241,37 @@ fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices
         tcode_traverse::pair_blocking(&minted.invite, &other),
         Err(PairError::Disabled)
     );
+    host.shutdown();
+}
+
+/// The heartbeat is the transport's own line, never charged to the outbox.
+/// Crediting it on send underflowed the outbox count after `NATIVE_IDLE_MS`
+/// of silence and killed the writer, so a connection that went quiet for ten
+/// seconds silently stopped carrying commands while still reporting
+/// `Connected`.
+#[test]
+fn an_idle_connection_survives_its_own_heartbeat_and_still_carries_commands() {
+    let host_dir = TestDir::new("idle-host");
+    let (mux, _, _) = fake_host();
+    let host = start_host(mux, &host_dir, None);
+    let dir = TestDir::new("idle-device");
+    let phone = device(&dir, "phone");
+    let minted = host.new_invitation();
+    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
+    let client = tcode_traverse::connect(&paired, &phone);
+    wait_state(&client, ConnectionState::Syncing);
+    client.to_host.send_blocking(subscribe(1)).unwrap();
+    recv_type(&client, "ack", Some(1));
+    wait_state(&client, ConnectionState::Connected);
+
+    std::thread::sleep(Duration::from_millis(NATIVE_IDLE_MS + 2_000));
+    while let Ok(state) = client.state.try_recv() {
+        assert_eq!(state, ConnectionState::Connected, "the idle link stayed up");
+    }
+    let ping = json!({"id": 2, "payload": {"type": "query", "content": {"type": "ping"}}});
+    client.to_host.send_blocking(ping.to_string()).unwrap();
+    recv_type(&client, "query_result", Some(2));
+    assert_eq!(client.state.try_recv().ok(), None);
     host.shutdown();
 }
 

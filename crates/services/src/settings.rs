@@ -10,7 +10,7 @@ use tcode_core::settings::Settings;
 #[cfg(test)]
 use tcode_core::settings::provider_key;
 #[cfg(test)]
-use tcode_core::settings::{EnvVar, ThemeMode};
+use tcode_core::settings::{EnvVar, ThemeMode, TraverseSetting};
 
 #[derive(Debug, Clone)]
 pub struct SettingsStore {
@@ -137,7 +137,7 @@ mod tests {
         let store = SettingsStore::new(root.clone());
         fs::write(
             &store.path,
-            r#"{"claude_binary":"/usr/bin/claude","theme_mode":"light","favorite_models":["opus"]}"#,
+            r#"{"claude_binary":"/usr/bin/claude","theme_mode":"light","favorite_models":["opus"],"remote_hosting_enabled":true,"remote_port":47421}"#,
         )
         .unwrap();
 
@@ -157,6 +157,16 @@ mod tests {
         // New fields tolerantly default to off.
         assert!(!loaded.word_wrap_diffs);
         assert!(!loaded.skip_delete_confirmation);
+        // The HTTP listener's port is gone; hosting continues on official
+        // Traverse and the next save no longer carries the port.
+        assert!(loaded.remote_hosting_enabled);
+        assert_eq!(loaded.traverse, TraverseSetting::Official);
+        store.save(&loaded).unwrap();
+        assert!(
+            !fs::read_to_string(&store.path)
+                .unwrap()
+                .contains("remote_port")
+        );
         let _ = fs::remove_dir_all(root);
     }
 
