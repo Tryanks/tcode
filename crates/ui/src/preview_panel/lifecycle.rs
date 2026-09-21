@@ -131,7 +131,7 @@ pub struct BrowserLifecycle {
     warm: HashSet<String>,
     active_identity: Option<(String, String)>,
     creator: Creator,
-    proxy: Option<tcode_client::pairing::PairedHost>,
+    proxy: Option<tcode_remote::preview::ProxyEntry>,
     endpoint: Option<tcode_remote::preview::PreviewEndpoint>,
     #[cfg(any(target_os = "windows", target_os = "android"))]
     _native_proxy: Option<tcode_remote::preview::NativeProxy>,
@@ -156,16 +156,27 @@ impl BrowserLifecycle {
         });
         #[cfg(any(target_os = "windows", target_os = "android"))]
         let mut native_proxy = None;
-        #[cfg(any(target_os = "windows", target_os = "android"))]
-        let proxy = proxy.and_then(|host| {
-            host.map(|mut host| {
-                let bridge = tcode_remote::preview::NativeProxy::new(endpoint.clone().unwrap())?;
-                host.origin = bridge.origin().to_owned();
-                native_proxy = Some(bridge);
-                Ok(host)
-            })
-            .transpose()
-        });
+        // The browser engine is pointed at a loopback bridge; macOS maps
+        // URLs per route instead and needs no entry.
+        let proxy: Result<Option<tcode_remote::preview::ProxyEntry>, String> =
+            proxy.and_then(|host| {
+                host.map(|_host| {
+                    #[cfg(any(target_os = "windows", target_os = "android"))]
+                    {
+                        let bridge =
+                            tcode_remote::preview::NativeProxy::new(endpoint.clone().unwrap())?;
+                        let entry = bridge.entry();
+                        native_proxy = Some(bridge);
+                        Ok(entry)
+                    }
+                    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+                    Ok(tcode_remote::preview::ProxyEntry {
+                        origin: String::new(),
+                        token: String::new(),
+                    })
+                })
+                .transpose()
+            });
         let creator = match proxy
             .as_ref()
             .map_err(Clone::clone)
@@ -669,7 +680,7 @@ mod platform {
 
     impl Adapter {
         pub(super) fn new(
-            _proxy: Option<&tcode_client::pairing::PairedHost>,
+            _proxy: Option<&tcode_remote::preview::ProxyEntry>,
         ) -> Result<Self, String> {
             Ok(Self)
         }
@@ -751,7 +762,7 @@ mod platform {
 
     impl Adapter {
         pub(super) fn new(
-            _proxy: Option<&tcode_client::pairing::PairedHost>,
+            _proxy: Option<&tcode_remote::preview::ProxyEntry>,
         ) -> Result<Self, String> {
             // Proxy arguments include an attachment-specific loopback port.
             // WebView2 cannot share a user-data directory between environments
@@ -975,7 +986,7 @@ mod platform {
     }
     impl Adapter {
         pub(super) fn new(
-            _proxy: Option<&tcode_client::pairing::PairedHost>,
+            _proxy: Option<&tcode_remote::preview::ProxyEntry>,
         ) -> Result<Self, String> {
             Ok(Self {
                 next_creation_id: 0,

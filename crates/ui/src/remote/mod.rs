@@ -273,7 +273,7 @@ impl RemotePanel {
         let Some((request, generation)) = self.form.begin_pair(cx) else {
             return;
         };
-        let address = request.origin.clone();
+        let address = short_host_id(&request.host_id);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = client.pair(request).await;
@@ -397,7 +397,7 @@ impl RemotePanel {
         let needs_pairing = reason == Some(tcode_client::ConnectionFailure::AuthenticationRejected);
         let subtitle = format!(
             "{} · {}",
-            host.origin,
+            host_route(host),
             match host.last_connected_unix {
                 Some(unix) => crate::tr!(
                     "hosts.last_connected",
@@ -455,7 +455,7 @@ impl RemotePanel {
                         panel.form.browsing = false;
                         panel
                             .form
-                            .fill_discovered(repair_host.origin.clone(), window, cx);
+                            .fill_discovered(repair_host.host_id.clone(), window, cx);
                         panel.open_pair(cx);
                     })),
             )
@@ -532,11 +532,16 @@ impl RemotePanel {
             );
         }
         for beacon in &self.form.discovered {
-            let origin = beacon.origin.clone();
+            let host_id = beacon.host_id.clone();
             let name = SharedString::from(beacon.name.clone());
+            let route = if beacon.addrs.is_empty() {
+                short_host_id(&beacon.host_id)
+            } else {
+                beacon.addrs.join(", ")
+            };
             rows.push(
                 list_row(
-                    SharedString::from(format!("nearby-{}-{}", beacon.host_id, beacon.origin)),
+                    SharedString::from(format!("nearby-{}", beacon.host_id)),
                     name.clone(),
                     cx,
                 )
@@ -551,7 +556,7 @@ impl RemotePanel {
                                 .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
                                 .truncate()
-                                .child(beacon.origin.clone()),
+                                .child(route),
                         ),
                 )
                 .child(
@@ -560,9 +565,10 @@ impl RemotePanel {
                         .flex_none()
                         .text_color(cx.theme().muted_foreground),
                 )
-                // Discovery carries no code: prefill the origin so only digits remain.
+                // Discovery carries no code: prefill the machine id so only
+                // digits remain. The code goes to that id and nowhere else.
                 .on_click(cx.listener(move |panel, _, window, cx| {
-                    panel.form.fill_discovered(origin.clone(), window, cx);
+                    panel.form.fill_discovered(host_id.clone(), window, cx);
                     panel.open_pair(cx);
                 }))
                 .into_any_element(),
@@ -853,6 +859,23 @@ pub(crate) fn device_label(name: &str, platform: Option<&str>) -> String {
     }
 }
 
+/// The first and last characters of a machine id, enough to tell rows apart.
+fn short_host_id(host_id: &str) -> String {
+    if host_id.len() <= 12 {
+        return host_id.to_owned();
+    }
+    format!("{}…{}", &host_id[..6], &host_id[host_id.len() - 6..])
+}
+
+/// Where a saved machine was last reached, for its row.
+fn host_route(host: &PairedHost) -> String {
+    match (host.addrs.first(), &host.relay) {
+        (Some(addr), _) => addr.clone(),
+        (None, Some(relay)) => relay.clone(),
+        (None, None) => short_host_id(&host.host_id),
+    }
+}
+
 /// The same recovery wording is used in the shell and the machine row.
 pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
     use tcode_client::ConnectionFailure::*;
@@ -895,24 +918,23 @@ mod tests {
             let state = cx.new(|_| WindowState::new(false));
             PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
         });
-        let host = |token: &str| PairedHost {
+        let host = |name: &str| PairedHost {
             host_id: "machine".into(),
-            name: "Machine".into(),
-            origin: "http://192.168.1.10:47420".into(),
-            candidates: Vec::new(),
-            token: token.into(),
-            identity_key: None,
+            name: name.into(),
+            traverse: None,
+            relay: None,
+            addrs: vec!["192.168.1.10:47420".into()],
             last_connected_unix: None,
         };
         probe.update_in(cx, |probe, _, cx| {
             probe.0.update(cx, |panel, cx| {
                 let old = panel.form.restart();
                 let current = panel.form.restart();
-                panel.finish_pair(current, Ok(host("current token")), "192.168.1.10:47420", cx);
-                panel.finish_pair(old, Ok(host("superseded token")), "192.168.1.10:47420", cx);
+                panel.finish_pair(current, Ok(host("current pairing")), "machine", cx);
+                panel.finish_pair(old, Ok(host("superseded pairing")), "machine", cx);
             });
         });
-        assert_eq!(client.load_hosts(), vec![host("current token")]);
+        assert_eq!(client.load_hosts(), vec![host("current pairing")]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

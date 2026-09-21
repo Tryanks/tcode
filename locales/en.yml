@@ -986,7 +986,7 @@ remote:
     expired: "Connection code expired"
     new: "New code"
     expires: "Expires in %{time}"
-    listening: "Listening on %{addrs} port %{port}"
+    machine: "Machine id %{id} · %{addrs}"
     no_addresses: "this machine only"
   devices:
     section: "CONNECTED DEVICES"
@@ -1026,11 +1026,11 @@ hosts:
   pair:
     title: "Add a machine"
     action: "Add a machine"
-    description: "Enter the machine's address and the six-digit connection code it shows."
+    description: "Enter the machine's id and the six-digit connection code it shows, or scan its QR code."
     fixed_description: "Enter the six-digit connection code this machine shows."
-    address: "Address"
+    address: "Machine id"
     code: "Connection code"
-    address_placeholder: "192.168.1.10:47420"
+    address_placeholder: "64 hex characters from the machine"
     code_placeholder: "123456"
     scan: "Scan a QR code"
     bad_invite: "That is not a Tcode connection link."

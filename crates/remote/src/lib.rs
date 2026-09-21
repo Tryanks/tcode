@@ -1,18 +1,10 @@
-//! Remote transport, pairing, discovery, and multi-client multiplexing.
+//! The browser listener (static bundle, password login, `/ws`), the native
+//! client host on Traverse, and the preview bridge.
 
 #[cfg(feature = "server")]
 mod auth;
 #[cfg(feature = "client")]
-pub mod client;
-#[cfg(feature = "client")]
 pub mod client_host;
-pub mod discovery;
-#[cfg(any(feature = "server", feature = "client"))]
-mod identity;
-#[cfg(feature = "server")]
-pub mod mux;
-#[cfg(feature = "server")]
-mod proxy;
 #[cfg(feature = "server")]
 pub mod server;
 #[cfg(feature = "server")]
@@ -21,12 +13,8 @@ mod wire;
 #[cfg(feature = "client")]
 pub use client_host::NativeClientHost;
 #[cfg(feature = "server")]
-pub use mux::{Connection, HostMux};
-#[cfg(feature = "server")]
-pub use server::{DeviceInfo, PairingCode, RemoteConfig, RemoteServer, StaticBundle, serve};
+pub use server::{HostingHandler, RemoteConfig, RemoteServer, StaticBundle, serve};
+pub use tcode_traverse::{Connection, HostMux};
 
 #[cfg(feature = "client")]
 pub mod preview;
-
-#[cfg(feature = "client")]
-mod endpoint;

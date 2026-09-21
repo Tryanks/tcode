@@ -55,6 +55,10 @@ pub(crate) fn native_host(cx: &mut gpui::App) -> (NativeClientHost, Option<Strin
     })
     .filter(|locale| !locale.trim().is_empty());
 
+    // TODO(traverse): the Swift Bonjour browser still looks for the retired
+    // `_tcode._tcp` beacon; machines now advertise `_tcode._udp` through iroh
+    // with their EndpointId as the instance name. Until the Swift side is
+    // updated, this reports nothing and pairing goes through invites.
     let host = NativeClientHost::from_env_with_device_name(device_name)
         .with_platform(platform)
         .with_browser(|| -> HostFuture<'static, Vec<DiscoveredHost>> {

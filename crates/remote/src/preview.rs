@@ -1,25 +1,23 @@
-//! Browser-owned local endpoints for the paired host's existing CONNECT service.
-//! Only the CONNECT handshake is interpreted; browser traffic is copied verbatim.
+//! Browser-owned local endpoints that stand in for services on the paired
+//! machine. The loopback listeners, route mapping and history are kept; the
+//! tunnel to the machine is not: the HTTP forward proxy it used retired with
+//! the plaintext transport.
+//!
+//! TODO(traverse): Traverse preview streams — carry each mapped connection
+//! over a `connect` bi stream on the machine's `tcode/1` connection.
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Shutdown},
+    net::IpAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_lite::{
-    future,
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-};
 use smol::net::{TcpListener, TcpStream};
 use tcode_client::pairing::PairedHost;
 use url::Url;
 
-/// One attachment's authenticated machine identity and current HTTP(S) entry.
-/// Updating it retains browser loopback addresses and history, cancels old
-/// connections without replaying their requests, and routes new ones here.
+/// One attachment's paired machine. Updating it retains browser loopback
+/// addresses and history and retires connections made for the old address.
 #[derive(Clone)]
 pub struct PreviewEndpoint {
     current: Arc<Mutex<PreviewConnection>>,
@@ -28,56 +26,49 @@ pub struct PreviewEndpoint {
 #[derive(Clone)]
 struct PreviewConnection {
     host: PairedHost,
-    endpoint: Arc<crate::endpoint::Endpoint>,
     retired: async_channel::Receiver<()>,
     _live: async_channel::Sender<()>,
 }
 
 impl PreviewConnection {
-    fn new(host: &PairedHost) -> Result<Self, String> {
-        let endpoint = crate::endpoint::Endpoint::new(&host.origin)?;
+    fn new(host: &PairedHost) -> Self {
         let (live, retired) = async_channel::bounded(1);
-        Ok(Self {
+        Self {
             host: host.clone(),
-            endpoint: Arc::new(endpoint),
             retired,
             _live: live,
-        })
+        }
     }
+}
+
+/// The loopback bridge address and credential a native browser engine is
+/// configured with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyEntry {
+    pub origin: String,
+    pub token: String,
 }
 
 impl PreviewEndpoint {
     pub fn new(host: &PairedHost) -> Result<Self, String> {
         Ok(Self {
-            current: Arc::new(Mutex::new(PreviewConnection::new(host)?)),
+            current: Arc::new(Mutex::new(PreviewConnection::new(host))),
         })
     }
 
-    /// Called after the main connection has authenticated and persisted its
-    /// new origin. Discovery hints alone must never move browser credentials.
+    /// Called after the main connection has authenticated the machine again.
     pub fn update(&self, host: &PairedHost) -> Result<(), String> {
         let mut current = self.current.lock().unwrap();
-        if host.host_id != current.host.host_id
-            || host.token != current.host.token
-            || current
-                .host
-                .identity_key
-                .as_ref()
-                .is_some_and(|key| host.identity_key.as_ref() != Some(key))
-        {
+        if host.host_id != current.host.host_id {
             return Err("Preview belongs to a different paired machine".into());
         }
-        if current.host.origin == host.origin && current.host.identity_key == host.identity_key {
+        if current.host == *host {
             return Ok(());
         }
-        if current.host.origin.starts_with("https:") && !host.origin.starts_with("https:") {
-            return Err("Preview cannot downgrade a secure pairing".into());
-        }
-        let next = PreviewConnection::new(host)?;
         // Closing a channel wakes every receiver; sending one message would
         // retire only one of several browser connections sharing this entry.
         current.retired.close();
-        *current = next;
+        *current = PreviewConnection::new(host);
         Ok(())
     }
 
@@ -208,28 +199,13 @@ impl PreviewRoutes {
                         let error = error.clone();
                         let changed = changed.clone();
                         connections.push(smol::spawn(async move {
-                            let keepalive = socket.clone();
-                            future::race(
-                                async {
-                                    if let Err(failure) = forward(
-                                        socket,
-                                        &connection.endpoint,
-                                        &connection.host,
-                                        &destination,
-                                    )
-                                    .await
-                                    {
-                                        *error.lock().unwrap() =
-                                            Some((destination, failure.to_string()));
-                                        let _ = changed.try_send(());
-                                    }
-                                },
-                                async {
-                                    let _ = connection.retired.recv().await;
-                                },
-                            )
-                            .await;
-                            drop(keepalive);
+                            if let Err(failure) =
+                                forward(socket, &connection.host, &destination).await
+                            {
+                                *error.lock().unwrap() = Some((destination, failure.to_string()));
+                                let _ = changed.try_send(());
+                            }
+                            let _ = connection.retired.recv().await;
                         }));
                     }
                 }));
@@ -311,61 +287,18 @@ fn bind_loopback(url: &Url) -> io::Result<Vec<std::net::TcpListener>> {
     ))
 }
 
+/// Where a mapped connection would go. Until Traverse preview streams exist
+/// every attempt fails and the panel shows why.
 pub(crate) async fn forward(
     socket: TcpStream,
-    endpoint: &crate::endpoint::Endpoint,
     host: &PairedHost,
     destination: &str,
 ) -> io::Result<()> {
-    let remote = future::race(
-        async {
-            let mut remote = endpoint.connect_paired(host).await?;
-            let auth = STANDARD.encode(format!("tcode:{}", host.token));
-            let request = format!(
-                "CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\nProxy-Authorization: Basic {auth}\r\n\r\n"
-            );
-            remote.write_all(request.as_bytes()).await?;
-            let mut head = Vec::new();
-            while !head.ends_with(b"\r\n\r\n") && head.len() < 16384 {
-                let mut byte = [0];
-                remote.read_exact(&mut byte).await?;
-                head.push(byte[0]);
-            }
-            if !head.starts_with(b"HTTP/1.1 200 ") || !head.ends_with(b"\r\n\r\n") {
-                let message = if head.starts_with(b"HTTP/1.1 407 ") {
-                    "Paired host rejected preview authentication; reconnect or pair again"
-                } else {
-                    "Paired host could not connect to the remote preview destination"
-                };
-                return Err(io::Error::other(message));
-            }
-            Ok(remote)
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(12)).await;
-            Err(io::Error::other(
-                "Timed out connecting to the remote preview destination",
-            ))
-        },
-    )
-    .await?;
-    let mut browser = socket.clone();
-    let (mut remote, mut outbound) = futures_util::io::AsyncReadExt::split(remote);
-    // Once CONNECT succeeds, normal browser cancellation and peer shutdown
-    // can return NotConnected/BrokenPipe. WebKit owns page-load errors; a
-    // closed keepalive socket must not overwrite a successfully loaded page.
-    let _ = future::try_zip(
-        async {
-            futures_lite::io::copy(&mut browser, &mut outbound).await?;
-            outbound.close().await
-        },
-        async {
-            futures_lite::io::copy(&mut remote, &mut socket.clone()).await?;
-            socket.shutdown(Shutdown::Write)
-        },
-    )
-    .await;
-    Ok(())
+    drop(socket);
+    Err(io::Error::other(format!(
+        "Remote preview of {destination} on {} is not available over Traverse yet",
+        host.name
+    )))
 }
 
 /// Attachment-owned bridge for native browser engines that require an OS proxy
@@ -386,40 +319,10 @@ impl NativeProxy {
         );
         let listener = TcpListener::try_from(listener).map_err(|e| e.to_string())?;
         let task = smol::spawn(async move {
-            let mut connections = Vec::new();
             while let Ok((browser, _)) = listener.accept().await {
-                connections.retain(|task: &smol::Task<()>| !task.is_finished());
                 let connection = host.connection();
-                connections.push(smol::spawn(async move {
-                    future::race(
-                        async {
-                            let Ok(remote) =
-                                connection.endpoint.connect_paired(&connection.host).await
-                            else {
-                                return;
-                            };
-                            let (mut reader, mut writer) =
-                                futures_util::io::AsyncReadExt::split(remote);
-                            let _ = future::try_zip(
-                                async {
-                                    futures_lite::io::copy(&mut browser.clone(), &mut writer)
-                                        .await?;
-                                    writer.close().await
-                                },
-                                async {
-                                    futures_lite::io::copy(&mut reader, &mut browser.clone())
-                                        .await?;
-                                    browser.shutdown(Shutdown::Write)
-                                },
-                            )
-                            .await;
-                        },
-                        async {
-                            let _ = connection.retired.recv().await;
-                        },
-                    )
-                    .await;
-                }));
+                // Refuse until Traverse preview streams carry the request.
+                let _ = forward(browser, &connection.host, "proxy").await;
             }
         });
         Ok(Self {
@@ -430,5 +333,14 @@ impl NativeProxy {
 
     pub fn origin(&self) -> &str {
         &self.origin
+    }
+
+    /// What the browser engine is configured with. There is no credential
+    /// until the bridge is carried over Traverse.
+    pub fn entry(&self) -> ProxyEntry {
+        ProxyEntry {
+            origin: self.origin.clone(),
+            token: String::new(),
+        }
     }
 }

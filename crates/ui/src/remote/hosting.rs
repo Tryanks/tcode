@@ -1,14 +1,16 @@
-//! Hosting this machine: the listener, the discovery beacon, minted pairing
-//! codes and the devices that have paired with it.
+//! Hosting this machine: the Traverse endpoint, minted pairing codes and the
+//! devices that have paired with it.
 //!
 //! [`RemoteController`] is the process-wide handle the composition root installs.
-//! It owns the local [`HostMux`], listener and beacon independently of whichever
-//! host the window is currently attached to, so **Connect** and **Back to local**
+//! It owns the local [`HostMux`] and endpoint independently of whichever host
+//! the window is currently attached to, so **Connect** and **Back to local**
 //! never stop it and never disturb another attached client.
+//!
+//! TODO(traverse): a Traverse setting (official / self-hosted / off) and the
+//! direct-or-relayed state of each device belong on this page.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -18,11 +20,10 @@ use gpui::{
 };
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use tcode_client::HostLink;
-use tcode_client::pairing::{PairInvite, pair_url};
+use tcode_client::pairing::pair_url;
 use tcode_core::settings::Settings;
 use tcode_protocol::{Command, SettingsPatch};
-use tcode_remote::discovery::{BeaconHandle, start_beacon};
-use tcode_remote::{DeviceInfo, HostMux, PairingCode, RemoteConfig, RemoteServer, serve};
+use tcode_traverse::{DeviceInfo, HostConfig, HostMux, PairingCode, TraverseHost, TraverseMode};
 
 use super::qr::qr_element;
 use crate::overlay::{Notification, OverlayExt as _};
@@ -60,13 +61,10 @@ fn note(text: SharedString, cx: &App) -> AnyElement {
 
 pub struct RemoteController {
     mux: HostMux,
-    server: Option<RemoteServer>,
-    beacon: Option<BeaconHandle>,
+    host: Option<TraverseHost>,
     data_dir: PathBuf,
     local_settings_link: HostLink,
     local_settings: Settings,
-    /// The last minted code and when it was minted, for the countdown.
-    pairing: Option<(PairingCode, Instant)>,
 }
 
 impl Global for RemoteController {}
@@ -80,12 +78,10 @@ impl RemoteController {
     ) -> Self {
         Self {
             mux,
-            server: None,
-            beacon: None,
+            host: None,
             data_dir,
             local_settings_link,
             local_settings,
-            pairing: None,
         }
     }
 
@@ -115,81 +111,65 @@ impl RemoteController {
     }
 
     pub fn is_hosting(&self) -> bool {
-        self.server.is_some()
+        self.host.is_some()
     }
 
-    pub fn local_addr(&self) -> Option<SocketAddr> {
-        self.server.as_ref().map(RemoteServer::local_addr)
+    /// This machine's id while hosting.
+    pub fn endpoint_id(&self) -> Option<String> {
+        self.host.as_ref().map(TraverseHost::endpoint_id)
     }
 
-    /// Bind the listener, start the discovery beacon and mint a first code.
+    /// Bind the endpoint on `port`, advertise on the LAN and mint a first code.
     pub fn start_hosting(&mut self, port: u16, host_name: String) -> Result<(), String> {
-        if self.server.is_some() {
+        if self.host.is_some() {
             return Ok(());
         }
-        let listen: SocketAddr = format!("0.0.0.0:{port}")
-            .parse()
-            .map_err(|error| format!("invalid listen address: {error}"))?;
-        let server = serve(
+        let host = TraverseHost::start(
             self.mux.clone(),
-            RemoteConfig {
-                listen,
+            HostConfig {
                 host_name,
                 data_dir: self.data_dir.clone(),
-                static_bundle: None,
-                browser_password: false,
+                traverse: TraverseMode::Official,
+                pairing_enabled: true,
+                lan_discovery: true,
+                bind_port: Some(port),
             },
         )
         .map_err(|error| error.to_string())?;
-        let pairing = server.new_pairing_code();
-        self.beacon = Some(start_beacon(
-            pairing.host_id.clone(),
-            pairing.host_name.clone(),
-            server.local_addr().port(),
-        ));
-        self.pairing = Some((pairing, Instant::now()));
-        self.server = Some(server);
+        host.new_pairing_code();
+        self.host = Some(host);
         Ok(())
     }
 
     pub fn stop_hosting(&mut self) {
-        if let Some(beacon) = self.beacon.take() {
-            beacon.shutdown();
+        if let Some(host) = self.host.take() {
+            host.shutdown();
         }
-        if let Some(server) = self.server.take() {
-            server.shutdown();
-        }
-        self.pairing = None;
     }
 
     pub fn new_pairing_code(&mut self) {
-        if let Some(server) = self.server.as_ref() {
-            self.pairing = Some((server.new_pairing_code(), Instant::now()));
+        if let Some(host) = self.host.as_ref() {
+            host.new_pairing_code();
         }
     }
 
     /// The active code with its remaining lifetime in seconds, or `None` once
     /// it has expired.
-    pub fn pairing(&self) -> Option<(&PairingCode, u64)> {
-        let (code, minted) = self.pairing.as_ref()?;
-        let remaining = code
-            .expires_in_secs
-            .saturating_sub(minted.elapsed().as_secs());
-        (remaining > 0).then_some((code, remaining))
+    pub fn pairing(&self) -> Option<(PairingCode, u64)> {
+        let (code, remaining) = self.host.as_ref()?.pairing()?;
+        (remaining.as_secs() > 0).then_some((code, remaining.as_secs()))
     }
 
     pub fn devices(&self) -> Vec<DeviceInfo> {
-        self.server
+        self.host
             .as_ref()
-            .map(RemoteServer::devices)
+            .map(TraverseHost::devices)
             .unwrap_or_default()
     }
 
     pub fn revoke_device(&self, id: &str) {
-        if let Some(server) = self.server.as_ref()
-            && let Err(error) = server.revoke_device(id)
-        {
-            log::error!("could not revoke remote device: {error}");
+        if let Some(host) = self.host.as_ref() {
+            host.revoke(id);
         }
     }
 }
@@ -469,10 +449,7 @@ impl HostingPanel {
         let Some(controller) = cx.try_global::<RemoteController>() else {
             return div().into_any_element();
         };
-        let listening = controller
-            .local_addr()
-            .map(|addr| addr.port().to_string())
-            .unwrap_or_default();
+        let machine_id = controller.endpoint_id().unwrap_or_default();
         let Some((code, remaining)) = controller.pairing() else {
             return crate::material::group(cx)
                 .child(
@@ -499,29 +476,11 @@ impl HostingPanel {
                 .into_any_element();
         };
         let digits = code.code.clone();
-        let url = pair_url(&PairInvite {
-            host_id: code.host_id.clone(),
-            name: code.host_name.clone(),
-            origin: tcode_client::pairing::lan_origin(
-                code.addrs
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or("127.0.0.1"),
-                code.port,
-            ),
-            candidates: code
-                .addrs
-                .iter()
-                .skip(1)
-                .map(|addr| tcode_client::pairing::lan_origin(addr, code.port))
-                .collect(),
-            identity_key: Some(code.identity_key.clone()),
-            code: code.code.clone(),
-        });
-        let addresses = if code.addrs.is_empty() {
+        let url = pair_url(&code.invite);
+        let addresses = if code.invite.addrs.is_empty() {
             crate::tr!("remote.code.no_addresses").into_owned()
         } else {
-            code.addrs.join(", ")
+            code.invite.addrs.join(", ")
         };
         let qr = qr_element(&url);
         crate::material::group(cx)
@@ -567,9 +526,9 @@ impl HostingPanel {
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(crate::tr!(
-                                        "remote.code.listening",
-                                        addrs = addresses,
-                                        port = listening
+                                        "remote.code.machine",
+                                        id = machine_id,
+                                        addrs = addresses
                                     )),
                             )
                             .child(

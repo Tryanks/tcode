@@ -3113,17 +3113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "futures-rustls"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8f2f12607f92c69b12ed746fabf9ca4f5c482cba46679c1a75b874ed7c26adb"
-dependencies = [
- "futures-io",
- "rustls",
- "rustls-pki-types",
-]
-
-[[package]]
 name = "futures-sink"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4754,16 +4743,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "if-addrs"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
-dependencies = [
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "igd-next"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5812,21 +5791,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mdns-sd"
-version = "0.21.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a63c9b854b5ad0812ac5969f8db92a59f28b45d0a5ae599b9a45b84c5c8a08e8"
-dependencies = [
- "fastrand",
- "flume 0.12.0",
- "if-addrs",
- "log",
- "mio",
- "socket-pktinfo",
- "socket2",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5914,7 +5878,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02bd0af71c67b473010cbbc60715ee815645a4dc942899111f494b4b737d6fda"
 dependencies = [
  "libc",
- "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
 ]
@@ -9532,17 +9495,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "socket-pktinfo"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612942246d0cc239cfd83af1dfd39be47f649208a3524e5e9da651910128e0ac"
-dependencies = [
- "libc",
- "socket2",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "socket2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10131,11 +10083,15 @@ dependencies = [
  "orchestrate-mcp",
  "preview-mcp",
  "qrcode",
+ "serde",
  "serde_json",
+ "tcode-client",
  "tcode-protocol",
  "tcode-remote",
  "tcode-runtime",
  "tcode-services",
+ "tcode-traverse",
+ "url",
 ]
 
 [[package]]
@@ -10173,17 +10129,11 @@ dependencies = [
  "core-foundation 0.9.4",
  "dirs 7.0.0",
  "futures-lite",
- "futures-rustls",
  "futures-util",
  "getrandom 0.4.3",
- "hmac 0.13.0",
- "if-addrs",
  "libc",
  "log",
- "mdns-sd",
  "pbkdf2 0.13.0",
- "ring",
- "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -10194,10 +10144,10 @@ dependencies = [
  "tcode-protocol",
  "tcode-runtime",
  "tcode-services",
+ "tcode-traverse",
  "tungstenite",
  "url",
  "uuid",
- "webpki-roots 1.0.9",
  "windows 0.62.2",
 ]
 
@@ -10315,6 +10265,7 @@ dependencies = [
  "tcode-remote",
  "tcode-runtime",
  "tcode-services",
+ "tcode-traverse",
  "tcode-voice",
  "tempfile",
  "unicode-segmentation",

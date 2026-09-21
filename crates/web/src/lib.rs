@@ -7,10 +7,10 @@ mod transport;
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
 use host::{WebHost, take_pairing_code, window};
+use tcode_client::host::ClientHost as _;
 #[cfg(feature = "debug-exports")]
 use tcode_client::host::Transport;
-use tcode_client::host::{ClientHost as _, PairRequest};
-use tcode_client::pairing::PairedHost;
+use tcode_client::pairing::{PairInvite, PairedHost};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -147,18 +147,8 @@ async fn initial_target(
         return (saved, None);
     }
     let code = code.unwrap();
-    let origin = host.fixed_pairing_endpoint().unwrap();
-    let address = origin.clone();
-    match host
-        .pair(PairRequest {
-            origin,
-            code,
-            host_id: None,
-            identity_key: None,
-            candidates: Vec::new(),
-        })
-        .await
-    {
+    let address = host.fixed_pairing_endpoint().unwrap();
+    match host.pair(browser_invite(code)).await {
         Ok(paired) => {
             save_host(host, &paired);
             host.set_last_host_id(Some(&paired.host_id));
@@ -173,6 +163,18 @@ async fn initial_target(
 
 fn save_host(host: &WebHost, paired: &PairedHost) {
     host.remember_host(paired.clone());
+}
+
+/// A browser pairs with the origin that served it; only the code travels.
+fn browser_invite(code: String) -> PairInvite {
+    PairInvite {
+        host_id: String::new(),
+        name: String::new(),
+        code,
+        traverse: None,
+        relay: None,
+        addrs: Vec::new(),
+    }
 }
 
 #[cfg(feature = "debug-exports")]
@@ -191,17 +193,7 @@ pub async fn debug_pair_and_connect(code: String) -> String {
     if !started {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
-    let origin = WebHost.fixed_pairing_endpoint().unwrap();
-    let paired = match WebHost
-        .pair(PairRequest {
-            origin,
-            code,
-            host_id: None,
-            identity_key: None,
-            candidates: Vec::new(),
-        })
-        .await
-    {
+    let paired = match WebHost.pair(browser_invite(code)).await {
         Ok(host) => host,
         Err(error) => return serde_json::json!({"error":error}).to_string(),
     };
