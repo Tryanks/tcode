@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tcode_client::host::Transport;
+use tcode_client::pairing::PairInvite;
 use tcode_client::{ConnectionFailure, ConnectionState};
 use tcode_traverse::{
     DeviceIdentity, EndpointOptions, HostConfig, HostMux, PairError, TraverseHost, TraverseMode,
@@ -151,7 +152,7 @@ fn subscribe(id: u64) -> String {
 }
 
 #[test]
-fn pairing_is_single_use_five_failures_invalidate_and_unpaired_devices_are_rejected() {
+fn invitations_are_single_use_five_wrong_secrets_invalidate_and_unpaired_devices_are_rejected() {
     let host_dir = TestDir::new("pair-host");
     let (mux, _, _) = fake_host();
     let host = start_host(mux, &host_dir, None);
@@ -160,7 +161,7 @@ fn pairing_is_single_use_five_failures_invalidate_and_unpaired_devices_are_rejec
     let other_dir = TestDir::new("pair-other");
     let other = device(&other_dir, "other");
 
-    let minted = host.new_pairing_code();
+    let minted = host.new_invitation();
     let invite = &minted.invite;
     assert_eq!(invite.host_id, host.endpoint_id());
     assert!(
@@ -171,29 +172,46 @@ fn pairing_is_single_use_five_failures_invalidate_and_unpaired_devices_are_rejec
         "the invite names the loopback socket: {:?}",
         invite.addrs
     );
+    assert!(tcode_client::pairing::valid_invitation_secret(&invite.secret));
+    let link = tcode_client::pairing::parse_pair_url(&minted.url()).unwrap();
+    assert_eq!(&link, invite, "the link carries the whole invitation");
+    let wrong = PairInvite {
+        secret: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        ..invite.clone()
+    };
     for _ in 0..5 {
         assert_eq!(
-            tcode_traverse::pair_blocking(invite, "000000", &phone),
-            Err(PairError::Code)
+            tcode_traverse::pair_blocking(&wrong, &phone),
+            Err(PairError::Invalid)
         );
     }
     assert_eq!(
-        tcode_traverse::pair_blocking(invite, &minted.code, &phone),
-        Err(PairError::Code),
-        "five failures burn the code even for the right digits"
+        tcode_traverse::pair_blocking(invite, &phone),
+        Err(PairError::Invalid),
+        "five wrong secrets burn the invitation even for the right one"
     );
     assert!(host.devices().is_empty());
+    assert!(host.invitation().is_none());
 
-    let minted = host.new_pairing_code();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &phone).unwrap();
+    let old = host.new_invitation();
+    let minted = host.new_invitation();
+    assert_ne!(old.invite.secret, minted.invite.secret);
+    assert_eq!(
+        tcode_traverse::pair_blocking(&old.invite, &phone),
+        Err(PairError::Invalid),
+        "a new invitation replaces the old one"
+    );
+    assert_eq!(host.invitation().map(|(active, _)| active.invite), Some(minted.invite.clone()));
+    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     assert_eq!(paired.host_id, host.endpoint_id());
     assert_eq!(paired.name, "Test Host");
     assert_eq!(paired.addrs, minted.invite.addrs);
     assert_eq!(
-        tcode_traverse::pair_blocking(&minted.invite, &minted.code, &other),
-        Err(PairError::Code),
-        "a code is single use"
+        tcode_traverse::pair_blocking(&minted.invite, &other),
+        Err(PairError::Invalid),
+        "an invitation is single use"
     );
+    assert!(host.invitation().is_none(), "a used invitation is gone");
     let devices = host.devices();
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0].id, phone.endpoint_id().to_string());
@@ -212,9 +230,9 @@ fn pairing_is_single_use_five_failures_invalidate_and_unpaired_devices_are_rejec
     stranger.to_host.close();
 
     host.set_pairing_enabled(false);
-    let minted = host.new_pairing_code();
+    let minted = host.new_invitation();
     assert_eq!(
-        tcode_traverse::pair_blocking(&minted.invite, &minted.code, &other),
+        tcode_traverse::pair_blocking(&minted.invite, &other),
         Err(PairError::Disabled)
     );
     host.shutdown();
@@ -229,10 +247,10 @@ fn two_devices_route_acks_broadcast_events_and_scope_keys() {
     let dir_b = TestDir::new("route-b");
     let device_a = device(&dir_a, "A");
     let device_b = device(&dir_b, "B");
-    let minted = host.new_pairing_code();
-    let host_a = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &device_a).unwrap();
-    let minted = host.new_pairing_code();
-    let host_b = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &device_b).unwrap();
+    let minted = host.new_invitation();
+    let host_a = tcode_traverse::pair_blocking(&minted.invite, &device_a).unwrap();
+    let minted = host.new_invitation();
+    let host_b = tcode_traverse::pair_blocking(&minted.invite, &device_b).unwrap();
     let client_a = tcode_traverse::connect(&host_a, &device_a);
     let client_b = tcode_traverse::connect(&host_b, &device_b);
     wait_state(&client_a, ConnectionState::Syncing);
@@ -323,8 +341,8 @@ fn revocation_closes_the_live_connection_and_rejects_reconnects() {
     let host = start_host(mux, &host_dir, None);
     let dir = TestDir::new("revoke-phone");
     let phone = device(&dir, "phone");
-    let minted = host.new_pairing_code();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &phone).unwrap();
+    let minted = host.new_invitation();
+    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, ConnectionState::Syncing);
     client.to_host.send_blocking(subscribe(1)).unwrap();
@@ -362,8 +380,8 @@ fn a_restarted_machine_is_rejoined_and_buffered_writes_are_delivered() {
     let host = start_host(mux.clone(), &host_dir, Some(port));
     let dir = TestDir::new("restart-phone");
     let phone = device(&dir, "phone");
-    let minted = host.new_pairing_code();
-    let paired = tcode_traverse::pair_blocking(&minted.invite, &minted.code, &phone).unwrap();
+    let minted = host.new_invitation();
+    let paired = tcode_traverse::pair_blocking(&minted.invite, &phone).unwrap();
     let client = tcode_traverse::connect(&paired, &phone);
     wait_state(&client, ConnectionState::Syncing);
     client.to_host.send_blocking(subscribe(1)).unwrap();

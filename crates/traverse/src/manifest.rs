@@ -1,25 +1,70 @@
-//! A Traverse instance describes itself with `<base>/relays.json`:
+//! A Traverse instance describes itself with a manifest:
 //!
 //! ```json
-//! { "v": 1,
-//!   "relays": [ { "url": "https://relay.example/", "quic_port": 7842 } ],
-//!   "pkarr":  [ "https://traverse.example/pkarr/" ] }
+//! { "version": 1,
+//!   "updatedAt": "2026-09-21T00:00:00Z",
+//!   "relays": [ { "url": "https://relay.example/", "quic_port": 7842, "region": "eu", "home_rtt_max_ms": 80 } ],
+//!   "pkarr":  [ "https://traverse.example/pkarr/" ],
+//!   "dns":    [] }
 //! ```
 //!
 //! A relay without `quic_port` uses iroh's default QUIC address-discovery
-//! port; `"quic_port": 0` marks a relay that only forwards (no UDP).
-use std::{fs, io, path::Path};
+//! port; `"quic_port": 0` marks a relay that only forwards (no UDP). `dns`
+//! lists origins for iroh's DNS address lookup; self-hosted manifests usually
+//! leave it empty, because it needs an authoritative zone.
+//!
+//! The official manifest is `traverse_manifest.json` next to this file,
+//! bundled into every build and re-fetched from [`OFFICIAL_MANIFEST_URL`]; a
+//! self-hosted instance serves `<base>/relays.json`. Both go through one
+//! [`ManifestLoader`]: preference is remote, then the disk cache, then the
+//! bundle — except that a bundle whose `updatedAt` is newer than the cache
+//! outranks it — and invalid data never replaces a usable copy. A self-hosted
+//! instance has no bundle: with no cache and no fetch it is an error, never
+//! the official service.
+use std::{
+    fs,
+    io::{self, Read as _},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use iroh::{RelayConfig, RelayMap, RelayUrl};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
+
+pub const OFFICIAL_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/Tryanks/tcode/main/crates/traverse/src/traverse_manifest.json";
+/// Debug builds may point the official fetch elsewhere (`file://` included)
+/// to exercise the fetch path before the manifest is published.
+#[cfg(debug_assertions)]
+pub const MANIFEST_URL_ENV: &str = "TCODE_TRAVERSE_MANIFEST_URL";
+const BUNDLED: &str = include_str!("traverse_manifest.json");
+/// How long a fetched manifest stays fresh.
+pub const TTL_MS: u64 = 60 * 60 * 1000;
+/// Minimum gap between attempts after a failure, so an offline machine does
+/// not pay a network timeout on every check.
+pub const RETRY_MS: u64 = 5 * 60 * 1000;
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
-    pub v: u32,
+    pub version: u32,
+    /// ISO-8601 UTC edit date. Same-format timestamps order lexicographically,
+    /// and an undated manifest counts as older than any dated one.
+    #[serde(
+        rename = "updatedAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub updated_at: Option<String>,
     pub relays: Vec<ManifestRelay>,
     #[serde(default)]
     pub pkarr: Vec<Url>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +85,8 @@ pub enum ManifestError {
     /// A relay or pkarr URL is not `https`, or the relay URL is malformed.
     Url(String),
     NoRelays,
+    /// A DNS origin is empty or contains whitespace or control characters.
+    Dns(String),
 }
 
 impl std::fmt::Display for ManifestError {
@@ -49,6 +96,7 @@ impl std::fmt::Display for ManifestError {
             Self::Version(version) => write!(f, "unsupported manifest version {version}"),
             Self::Url(url) => write!(f, "manifest URL must be https: {url}"),
             Self::NoRelays => f.write_str("manifest lists no relays"),
+            Self::Dns(origin) => write!(f, "invalid DNS origin {origin:?}"),
         }
     }
 }
@@ -57,10 +105,16 @@ impl std::error::Error for ManifestError {}
 
 impl Manifest {
     pub fn parse(json: &str) -> Result<Self, ManifestError> {
-        let manifest: Self =
-            serde_json::from_str(json).map_err(|error| ManifestError::Json(error.to_string()))?;
-        if manifest.v != 1 {
-            return Err(ManifestError::Version(manifest.v));
+        serde_json::from_str(json)
+            .map_err(|error| ManifestError::Json(error.to_string()))
+            .and_then(Self::from_value)
+    }
+
+    pub fn from_value(value: Value) -> Result<Self, ManifestError> {
+        let manifest: Self = serde_json::from_value(value)
+            .map_err(|error| ManifestError::Json(error.to_string()))?;
+        if manifest.version != 1 {
+            return Err(ManifestError::Version(manifest.version));
         }
         if manifest.relays.is_empty() {
             return Err(ManifestError::NoRelays);
@@ -75,11 +129,20 @@ impl Manifest {
                 return Err(ManifestError::Url(url.to_string()));
             }
         }
+        for origin in &manifest.dns {
+            if origin.is_empty()
+                || origin
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '/')
+            {
+                return Err(ManifestError::Dns(origin.clone()));
+            }
+        }
         Ok(manifest)
     }
 
     /// The relay map iroh dials for `RelayMode::Custom`.
-    pub fn relay_map(&self) -> Result<RelayMap, ManifestError> {
+    pub fn relay_map(&self) -> RelayMap {
         self.relays
             .iter()
             .map(|relay| {
@@ -95,7 +158,7 @@ impl Manifest {
                     }
                     None => {}
                 }
-                Ok(config)
+                config
             })
             .collect()
     }
@@ -103,60 +166,463 @@ impl Manifest {
     pub fn pkarr_urls(&self) -> &[Url] {
         &self.pkarr
     }
+
+    pub fn dns_origins(&self) -> &[String] {
+        &self.dns
+    }
 }
 
-/// Where the last manifest for `base` is kept.
-pub fn cache_path(data_dir: &Path, base: &Url) -> std::path::PathBuf {
-    let mut name = String::from("traverse-manifest-");
-    for byte in base.as_str().bytes() {
-        if byte.is_ascii_alphanumeric() {
-            name.push(byte as char);
-        } else {
-            name.push('_');
+/// The copy of the official manifest built into this binary.
+pub fn bundled() -> Manifest {
+    Manifest::parse(BUNDLED).expect("bundled Traverse manifest is valid")
+}
+
+/// Whose manifest: the official service's or a self-hosted instance's.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ManifestSource {
+    Official,
+    /// Base URL of the instance; a `file://` base names the manifest file
+    /// itself.
+    Custom(Url),
+}
+
+impl ManifestSource {
+    /// What a device stores per machine: `None` is the official service.
+    pub fn from_traverse(base: Option<&str>) -> Option<Self> {
+        match base {
+            None => Some(Self::Official),
+            Some(base) => Url::parse(base).ok().map(Self::Custom),
         }
     }
-    name.push_str(".json");
-    data_dir.join(name)
+
+    /// Where the manifest is fetched from.
+    pub fn url(&self) -> Url {
+        match self {
+            Self::Official => {
+                #[cfg(debug_assertions)]
+                if let Some(url) = std::env::var_os(MANIFEST_URL_ENV)
+                    .and_then(|value| Url::parse(&value.to_string_lossy()).ok())
+                {
+                    return url;
+                }
+                Url::parse(OFFICIAL_MANIFEST_URL).expect("static manifest URL is valid")
+            }
+            Self::Custom(base) if base.scheme() == "file" => base.clone(),
+            Self::Custom(base) => {
+                let mut base = base.clone();
+                if !base.path().ends_with('/') {
+                    base.set_path(&format!("{}/", base.path()));
+                }
+                base.join("relays.json").unwrap_or(base)
+            }
+        }
+    }
+
+    pub fn cache_key(&self) -> String {
+        match self {
+            Self::Official => "official".into(),
+            Self::Custom(base) => format!("{:016x}", fnv1a(base.as_str().as_bytes())),
+        }
+    }
+
+    /// `<data_dir>/traverse-manifest-<key>.json`.
+    pub fn cache_path(&self, data_dir: &Path) -> PathBuf {
+        data_dir.join(format!("traverse-manifest-{}.json", self.cache_key()))
+    }
 }
 
-/// The manifest for the Traverse instance at `base`.
-///
-/// TODO(traverse): fetch `<base>/relays.json` over HTTPS and refresh the
-/// cache. Until then a `file://` base is read directly and any other base is
-/// served from the cache written next to the machine's data, so a fetch
-/// failure can never silently turn a self-hosted machine into an official one.
-pub fn load(data_dir: &Path, base: &Url) -> io::Result<Manifest> {
-    let json = if base.scheme() == "file" {
-        let path = base
+/// FNV-1a: a stable file-name hash, not a security boundary.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// On-disk shape of the last good remote manifest.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheFile {
+    pub fetched_at_ms: u64,
+    pub manifest: Value,
+}
+
+/// In-memory manifest plus the fetch bookkeeping that paces refreshes.
+pub struct ManifestState {
+    /// `None` for a self-hosted instance with nothing cached yet.
+    manifest: Option<Arc<Manifest>>,
+    /// Wall-clock millis of the fetch that produced `manifest`; `None` for
+    /// the bundle. Persisted with the disk cache so a restart does not
+    /// refetch.
+    fetched_at_ms: Option<u64>,
+    last_attempt_ms: Option<u64>,
+    disk_loaded: bool,
+}
+
+impl ManifestState {
+    pub fn new(source: ManifestSource) -> Self {
+        let manifest = match &source {
+            ManifestSource::Official => Some(Arc::new(bundled())),
+            ManifestSource::Custom(_) => None,
+        };
+        Self {
+            manifest,
+            fetched_at_ms: None,
+            last_attempt_ms: None,
+            disk_loaded: false,
+        }
+    }
+
+    pub fn current(&self) -> Option<Arc<Manifest>> {
+        self.manifest.clone()
+    }
+
+    /// Adopt the disk cache once, unless the bundle is newer by `updatedAt`.
+    pub fn load_cache(&mut self, path: &Path) {
+        if std::mem::replace(&mut self.disk_loaded, true) {
+            return;
+        }
+        let Some(cache) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<CacheFile>(&text).ok())
+        else {
+            return;
+        };
+        match Manifest::from_value(cache.manifest) {
+            Ok(manifest)
+                if self
+                    .manifest
+                    .as_ref()
+                    .is_none_or(|bundle| manifest.updated_at >= bundle.updated_at) =>
+            {
+                self.manifest = Some(Arc::new(manifest));
+                self.fetched_at_ms = Some(cache.fetched_at_ms);
+            }
+            Ok(_) => log::info!("bundled Traverse manifest is newer than the cache"),
+            Err(error) => log::warn!("ignoring cached Traverse manifest: {error}"),
+        }
+    }
+
+    /// Whether a fetch is due now; records the attempt when it is.
+    pub fn begin_fetch(&mut self, now_ms: u64) -> bool {
+        // A timestamp in the future means the wall clock moved backwards;
+        // treat it as expired so the refetch rewrites both timestamps.
+        let within = |since: Option<u64>, window: u64| {
+            since.is_some_and(|since| now_ms >= since && now_ms - since < window)
+        };
+        if within(self.fetched_at_ms, TTL_MS) || within(self.last_attempt_ms, RETRY_MS) {
+            return false;
+        }
+        self.last_attempt_ms = Some(now_ms);
+        true
+    }
+
+    /// Replace the manifest with a fetched one; an undecodable or invalid
+    /// body leaves the current manifest in place. Returns the manifest and
+    /// its raw value for the cache.
+    pub fn install(&mut self, now_ms: u64, body: &[u8]) -> Result<(Arc<Manifest>, Value), String> {
+        let value: Value = serde_json::from_slice(body).map_err(|error| error.to_string())?;
+        let manifest = Arc::new(Manifest::from_value(value.clone()).map_err(|error| error.to_string())?);
+        self.manifest = Some(manifest.clone());
+        self.fetched_at_ms = Some(now_ms);
+        Ok((manifest, value))
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
+}
+
+fn fetch(url: &Url) -> Result<Vec<u8>, String> {
+    if url.scheme() == "file" {
+        let path = url
             .to_file_path()
-            .map_err(|()| io::Error::new(io::ErrorKind::InvalidInput, "invalid file URL"))?;
-        fs::read_to_string(path)?
-    } else {
-        let path = cache_path(data_dir, base);
-        fs::read_to_string(&path).map_err(|error| {
+            .map_err(|()| "invalid file URL".to_owned())?;
+        let body = fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        if body.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err("manifest exceeds 1 MiB".into());
+        }
+        return Ok(body);
+    }
+    let response = ureq::get(url.as_str())
+        .set("User-Agent", "tcode")
+        .timeout(FETCH_TIMEOUT)
+        .call()
+        .map_err(|error| error.to_string())?;
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|error| error.to_string())?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err("manifest exceeds 1 MiB".into());
+    }
+    Ok(body)
+}
+
+struct LoaderInner {
+    source: ManifestSource,
+    cache_path: PathBuf,
+    state: Mutex<ManifestState>,
+}
+
+/// One manifest source shared by everything that builds on it: the copy in
+/// effect is always available without waiting on the network, and
+/// [`refresh`](Self::refresh) reports when a fetch changed it.
+#[derive(Clone)]
+pub struct ManifestLoader {
+    inner: Arc<LoaderInner>,
+}
+
+impl ManifestLoader {
+    /// Adopt the cache under `data_dir` (bundle first for the official
+    /// service). Nothing is fetched here.
+    pub fn new(source: ManifestSource, data_dir: &Path) -> Self {
+        let cache_path = source.cache_path(data_dir);
+        let mut state = ManifestState::new(source.clone());
+        state.load_cache(&cache_path);
+        Self {
+            inner: Arc::new(LoaderInner {
+                source,
+                cache_path,
+                state: Mutex::new(state),
+            }),
+        }
+    }
+
+    pub fn source(&self) -> &ManifestSource {
+        &self.inner.source
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, ManifestState> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The manifest in effect; never waits on the network. A self-hosted
+    /// instance with nothing cached is an error, never the official service.
+    pub fn current(&self) -> io::Result<Arc<Manifest>> {
+        self.state().current().ok_or_else(|| {
             io::Error::new(
-                error.kind(),
+                io::ErrorKind::NotFound,
                 format!(
-                    "no cached Traverse manifest for {base} at {}: {error}",
-                    path.display()
+                    "no cached Traverse manifest for {} at {}",
+                    self.inner.source.url(),
+                    self.inner.cache_path.display()
                 ),
             )
-        })?
+        })
+    }
+
+    /// The manifest to start with: the copy in hand, or — only when there is
+    /// none — one fetch now. Must run on the runtime.
+    pub async fn startup(&self) -> io::Result<Arc<Manifest>> {
+        if let Ok(manifest) = self.current() {
+            return Ok(manifest);
+        }
+        self.refresh().await;
+        self.current()
+    }
+
+    /// Fetch when the TTL and retry gap allow, on a blocking thread. Returns
+    /// the new manifest when the fetch produced one different from the copy
+    /// in effect.
+    pub async fn refresh(&self) -> Option<Arc<Manifest>> {
+        let now = now_ms();
+        let (due, previous) = {
+            let mut state = self.state();
+            (state.begin_fetch(now), state.current())
+        };
+        if !due {
+            return None;
+        }
+        let url = self.inner.source.url();
+        // The lock is not held across the fetch: `current()` must stay
+        // instant while a 10 s timeout plays out.
+        let fetched = tokio::task::spawn_blocking(move || fetch(&url))
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
+        let installed = fetched.and_then(|body| self.state().install(now, &body));
+        match installed {
+            Ok((manifest, value)) => {
+                let cache = CacheFile {
+                    fetched_at_ms: now,
+                    manifest: value,
+                };
+                if let Err(error) = serde_json::to_vec(&cache)
+                    .map_err(io::Error::other)
+                    .and_then(|bytes| fs::write(&self.inner.cache_path, bytes))
+                {
+                    log::warn!("could not cache the Traverse manifest: {error}");
+                }
+                (previous.as_deref() != Some(&*manifest)).then_some(manifest)
+            }
+            Err(error) => {
+                log::warn!(
+                    "Traverse manifest refresh from {} failed: {error}; keeping the {}",
+                    self.inner.source.url(),
+                    match (&self.inner.source, previous.is_some()) {
+                        (ManifestSource::Official, _) => "cached or bundled copy",
+                        (ManifestSource::Custom(_), true) => "cached copy",
+                        (ManifestSource::Custom(_), false) => "instance unreachable",
+                    }
+                );
+                None
+            }
+        }
+    }
+
+    /// Keep refreshing every [`RETRY_MS`] (the TTL paces actual fetches);
+    /// `apply` runs with each manifest a fetch changed. Aborted when the
+    /// returned handle is dropped by its owner.
+    pub fn spawn_refresh<F, Fut>(&self, apply: F) -> tokio::task::AbortHandle
+    where
+        F: Fn(Arc<Manifest>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let loader = self.clone();
+        crate::runtime::runtime()
+            .spawn(async move {
+                loop {
+                    if let Some(manifest) = loader.refresh().await {
+                        apply(manifest).await;
+                    }
+                    tokio::time::sleep(Duration::from_millis(RETRY_MS)).await;
+                }
+            })
+            .abort_handle()
+    }
+}
+
+/// Live application of a manifest to a bound endpoint.
+pub(crate) mod live {
+    use std::sync::Arc;
+
+    use iroh::{
+        Endpoint,
+        address_lookup::{
+            AddressLookupBuilder as _, DnsAddressLookup, PkarrPublisher, PkarrResolver,
+        },
     };
-    Manifest::parse(&json).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+
+    use super::Manifest;
+
+    /// Move the endpoint's relay map from `previous` to `manifest`: relays
+    /// no longer listed are removed, the rest inserted or replaced.
+    pub(crate) async fn sync_relays(endpoint: &Endpoint, previous: &Manifest, manifest: &Manifest) {
+        let wanted = manifest.relay_map();
+        for url in previous.relay_map().urls::<Vec<_>>() {
+            if !wanted.contains(&url) {
+                endpoint.remove_relay(&url).await;
+            }
+        }
+        for config in wanted.relays::<Vec<Arc<_>>>() {
+            endpoint.insert_relay(config.url.clone(), config).await;
+        }
+    }
+
+    /// Replace every address-lookup service with those of `manifests`: a
+    /// pkarr publisher (machines only) and resolver per pkarr URL, and a DNS
+    /// lookup per origin.
+    pub(crate) fn install_lookups<'a>(
+        endpoint: &Endpoint,
+        manifests: impl IntoIterator<Item = &'a Manifest>,
+        publish: bool,
+    ) {
+        let Ok(services) = endpoint.address_lookup() else {
+            return;
+        };
+        services.clear();
+        for manifest in manifests {
+            for pkarr in manifest.pkarr_urls() {
+                if publish {
+                    match PkarrPublisher::builder(pkarr.clone()).into_address_lookup(endpoint) {
+                        Ok(publisher) => services.add(publisher),
+                        Err(error) => log::warn!("could not add pkarr publisher {pkarr}: {error}"),
+                    }
+                }
+                match PkarrResolver::builder(pkarr.clone()).into_address_lookup(endpoint) {
+                    Ok(resolver) => services.add(resolver),
+                    Err(error) => log::warn!("could not add pkarr resolver {pkarr}: {error}"),
+                }
+            }
+            for origin in manifest.dns_origins() {
+                match DnsAddressLookup::builder(origin.clone()).into_address_lookup(endpoint) {
+                    Ok(lookup) => services.add(lookup),
+                    Err(error) => log::warn!("could not add DNS lookup {origin}: {error}"),
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tcode-manifest-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn manifest_json(updated_at: &str, relay: &str) -> String {
+        format!(r#"{{"version":1,"updatedAt":"{updated_at}","relays":[{{"url":"{relay}"}}]}}"#)
+    }
+
+    fn write_cache(path: &Path, fetched_at_ms: u64, manifest: &str) {
+        let cache = CacheFile {
+            fetched_at_ms,
+            manifest: serde_json::from_str(manifest).unwrap(),
+        };
+        fs::write(path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    }
+
+    fn first_relay(state: &ManifestState) -> String {
+        state.current().unwrap().relays[0].url.to_string()
+    }
+
+    #[test]
+    fn bundle_lists_iroh_default_relays_and_the_n0_lookup_services() {
+        let bundle = bundled();
+        assert_eq!(
+            bundle.relay_map(),
+            iroh::RelayMode::Default.relay_map(),
+            "the official manifest must match iroh's default relays"
+        );
+        assert_eq!(
+            bundle
+                .pkarr_urls()
+                .iter()
+                .map(Url::as_str)
+                .collect::<Vec<_>>(),
+            [iroh::address_lookup::N0_DNS_PKARR_RELAY_PROD]
+        );
+        assert_eq!(
+            bundle.dns_origins(),
+            [iroh::address_lookup::N0_DNS_ENDPOINT_ORIGIN_PROD]
+        );
+        assert!(bundle.updated_at.is_some());
+    }
+
     #[test]
     fn manifest_becomes_relay_map_and_pkarr_urls() {
         let manifest = Manifest::parse(
-            r#"{"v":1,"relays":[{"url":"https://relay.example/","quic_port":7842,"region":"eu"},{"url":"https://tcp-only.example/","quic_port":0},{"url":"https://default.example/"}],"pkarr":["https://traverse.example/pkarr/"]}"#,
+            r#"{"version":1,"relays":[{"url":"https://relay.example/","quic_port":7842,"region":"eu"},{"url":"https://tcp-only.example/","quic_port":0},{"url":"https://default.example/"}],"pkarr":["https://traverse.example/pkarr/"],"dns":["dns.example."]}"#,
         )
         .unwrap();
-        let map = manifest.relay_map().unwrap();
+        let map = manifest.relay_map();
         assert_eq!(map.len(), 3);
         let relay = |url: &str| map.get(&RelayUrl::from(Url::parse(url).unwrap())).unwrap();
         assert_eq!(
@@ -170,17 +636,13 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .port,
-            RelayConfig::from(RelayUrl::from(
-                Url::parse("https://default.example/").unwrap()
-            ))
-            .quic
-            .unwrap()
-            .port
+            iroh::defaults::DEFAULT_RELAY_QUIC_PORT
         );
         assert_eq!(
             manifest.pkarr_urls(),
             [Url::parse("https://traverse.example/pkarr/").unwrap()]
         );
+        assert_eq!(manifest.dns_origins(), ["dns.example."]);
     }
 
     #[test]
@@ -190,54 +652,227 @@ mod tests {
             Err(ManifestError::Json(_))
         ));
         assert_eq!(
-            Manifest::parse(r#"{"v":2,"relays":[{"url":"https://relay.example/"}]}"#),
+            Manifest::parse(r#"{"version":2,"relays":[{"url":"https://relay.example/"}]}"#),
             Err(ManifestError::Version(2))
         );
         assert_eq!(
-            Manifest::parse(r#"{"v":1,"relays":[]}"#),
+            Manifest::parse(r#"{"version":1,"relays":[]}"#),
             Err(ManifestError::NoRelays)
         );
         assert_eq!(
-            Manifest::parse(r#"{"v":1,"relays":[{"url":"http://relay.example/"}]}"#),
+            Manifest::parse(r#"{"version":1,"relays":[{"url":"http://relay.example/"}]}"#),
             Err(ManifestError::Url("http://relay.example/".into()))
         );
         assert_eq!(
             Manifest::parse(
-                r#"{"v":1,"relays":[{"url":"https://relay.example/"}],"pkarr":["ftp://x/"]}"#
+                r#"{"version":1,"relays":[{"url":"https://relay.example/"}],"pkarr":["ftp://x/"]}"#
             ),
             Err(ManifestError::Url("ftp://x/".into()))
         );
+        assert_eq!(
+            Manifest::parse(
+                r#"{"version":1,"relays":[{"url":"https://relay.example/"}],"dns":["bad origin"]}"#
+            ),
+            Err(ManifestError::Dns("bad origin".into()))
+        );
         assert!(matches!(
-            Manifest::parse(r#"{"v":1,"relays":[{"url":"relay"}]}"#),
+            Manifest::parse(r#"{"version":1,"relays":[{"url":"relay"}]}"#),
             Err(ManifestError::Json(_))
         ));
     }
 
     #[test]
-    fn a_file_base_is_read_directly_and_a_missing_cache_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("tcode-manifest-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+    fn sources_name_their_fetch_url_and_cache_file() {
+        let dir = Path::new("/data");
+        assert_eq!(
+            ManifestSource::Official.cache_path(dir),
+            dir.join("traverse-manifest-official.json")
+        );
+        let base = ManifestSource::Custom(Url::parse("https://traverse.example/tcode").unwrap());
+        assert_eq!(base.url().as_str(), "https://traverse.example/tcode/relays.json");
+        assert_eq!(
+            ManifestSource::Custom(Url::parse("https://traverse.example/").unwrap())
+                .url()
+                .as_str(),
+            "https://traverse.example/relays.json"
+        );
+        let cache = base.cache_path(dir);
+        let name = cache.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("traverse-manifest-") && name.ends_with(".json"));
+        assert_eq!(name.len(), "traverse-manifest-.json".len() + 16);
+        assert_ne!(
+            ManifestSource::Custom(Url::parse("https://other.example/").unwrap()).cache_path(dir),
+            cache
+        );
+        let file = ManifestSource::Custom(Url::parse("file:///tmp/relays.json").unwrap());
+        assert_eq!(file.url().as_str(), "file:///tmp/relays.json");
+        assert_eq!(
+            ManifestSource::from_traverse(None),
+            Some(ManifestSource::Official)
+        );
+        assert_eq!(ManifestSource::from_traverse(Some("not a url")), None);
+    }
+
+    #[test]
+    fn official_cache_is_adopted_unless_the_bundle_is_newer_and_invalid_caches_are_ignored() {
+        let dir = temp_dir("official");
+        let path = ManifestSource::Official.cache_path(&dir);
+        let bundle_date = bundled().updated_at.unwrap();
+
+        // Older than the bundle: ignored.
+        write_cache(
+            &path,
+            42,
+            &manifest_json("2000-01-01T00:00:00Z", "https://old.example/"),
+        );
+        let mut state = ManifestState::new(ManifestSource::Official);
+        state.load_cache(&path);
+        assert_eq!(state.current().unwrap().relay_map(), bundled().relay_map());
+        assert_eq!(state.fetched_at_ms, None);
+
+        // Same date or newer: adopted, together with its fetch time.
+        write_cache(&path, 42, &manifest_json(&bundle_date, "https://cached.example/"));
+        let mut state = ManifestState::new(ManifestSource::Official);
+        state.load_cache(&path);
+        assert_eq!(first_relay(&state), "https://cached.example/");
+        assert_eq!(state.fetched_at_ms, Some(42));
+
+        // Loaded once: a later cache write is not re-read.
+        write_cache(
+            &path,
+            43,
+            &manifest_json("2999-01-01T00:00:00Z", "https://later.example/"),
+        );
+        state.load_cache(&path);
+        assert_eq!(first_relay(&state), "https://cached.example/");
+
+        // Invalid cache: bundle stays.
+        for broken in [
+            "{}",
+            r#"{"fetchedAtMs":1,"manifest":{"version":1,"relays":[]}}"#,
+            r#"{"fetchedAtMs":1,"manifest":{"version":9,"relays":[{"url":"https://x/"}]}}"#,
+        ] {
+            fs::write(&path, broken).unwrap();
+            let mut state = ManifestState::new(ManifestSource::Official);
+            state.load_cache(&path);
+            assert_eq!(state.current().unwrap().relay_map(), bundled().relay_map());
+        }
+        let loader = ManifestLoader::new(ManifestSource::Official, &dir);
+        assert_eq!(loader.current().unwrap().relay_map(), bundled().relay_map());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_custom_base_uses_its_cache_and_never_the_official_manifest() {
+        let dir = temp_dir("custom");
+        let base = ManifestSource::Custom(Url::parse("https://traverse.example/").unwrap());
+        let loader = ManifestLoader::new(base.clone(), &dir);
+        let error = loader.current().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(
+            error
+                .to_string()
+                .contains("https://traverse.example/relays.json"),
+            "{error}"
+        );
+
+        write_cache(
+            &base.cache_path(&dir),
+            7,
+            &manifest_json("2000-01-01T00:00:00Z", "https://self-hosted.example/"),
+        );
+        let loader = ManifestLoader::new(base.clone(), &dir);
+        assert_eq!(
+            loader.current().unwrap().relays[0].url.as_str(),
+            "https://self-hosted.example/"
+        );
+        // A self-hosted cache is adopted however old it is: there is no bundle to outrank it.
+        assert_eq!(loader.state().fetched_at_ms, Some(7));
+
+        fs::write(base.cache_path(&dir), "garbage").unwrap();
+        assert!(ManifestLoader::new(base, &dir).current().is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn fetches_are_paced_by_ttl_and_retry_gap() {
+        let mut state = ManifestState::new(ManifestSource::Official);
+        assert!(state.begin_fetch(1_000));
+        assert!(!state.begin_fetch(1_000 + RETRY_MS - 1), "retry gap");
+        assert!(state.begin_fetch(1_000 + RETRY_MS));
+        state.fetched_at_ms = Some(10_000);
+        assert!(!state.begin_fetch(10_000 + TTL_MS - 1), "fresh");
+        assert!(state.begin_fetch(10_000 + TTL_MS));
+        // A future timestamp (clock moved backwards) counts as expired.
+        state.fetched_at_ms = Some(u64::MAX);
+        state.last_attempt_ms = Some(u64::MAX);
+        assert!(state.begin_fetch(5));
+    }
+
+    #[test]
+    fn a_fetched_manifest_replaces_the_copy_in_hand_unless_invalid() {
+        let mut state = ManifestState::new(ManifestSource::Official);
+        assert!(state.install(1_000, b"{ not json").is_err());
+        assert!(
+            state
+                .install(1_000, br#"{"version":1,"relays":[]}"#)
+                .is_err()
+        );
+        assert_eq!(state.current().unwrap().relay_map(), bundled().relay_map());
+        assert_eq!(state.fetched_at_ms, None);
+        // The remote wins even when dated before the bundle.
+        let (manifest, _) = state
+            .install(
+                2_000,
+                manifest_json("2000-01-01T00:00:00Z", "https://remote.example/").as_bytes(),
+            )
+            .unwrap();
+        assert_eq!(manifest.relays[0].url.as_str(), "https://remote.example/");
+        assert_eq!(first_relay(&state), "https://remote.example/");
+        assert_eq!(state.fetched_at_ms, Some(2_000));
+    }
+
+    #[test]
+    fn a_file_source_is_fetched_cached_and_reported_only_when_it_changes() {
+        let dir = temp_dir("file");
         let path = dir.join("relays.json");
         fs::write(
             &path,
-            r#"{"v":1,"relays":[{"url":"https://relay.example/"}]}"#,
+            manifest_json("2000-01-01T00:00:00Z", "https://first.example/"),
         )
         .unwrap();
-        let base = Url::from_file_path(&path).unwrap();
-        assert_eq!(load(&dir, &base).unwrap().relays.len(), 1);
-        let remote = Url::parse("https://traverse.example/").unwrap();
-        assert_eq!(
-            load(&dir, &remote).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
+        let base = ManifestSource::Custom(Url::from_file_path(&path).unwrap());
+        let loader = ManifestLoader::new(base.clone(), &dir);
+        assert!(loader.current().is_err());
+        let started = crate::block_on(loader.startup()).unwrap();
+        assert_eq!(started.relays[0].url.as_str(), "https://first.example/");
+        assert!(base.cache_path(&dir).is_file(), "the fetch is cached");
+        // Fresh: no fetch, so no change reported even though the file changed.
         fs::write(
-            cache_path(&dir, &remote),
-            r#"{"v":1,"relays":[{"url":"https://cached.example/"}]}"#,
+            &path,
+            manifest_json("2000-01-01T00:00:00Z", "https://second.example/"),
         )
         .unwrap();
+        assert!(crate::block_on(loader.refresh()).is_none());
+        loader.state().fetched_at_ms = None;
+        loader.state().last_attempt_ms = None;
+        let changed = crate::block_on(loader.refresh()).unwrap();
+        assert_eq!(changed.relays[0].url.as_str(), "https://second.example/");
+        loader.state().fetched_at_ms = None;
+        loader.state().last_attempt_ms = None;
+        assert!(
+            crate::block_on(loader.refresh()).is_none(),
+            "an unchanged manifest is not reported"
+        );
+        // The next process starts from the cache.
         assert_eq!(
-            load(&dir, &remote).unwrap().relays[0].url.as_str(),
-            "https://cached.example/"
+            ManifestLoader::new(base, &dir)
+                .current()
+                .unwrap()
+                .relays[0]
+                .url
+                .as_str(),
+            "https://second.example/"
         );
         fs::remove_dir_all(dir).unwrap();
     }
