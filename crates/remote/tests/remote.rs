@@ -138,11 +138,12 @@ fn browser_password_login_hello_hosting_query_and_lockout() {
         seen.lock().unwrap().push(format!("{action:?}"));
         tcode_protocol::HostingState {
             enabled: true,
-            code: Some("123456".into()),
+            invite: Some(
+                "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host".into(),
+            ),
             expires_in_secs: 299,
             host_id: "machine".into(),
             host_name: "Test Host".into(),
-            invite: None,
             devices: Vec::new(),
         }
     }));
@@ -217,7 +218,8 @@ fn browser_password_login_hello_hosting_query_and_lockout() {
     assert_eq!(reply["type"], "query_result");
     assert_eq!(reply["content"]["id"], 900);
     assert_eq!(
-        reply["content"]["result"]["Ok"]["content"]["code"], "123456",
+        reply["content"]["result"]["Ok"]["content"]["invite"],
+        "tcode://pair?v=2&id=machine&secret=AAECAwQFBgcICQoLDA0ODw&name=Test%20Host",
         "hosting queries are answered by the handler the host installed"
     );
     assert_eq!(hosting_calls.lock().unwrap().as_slice(), ["State"]);

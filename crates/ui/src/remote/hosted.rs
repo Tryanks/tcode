@@ -160,17 +160,16 @@ impl HostedPanel {
                         })),
                 );
             }
-            invitation =
-                invitation.child(
-                    actions.child(
-                        Button::new("headless-new-invitation")
-                            .disabled(self.pending)
-                            .label(crate::tr!("remote.invite.new"))
-                            .on_click(cx.listener(|panel, _, _, cx| {
-                                panel.request(HostingAction::NewCode, cx)
-                            })),
-                    ),
-                );
+            invitation = invitation.child(
+                actions.child(
+                    Button::new("headless-new-invitation")
+                        .disabled(self.pending)
+                        .label(crate::tr!("remote.invite.new"))
+                        .on_click(cx.listener(|panel, _, _, cx| {
+                            panel.request(HostingAction::NewInvitation, cx)
+                        })),
+                ),
+            );
             let mut row = if crate::window_seam::window_is_compact(window, cx) {
                 v_flex()
             } else {

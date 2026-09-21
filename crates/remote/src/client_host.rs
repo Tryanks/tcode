@@ -250,7 +250,7 @@ impl ClientHost for NativeClientHost {
             let device = device?;
             let (done, result) = async_channel::bounded(1);
             tcode_traverse::runtime().spawn(async move {
-                let paired = tcode_traverse::pair(&invite, &invite.code, &device)
+                let paired = tcode_traverse::pair(&invite, &device)
                     .await
                     .map_err(|error| error.to_string());
                 let _ = done.send(paired).await;

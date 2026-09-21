@@ -35,7 +35,7 @@ fn main() {
     device.set_details("example device".into(), None);
     println!("device id {}", device.endpoint_id());
     let started = Instant::now();
-    let paired = match tcode_traverse::pair_blocking(&invite, &invite.code, &device) {
+    let paired = match tcode_traverse::pair_blocking(&invite, &device) {
         Ok(paired) => paired,
         Err(error) => {
             eprintln!("pairing failed: {error}");

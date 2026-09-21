@@ -18,10 +18,9 @@ use gpui::{
 use gpui_base::{StyledExt as _, h_flex, v_flex};
 use serde::Deserialize;
 use tcode_client::HostLink;
-use tcode_client::pairing::{PairInvite, pair_url};
 use tcode_core::settings::{Settings, TraverseSetting};
 use tcode_protocol::{Command, SettingsPatch};
-use tcode_traverse::{DeviceInfo, HostConfig, HostMux, PairingCode, TraverseHost, TraverseMode};
+use tcode_traverse::{DeviceInfo, HostConfig, HostMux, Invitation, TraverseHost, TraverseMode};
 
 use super::qr::qr_element;
 use crate::icon::{Icon, IconName};
@@ -161,7 +160,7 @@ impl RemoteController {
             },
         )
         .map_err(|error| error.to_string())?;
-        host.new_pairing_code();
+        host.new_invitation();
         self.host = Some(host);
         Ok(())
     }
@@ -172,33 +171,21 @@ impl RemoteController {
         }
     }
 
-    pub fn new_pairing_code(&mut self) {
+    pub fn new_invitation(&mut self) {
         if let Some(host) = self.host.as_ref() {
-            host.new_pairing_code();
+            host.new_invitation();
         }
     }
 
-    /// The active code with its remaining lifetime in seconds, or `None` once
-    /// it has expired.
-    pub fn pairing(&self) -> Option<(PairingCode, u64)> {
-        let (code, remaining) = self.host.as_ref()?.pairing()?;
-        (remaining.as_secs() > 0).then_some((code, remaining.as_secs()))
-    }
-
-    /// The invite for `code` with where this machine is reachable *now*: a
-    /// code is minted the moment hosting starts, before the endpoint has
-    /// found its home relay, so the QR is composed at paint time rather than
-    /// from the addresses the mint saw.
-    pub fn invite(&self, code: &PairingCode) -> PairInvite {
-        let Some(host) = self.host.as_ref() else {
-            return code.invite.clone();
-        };
-        let addr = host.addr();
-        PairInvite {
-            relay: addr.relays.first().cloned(),
-            addrs: addr.addrs,
-            ..code.invite.clone()
-        }
+    /// The active invitation with its remaining lifetime in seconds, or
+    /// `None` once it has expired. It carries where this machine is
+    /// reachable *now*: an invitation is minted the moment hosting starts,
+    /// before the endpoint has found its home relay, so the QR is composed
+    /// at paint time from [`TraverseHost::invitation`], as the hosting query
+    /// answers a remote client.
+    pub fn invitation(&self) -> Option<(Invitation, u64)> {
+        let (invitation, remaining) = self.host.as_ref()?.invitation()?;
+        (remaining.as_secs() > 0).then_some((invitation, remaining.as_secs()))
     }
 
     pub fn devices(&self) -> Vec<DeviceInfo> {
@@ -379,7 +366,7 @@ impl HostingPanel {
                     loop {
                         let counting = cx.update(|cx| {
                             cx.try_global::<RemoteController>()
-                                .is_some_and(|controller| controller.pairing().is_some())
+                                .is_some_and(|controller| controller.invitation().is_some())
                         });
                         let interval = if counting {
                             Duration::from_secs(1)
@@ -671,13 +658,13 @@ impl HostingPanel {
                 .label(crate::tr!("remote.invite.new"))
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.update_global::<RemoteController, _>(|controller, _| {
-                        controller.new_pairing_code();
+                        controller.new_invitation();
                     });
                     this.sync_ticker(cx);
                     cx.notify();
                 }))
         };
-        let Some((code, remaining)) = controller.pairing() else {
+        let Some((invitation, remaining)) = controller.invitation() else {
             return crate::material::group(cx)
                 .child(
                     row(compact)
@@ -690,7 +677,7 @@ impl HostingPanel {
                 )
                 .into_any_element();
         };
-        let link = pair_url(&controller.invite(&code));
+        let link = invitation.url();
         let qr = qr_element(&link);
         crate::material::group(cx)
             .child(

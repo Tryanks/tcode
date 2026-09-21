@@ -91,19 +91,14 @@ impl DeviceClaim {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientLine {
-    Pair {
-        code: String,
-        device: DeviceClaim,
-    },
+    /// Present an invitation's secret to join the allow list.
+    Pair { secret: String, device: DeviceClaim },
     Hello {
         protocol_version: u32,
         device: DeviceClaim,
     },
     /// Open a Preview tunnel; see the module documentation.
-    Connect {
-        host: String,
-        port: u16,
-    },
+    Connect { host: String, port: u16 },
 }
 
 /// Whether a `connect` line names something the machine will dial: a host
@@ -120,8 +115,8 @@ pub fn valid_tunnel_target(host: &str, port: u16) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairRejection {
-    /// Wrong, expired or already used code.
-    Code,
+    /// Wrong, expired or already used invitation.
+    Invalid,
     /// The machine is not accepting new devices.
     Disabled,
     /// The machine could not record the pairing; try again.
@@ -240,7 +235,7 @@ mod tests {
     #[test]
     fn control_lines_use_the_documented_shapes() {
         let pair = ClientLine::Pair {
-            code: "123456".into(),
+            secret: "AAECAwQFBgcICQoLDA0ODw".into(),
             device: DeviceClaim {
                 name: "Phone".into(),
                 platform: Some("Android 15".into()),
@@ -248,7 +243,14 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&pair).unwrap(),
-            serde_json::json!({"type":"pair","code":"123456","device":{"name":"Phone","platform":"Android 15"}})
+            serde_json::json!({"type":"pair","secret":"AAECAwQFBgcICQoLDA0ODw","device":{"name":"Phone","platform":"Android 15"}})
+        );
+        assert_eq!(
+            serde_json::to_value(HostLine::PairRejected {
+                reason: PairRejection::Invalid
+            })
+            .unwrap(),
+            serde_json::json!({"type":"pair_rejected","reason":"invalid"})
         );
         assert_eq!(
             serde_json::from_str::<ClientLine>(

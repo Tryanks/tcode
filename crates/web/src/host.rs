@@ -177,7 +177,7 @@ impl ClientHost for WebHost {
 
     fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
         let device = self.device_identity();
-        Box::pin(async move { pair(&invite.code, &device).await })
+        Box::pin(async move { pair(&invite.secret, &device).await })
     }
 
     fn connect(&self, host: &PairedHost) -> Transport {

@@ -14,30 +14,32 @@ use std::{
 
 use iroh::{
     Endpoint, EndpointId, RelayMode, TransportAddr,
-    address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{Connection, SendStream, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
-use tcode_client::pairing::{PairInvite, pair_url};
+use tcode_client::pairing::{PairInvite, encode_secret, pair_url};
 use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
 use url::Url;
 
 use crate::{
     identity::HostIdentity,
+    manifest::{ManifestLoader, ManifestSource, live},
     mux::HostMux,
     runtime::block_on,
     wire::{self, ClientLine, DeviceClaim, HelloRejection, HostLine, LineReader, PairRejection},
 };
 
-pub const PAIRING_LIFETIME: Duration = Duration::from_secs(5 * 60);
+pub const INVITATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
+/// Wrong secrets an invitation survives; a cheap defence in depth behind
+/// 128 bits of entropy.
 pub const MAX_PAIRING_FAILURES: u8 = 5;
 
-/// Which Traverse instance this machine publishes to.
+/// Which Traverse instance this machine publishes to. Official and custom
+/// are the same mechanism with a different [`ManifestSource`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraverseMode {
-    /// The official service. iroh's `N0` preset: n0's public relays, the
-    /// n0 pkarr relay for publishing and resolving, and `dns.iroh.link` as a
-    /// second resolver for machines published there.
+    /// The official service: the bundled manifest, refreshed from the
+    /// repository.
     Official,
     /// A self-hosted instance described by its manifest; see
     /// [`crate::manifest`] for how the manifest is obtained.
@@ -59,17 +61,21 @@ pub struct HostConfig {
     pub bind_port: Option<u16>,
 }
 
-/// A minted code and the invite that carries it.
+/// A minted invitation: the link is the secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PairingCode {
-    pub code: String,
-    pub expires_at: Instant,
+pub struct Invitation {
     pub invite: PairInvite,
+    pub expires_at: Instant,
 }
 
-impl PairingCode {
+impl Invitation {
     pub fn remaining(&self) -> Duration {
         self.expires_at.saturating_duration_since(Instant::now())
+    }
+
+    /// The `tcode://pair?…` link to scan or paste.
+    pub fn url(&self) -> String {
+        pair_url(&self.invite)
     }
 }
 
@@ -92,16 +98,16 @@ pub struct EndpointAddrSnapshot {
     pub addrs: Vec<String>,
 }
 
-struct ActiveCode {
-    code: PairingCode,
+struct ActiveInvitation {
+    invitation: Invitation,
     failures: u8,
 }
 
 /// Everything revocation and pairing must see atomically: the allow list,
-/// the active code and the connections currently admitted.
+/// the active invitation and the connections currently admitted.
 struct State {
     identity: HostIdentity,
-    pairing: Option<ActiveCode>,
+    invitation: Option<ActiveInvitation>,
     live: HashMap<EndpointId, Vec<Connection>>,
 }
 
@@ -116,6 +122,8 @@ struct Shared {
 pub struct TraverseHost {
     shared: Arc<Shared>,
     router: Router,
+    /// The manifest refresh loop, ended with the host.
+    refresh: Option<tokio::task::AbortHandle>,
 }
 
 impl TraverseHost {
@@ -128,26 +136,28 @@ impl TraverseHost {
             TraverseMode::Official | TraverseMode::Off => None,
         };
         block_on(async move {
+            let loader = match &config.traverse {
+                TraverseMode::Official => Some(ManifestLoader::new(
+                    ManifestSource::Official,
+                    &config.data_dir,
+                )),
+                TraverseMode::Custom(base) => Some(ManifestLoader::new(
+                    ManifestSource::Custom(base.clone()),
+                    &config.data_dir,
+                )),
+                TraverseMode::Off => None,
+            };
+            // The copy in hand starts the endpoint; only a self-hosted
+            // instance with nothing cached waits for one fetch.
+            let manifest = match &loader {
+                Some(loader) => Some(loader.startup().await?),
+                None => None,
+            };
             let build = |ipv6: bool| -> io::Result<iroh::endpoint::Builder> {
-                let mut builder = match &config.traverse {
-                    TraverseMode::Official => Endpoint::builder(presets::N0),
-                    TraverseMode::Custom(base) => {
-                        let manifest = crate::manifest::load(&config.data_dir, base)?;
-                        let relays = manifest
-                            .relay_map()
-                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                        let mut builder = Endpoint::builder(presets::Minimal)
-                            .relay_mode(RelayMode::Custom(relays));
-                        for pkarr in manifest.pkarr_urls() {
-                            builder = builder
-                                .address_lookup(PkarrPublisher::builder(pkarr.clone()))
-                                .address_lookup(PkarrResolver::builder(pkarr.clone()));
-                        }
-                        builder
-                    }
-                    TraverseMode::Off => {
-                        Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
-                    }
+                let mut builder = match &manifest {
+                    Some(manifest) => Endpoint::builder(presets::Minimal)
+                        .relay_mode(RelayMode::Custom(manifest.relay_map())),
+                    None => Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled),
                 };
                 builder = builder
                     .secret_key(secret_key.clone())
@@ -175,12 +185,32 @@ impl TraverseHost {
                 }
                 Err(error) => return Err(io::Error::other(error)),
             };
+            if let Some(manifest) = &manifest {
+                live::install_lookups(&endpoint, [manifest.as_ref()], true);
+            }
+            // A refreshed manifest is applied to the running endpoint:
+            // relays through `insert_relay`/`remove_relay`, publishers and
+            // resolvers rebuilt on the endpoint's lookup services.
+            let refresh = loader.zip(manifest.clone()).map(|(loader, applied)| {
+                let endpoint = endpoint.clone();
+                let applied = Mutex::new(applied);
+                loader.spawn_refresh(move |manifest| {
+                    let endpoint = endpoint.clone();
+                    let previous =
+                        std::mem::replace(&mut *applied.lock().unwrap(), manifest.clone());
+                    async move {
+                        log::info!("applying the refreshed Traverse manifest");
+                        live::sync_relays(&endpoint, &previous, &manifest).await;
+                        live::install_lookups(&endpoint, [manifest.as_ref()], true);
+                    }
+                })
+            });
             let shared = Arc::new(Shared {
                 endpoint: endpoint.clone(),
                 mux,
                 state: Mutex::new(State {
                     identity,
-                    pairing: None,
+                    invitation: None,
                     live: HashMap::new(),
                 }),
                 traverse,
@@ -190,7 +220,11 @@ impl TraverseHost {
                 .accept(wire::ALPN_PAIR, PairHandler(shared.clone()))
                 .accept(wire::ALPN_MAIN, MainHandler(shared.clone()))
                 .spawn();
-            Ok(TraverseHost { shared, router })
+            Ok(TraverseHost {
+                shared,
+                router,
+                refresh,
+            })
         })
     }
 
@@ -215,17 +249,18 @@ impl TraverseHost {
         self.shared.snapshot()
     }
 
-    /// Mint a code, replacing any active one.
-    pub fn new_pairing_code(&self) -> PairingCode {
+    /// Mint an invitation, replacing any active one.
+    pub fn new_invitation(&self) -> Invitation {
         self.shared.mint()
     }
 
-    /// The active code and its remaining lifetime.
-    pub fn pairing(&self) -> Option<(PairingCode, Duration)> {
+    /// The active invitation and its remaining lifetime, carrying where the
+    /// machine is reachable right now: the endpoint may have found its
+    /// relay since the mint. `None` while pairing is disabled.
+    pub fn invitation(&self) -> Option<(Invitation, Duration)> {
+        let addr = self.shared.snapshot();
         let state = self.shared.state.lock().unwrap();
-        let active = state.pairing.as_ref()?;
-        let remaining = active.code.remaining();
-        (!remaining.is_zero()).then(|| (active.code.clone(), remaining))
+        self.shared.current_invitation(&state, &addr)
     }
 
     pub fn pairing_enabled(&self) -> bool {
@@ -253,6 +288,9 @@ impl TraverseHost {
     }
 
     pub fn shutdown(self) {
+        if let Some(refresh) = self.refresh {
+            refresh.abort();
+        }
         let router = self.router;
         block_on(async move {
             let _ = router.shutdown().await;
@@ -261,31 +299,53 @@ impl TraverseHost {
 }
 
 impl Shared {
-    fn mint(&self) -> PairingCode {
-        let mut random = [0_u8; 4];
-        if let Err(error) = getrandom::fill(&mut random) {
-            log::error!("unable to generate pairing code: {error}");
-        }
-        let code = format!("{:06}", u32::from_le_bytes(random) % 1_000_000);
+    fn mint(&self) -> Invitation {
+        let mut random = [0_u8; tcode_client::pairing::SECRET_BYTES];
+        getrandom::fill(&mut random).expect("the OS random source is available");
         let addr = self.snapshot();
         let mut state = self.state.lock().unwrap();
-        let pairing = PairingCode {
-            code: code.clone(),
-            expires_at: Instant::now() + PAIRING_LIFETIME,
+        let invitation = Invitation {
             invite: PairInvite {
                 host_id: addr.id,
                 name: state.identity.host_name.clone(),
-                code,
+                secret: encode_secret(&random),
                 traverse: self.traverse.as_ref().map(ToString::to_string),
                 relay: addr.relays.first().cloned(),
                 addrs: addr.addrs,
             },
+            expires_at: Instant::now() + INVITATION_LIFETIME,
         };
-        state.pairing = Some(ActiveCode {
-            code: pairing.clone(),
+        state.invitation = Some(ActiveInvitation {
+            invitation: invitation.clone(),
             failures: 0,
         });
-        pairing
+        invitation
+    }
+
+    /// The unexpired invitation with `addr` as its routing hints. The
+    /// secret never changes; only where the link says to dial does.
+    fn current_invitation(
+        &self,
+        state: &State,
+        addr: &EndpointAddrSnapshot,
+    ) -> Option<(Invitation, Duration)> {
+        if !self.allow_pairing || !state.identity.pairing_enabled {
+            return None;
+        }
+        let active = state.invitation.as_ref()?;
+        let remaining = active.invitation.remaining();
+        if remaining.is_zero() {
+            return None;
+        }
+        let invitation = Invitation {
+            invite: PairInvite {
+                relay: addr.relays.first().cloned(),
+                addrs: addr.addrs.clone(),
+                ..active.invitation.invite.clone()
+            },
+            expires_at: active.invitation.expires_at,
+        };
+        Some((invitation, remaining))
     }
 
     fn snapshot(&self) -> EndpointAddrSnapshot {
@@ -322,7 +382,7 @@ impl Shared {
             log::error!("could not persist the pairing switch: {error}");
         }
         if !enabled {
-            state.pairing = None;
+            state.invitation = None;
         }
     }
 
@@ -377,7 +437,7 @@ impl Shared {
                     self.mint();
                 }
             }
-            HostingAction::NewCode => {
+            HostingAction::NewInvitation => {
                 if self.allow_pairing && self.state.lock().unwrap().identity.pairing_enabled {
                     self.mint();
                 }
@@ -387,28 +447,12 @@ impl Shared {
         let addr = self.snapshot();
         let state = self.state.lock().unwrap();
         let enabled = self.allow_pairing && state.identity.pairing_enabled;
-        let (code, invite, expires_in_secs) = state
-            .pairing
-            .as_ref()
-            .filter(|active| enabled && !active.code.remaining().is_zero())
-            .map(|active| {
-                // Addresses as of now, not as of the mint: the endpoint may
-                // have found its relay since.
-                let invite = PairInvite {
-                    relay: addr.relays.first().cloned(),
-                    addrs: addr.addrs.clone(),
-                    ..active.code.invite.clone()
-                };
-                (
-                    Some(active.code.code.clone()),
-                    Some(pair_url(&invite)),
-                    active.code.remaining().as_secs(),
-                )
-            })
-            .unwrap_or((None, None, 0));
+        let (invite, expires_in_secs) = self
+            .current_invitation(&state, &addr)
+            .map(|(invitation, remaining)| (Some(invitation.url()), remaining.as_secs()))
+            .unwrap_or((None, 0));
         HostingState {
             enabled,
-            code,
             expires_in_secs,
             host_id: addr.id,
             host_name: state.identity.host_name.clone(),
@@ -434,30 +478,34 @@ impl Shared {
         }
     }
 
-    /// Exchange a code for a place on the allow list. Expiry, single use and
-    /// the failure budget are judged under the one lock every requester
-    /// shares, and the device is on disk before it is told so.
-    fn pair(&self, remote: EndpointId, code: &str, device: &DeviceClaim) -> HostLine {
+    /// Exchange an invitation's secret for a place on the allow list.
+    /// Expiry, single use and the failure budget are judged under the one
+    /// lock every requester shares, and the device is on disk before it is
+    /// told so.
+    fn pair(&self, remote: EndpointId, secret: &str, device: &DeviceClaim) -> HostLine {
         let mut state = self.state.lock().unwrap();
         if !self.allow_pairing || !state.identity.pairing_enabled {
             return HostLine::PairRejected {
                 reason: PairRejection::Disabled,
             };
         }
-        let accepted = match state.pairing.as_mut() {
+        let accepted = match state.invitation.as_mut() {
             None => false,
-            Some(active) if active.code.remaining().is_zero() => {
-                state.pairing = None;
+            Some(active) if active.invitation.remaining().is_zero() => {
+                state.invitation = None;
                 false
             }
             Some(active) => {
-                if constant_time_eq(active.code.code.as_bytes(), code.as_bytes()) {
-                    state.pairing = None;
+                if constant_time_eq(
+                    active.invitation.invite.secret.as_bytes(),
+                    secret.as_bytes(),
+                ) {
+                    state.invitation = None;
                     true
                 } else {
                     active.failures += 1;
                     if active.failures >= MAX_PAIRING_FAILURES {
-                        state.pairing = None;
+                        state.invitation = None;
                     }
                     false
                 }
@@ -465,7 +513,7 @@ impl Shared {
         };
         if !accepted {
             return HostLine::PairRejected {
-                reason: PairRejection::Code,
+                reason: PairRejection::Invalid,
             };
         }
         let (name, platform) = device.normalized();
@@ -585,10 +633,10 @@ impl ProtocolHandler for PairHandler {
             .map_err(|_| AcceptError::from_err(timed_out("pairing stream")))??;
         let mut reader = wire::reader(recv);
         let reply = match wire::read_control::<ClientLine>(&mut reader).await {
-            Ok(ClientLine::Pair { code, device })
-                if device.is_valid() && code.len() <= wire::MAX_CONTROL_LINE =>
+            Ok(ClientLine::Pair { secret, device })
+                if device.is_valid() && secret.len() <= wire::MAX_CONTROL_LINE =>
             {
-                self.0.pair(remote, &code, &device)
+                self.0.pair(remote, &secret, &device)
             }
             Ok(_) => HostLine::Refused {
                 reason: "expected a pair line".into(),

@@ -109,17 +109,18 @@ device in your hands, such as opening a native file dialog or driving the
 embedded preview browser.
 
 **Use your desktop as the machine.** In **Settings → Other devices**, turn on
-**Let other devices connect to this machine**. Share the connection code or QR
-code with the device you want to connect. Codes are single-use and expire after
-five minutes.
+**Let other devices connect to this machine**. Scan the QR code with the device
+you want to connect, or send it the invitation link. An invitation admits one
+device and expires after five minutes; the link is the secret, so share it only
+with that device.
 
 **Use a server as the machine.** Download `tcode-headless` from
 [Releases](https://github.com/Tryanks/tcode/releases), install your agent CLIs
 on the server, then:
 
 ```sh
-tcode-headless serve --listen 0.0.0.0:47420 --name build-server
-tcode-headless pair      # prints a fresh connection code and QR code
+tcode-headless serve --name build-server   # prints the invitation link and QR
+tcode-headless pair      # reprints the current invitation while it is valid
 ```
 
 Headless release builds also serve the browser app at `http://<machine>:47420/`. Set a
@@ -127,11 +128,11 @@ password on first open, or preset it with `TCODE_PASSWORD`. Saved browser tokens
 skip login on later visits.
 
 **Connect another device.** Open the sidebar's **Machines** row on a desktop,
-or the opening screen on a phone. Add the machine with its connection code, or
-choose it under **Nearby machines**, then connect. In a browser, open the
-printed HTTP link and log in with the password. The browser’s **Settings →
-Other devices** shows codes and QR codes for native clients and controls new
-pairings and device revocation.
+or the opening screen on a phone. Scan the machine's QR code or paste its
+invitation link, then connect. In a browser, open the printed HTTP link and
+log in with the password. The browser’s **Settings → Other devices** shows the
+machine's invitation QR for native clients and controls new pairings and
+device revocation.
 See [Use Tcode from other devices](docs/remote.md) for the native-app and
 browser steps.
 
