@@ -14,7 +14,7 @@ pub enum Destination {
     /// Which host this window talks to: the root, and a place that can also be
     /// *visited* from an attached workspace without detaching from it.
     Hosts,
-    /// The pairing form, pushed from Hosts (or from a Nearby / repair row that
+    /// The pairing form, pushed from Hosts (or from a repair row that
     /// prefilled it).
     Pair,
     Threads,

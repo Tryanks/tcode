@@ -6,6 +6,7 @@
 use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
+pub use tcode_protocol::PathInfo;
 
 use crate::{
     ConnectionState,
@@ -25,23 +26,49 @@ pub struct Transport {
     pub current_host: Option<LiveHost>,
 }
 
-/// The transport publishes its current pairing before emitting Syncing.
-/// Consumers take an atomic snapshot; saved hosts are only restart storage.
+/// The transport publishes its current pairing before emitting Syncing, and
+/// how the link is carried while it is up. Consumers take an atomic snapshot;
+/// saved hosts are only restart storage.
 #[derive(Clone)]
-pub struct LiveHost(std::sync::Arc<std::sync::Mutex<PairedHost>>);
+pub struct LiveHost(std::sync::Arc<std::sync::Mutex<LiveHostState>>);
+
+struct LiveHostState {
+    host: PairedHost,
+    path: Option<PathInfo>,
+}
 
 impl LiveHost {
     pub fn new(host: PairedHost) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(host)))
+        Self(std::sync::Arc::new(std::sync::Mutex::new(LiveHostState {
+            host,
+            path: None,
+        })))
     }
 
     pub fn snapshot(&self) -> PairedHost {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().host.clone()
     }
 
     /// Called by the owning transport only after authenticating the endpoint.
     pub fn authenticated(&self, host: &PairedHost) {
-        *self.0.lock().unwrap() = host.clone();
+        self.0.lock().unwrap().host = host.clone();
+    }
+
+    /// How the current connection reaches the host; `None` between
+    /// connections or on a transport that cannot tell.
+    pub fn path(&self) -> Option<PathInfo> {
+        self.0.lock().unwrap().path.clone()
+    }
+
+    /// Set by the owning transport when a connection comes up or its
+    /// selected path changes. Returns whether anything changed.
+    pub fn set_path(&self, path: Option<PathInfo>) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if state.path == path {
+            return false;
+        }
+        state.path = path;
+        true
     }
 }
 

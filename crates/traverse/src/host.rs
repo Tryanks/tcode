@@ -19,7 +19,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use tcode_client::pairing::PairInvite;
-use tcode_protocol::{HostedDevice, HostingAction, HostingState};
+use tcode_protocol::{HostedDevice, HostingAction, HostingState, PathInfo};
 use url::Url;
 
 use crate::{
@@ -82,14 +82,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub platform: Option<String>,
     pub created_unix: u64,
-    pub live: Option<LiveInfo>,
-}
-
-/// How a connected device currently reaches this machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiveInfo {
-    pub direct: bool,
-    pub relay: Option<String>,
+    /// How the device reaches this machine while connected; `None` offline.
+    pub live: Option<PathInfo>,
 }
 
 /// This machine's addresses at one moment, for invites.
@@ -353,7 +347,7 @@ impl Shared {
                     .ok()
                     .and_then(|id| state.live.get(&id))
                     .and_then(|connections| connections.first())
-                    .map(live_info);
+                    .map(path_info);
                 DeviceInfo {
                     id: device.id.clone(),
                     name: device.name.clone(),
@@ -398,6 +392,7 @@ impl Shared {
             }
             HostingAction::RevokeDevice(id) => self.revoke(&id),
         }
+        let addr = self.snapshot();
         let state = self.state.lock().unwrap();
         let enabled = self.allow_pairing && state.identity.pairing_enabled;
         let (code, expires_in_secs) = state
@@ -415,8 +410,11 @@ impl Shared {
             enabled,
             code,
             expires_in_secs,
-            host_id: self.endpoint.id().to_string(),
+            host_id: addr.id,
             host_name: state.identity.host_name.clone(),
+            traverse: self.traverse.as_ref().map(ToString::to_string),
+            relay: addr.relays.first().cloned(),
+            addrs: addr.addrs,
             devices: state
                 .identity
                 .devices
@@ -426,6 +424,13 @@ impl Shared {
                     name: device.name.clone(),
                     created_unix: device.created_unix,
                     platform: device.platform.clone(),
+                    path: device
+                        .id
+                        .parse::<EndpointId>()
+                        .ok()
+                        .and_then(|id| state.live.get(&id))
+                        .and_then(|connections| connections.first())
+                        .map(path_info),
                 })
                 .collect(),
         }
@@ -535,22 +540,23 @@ impl Shared {
     }
 }
 
-fn live_info(connection: &Connection) -> LiveInfo {
+/// How `connection` is carried right now, judged by its selected path.
+pub(crate) fn path_info(connection: &Connection) -> PathInfo {
     let paths = connection.paths();
     let selected = paths
         .iter()
         .find(|path| path.is_selected())
         .or_else(|| paths.iter().next());
     match selected.map(|path| path.remote_addr().clone()) {
-        Some(TransportAddr::Ip(_)) => LiveInfo {
+        Some(TransportAddr::Ip(_)) => PathInfo {
             direct: true,
             relay: None,
         },
-        Some(TransportAddr::Relay(url)) => LiveInfo {
+        Some(TransportAddr::Relay(url)) => PathInfo {
             direct: false,
             relay: Some(url.to_string()),
         },
-        _ => LiveInfo {
+        _ => PathInfo {
             direct: false,
             relay: None,
         },
