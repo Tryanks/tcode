@@ -853,3 +853,71 @@ fn command_key_is_optional_for_v3_and_preserved_for_v4() {
     );
     assert_eq!(keyed.payload, legacy.payload);
 }
+
+/// The hosting reply is read by browsers and phones that may be older or
+/// newer than the machine: a machine without the invite link or device paths
+/// must still be understood, and a machine that has them sends the link whole
+/// so a scanner needs nothing else to reach it off the LAN.
+#[test]
+fn hosting_state_keeps_older_machines_readable_and_carries_the_invite_link() {
+    let older: HostingState = serde_json::from_value(json!({
+        "enabled": true,
+        "code": "123456",
+        "expires_in_secs": 280,
+        "host_id": "ab".repeat(32),
+        "host_name": "Studio",
+        "devices": [{"id": "cd".repeat(32), "name": "Phone", "created_unix": 1}]
+    }))
+    .unwrap();
+    assert_eq!(older.invite, None);
+    assert_eq!(older.devices[0].path, None);
+
+    let state = HostingState {
+        enabled: true,
+        code: Some("123456".into()),
+        expires_in_secs: 280,
+        host_id: "ab".repeat(32),
+        host_name: "Studio".into(),
+        invite: Some("tcode://pair?v=2&id=abab".into()),
+        devices: vec![
+            HostedDevice {
+                id: "cd".repeat(32),
+                name: "Phone".into(),
+                created_unix: 1,
+                platform: Some("iOS 26".into()),
+                path: Some(PathInfo {
+                    direct: false,
+                    relay: Some("https://relay.example/".into()),
+                }),
+            },
+            HostedDevice {
+                id: "ef".repeat(32),
+                name: "Laptop".into(),
+                created_unix: 2,
+                platform: None,
+                path: None,
+            },
+        ],
+    };
+    assert_eq!(
+        serde_json::to_value(&state).unwrap(),
+        json!({
+            "enabled": true,
+            "code": "123456",
+            "expires_in_secs": 280,
+            "host_id": "ab".repeat(32),
+            "host_name": "Studio",
+            "invite": "tcode://pair?v=2&id=abab",
+            "devices": [
+                {
+                    "id": "cd".repeat(32),
+                    "name": "Phone",
+                    "created_unix": 1,
+                    "platform": "iOS 26",
+                    "path": {"direct": false, "relay": "https://relay.example/"}
+                },
+                {"id": "ef".repeat(32), "name": "Laptop", "created_unix": 2}
+            ]
+        })
+    );
+}
