@@ -36,16 +36,19 @@ is derived from it. **Process** is how to build, check and submit work.
    handled uniformly, so a provider that never emits it simply appears not to
    have it. The UI never branches on the provider kind.
 
-5. **Remote access.** The target transport is iroh, end to end encrypted, as the
-   only transport for native clients; the browser client uses iroh's browser
-   support over a relay. An official service, **Traverse**, provides discovery
-   and relay fallback: no accounts, on by default, self-hostable, sees only
-   ciphertext, and never required — on a LAN, direct connections give the full
-   product without it. Abuse is limited without accounts: the relay only carries
-   traffic between paired peers, discovery, pairing and relay bandwidth are
-   rate-limited per node and per IP, a pairing code dies after five failures on
-   the service as it does locally, and no SLA is promised. Current status and
-   plan: [#376](https://github.com/Tryanks/tcode/issues/376).
+5. **Remote access.** iroh, end to end encrypted, is the only transport for
+   native clients; the browser client is a direct-access HTTP entry on the
+   machine and does not use iroh. There is no automatic discovery: a device's
+   first contact with a machine is always its invitation, scanned or pasted.
+   An official service, **Traverse**, provides lookup and relay fallback: no
+   accounts, on by default, self-hostable, sees only ciphertext, and never
+   required — on a LAN, direct connections give the full product without it.
+   Abuse is limited without accounts: the relay forwards by destination id and
+   the machine rejects every peer it has not paired; lookup and relay
+   bandwidth are rate-limited per node and per IP; an invitation secret dies
+   after five failures on the machine, which is the only place it is ever
+   checked — the service never sees it; and no SLA is promised. Current status
+   and plan: [#376](https://github.com/Tryanks/tcode/issues/376).
 
 6. **Orchestrate is core.** Multi-agent orchestration is a core capability and
    keeps iterating. The long-term plan is a WASM plugin framework with
@@ -174,10 +177,10 @@ crates/services          persistence, filesystem, process, git, import, probes
 crates/runtime           session and provider lifecycle, queues, orchestration,
                          terminals, semantic events; AppState is reached only
                          through serialized protocol messages
-crates/remote            remote transport, pairing, discovery, multi-client mux,
-                         preview proxy
-crates/traverse          iroh transport: endpoint ownership, invitations, tunnels,
-                         Traverse manifest
+crates/traverse          tcode-traverse owns remote access: the iroh endpoint,
+                         machine and device identities, invitations and the
+                         allow list, the multi-client mux, Preview tunnels, the
+                         Traverse manifest, and the browser listener
 crates/traverse-server   tcode-traverse, the self-hostable Traverse instance
                          (relay, pkarr store, manifest)
 crates/ui                the one GPUI shell every client opens via `run_shell`;
