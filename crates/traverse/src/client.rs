@@ -1,6 +1,5 @@
 //! The device side: one iroh endpoint per [`DeviceIdentity`], pairing over
-//! `tcode/pair/1`, a reconnecting main-stream [`Transport`] over `tcode/1`,
-//! and LAN browsing.
+//! `tcode/pair/1` and a reconnecting main-stream [`Transport`] over `tcode/1`.
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
@@ -36,19 +35,9 @@ const CONNECT_BUDGET: Duration = Duration::from_secs(20);
 const CLOSE_UNPAIRED: u32 = 1;
 const CLOSE_REVOKED: u32 = 3;
 
-/// A machine advertising itself on the local network.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NearbyHost {
-    /// The machine's `EndpointId`; the only thing a pairing may be sent to.
-    pub id: String,
-    pub name: Option<String>,
-    pub addrs: Vec<String>,
-}
-
 /// The endpoint a device dials from, built on first use.
 pub(crate) struct ClientEndpoint {
     endpoint: Endpoint,
-    lan: Option<crate::mdns::LanLookup>,
     /// Transports to probe when the network changes.
     transports: Mutex<Vec<Outgoing>>,
     /// Traverse instances whose resolvers are already installed.
@@ -78,17 +67,9 @@ impl DeviceIdentity {
                 builder = builder
                     .secret_key(secret_key.clone())
                     .transport_config(wire::transport_config());
-                let lan = if options.lan_discovery {
-                    let lan = crate::mdns::LanLookup::new(secret_key.public(), false, None)?;
-                    builder = builder.address_lookup(lan.clone());
-                    Some(lan)
-                } else {
-                    None
-                };
                 let endpoint = builder.bind().await.map_err(io::Error::other)?;
                 Ok(ClientEndpoint {
                     endpoint,
-                    lan,
                     transports: Mutex::new(Vec::new()),
                     resolvers: Mutex::new(HashSet::new()),
                 })
@@ -759,60 +740,4 @@ fn jitter_sample() -> f64 {
         .unwrap_or_default()
         .subsec_nanos();
     f64::from(nanos % 1_000_001) / 1_000_000.
-}
-
-/// Machines advertising on the local network, collected for `timeout`.
-pub async fn browse(device: &DeviceIdentity, timeout: Duration) -> Vec<NearbyHost> {
-    use futures_lite::StreamExt as _;
-    let Ok(client) = device.client().await else {
-        return Vec::new();
-    };
-    let Some(lan) = &client.lan else {
-        return Vec::new();
-    };
-    let own_id = device.endpoint_id();
-    let mut events = lan.inner.subscribe().await;
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    let mut found: HashMap<EndpointId, NearbyHost> = HashMap::new();
-    loop {
-        tokio::select! {
-            event = events.next() => match event {
-                Some(iroh_mdns_address_lookup::DiscoveryEvent::Discovered { endpoint_info, .. }) => {
-                    let id = endpoint_info.endpoint_id;
-                    if id == own_id {
-                        continue;
-                    }
-                    let entry = found.entry(id).or_insert_with(|| NearbyHost {
-                        id: id.to_string(),
-                        name: None,
-                        addrs: Vec::new(),
-                    });
-                    if let Some(name) = endpoint_info.data.user_data() {
-                        entry.name = Some(name.to_string());
-                    }
-                    for addr in endpoint_info.data.ip_addrs() {
-                        let addr = addr.to_string();
-                        if !entry.addrs.contains(&addr) && entry.addrs.len() < MAX_ADDRS {
-                            entry.addrs.push(addr);
-                        }
-                    }
-                }
-                Some(iroh_mdns_address_lookup::DiscoveryEvent::Expired { endpoint_id }) => {
-                    found.remove(&endpoint_id);
-                }
-                Some(_) => {}
-                None => break,
-            },
-            _ = &mut deadline => break,
-        }
-    }
-    let mut hosts: Vec<NearbyHost> = found.into_values().collect();
-    hosts.sort_by(|a, b| a.id.cmp(&b.id));
-    hosts
-}
-
-/// [`browse`] from a thread outside the runtime.
-pub fn browse_blocking(device: &DeviceIdentity, timeout: Duration) -> Vec<NearbyHost> {
-    block_on(browse(device, timeout))
 }
