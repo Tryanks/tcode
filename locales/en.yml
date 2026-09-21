@@ -1041,7 +1041,6 @@ hosts:
     title: "ADD A MACHINE"
     action: "Add a machine"
     description: "Paste the invitation link the machine shows under Settings → Other devices."
-    fixed_description: "Paste the invitation link this machine shows."
     invitation: "Invitation link"
     invitation_placeholder: "tcode://pair?…"
     scan: "Scan a QR code"

@@ -235,14 +235,19 @@ pub trait ClientHost: 'static {
     fn last_host_id(&self) -> Option<String>;
     fn set_last_host_id(&self, host_id: Option<&str>);
 
-    /// Browsers can only pair with the origin that served the application.
-    fn fixed_pairing_endpoint(&self) -> Option<String> {
-        None
+    /// A browser is signed in with the machine that served it and can reach
+    /// no other: the shell offers it no way to add or re-pair a machine, and
+    /// [`ClientHost::pair`] is never called on it.
+    fn fixed_machine(&self) -> bool {
+        false
     }
 
-    /// Exchange the invite's code for a pairing with exactly the machine the
-    /// invite names.
-    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>>;
+    /// Exchange the invitation's secret for a pairing with exactly the
+    /// machine the invitation names.
+    fn pair(&self, invite: PairInvite) -> HostFuture<'_, Result<PairedHost, String>> {
+        let _ = invite;
+        Box::pin(async { Err("this client cannot add machines".into()) })
+    }
 
     /// Open a reconnecting link. Dropping the returned channels ends it.
     fn connect(&self, host: &PairedHost) -> Transport;
