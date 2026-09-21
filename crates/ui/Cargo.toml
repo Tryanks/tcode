@@ -9,12 +9,7 @@ default = ["remote", "desktop"]
 # device revocation. Off for wasm targets, which cannot listen or advertise.
 # Client pairing (saved hosts, the pair form, authentication repair) is *not* here:
 # it is shared UI over `tcode_client` and compiles everywhere.
-remote-hosting = [
-    "dep:tcode-remote",
-    "tcode-remote/server",
-    "tcode-remote/client",
-    "dep:tcode-traverse",
-]
+remote-hosting = ["dep:tcode-traverse", "tcode-traverse/native"]
 # Transitional alias for the pre-split feature name.
 remote = ["remote-hosting"]
 # Aggregate of the narrow native capabilities the desktop binary ships. It gates
@@ -32,8 +27,8 @@ native-dialogs = []
 # Embedded webview preview backend. Available on macOS, Windows and Android; the panel,
 # its URL field, open-externally and copy-URL are always compiled.
 native-preview = [
-    "dep:tcode-remote",
-    "tcode-remote/client",
+    "dep:tcode-traverse",
+    "tcode-traverse/native",
     "dep:gpui-android",
     "dep:gpui-wry",
     "dep:wry",
@@ -86,12 +81,13 @@ unicode-width = "0.2"
 [target.'cfg(target_family = "wasm")'.dependencies]
 web-time = "1"
 
-# `remote-hosting` reaches tcode-remote -> smol -> rustix -> errno, which has no
-# wasm32-unknown-unknown build. Declaring the dependency per-target keeps the
-# browser green even if a wasm-facing crate turns the feature on.
+# tcode-traverse reaches iroh, tokio's net stack and platform system calls,
+# none of which build for wasm32-unknown-unknown. Declaring the dependency
+# per-target keeps the browser green even if a wasm-facing crate turns a
+# feature on. `fast-apple-datapath` is the binary's decision (desktop on,
+# iOS off), so it is left to the composition roots.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-tcode-remote = { path = "../remote", default-features = false, optional = true }
-tcode-traverse = { path = "../traverse", optional = true }
+tcode-traverse = { path = "../traverse", default-features = false, optional = true }
 reqwest-client = { package = "gpui-pre-reqwest-client", version = "=0.3.5" }
 # Android apps do not have the Unix certificate files used by native-roots discovery.
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls-webpki-roots"] }
@@ -150,7 +146,7 @@ syntect = { version = "5.3.0", default-features = false, features = ["parsing", 
 # Test fixtures build real session stores and a real native client host; neither
 # is reachable from the shipped library.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-tcode-remote = { path = "../remote" }
+tcode-traverse = { path = "../traverse", features = ["native"] }
 tcode-services = { path = "../services" }
 
 [[bench]]

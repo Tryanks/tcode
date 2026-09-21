@@ -10,11 +10,10 @@ use std::{
 };
 
 use tcode_client::{ConnectionState, host::Transport, host::TunnelOpener, pairing::PairedHost};
-use tcode_remote::{
-    HostMux,
+use tcode_traverse::{
+    DeviceIdentity, EndpointOptions, HostConfig, HostMux, TraverseHost, TraverseMode,
     preview::{NativeProxy, PreviewEndpoint, PreviewRoutes},
 };
-use tcode_traverse::{DeviceIdentity, EndpointOptions, HostConfig, TraverseHost, TraverseMode};
 
 struct TestDir(PathBuf);
 

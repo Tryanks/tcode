@@ -643,21 +643,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-tungstenite"
-version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6ab5b7664abf9ccae07576888c72bc93750c7090c1ff4ffee9317cc05d11618"
-dependencies = [
- "atomic-waker",
- "futures-core",
- "futures-io",
- "futures-task",
- "log",
- "pin-project-lite",
- "tungstenite",
-]
-
-[[package]]
 name = "async_io_stream"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9937,9 +9922,9 @@ dependencies = [
  "smol",
  "tcode-client",
  "tcode-protocol",
- "tcode-remote",
  "tcode-runtime",
  "tcode-services",
+ "tcode-traverse",
  "tcode-ui",
 ]
 
@@ -9956,7 +9941,7 @@ dependencies = [
  "jni 0.22.4",
  "log",
  "tcode-client",
- "tcode-remote",
+ "tcode-traverse",
  "tcode-ui",
 ]
 
@@ -10004,7 +9989,6 @@ dependencies = [
  "serde_json",
  "tcode-client",
  "tcode-protocol",
- "tcode-remote",
  "tcode-runtime",
  "tcode-services",
  "tcode-traverse",
@@ -10020,7 +10004,7 @@ dependencies = [
  "gpui-pre",
  "log",
  "tcode-client",
- "tcode-remote",
+ "tcode-traverse",
  "tcode-ui",
 ]
 
@@ -10034,38 +10018,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tcode-core",
-]
-
-[[package]]
-name = "tcode-remote"
-version = "0.1.0"
-dependencies = [
- "async-channel",
- "async-tungstenite",
- "base64 0.23.1",
- "core-foundation 0.9.4",
- "dirs 7.0.0",
- "futures-lite",
- "futures-util",
- "getrandom 0.4.3",
- "libc",
- "log",
- "pbkdf2 0.13.0",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.11.0",
- "smol",
- "system-configuration-sys",
- "tcode-client",
- "tcode-protocol",
- "tcode-runtime",
- "tcode-services",
- "tcode-traverse",
- "tungstenite",
- "url",
- "uuid",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -10086,8 +10038,8 @@ dependencies = [
  "tcode-client",
  "tcode-core",
  "tcode-protocol",
- "tcode-remote",
  "tcode-services",
+ "tcode-traverse",
  "term",
  "uuid",
 ]
@@ -10119,18 +10071,30 @@ name = "tcode-traverse"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "base64 0.23.1",
+ "core-foundation 0.9.4",
+ "dirs 7.0.0",
  "env_logger",
  "futures-lite",
+ "futures-util",
  "getrandom 0.4.3",
  "iroh",
+ "libc",
  "log",
+ "pbkdf2 0.13.0",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "system-configuration-sys",
  "tcode-client",
  "tcode-protocol",
+ "tcode-traverse",
  "tokio",
+ "tokio-tungstenite",
  "ureq",
  "url",
+ "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -10180,7 +10144,6 @@ dependencies = [
  "tcode-client",
  "tcode-core",
  "tcode-protocol",
- "tcode-remote",
  "tcode-runtime",
  "tcode-services",
  "tcode-traverse",
@@ -10500,6 +10463,18 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
 ]
 
 [[package]]

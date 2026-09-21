@@ -174,8 +174,10 @@ crates/services          persistence, filesystem, process, git, import, probes
 crates/runtime           session and provider lifecycle, queues, orchestration,
                          terminals, semantic events; AppState is reached only
                          through serialized protocol messages
-crates/remote            remote transport, pairing, discovery, multi-client mux,
-                         preview proxy
+crates/traverse          Traverse: the iroh transport (host, pairing, tunnels,
+                         multi-client mux, manifest), the native client host
+                         and Preview adapters (`native`), the headless browser
+                         listener (`browser`)
 crates/ui                the one GPUI shell every client opens via `run_shell`;
                          owns localization (crates/ui/src/i18n.rs) and presentation
 crates/app/src/main.rs   desktop binary and composition root (default `cargo run`)

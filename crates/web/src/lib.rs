@@ -6,11 +6,9 @@ mod transport;
 
 use std::{borrow::Cow, cell::RefCell, rc::Rc};
 
-use host::{WebHost, take_pairing_code, window};
-use tcode_client::host::ClientHost as _;
+use host::{WebHost, window};
 #[cfg(feature = "debug-exports")]
-use tcode_client::host::Transport;
-use tcode_client::pairing::{PairInvite, PairedHost};
+use tcode_client::host::{ClientHost as _, Transport};
 use wasm_bindgen::prelude::*;
 
 thread_local! {
@@ -80,7 +78,9 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     gpui_web::init_logging();
     prepare_canvas(canvas_id)?;
     let host = Rc::new(WebHost);
-    let (initial, initial_pairing_error) = initial_target(host.as_ref()).await;
+    // The login page already signed this browser in with the serving
+    // machine; the shell reopens that record.
+    let initial = tcode_ui::last_host_target(host.as_ref());
     let platform = Rc::new(gpui_web::WebPlatform::new_with_backend(
         true,
         gpui_web::WebBackendPreference::Auto,
@@ -111,7 +111,7 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
                     activate: true,
                     setup: tcode_ui::ShellSetup {
                         initial,
-                        initial_pairing_error,
+                        initial_pairing_error: None,
                         client_host: Some(host),
                         // A browser tab runs no host of its own.
                         local: None,
@@ -135,48 +135,6 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn initial_target(
-    host: &WebHost,
-) -> (Option<tcode_ui::remote::AttachmentTarget>, Option<String>) {
-    let saved = tcode_ui::last_host_target(host);
-    let code = match take_pairing_code() {
-        Ok(code) => code,
-        Err(error) => return (saved, Some(error)),
-    };
-    if saved.is_some() || code.is_none() {
-        return (saved, None);
-    }
-    let code = code.unwrap();
-    let address = host.fixed_pairing_endpoint().unwrap();
-    match host.pair(browser_invite(code)).await {
-        Ok(paired) => {
-            save_host(host, &paired);
-            host.set_last_host_id(Some(&paired.host_id));
-            (
-                Some(tcode_ui::remote::AttachmentTarget::Remote(paired)),
-                None,
-            )
-        }
-        Err(error) => (None, Some(tcode_ui::pairing::pair_error(&error, &address))),
-    }
-}
-
-fn save_host(host: &WebHost, paired: &PairedHost) {
-    host.remember_host(paired.clone());
-}
-
-/// A browser pairs with the origin that served it; only the code travels.
-fn browser_invite(code: String) -> PairInvite {
-    PairInvite {
-        host_id: String::new(),
-        name: String::new(),
-        secret: code,
-        traverse: None,
-        relay: None,
-        addrs: Vec::new(),
-    }
-}
-
 #[cfg(feature = "debug-exports")]
 struct DebugConnection {
     transport: Transport,
@@ -184,20 +142,25 @@ struct DebugConnection {
     index_snapshots: usize,
 }
 
-/// Exercise the actual MobileHost methods without depending on screen state.
-/// The retained transport also permits restart/replay verification.
+/// Exercise the actual WebHost methods without depending on screen state:
+/// connect to the machine the login page signed in with. The retained
+/// transport also permits restart/replay verification.
 #[wasm_bindgen]
 #[cfg(feature = "debug-exports")]
-pub async fn debug_pair_and_connect(code: String) -> String {
+pub async fn debug_connect() -> String {
     let started = APPLICATION.with(|slot| slot.borrow().is_some());
     if !started {
         return serde_json::json!({"error":"call start first"}).to_string();
     }
-    let paired = match WebHost.pair(browser_invite(code)).await {
-        Ok(host) => host,
-        Err(error) => return serde_json::json!({"error":error}).to_string(),
+    let host = WebHost;
+    let Some(paired) = host.last_host_id().and_then(|id| {
+        host.load_hosts()
+            .into_iter()
+            .find(|host| host.host_id == id)
+    }) else {
+        return serde_json::json!({"error":"not signed in"}).to_string();
     };
-    let transport = WebHost.connect(&paired);
+    let transport = host.connect(&paired);
     let _ = transport.to_host.try_send(
         r#"{"id":1,"payload":{"type":"subscribe","content":{"topic":{"type":"index"}}}}"#.into(),
     );

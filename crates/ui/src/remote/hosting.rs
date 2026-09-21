@@ -223,7 +223,7 @@ fn custom_traverse_url(value: &str) -> Option<url::Url> {
 
 /// This machine's default advertised host name.
 pub fn machine_name() -> String {
-    tcode_remote::client_host::default_device_name()
+    tcode_traverse::native_host::default_device_name()
 }
 
 /// One hosting settings row: label and description left, control right. A

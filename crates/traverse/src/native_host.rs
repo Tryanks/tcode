@@ -1,4 +1,5 @@
-//! Native implementation of the transport-agnostic client host contract.
+//! Native implementation of the transport-agnostic client host contract,
+//! shared by the desktop, iOS and Android bootstraps.
 
 use std::{
     fs, io,
@@ -8,7 +9,8 @@ use std::{
 
 use tcode_client::host::{ClientHost, ClientPreferences, HostFuture, Transport};
 use tcode_client::pairing::{PairInvite, PairedHost};
-use tcode_traverse::DeviceIdentity;
+
+use crate::identity::DeviceIdentity;
 
 type QrScanner = dyn Fn() -> HostFuture<'static, Result<String, String>>;
 type EditorOpener = dyn Fn(&Path) -> Result<(), String>;
@@ -44,10 +46,7 @@ impl NativeClientHost {
             .device
             .get_or_init(|| {
                 DeviceIdentity::load_or_create(&self.data_dir).map_err(|error| {
-                    format!(
-                        "could not open {}: {error}",
-                        tcode_traverse::identity::DEVICE_FILE
-                    )
+                    format!("could not open {}: {error}", crate::identity::DEVICE_FILE)
                 })
             })
             .clone()?;
@@ -188,20 +187,20 @@ impl ClientHost for NativeClientHost {
     }
 
     fn load_hosts(&self) -> Vec<PairedHost> {
-        tcode_traverse::hosts::load_hosts(&self.data_dir).unwrap_or_else(|error| {
+        crate::hosts::load_hosts(&self.data_dir).unwrap_or_else(|error| {
             log::error!("could not read hosts.json: {error}");
             Vec::new()
         })
     }
 
     fn save_hosts(&self, hosts: &[PairedHost]) {
-        if let Err(error) = tcode_traverse::hosts::save_hosts(&self.data_dir, hosts) {
+        if let Err(error) = crate::hosts::save_hosts(&self.data_dir, hosts) {
             log::error!("could not write hosts.json: {error}");
         }
     }
 
     fn remember_host(&self, host: PairedHost) {
-        if let Err(error) = tcode_traverse::hosts::update_hosts(&self.data_dir, |hosts| {
+        if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
             tcode_client::pairing::remember_host(hosts, host);
         }) {
             log::error!("could not save paired machine: {error}");
@@ -209,7 +208,7 @@ impl ClientHost for NativeClientHost {
     }
 
     fn remove_host(&self, host_id: &str) {
-        if let Err(error) = tcode_traverse::hosts::update_hosts(&self.data_dir, |hosts| {
+        if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
             hosts.retain(|host| host.host_id != host_id);
         }) {
             log::error!("could not remove paired machine: {error}");
@@ -217,7 +216,7 @@ impl ClientHost for NativeClientHost {
     }
 
     fn stamp_connected(&self, host_id: &str, timestamp: u64) {
-        if let Err(error) = tcode_traverse::hosts::update_hosts(&self.data_dir, |hosts| {
+        if let Err(error) = crate::hosts::update_hosts(&self.data_dir, |hosts| {
             if let Some(host) = hosts.iter_mut().find(|host| host.host_id == host_id) {
                 host.last_connected_unix = Some(timestamp);
             }
@@ -249,8 +248,8 @@ impl ClientHost for NativeClientHost {
         Box::pin(async move {
             let device = device?;
             let (done, result) = async_channel::bounded(1);
-            tcode_traverse::runtime().spawn(async move {
-                let paired = tcode_traverse::pair(&invite, &device)
+            crate::runtime().spawn(async move {
+                let paired = crate::pair(&invite, &device)
                     .await
                     .map_err(|error| error.to_string());
                 let _ = done.send(paired).await;
@@ -268,7 +267,7 @@ impl ClientHost for NativeClientHost {
 
     fn connect(&self, host: &PairedHost) -> Transport {
         match self.device() {
-            Ok(device) => tcode_traverse::connect(host, &device),
+            Ok(device) => crate::connect(host, &device),
             Err(error) => {
                 // A link that reports itself offline instead of a panic in
                 // the shell; the profile directory is the thing to fix.
@@ -556,7 +555,7 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel();
         let transport_dir = dir.0.clone();
         let transport = std::thread::spawn(move || {
-            tcode_traverse::hosts::update_hosts(&transport_dir, |hosts| {
+            crate::hosts::update_hosts(&transport_dir, |hosts| {
                 hosts[0].addrs.insert(0, "192.168.1.161:47420".into());
                 locked.send(()).unwrap();
                 released.recv().unwrap();
@@ -644,8 +643,12 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            let path = std::env::temp_dir()
-                .join(format!("tcode-native-client-host-{}", uuid::Uuid::new_v4()));
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "tcode-native-client-host-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
