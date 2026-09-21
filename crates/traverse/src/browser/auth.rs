@@ -1,5 +1,7 @@
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
+//! `remote.json`: the browser listener's password and the tokens it issued.
+//! Native devices live in `traverse.json`; nothing here is shared with them.
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,16 +13,14 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AuthStore {
+    /// What a browser records this machine under; unrelated to the
+    /// Traverse `EndpointId`, which no browser ever dials.
     pub host_id: Uuid,
     pub host_name: String,
     #[serde(default)]
     pub devices: Vec<Device>,
     #[serde(default)]
     password: Option<PasswordHash>,
-    /// Retained for `traverse.json`, which adopts this seed as the machine's
-    /// iroh key when it is first created; never generated here any more.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    identity_seed: Option<[u8; 32]>,
     #[serde(skip)]
     failures: u8,
     #[serde(skip)]
@@ -79,7 +79,6 @@ impl AuthStore {
                     host_name: host_name.to_owned(),
                     devices: Vec::new(),
                     password: None,
-                    identity_seed: None,
                     failures: 0,
                     locked_until: None,
                     path,
@@ -218,6 +217,25 @@ impl AuthStore {
         self.device_for_token(token).is_some()
     }
 
+    /// The record `token` authenticates as, if any.
+    pub fn device_id_for_token(&self, token: &str) -> Option<Uuid> {
+        self.device_for_token(token)
+            .map(|index| self.devices[index].id)
+    }
+
+    /// Forget a device; its token stops validating. Returns whether it was
+    /// listed.
+    pub fn revoke(&mut self, id: Uuid) -> io::Result<bool> {
+        if !self.devices.iter().any(|device| device.id == id) {
+            return Ok(false);
+        }
+        let mut updated = self.clone();
+        updated.devices.retain(|device| device.id != id);
+        updated.save()?;
+        *self = updated;
+        Ok(true)
+    }
+
     fn device_for_token(&self, token: &str) -> Option<usize> {
         if token.len() != 43 {
             return None;
@@ -233,18 +251,7 @@ impl AuthStore {
 
     pub(crate) fn save(&self) -> io::Result<()> {
         let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let temporary = self.path.with_extension("json.tmp");
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        fs::rename(temporary, &self.path)
+        crate::identity::write_private(&self.path, &bytes)
     }
 }
 
@@ -369,7 +376,7 @@ mod tests {
             .unwrap();
         // A directory in place of the temporary file deterministically fails
         // save on every platform, without relying on writable-user permissions.
-        fs::create_dir(root.join("remote.json.tmp")).unwrap();
+        fs::create_dir(root.join("remote.tmp")).unwrap();
         assert!(
             auth.issue_token(Some("phone-id".into()), phone("Renamed"))
                 .is_err()
@@ -380,7 +387,7 @@ mod tests {
         );
         assert!(auth.refresh_device(&token, phone("Renamed")).is_err());
         assert_eq!(auth.devices[0].name, "Phone");
-        fs::remove_dir(root.join("remote.json.tmp")).unwrap();
+        fs::remove_dir(root.join("remote.tmp")).unwrap();
         auth.refresh_device(&token, phone("Renamed")).unwrap();
         assert_eq!(
             AuthStore::open(&root, "host").unwrap().devices[0].name,
@@ -404,8 +411,7 @@ mod tests {
                 "token_sha256_hex": "00",
                 "created_unix": 1700000000
               }],
-              "password": null,
-              "pairing_enabled": true
+              "password": null
             }"#,
         )
         .unwrap();

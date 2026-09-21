@@ -49,9 +49,7 @@ fn enabled() -> bool {
 pub const HOST_FILE: &str = "traverse.json";
 
 impl HostIdentity {
-    /// Load the machine identity, or create one. A `remote.json` written by
-    /// the retired transport donates its identity seed so the machine keeps
-    /// the key it already had; devices must pair again either way.
+    /// Load the machine identity, or create one.
     pub fn load_or_create(data_dir: &Path, host_name: &str) -> io::Result<Self> {
         fs::create_dir_all(data_dir)?;
         let path = data_dir.join(HOST_FILE);
@@ -78,12 +76,9 @@ impl HostIdentity {
                 Ok(identity)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let secret_key = legacy_seed(data_dir)
-                    .map(|seed| SecretKey::from_bytes(&seed))
-                    .unwrap_or_else(SecretKey::generate);
                 let identity = Self {
                     host_name: host_name.to_owned(),
-                    secret_key,
+                    secret_key: SecretKey::generate(),
                     devices: Vec::new(),
                     pairing_enabled: true,
                     path,
@@ -142,12 +137,6 @@ impl HostIdentity {
         self.devices.retain(|device| device.id != id);
         self.devices.len() != before
     }
-}
-
-fn legacy_seed(data_dir: &Path) -> Option<[u8; 32]> {
-    let bytes = fs::read(data_dir.join("remote.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    serde_json::from_value(value.get("identity_seed")?.clone()).ok()
 }
 
 /// `device.json`: this device's key and how it introduces itself. Cloning
@@ -351,20 +340,9 @@ mod tests {
     }
 
     #[test]
-    fn host_identity_survives_restart_and_adopts_the_legacy_seed() {
+    fn host_identity_survives_restart() {
         let dir = temp_dir("host");
-        let seed = [7_u8; 32];
-        fs::write(
-            dir.join("remote.json"),
-            serde_json::json!({"host_id":"x","host_name":"Old","identity_seed":seed}).to_string(),
-        )
-        .unwrap();
         let mut identity = HostIdentity::load_or_create(&dir, "Desk").unwrap();
-        assert_eq!(
-            identity.endpoint_id(),
-            SecretKey::from_bytes(&seed).public(),
-            "the machine keeps the key it already had"
-        );
         let phone = SecretKey::generate().public();
         identity.admit(&phone, "Phone".into(), Some("Android 15".into()));
         identity.pairing_enabled = false;

@@ -10,9 +10,9 @@ use gpui::{
 };
 use tcode_client::{HostLink, host::ClientHost as _, host::Transport};
 use tcode_protocol::{Command, CommandResponse};
-use tcode_remote::{HostMux, NativeClientHost};
 use tcode_runtime::pipe::{HostServices, SpawnedHost, spawn_host};
 use tcode_services::{shell_env, store::SessionStore};
+use tcode_traverse::{HostMux, NativeClientHost};
 use tcode_ui::remote::{AttachmentTarget, RemoteController, machine_name};
 use tcode_ui::{AppShell, Quit, ShellOptions, ShellSetup, WindowState, theme::ActiveTheme as _};
 use tcode_ui::{assets, settings};

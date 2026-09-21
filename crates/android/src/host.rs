@@ -20,7 +20,7 @@ use jni::{
     refs::Global,
 };
 use tcode_client::host::HostFuture;
-use tcode_remote::NativeClientHost;
+use tcode_traverse::NativeClientHost;
 
 const RESULT_OK: i32 = 0;
 const RESULT_CANCELLED: i32 = 1;

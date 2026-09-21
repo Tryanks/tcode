@@ -5,7 +5,7 @@ use std::time::Duration;
 use tcode_protocol::{
     ExternalImportState, ExternalImportStatus, ExternalThread, SessionSearchHit, SourceTool,
 };
-use tcode_remote::HostMux;
+use tcode_traverse::HostMux;
 
 pub(super) fn linked(mux: &HostMux) -> HostLink {
     let connection = mux.attach();

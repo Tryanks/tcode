@@ -2,27 +2,32 @@
 //! machine. Each accepted loopback connection becomes one Preview tunnel on
 //! the attachment's Traverse connection: the machine dials the requested
 //! `host:port` itself, so a dev server bound to its loopback is reachable and
-//! nothing here rewrites page URLs.
+//! nothing here rewrites page URLs. Listeners and their connections run on
+//! the Traverse runtime and end when their owner is dropped.
 use std::{
     collections::HashMap,
     io,
-    net::{IpAddr, Shutdown},
+    net::IpAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use futures_lite::{
-    future,
-    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
-};
-use smol::net::{TcpListener, TcpStream};
+use futures_lite::io::AsyncWriteExt as _;
 use tcode_client::{
     host::{Tunnel, TunnelOpener},
     pairing::PairedHost,
 };
+use tokio::{
+    io::{AsyncBufRead, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, BufReader},
+    net::{TcpListener, TcpStream},
+    task::JoinSet,
+};
 use url::Url;
 
-use crate::wire::{MAX_HEAD_BYTES, Request, read_request, response};
+use crate::{
+    http::{MAX_HEAD_BYTES, Request, read_request, response},
+    runtime::runtime,
+};
 
 /// One attachment's paired machine and the tunnels to it. Updating it
 /// retains browser loopback addresses and history and retires connections
@@ -109,10 +114,56 @@ impl PreviewEndpoint {
     }
 }
 
+/// A runtime task that ends with its handle, as do the tasks it spawned
+/// into its own [`JoinSet`].
+struct Task(tokio::task::JoinHandle<()>);
+
+impl Task {
+    fn spawn(future: impl Future<Output = ()> + Send + 'static) -> Self {
+        Self(runtime().spawn(future))
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Accept on `listener` until dropped, running `serve` for each connection
+/// against the endpoint's connection at accept time and until that
+/// connection is retired.
+fn accept_loop<F, Fut>(listener: TcpListener, host: PreviewEndpoint, serve: F) -> Task
+where
+    F: Fn(TcpStream, PreviewConnection) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    Task::spawn(async move {
+        let mut connections = JoinSet::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            let connection = host.connection();
+            let retired = connection.retired.clone();
+            let served = serve(socket, connection);
+            connections.spawn(async move {
+                tokio::select! {
+                    () = served => {}
+                    _ = retired.recv() => {}
+                }
+            });
+        }
+    })
+}
+
+fn into_tokio(listener: std::net::TcpListener) -> io::Result<TcpListener> {
+    listener.set_nonblocking(true)?;
+    let _guard = runtime().enter();
+    TcpListener::from_std(listener)
+}
+
 struct Route {
     remote: Url,
     port: u16,
-    _listeners: Vec<smol::Task<()>>,
+    _listeners: Vec<Task>,
 }
 
 /// One browser's mapping identity and local socket lifetime. Public/LAN URLs
@@ -216,39 +267,26 @@ impl PreviewRoutes {
                 .port();
             let mut tasks = Vec::new();
             for listener in listeners {
-                let listener = TcpListener::try_from(listener)
-                    .map_err(|_| "Could not start preview listener")?;
-                let host = self.host.clone();
+                let listener =
+                    into_tokio(listener).map_err(|_| "Could not start preview listener")?;
                 let destination = destination.clone();
                 let error = self.error.clone();
                 let changed = self.changed.clone();
-                tasks.push(smol::spawn(async move {
-                    let mut connections = Vec::new();
-                    while let Ok((socket, _)) = listener.accept().await {
-                        connections.retain(|task: &smol::Task<()>| !task.is_finished());
-                        let connection = host.connection();
+                tasks.push(accept_loop(
+                    listener,
+                    self.host.clone(),
+                    move |socket, connection| {
                         let destination = destination.clone();
                         let error = error.clone();
                         let changed = changed.clone();
-                        connections.push(smol::spawn(async move {
-                            future::race(
-                                async {
-                                    if let Err(failure) =
-                                        forward(socket, &connection, &destination).await
-                                    {
-                                        *error.lock().unwrap() =
-                                            Some((destination, failure.to_string()));
-                                        let _ = changed.try_send(());
-                                    }
-                                },
-                                async {
-                                    let _ = connection.retired.recv().await;
-                                },
-                            )
-                            .await;
-                        }));
-                    }
-                }));
+                        async move {
+                            if let Err(failure) = forward(socket, &connection, &destination).await {
+                                *error.lock().unwrap() = Some((destination, failure.to_string()));
+                                let _ = changed.try_send(());
+                            }
+                        }
+                    },
+                ));
             }
             self.routes.insert(
                 destination,
@@ -339,7 +377,8 @@ async fn forward(
     let (host, port) = split_authority(destination)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid preview port"))?;
     let tunnel = connection.tunnel(host, port).await?;
-    let _ = pipe(socket, tunnel).await;
+    let (read, write) = socket.into_split();
+    let _ = pipe(read, write, tunnel).await;
     Ok(())
 }
 
@@ -351,23 +390,64 @@ fn split_authority(authority: &str) -> Option<(&str, u16)> {
 /// Copy bytes both ways until both directions have ended. The browser's
 /// write shutdown finishes the tunnel; the tunnel's end shuts down the
 /// browser socket's write half.
-async fn pipe(socket: TcpStream, tunnel: Tunnel) -> io::Result<()> {
+async fn pipe<R, W>(mut browser_read: R, mut browser_write: W, tunnel: Tunnel) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let Tunnel {
         mut read,
         mut write,
     } = tunnel;
-    future::try_zip(
+    tokio::try_join!(
         async {
-            futures_lite::io::copy(&mut socket.clone(), &mut write).await?;
+            copy_to_tunnel(&mut browser_read, &mut write, u64::MAX).await?;
             write.close().await
         },
         async {
-            futures_lite::io::copy(&mut read, &mut socket.clone()).await?;
-            socket.shutdown(Shutdown::Write)
+            copy_from_tunnel(&mut read, &mut browser_write).await?;
+            browser_write.shutdown().await
         },
     )
-    .await
     .map(|_| ())
+}
+
+/// Copy up to `limit` bytes from a runtime socket into a tunnel's write half.
+async fn copy_to_tunnel<R, W>(reader: &mut R, writer: &mut W, limit: u64) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: futures_lite::AsyncWrite + Unpin,
+{
+    let mut bytes = [0_u8; 16 * 1024];
+    let mut remaining = limit;
+    while remaining > 0 {
+        let window = bytes
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let count = tokio::io::AsyncReadExt::read(reader, &mut bytes[..window]).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        remaining -= count as u64;
+        futures_lite::AsyncWriteExt::write_all(writer, &bytes[..count]).await?;
+    }
+    Ok(())
+}
+
+/// Copy a tunnel's read half into a runtime socket until the tunnel ends.
+async fn copy_from_tunnel<R, W>(reader: &mut R, writer: &mut W) -> io::Result<()>
+where
+    R: futures_lite::AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut bytes = [0_u8; 16 * 1024];
+    loop {
+        let count = futures_lite::AsyncReadExt::read(reader, &mut bytes).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        tokio::io::AsyncWriteExt::write_all(writer, &bytes[..count]).await?;
+    }
 }
 
 /// Attachment-owned loopback HTTP proxy for browser engines that need an
@@ -377,7 +457,7 @@ async fn pipe(socket: TcpStream, tunnel: Tunnel) -> io::Result<()> {
 /// Dropping the proxy cancels its listener and all accepted connections.
 pub struct NativeProxy {
     origin: String,
-    _listener: smol::Task<()>,
+    _listener: Task,
 }
 
 impl NativeProxy {
@@ -387,25 +467,10 @@ impl NativeProxy {
             "http://{}",
             listener.local_addr().map_err(|e| e.to_string())?
         );
-        let listener = TcpListener::try_from(listener).map_err(|e| e.to_string())?;
-        let task = smol::spawn(async move {
-            let mut connections = Vec::new();
-            while let Ok((browser, _)) = listener.accept().await {
-                connections.retain(|task: &smol::Task<()>| !task.is_finished());
-                let connection = host.connection();
-                connections.push(smol::spawn(async move {
-                    future::race(
-                        async {
-                            if let Err(error) = proxy(browser, &connection).await {
-                                log::debug!("preview proxy connection ended: {error}");
-                            }
-                        },
-                        async {
-                            let _ = connection.retired.recv().await;
-                        },
-                    )
-                    .await;
-                }));
+        let listener = into_tokio(listener).map_err(|e| e.to_string())?;
+        let task = accept_loop(listener, host, |browser, connection| async move {
+            if let Err(error) = proxy(browser, &connection).await {
+                log::debug!("preview proxy connection ended: {error}");
             }
         });
         Ok(Self {
@@ -442,12 +507,14 @@ fn hop_by_hop(name: &str, nominated: &str) -> bool {
             .any(|nominee| nominee.trim().eq_ignore_ascii_case(name)))
 }
 
-async fn proxy(mut browser: TcpStream, connection: &PreviewConnection) -> io::Result<()> {
-    let request = match read_request(&mut browser).await {
+async fn proxy(browser: TcpStream, connection: &PreviewConnection) -> io::Result<()> {
+    let (browser_read, mut browser_write) = browser.into_split();
+    let mut browser_read = BufReader::new(browser_read);
+    let request = match read_request(&mut browser_read).await {
         Ok(request) => request,
         Err(error) => {
             response(
-                &mut browser,
+                &mut browser_write,
                 "400 Bad Request",
                 "text/plain",
                 b"malformed request",
@@ -472,7 +539,7 @@ async fn proxy(mut browser: TcpStream, connection: &PreviewConnection) -> io::Re
     });
     let Some(target) = target else {
         response(
-            &mut browser,
+            &mut browser_write,
             "400 Bad Request",
             "text/plain",
             b"expected CONNECT host:port or an absolute-form request",
@@ -496,7 +563,7 @@ async fn proxy(mut browser: TcpStream, connection: &PreviewConnection) -> io::Re
         || (request.headers.contains_key("content-length") && length.is_none())
     {
         response(
-            &mut browser,
+            &mut browser_write,
             "400 Bad Request",
             "text/plain",
             b"ambiguous request framing",
@@ -517,7 +584,7 @@ async fn proxy(mut browser: TcpStream, connection: &PreviewConnection) -> io::Re
         Ok(tunnel) => tunnel,
         Err(error) => {
             response(
-                &mut browser,
+                &mut browser_write,
                 "502 Bad Gateway",
                 "text/plain",
                 error.to_string().as_bytes(),
@@ -531,7 +598,7 @@ async fn proxy(mut browser: TcpStream, connection: &PreviewConnection) -> io::Re
         mut write,
     } = tunnel;
     if connect {
-        browser
+        browser_write
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
     } else {
@@ -540,55 +607,29 @@ async fn proxy(mut browser: TcpStream, connection: &PreviewConnection) -> io::Re
             .await?;
     }
     if connect || upgrade {
-        return future::try_zip(
-            async {
-                futures_lite::io::copy(&mut browser.clone(), &mut write).await?;
-                write.close().await
-            },
-            async {
-                futures_lite::io::copy(&mut read, &mut browser.clone()).await?;
-                browser.shutdown(Shutdown::Write)
-            },
-        )
-        .await
-        .map(|_| ());
+        return pipe(browser_read, browser_write, Tunnel { read, write }).await;
     }
-    future::race(
-        async {
-            upload(
-                &mut browser.clone(),
-                &mut write,
-                length.unwrap_or(0),
-                chunked.is_some(),
-            )
-            .await?;
+    tokio::select! {
+        result = async {
+            upload(&mut browser_read, &mut write, length.unwrap_or(0), chunked.is_some()).await?;
             // One request per connection: whatever the browser pipelines
             // after the body is never forwarded.
             std::future::pending::<io::Result<()>>().await
-        },
-        async {
-            futures_lite::io::copy(&mut read, &mut browser.clone()).await?;
-            Ok(())
-        },
-    )
-    .await?;
+        } => result?,
+        result = copy_from_tunnel(&mut read, &mut browser_write) => result?,
+    }
     // Finish with FIN, not RST: dropping the socket while pipelined bytes
     // sit unread resets the connection, and Windows discards the
     // already-sent response on reset. Discard what the browser sent until
     // it closes.
-    browser.shutdown(Shutdown::Write)?;
-    future::race(
-        async {
-            let mut sink = [0; 1024];
-            while browser.read(&mut sink).await? != 0 {}
-            Ok(())
-        },
-        async {
-            smol::Timer::after(Duration::from_secs(1)).await;
-            Ok(())
-        },
-    )
-    .await
+    browser_write.shutdown().await?;
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut sink = [0; 1024];
+        while browser_read.read(&mut sink).await? != 0 {}
+        io::Result::Ok(())
+    })
+    .await;
+    Ok(())
 }
 
 /// The request head as the origin sees it: origin-form target, its own
@@ -624,15 +665,13 @@ fn origin_form(request: &Request, target: &Url, upgrade: bool) -> String {
 
 /// Forward exactly the declared body: `length` bytes, or chunks re-framed
 /// so trailers and anything after the last chunk stay behind.
-async fn upload(
-    reader: &mut (impl AsyncRead + Unpin),
-    writer: &mut (impl AsyncWrite + Unpin),
-    length: u64,
-    chunked: bool,
-) -> io::Result<()> {
+async fn upload<R, W>(reader: &mut R, writer: &mut W, length: u64, chunked: bool) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: futures_lite::AsyncWrite + Unpin,
+{
     if !chunked {
-        futures_lite::io::copy(reader.take(length), writer).await?;
-        return Ok(());
+        return copy_to_tunnel(reader, writer, length).await;
     }
     loop {
         let line = line_read(reader).await?;
@@ -654,7 +693,7 @@ async fn upload(
             return Ok(());
         }
         writer.write_all(format!("{size:x}\r\n").as_bytes()).await?;
-        futures_lite::io::copy(reader.take(size), &mut *writer).await?;
+        copy_to_tunnel(reader, writer, size).await?;
         let mut crlf = [0; 2];
         reader.read_exact(&mut crlf).await?;
         if crlf != *b"\r\n" {

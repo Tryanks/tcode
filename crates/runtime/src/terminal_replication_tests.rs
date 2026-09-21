@@ -12,7 +12,7 @@ use super::*;
 use tcode_protocol::terminal::{
     CellWidth, HISTORY_LIMIT, TerminalCell, TerminalFrame, TerminalLink, TerminalRow, TerminalStyle,
 };
-use tcode_remote::HostMux;
+use tcode_traverse::HostMux;
 
 /// A client's replicated grid: the subscription frame plus every delta since.
 struct Replica {

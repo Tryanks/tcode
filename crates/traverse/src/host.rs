@@ -922,7 +922,7 @@ async fn refuse(mut send: SendStream, reason: &str) -> io::Result<()> {
 }
 
 /// A client-minted key is one UUID; the host adds the device scope itself.
-fn valid_key(key: &str) -> bool {
+pub(crate) fn valid_key(key: &str) -> bool {
     key.len() == 36
         && key.bytes().enumerate().all(|(index, byte)| {
             if matches!(index, 8 | 13 | 18 | 23) {
