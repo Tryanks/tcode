@@ -119,7 +119,7 @@ impl RemoteController {
         self.host.as_ref().map(TraverseHost::endpoint_id)
     }
 
-    /// Bind the endpoint on `port`, advertise on the LAN and mint a first code.
+    /// Bind the endpoint on `port` and mint a first code.
     pub fn start_hosting(&mut self, port: u16, host_name: String) -> Result<(), String> {
         if self.host.is_some() {
             return Ok(());
@@ -131,7 +131,6 @@ impl RemoteController {
                 data_dir: self.data_dir.clone(),
                 traverse: TraverseMode::Official,
                 pairing_enabled: true,
-                lan_discovery: true,
                 bind_port: Some(port),
             },
         )
