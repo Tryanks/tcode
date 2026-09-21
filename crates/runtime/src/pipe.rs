@@ -443,6 +443,10 @@ fn dispatch_command(app: &mut AppState, cx: &mut HostCx, command: Command) -> Co
         Command::ToggleProjectCollapsed { project_id } => {
             app.toggle_project_collapsed(&project_id, cx)
         }
+        Command::SetThreadCollapsed {
+            session_id,
+            collapsed,
+        } => app.set_thread_collapsed(&session_id, collapsed, cx),
         Command::PatchSettings { patch } => app.patch_settings(patch, cx),
         Command::SettleSession { session_id } => app.settle_session(&session_id, cx),
         Command::MakeSessionActive { session_id } => app.make_session_active(&session_id, cx),

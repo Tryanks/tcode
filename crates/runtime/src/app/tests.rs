@@ -525,6 +525,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         },
     );
     settings.collapsed_projects.push("project".into());
+    settings.collapsed_threads.push("parent".into());
     settings.favorite_models.push("gpt-5.6-sol".into());
     settings.sidebar_collapsed = true;
     settings.project_sort = tcode_core::settings::ProjectSort::NameAsc;
@@ -556,6 +557,7 @@ fn reset_settings_clears_preferences_but_keeps_credentials_installs_and_unknown_
         assert_eq!(reset.claude_binary, Some(PathBuf::from("/custom/claude")));
         assert!(reset.acp_agents.contains_key("first"));
         assert_eq!(reset.collapsed_projects, vec!["project".to_string()]);
+        assert_eq!(reset.collapsed_threads, vec!["parent".to_string()]);
         assert_eq!(reset.favorite_models, vec!["gpt-5.6-sol".to_string()]);
         assert!(reset.sidebar_collapsed);
         assert_eq!(
@@ -780,6 +782,115 @@ fn scripted_provider_connects_command_launch_and_agent_event_paths() {
     )));
     state.read(|state| {
         assert!(state.selected_session().unwrap().turn_in_flight);
+    });
+}
+
+#[test]
+fn host_start_folds_only_parents_with_visible_children() {
+    let mut archived_child = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
+    archived_child.id = "archived-child".into();
+    archived_child.parent_session_id = Some("quiet-parent".into());
+    archived_child.archived_at = Some(1);
+    let mut sessions = Vec::new();
+    for (id, parent) in [
+        ("parent-a", None),
+        ("child-a", Some("parent-a")),
+        ("parent-b", None),
+        ("child-b", Some("parent-b")),
+        ("grandchild-b", Some("child-b")),
+        ("plain", None),
+        ("quiet-parent", None),
+        ("orphan", Some("missing-parent")),
+    ] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, PathBuf::from("/p"), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_string);
+        sessions.push(meta);
+    }
+    sessions.push(archived_child);
+
+    assert_eq!(
+        startup_collapsed_threads(&sessions),
+        ["parent-a", "parent-b", "child-b"].map(String::from),
+        "every parent of a visible child starts folded; leaves, a parent \
+         whose only child is archived, and a parent id no session carries \
+         (its orphans would be hidden with no row to unfold) do not"
+    );
+}
+
+#[test]
+fn thread_fold_is_host_state_shared_over_the_pipe_and_pruned_with_the_thread() {
+    let cx = &mut TestAppContext::default();
+    let test_store = TestStore::new("tcode-thread-fold-test");
+    let root = test_store.root().clone();
+    let store = (*test_store).clone();
+    for (id, parent) in [("parent", None), ("child", Some("parent"))] {
+        let mut meta = SessionMeta::new(ProviderKind::Codex, root.clone(), None);
+        meta.id = id.into();
+        meta.parent_session_id = parent.map(str::to_string);
+        store.upsert_meta(&meta).unwrap();
+    }
+    let state = cx.new_entity(TestClientState::new(store.clone()));
+    state.update(cx, |state, _| {
+        assert_eq!(
+            state.settings.collapsed_threads,
+            vec!["parent".to_string()],
+            "a parent that already has a child starts folded"
+        );
+    });
+    cx.run_until_parked();
+    cx.drain_outgoing();
+
+    state.dispatch_command(
+        cx,
+        7,
+        Command::SetThreadCollapsed {
+            session_id: "parent".into(),
+            collapsed: false,
+        },
+    );
+    state.dispatch_command(
+        cx,
+        8,
+        Command::SetThreadCollapsed {
+            session_id: "missing".into(),
+            collapsed: true,
+        },
+    );
+    cx.run_until_parked();
+    let outgoing = cx.drain_outgoing();
+    assert!(outgoing.iter().any(|message| matches!(
+        message,
+        HostMessage::Ack {
+            id: 7,
+            result: Ok(CommandResponse::Unit)
+        }
+    )));
+    assert!(
+        outgoing.iter().any(|message| matches!(message,
+            HostMessage::Ack { id: 8, result: Err(error) } if error.code == "unknown_session"
+        )),
+        "folding an unknown thread is rejected instead of stored"
+    );
+    assert!(
+        outgoing.iter().any(|message| matches!(message,
+            HostMessage::Event(EventEnvelope {
+                topic: Topic::Settings,
+                event: ServerEvent::SettingsReplaced(settings),
+                ..
+            }) if settings.collapsed_threads.is_empty()
+        )),
+        "every client learns the fold from the settings topic"
+    );
+
+    state.update(cx, |state, cx| {
+        state.set_thread_collapsed("parent", true, cx);
+        assert_eq!(state.settings.collapsed_threads, vec!["parent".to_string()]);
+        state.delete_session("parent", false, cx);
+        assert!(
+            state.settings.collapsed_threads.is_empty(),
+            "a deleted thread leaves no fold behind"
+        );
     });
 }
 

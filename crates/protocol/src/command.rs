@@ -222,6 +222,11 @@ pub enum Command {
     ToggleProjectCollapsed {
         project_id: String,
     },
+    /// Fold or unfold a parent thread's child rows in every client's list.
+    SetThreadCollapsed {
+        session_id: String,
+        collapsed: bool,
+    },
     PatchSettings {
         patch: SettingsPatch,
     },

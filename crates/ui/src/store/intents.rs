@@ -491,6 +491,12 @@ impl WorkspaceStore {
     pub fn toggle_project_collapsed(&mut self, project_id: String) {
         self.dispatch(Command::ToggleProjectCollapsed { project_id });
     }
+    pub fn set_thread_collapsed(&mut self, session_id: String, collapsed: bool) {
+        self.dispatch(Command::SetThreadCollapsed {
+            session_id,
+            collapsed,
+        });
+    }
     pub fn delete_project(&mut self, project_id: String) {
         self.dispatch(Command::DeleteProject { project_id });
     }

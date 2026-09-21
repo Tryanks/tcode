@@ -532,6 +532,26 @@ impl AppState {
         self.update_settings(settings, cx);
     }
 
+    /// Fold or unfold a parent thread's children (persisted in settings, so
+    /// every attached client renders the same list).
+    pub fn set_thread_collapsed(&mut self, session_id: &str, collapsed: bool, cx: &mut HostCx) {
+        let folded = self
+            .settings
+            .collapsed_threads
+            .iter()
+            .any(|id| id == session_id);
+        if folded == collapsed {
+            return;
+        }
+        let mut settings = self.settings.clone();
+        if collapsed {
+            settings.collapsed_threads.push(session_id.to_string());
+        } else {
+            settings.collapsed_threads.retain(|id| id != session_id);
+        }
+        self.update_settings(settings, cx);
+    }
+
     pub(crate) fn resident(&self, id: &str) -> Option<&ActiveSession> {
         self.residents.resident(id)
     }
@@ -960,6 +980,9 @@ impl AppState {
             })
         });
         self.settings.last_visited.remove(session_id);
+        self.settings
+            .collapsed_threads
+            .retain(|id| id != session_id);
         self.enqueue_store_write(StoreWrite::RemoveSession(session_id.to_string()), cx);
         // Persist the pruned last-visited map (ignore save errors — cosmetic).
         self.persist_settings(cx);

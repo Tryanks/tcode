@@ -253,6 +253,7 @@ impl AppState {
             acp_agents: self.settings.acp_agents.clone(),
             sidebar_collapsed: self.settings.sidebar_collapsed,
             collapsed_projects: self.settings.collapsed_projects.clone(),
+            collapsed_threads: self.settings.collapsed_threads.clone(),
             favorite_models: self.settings.favorite_models.clone(),
             project_sort: self.settings.project_sort,
             sidebar_layout: self.settings.sidebar_layout,
