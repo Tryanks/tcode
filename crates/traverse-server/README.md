@@ -1,0 +1,136 @@
+# tcode-traverse
+
+One binary that is a complete Traverse instance for Tcode: an
+[iroh](https://iroh.computer) relay with QUIC address discovery, a pkarr
+store for endpoint lookup, and the `relays.json` manifest a Tcode machine
+reads to use it. It is the same server for any operator; there is nothing
+that only an official instance can do.
+
+## Run
+
+```sh
+tcode-traverse --print-default-config > traverse.toml   # edit hostname, contact, data_dir
+tcode-traverse --config traverse.toml
+```
+
+Ports, with the defaults:
+
+| Port | Protocol | Purpose |
+| --- | --- | --- |
+| 443 | TCP, HTTPS | relay (`/relay` WebSocket), `/pkarr/<key>`, `/relays.json`, `/healthz` |
+| 80 | TCP, HTTP | the same routes without the relay; everything with `tls.mode = "off"` |
+| 7842 | UDP, QUIC | address discovery (skipped when `tls.mode = "off"`) |
+| 9090 | TCP, loopback | Prometheus metrics (`[metrics] bind`; absent means off) |
+
+A Tcode machine needs public TCP 443 and UDP 7842 on the instance plus a
+domain and certificate. Without UDP 7842 the manifest marks the relay as
+relay-only (`"quic_port": 0`) and devices skip hole punching through it.
+
+`tcode-traverse --dev` serves plain HTTP on `127.0.0.1:8080` with the store in
+`./tcode-traverse-dev`: no TLS, no QUIC address discovery, no metrics.
+`RUST_LOG` controls logging (`info` by default).
+
+## TLS
+
+`[tls] mode`:
+
+- `letsencrypt` — ACME over TLS-ALPN-01 on the `tls.bind` port; needs
+  `hostname` and `contact`. Certificates are cached in `<data_dir>/acme`.
+  `acme_directory` points at staging or a local ACME server.
+- `manual` — `cert` and `key` are PEM files read once at start.
+- `reloading` — like `manual`, re-read once a day, for certificates renewed by
+  another tool.
+- `off` — plain HTTP on `http.bind`. Use it behind a reverse proxy that
+  terminates TLS and forwards WebSocket upgrades (`hostname` still names the
+  public `https://` URL), or for development. QUIC address discovery is
+  unavailable in this mode.
+
+## Manifest
+
+`GET /relays.json` describes the instance to clients:
+
+```json
+{
+  "version": 1,
+  "updatedAt": "2026-09-21T00:00:00Z",
+  "relays": [
+    { "url": "https://traverse.example.org/", "quic_port": 7842, "region": "eu-central" }
+  ],
+  "pkarr": ["https://traverse.example.org/pkarr"],
+  "dns": []
+}
+```
+
+`updatedAt` is the config file's modification time. `[[peers]]` entries are
+appended to `relays`; `home_rtt_max_ms` appears when the region lock is on.
+
+## pkarr store
+
+`PUT /pkarr/<z32 endpoint id>` stores a signed packet (signature verified,
+at most 1072 bytes, `409` when a newer packet is stored, `400` when invalid,
+`413` when oversized, `429` above `pkarr.put_per_second`/`put_burst` per IP).
+`GET` returns it with `Cache-Control: public, max-age=300`, `404` when
+unknown. `/<key>` at the root is accepted too. Records not refreshed within
+`pkarr.eviction` are removed. Behind a reverse proxy set
+`[http] trust_forwarded_for = true` so the limit counts the client, not the
+proxy.
+
+## Region lock
+
+An instance can keep its relay for the clients that are close to it. With
+`[lock] enabled = true` a relay connection is admitted when its TCP RTT is at
+most `home_rtt_max_ms`, or its address is in `allow_cidrs`; every other client
+shares `far_connection_quota` concurrent connections and is refused, with a
+reason the client shows, once that is used up.
+
+iroh-relay only hands the access hook the HTTP upgrade request, not the
+socket, so the lock reads headers a reverse proxy adds: `X-TCP-RTT` in
+microseconds and `X-Forwarded-For`. **It does nothing useful without such a
+proxy** — every client then counts as far — and it is off by default. With
+nginx in front of `tls.mode = "off"` and `[http] bind = "127.0.0.1:8080"`:
+
+```nginx
+location /relay {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-TCP-RTT $tcpinfo_rtt;
+    proxy_read_timeout 1h;
+}
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header X-Forwarded-For $remote_addr;
+}
+```
+
+## Metrics
+
+`[metrics] bind` serves OpenMetrics text: iroh-relay's `relayserver_*`
+counters (a second copy labelled `component="qad"` for the QUIC socket) and
+`pkarr_*` (`puts`, `put_rejected`, `put_rate_limited`, `gets`,
+`get_missing`, `evicted`). Keep it on a private address.
+
+## Pointing a Tcode machine at it
+
+Desktop: **Settings → Other devices → Traverse → Self-hosted Traverse**, then
+the base URL, `https://traverse.example.org`. Headless:
+`tcode-headless serve --traverse https://traverse.example.org`. Devices take
+the URL from the machine's invitation, so nothing is configured on a phone.
+Clients accept `https` URLs only; a `--dev` instance is for the tests in this
+crate, not for a machine.
+
+## Docker
+
+`Dockerfile` builds the binary on a Rust image and ships it on
+`debian:bookworm-slim`, exposing 80, 443 and 7842/udp. Mount the config at
+`/etc/tcode-traverse/traverse.toml` and the data directory at
+`/var/lib/tcode-traverse`:
+
+```sh
+docker build -f crates/traverse-server/Dockerfile -t tcode-traverse .
+docker run -p 80:80 -p 443:443 -p 7842:7842/udp \
+  -v "$PWD/traverse.toml:/etc/tcode-traverse/traverse.toml:ro" \
+  -v tcode-traverse-data:/var/lib/tcode-traverse tcode-traverse
+```
