@@ -10202,6 +10202,7 @@ name = "tcode-traverse"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "env_logger",
  "futures-lite",
  "getrandom 0.4.3",
  "iroh",
