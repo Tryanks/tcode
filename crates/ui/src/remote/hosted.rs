@@ -1,5 +1,6 @@
 //! Controls for the headless listener, carried on the authenticated host pipe.
 use crate::{
+    overlay::OverlayExt as _,
     store::WorkspaceStore,
     theme::ActiveTheme as _,
     widgets::{
@@ -11,7 +12,7 @@ use gpui::{
     AnyElement, Context, Entity, IntoElement as _, ParentElement as _, Render, SharedString,
     Styled as _, Task, Window, div, px,
 };
-use gpui_base::{StyledExt as _, h_flex, v_flex};
+use gpui_base::{h_flex, v_flex};
 use tcode_protocol::{HostingAction, HostingState};
 
 pub(crate) struct HostedPanel {
@@ -119,58 +120,65 @@ impl HostedPanel {
             ),
         );
         if state.enabled {
-            let mut code = v_flex()
-                .gap_2()
-                .flex_1()
-                .min_w_0()
-                .child(crate::tr!("remote.code.title"))
-                .child(
-                    div()
-                        .text_size(px(if state.code.is_some() { 34. } else { 15. }))
-                        .line_height(px(if state.code.is_some() { 40. } else { 20. }))
-                        .font_semibold()
-                        .child(
-                            state
-                                .code
-                                .clone()
-                                .unwrap_or_else(|| crate::tr!("remote.code.expired").into_owned()),
-                        ),
-                )
-                .children(state.code.as_ref().map(|_| {
-                    crate::tr!(
-                        "remote.code.expires",
-                        time = format!(
-                            "{}:{:02}",
-                            state.expires_in_secs / 60,
-                            state.expires_in_secs % 60
+            let mut invitation =
+                v_flex()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .child(crate::tr!("remote.invite.title"))
+                    .child(div().text_size(px(15.)).line_height(px(20.)).child(
+                        match &state.invite {
+                            Some(_) => crate::tr!("remote.invite.how"),
+                            None => crate::tr!("remote.invite.expired"),
+                        },
+                    ))
+                    .children(state.invite.as_ref().map(|_| {
+                        crate::tr!(
+                            "remote.invite.expires",
+                            time = format!(
+                                "{}:{:02}",
+                                state.expires_in_secs / 60,
+                                state.expires_in_secs % 60
+                            )
                         )
-                    )
-                    .into_owned()
-                }));
-            code = code.child(
-                Button::new("headless-new-code")
-                    .disabled(self.pending)
-                    .label(crate::tr!("remote.code.new"))
-                    .on_click(
-                        cx.listener(|panel, _, _, cx| panel.request(HostingAction::NewCode, cx)),
+                        .into_owned()
+                    }));
+            let mut actions = h_flex().gap_2();
+            if let Some(link) = state.invite.clone() {
+                actions = actions.child(
+                    Button::new("headless-copy-invitation")
+                        .disabled(self.pending)
+                        .label(crate::tr!("remote.invite.copy"))
+                        .on_click(cx.listener(move |_, _, window, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.clone()));
+                            window.push_notification(
+                                crate::overlay::Notification::info(
+                                    crate::tr!("remote.invite.copied").into_owned(),
+                                ),
+                                cx,
+                            );
+                        })),
+                );
+            }
+            invitation =
+                invitation.child(
+                    actions.child(
+                        Button::new("headless-new-invitation")
+                            .disabled(self.pending)
+                            .label(crate::tr!("remote.invite.new"))
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.request(HostingAction::NewCode, cx)
+                            })),
                     ),
-            );
+                );
             let mut row = if crate::window_seam::window_is_compact(window, cx) {
                 v_flex()
             } else {
                 h_flex()
             };
-            row = row.p_3().gap_4().items_start().child(code);
-            if let Some(code) = state.code {
-                let invite = tcode_client::pairing::pair_url(&tcode_client::pairing::PairInvite {
-                    host_id: state.host_id,
-                    name: state.host_name,
-                    code,
-                    traverse: state.traverse,
-                    relay: state.relay,
-                    addrs: state.addrs,
-                });
-                row = row.children(super::qr::qr_element(&invite));
+            row = row.p_3().gap_4().items_start().child(invitation);
+            if let Some(link) = &state.invite {
+                row = row.children(super::qr::qr_element(link));
             }
             column = column.child(crate::material::group(cx).child(row));
         }

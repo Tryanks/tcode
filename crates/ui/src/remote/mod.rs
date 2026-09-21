@@ -7,7 +7,7 @@
 //! action, and nothing else: it compiles on every client, including
 //! `--no-default-features`.
 //!
-//! **Hosting** — the endpoint, minted codes and paired devices — is a genuine
+//! **Hosting** — the endpoint, minted invitations and paired devices — is a genuine
 //! setting of *this machine* and lives in
 //! `hosting`, behind `remote-hosting`, inside Settings → Remote. The browser
 //! uses `hosted` to control its headless listener over the authenticated pipe.
@@ -162,37 +162,21 @@ impl RemotePanel {
             .try_global::<ClientAttachment>()
             .and_then(|attachment| attachment.host.fixed_pairing_endpoint());
         let form = PairForm::new(fixed, window, cx);
-        let mut subscriptions = Vec::new();
-        // An invite pasted into either field fills the whole form.
-        for input in [&form.invitation, &form.code] {
-            subscriptions.push(cx.subscribe_in(
-                input,
-                window,
-                |this: &mut Self, input, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Change) {
-                        let value = input.read(cx).value().to_string();
-                        if value.trim().starts_with("tcode://pair?") {
-                            this.form.fill_invite(&value, window, cx);
-                        }
-                        cx.notify();
-                    } else if matches!(
-                        event,
-                        InputEvent::PressEnter {
-                            shift: false,
-                            secondary: false
-                        }
-                    ) {
-                        if *input == this.form.invitation {
-                            this.form
-                                .code
-                                .update(cx, |state, cx| state.focus(window, cx));
-                        } else {
-                            this.submit(window, cx);
-                        }
-                    }
-                },
-            ));
-        }
+        let subscriptions = vec![cx.subscribe_in(
+            &form.invitation,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.form.error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter {
+                    shift: false,
+                    secondary: false,
+                } => this.submit(window, cx),
+                _ => {}
+            },
+        )];
         Self {
             store,
             window_state,
@@ -393,7 +377,6 @@ impl RemotePanel {
         );
         let name = SharedString::from(host.name.clone());
         let connect_host = host.clone();
-        let repair_host = host.clone();
         let row = list_row(
             SharedString::from(format!("host-{}", host.host_id)),
             name.clone(),
@@ -434,11 +417,11 @@ impl RemotePanel {
                     .primary()
                     .compact()
                     .label(crate::tr!("hosts.pair_again"))
+                    // A new pairing needs a new invitation from the machine;
+                    // nothing from the stale record carries over.
                     .on_click(cx.listener(move |panel, _, window, cx| {
                         panel.form.restart();
-                        panel
-                            .form
-                            .fill_machine_id(repair_host.host_id.clone(), window, cx);
+                        panel.form.clear(window, cx);
                         panel.open_pair(cx);
                     })),
             )
@@ -598,12 +581,11 @@ impl RemotePanel {
                     .into(),
                 cx,
             )
+            // An invitation is single use, so whatever the field held last
+            // time is spent; start empty.
             .on_click(cx.listener(|panel, _, window, cx| {
+                panel.form.clear(window, cx);
                 panel.open_pair(cx);
-                panel
-                    .form
-                    .invitation
-                    .update(cx, |state, cx| state.focus(window, cx));
             }))
             .into_any_element(),
         );
@@ -630,8 +612,15 @@ impl RemotePanel {
         }
         let fixed = self.form.has_fixed_endpoint();
         let busy = self.form.busy;
-        let ready = !busy && self.form.request(cx).is_some();
+        let request = self.form.request(cx);
+        let ready = !busy && request.is_some();
         let scannable = self.client(cx).is_some_and(|client| client.supports_qr()) && !fixed;
+        // A pairing failure outranks the field's own complaint.
+        let error = self.form.error.clone().or_else(|| {
+            self.form
+                .invalid(cx)
+                .then(|| crate::tr!("hosts.pair.bad_invite").into_owned())
+        });
         let body = v_flex()
             .w_full()
             .px(px(PAGE_PADDING))
@@ -649,28 +638,22 @@ impl RemotePanel {
                         crate::tr!("hosts.pair.description")
                     }),
             )
-            .when(!fixed, |column| {
-                column.child(self.field(
-                    crate::tr!("hosts.pair.invitation").into_owned().into(),
-                    &self.form.invitation,
-                ))
-            })
-            .when_some(self.form.linked_machine(cx), |column, machine| {
+            .child(self.field(
+                crate::tr!("hosts.pair.invitation").into_owned().into(),
+                &self.form.invitation,
+            ))
+            .when_some(request.filter(|_| !fixed), |column, invite| {
                 column.child(
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
                         .child(crate::tr!(
                             "hosts.pair.filled",
-                            name = machine.name.clone(),
-                            fingerprint = fingerprint(&machine.host_id)
+                            name = invite.name.clone(),
+                            fingerprint = fingerprint(&invite.host_id)
                         )),
                 )
             })
-            .child(self.field(
-                crate::tr!("hosts.pair.code").into_owned().into(),
-                &self.form.code,
-            ))
             .when(scannable, |column| {
                 column.child(
                     Button::new("hosts-scan")
@@ -681,7 +664,7 @@ impl RemotePanel {
                         .on_click(cx.listener(|panel, _, _, cx| panel.scan(cx))),
                 )
             })
-            .when_some(self.form.error.clone(), |column, error| {
+            .when_some(error, |column, error| {
                 column.child(
                     div()
                         .text_size(px(13.))
@@ -853,7 +836,7 @@ pub(crate) fn failure_label(reason: tcode_client::ConnectionFailure) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, Focusable as _, Render, TestAppContext};
+    use gpui::{AppContext as _, Render, TestAppContext};
 
     struct PairingProbe(Entity<RemotePanel>);
 
@@ -897,36 +880,5 @@ mod tests {
         });
         assert_eq!(client.load_hosts(), vec![host("current pairing")]);
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[gpui::test]
-    fn address_enter_moves_focus_to_connection_code(cx: &mut TestAppContext) {
-        let (probe, cx) = cx.add_window_view(|window, cx| {
-            let state = cx.new(|_| WindowState::new(false));
-            PairingProbe(cx.new(|cx| RemotePanel::new(None, state, window, cx)))
-        });
-        probe.update_in(cx, |probe, window, cx| {
-            let invitation = probe.0.read(cx).form.invitation.clone();
-            invitation.update(cx, |input, cx| {
-                input.focus(window, cx);
-                cx.emit(InputEvent::PressEnter {
-                    shift: false,
-                    secondary: false,
-                });
-            });
-        });
-        cx.run_until_parked();
-        probe.update_in(cx, |probe, window, cx| {
-            assert!(
-                probe
-                    .0
-                    .read(cx)
-                    .form
-                    .code
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window)
-            );
-        });
     }
 }

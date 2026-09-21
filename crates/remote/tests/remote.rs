@@ -142,9 +142,7 @@ fn browser_password_login_hello_hosting_query_and_lockout() {
             expires_in_secs: 299,
             host_id: "machine".into(),
             host_name: "Test Host".into(),
-            traverse: None,
-            relay: None,
-            addrs: Vec::new(),
+            invite: None,
             devices: Vec::new(),
         }
     }));

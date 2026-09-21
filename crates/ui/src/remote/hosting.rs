@@ -665,36 +665,36 @@ impl HostingPanel {
             return div().into_any_element();
         };
         let machine_id = controller.endpoint_id().unwrap_or_default();
+        let new_invitation = |id: &'static str, cx: &mut Context<Self>| {
+            Button::new(id)
+                .compact()
+                .label(crate::tr!("remote.invite.new"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    cx.update_global::<RemoteController, _>(|controller, _| {
+                        controller.new_pairing_code();
+                    });
+                    this.sync_ticker(cx);
+                    cx.notify();
+                }))
+        };
         let Some((code, remaining)) = controller.pairing() else {
             return crate::material::group(cx)
                 .child(
                     row(compact)
                         .child(labels(
-                            crate::tr!("remote.code.expired").into_owned().into(),
-                            crate::tr!("remote.code.description").into_owned().into(),
+                            crate::tr!("remote.invite.expired").into_owned().into(),
+                            crate::tr!("remote.invite.description").into_owned().into(),
                             cx,
                         ))
-                        .child(
-                            Button::new("remote-new-code")
-                                .primary()
-                                .compact()
-                                .label(crate::tr!("remote.code.new"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.update_global::<RemoteController, _>(|controller, _| {
-                                        controller.new_pairing_code();
-                                    });
-                                    this.sync_ticker(cx);
-                                    cx.notify();
-                                })),
-                        ),
+                        .child(new_invitation("remote-new-invitation", cx).primary()),
                 )
                 .into_any_element();
         };
-        let digits = code.code.clone();
-        let qr = qr_element(&pair_url(&controller.invite(&code)));
+        let link = pair_url(&controller.invite(&code));
+        let qr = qr_element(&link);
         crate::material::group(cx)
             .child(
-                // Compact stacks the QR under the code rather than putting a
+                // Compact stacks the QR under the text rather than putting a
                 // fixed-size image beside text that then has nowhere to wrap.
                 if compact { v_flex() } else { h_flex() }
                     .w_full()
@@ -712,40 +712,50 @@ impl HostingPanel {
                                     .text_size(px(11.))
                                     .font_medium()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(crate::tr!("remote.code.title")),
+                                    .child(crate::tr!("remote.invite.title")),
                             )
                             .child(
                                 div()
-                                    .font_family("Lilex")
-                                    .text_size(px(34.))
-                                    .font_semibold()
-                                    .child(digits),
+                                    .text_size(px(13.))
+                                    .child(crate::tr!("remote.invite.how")),
                             )
                             .child(
                                 div()
                                     .text_size(px(13.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(crate::tr!(
-                                        "remote.code.expires",
+                                        "remote.invite.expires",
                                         time = countdown(remaining)
                                     )),
                             )
                             .child(self.machine_fingerprint(machine_id, cx))
                             .child(
-                                h_flex().child(
-                                    Button::new("remote-new-code")
-                                        .ghost()
-                                        .outline()
-                                        .compact()
-                                        .label(crate::tr!("remote.code.new"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            cx.update_global::<RemoteController, _>(
-                                                |controller, _| controller.new_pairing_code(),
-                                            );
-                                            this.sync_ticker(cx);
-                                            cx.notify();
-                                        })),
-                                ),
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("remote-copy-invitation")
+                                            .ghost()
+                                            .outline()
+                                            .compact()
+                                            .label(crate::tr!("remote.invite.copy"))
+                                            .on_click(cx.listener(move |_, _, window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    link.clone(),
+                                                ));
+                                                window.push_notification(
+                                                    Notification::info(
+                                                        crate::tr!("remote.invite.copied")
+                                                            .into_owned(),
+                                                    ),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(
+                                        new_invitation("remote-new-invitation", cx)
+                                            .ghost()
+                                            .outline(),
+                                    ),
                             ),
                     )
                     .children(qr),
@@ -765,7 +775,7 @@ impl HostingPanel {
             .text_color(cx.theme().muted_foreground)
             .cursor_pointer()
             .child(crate::tr!(
-                "remote.code.machine",
+                "remote.invite.machine",
                 fingerprint = super::fingerprint(&machine_id)
             ))
             .child(Icon::new(IconName::Copy).xsmall())
@@ -773,7 +783,7 @@ impl HostingPanel {
             .on_click(cx.listener(move |_, _, window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(machine_id.clone()));
                 window.push_notification(
-                    Notification::info(crate::tr!("remote.code.machine_copied").into_owned()),
+                    Notification::info(crate::tr!("remote.invite.machine_copied").into_owned()),
                     cx,
                 );
             }))
