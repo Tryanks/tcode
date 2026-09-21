@@ -145,37 +145,35 @@ pub(super) struct KeyReconciliation {
 impl BrowserLifecycle {
     pub(super) fn new(
         owner: Weak<()>,
-        proxy: Result<Option<tcode_client::pairing::PairedHost>, String>,
+        proxy: Result<Option<crate::store::PreviewTarget>, String>,
     ) -> Self {
-        let mut endpoint = None;
-        let proxy = proxy.and_then(|host| {
-            if let Some(host) = &host {
-                endpoint = Some(tcode_remote::preview::PreviewEndpoint::new(host)?);
-            }
-            Ok(host)
+        let endpoint = proxy.as_ref().ok().and_then(|target| {
+            target.as_ref().map(|(host, tunnels)| {
+                tcode_remote::preview::PreviewEndpoint::new(host, tunnels.clone())
+            })
         });
         #[cfg(any(target_os = "windows", target_os = "android"))]
         let mut native_proxy = None;
         // The browser engine is pointed at a loopback bridge; macOS maps
         // URLs per route instead and needs no entry.
         let proxy: Result<Option<tcode_remote::preview::ProxyEntry>, String> =
-            proxy.and_then(|host| {
-                host.map(|_host| {
-                    #[cfg(any(target_os = "windows", target_os = "android"))]
-                    {
-                        let bridge =
-                            tcode_remote::preview::NativeProxy::new(endpoint.clone().unwrap())?;
-                        let entry = bridge.entry();
-                        native_proxy = Some(bridge);
-                        Ok(entry)
-                    }
-                    #[cfg(not(any(target_os = "windows", target_os = "android")))]
-                    Ok(tcode_remote::preview::ProxyEntry {
-                        origin: String::new(),
-                        token: String::new(),
+            proxy.and_then(|target| {
+                target
+                    .map(|_target| {
+                        #[cfg(any(target_os = "windows", target_os = "android"))]
+                        {
+                            let bridge =
+                                tcode_remote::preview::NativeProxy::new(endpoint.clone().unwrap())?;
+                            let entry = bridge.entry();
+                            native_proxy = Some(bridge);
+                            Ok(entry)
+                        }
+                        #[cfg(not(any(target_os = "windows", target_os = "android")))]
+                        Ok(tcode_remote::preview::ProxyEntry {
+                            origin: String::new(),
+                        })
                     })
-                })
-                .transpose()
+                    .transpose()
             });
         let creator = match proxy
             .as_ref()
@@ -613,10 +611,6 @@ impl BrowserLifecycle {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Err(error) = super::proxy::authenticate(&raw, self.proxy.as_ref()) {
-            self.record_unavailable(error, cx);
-            return;
-        }
         load_error::install(&raw);
         let warm = if let Some(url) = &pending_url {
             match raw.load_url(url) {
